@@ -1,0 +1,467 @@
+import AppKit
+import SwiftData
+import SwiftUI
+
+struct KanbanBoardView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \BoardTask.createdAt, order: .reverse) private var tasks: [BoardTask]
+
+    @State private var isShowingNewTask = false
+    @State private var saveError: String?
+    @State private var draggedTaskID: UUID?
+    @State private var selectedTask: BoardTask?
+
+    var body: some View {
+        Group {
+            if let selectedTask {
+                TaskConversationView(task: selectedTask) {
+                    self.selectedTask = nil
+                }
+                .id(selectedTask.id)
+            } else {
+                boardContent
+            }
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+        .frame(minWidth: 980, minHeight: 640)
+        .sheet(isPresented: $isShowingNewTask) {
+            NewTaskSheet(onCreate: createTask)
+        }
+        .alert("Couldn't save changes", isPresented: isShowingSaveError) {
+            Button("OK", role: .cancel) {
+                saveError = nil
+            }
+        } message: {
+            Text(saveError ?? "Please try again.")
+        }
+    }
+
+    private var boardContent: some View {
+        VStack(spacing: 0) {
+            boardHeader
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.07))
+                .frame(height: 1)
+
+            ScrollView(.horizontal) {
+                HStack(alignment: .top, spacing: 16) {
+                    ForEach(TaskStatus.allCases) { status in
+                        KanbanColumnView(
+                            status: status,
+                            tasks: tasks.filter { $0.status == status },
+                            onMoveTask: moveTask,
+                            onAddTask: { isShowingNewTask = true },
+                            onOpenTask: { selectedTask = $0 },
+                            draggedTaskID: $draggedTaskID
+                        )
+                        .frame(width: 264)
+                    }
+                }
+                .padding(.horizontal, 30)
+                .padding(.top, 22)
+                .padding(.bottom, 28)
+            }
+            .scrollIndicators(.visible)
+        }
+    }
+
+    private var boardHeader: some View {
+        HStack(alignment: .center, spacing: 24) {
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [Color(red: 0.37, green: 0.43, blue: 0.92), Color(red: 0.54, green: 0.39, blue: 0.86)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                    Image(systemName: "square.stack.3d.up.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+                .frame(width: 42, height: 42)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("StationAI")
+                        .font(.system(size: 21, weight: .semibold, design: .rounded))
+                        .accessibilityIdentifier("board-title")
+                    Text("A clear view of every task in flight.")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer(minLength: 20)
+
+            HStack(spacing: 14) {
+                Text("\(tasks.count) \(tasks.count == 1 ? "task" : "tasks")")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Task count")
+                    .accessibilityValue("\(tasks.count)")
+                    .accessibilityIdentifier("task-count")
+
+                Button {
+                    isShowingNewTask = true
+                } label: {
+                    Label("New Task", systemImage: "plus")
+                        .font(.system(size: 13, weight: .semibold))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Color(red: 0.34, green: 0.40, blue: 0.86))
+                .accessibilityIdentifier("new-task-button")
+            }
+        }
+        .padding(.horizontal, 30)
+        .padding(.top, 24)
+        .padding(.bottom, 21)
+    }
+
+    private var isShowingSaveError: Binding<Bool> {
+        Binding(
+            get: { saveError != nil },
+            set: { if !$0 { saveError = nil } }
+        )
+    }
+
+    private func createTask(title: String) {
+        let task = BoardTask(title: title, status: .backlog)
+        modelContext.insert(task)
+        saveChanges()
+    }
+
+    private func moveTask(id: UUID, to status: TaskStatus) {
+        guard let task = tasks.first(where: { $0.id == id }), task.status != status else { return }
+        task.status = status
+        Task { @MainActor in
+            saveChanges()
+        }
+    }
+
+    private func saveChanges() {
+        do {
+            try modelContext.save()
+        } catch {
+            saveError = error.localizedDescription
+        }
+    }
+}
+
+private struct KanbanColumnView: View {
+    let status: TaskStatus
+    let tasks: [BoardTask]
+    let onMoveTask: (UUID, TaskStatus) -> Void
+    let onAddTask: () -> Void
+    let onOpenTask: (BoardTask) -> Void
+    @Binding var draggedTaskID: UUID?
+
+    var body: some View {
+        dropTarget
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("column-\(status.accessibilityKey)")
+    }
+
+    private var columnContent: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack(spacing: 9) {
+                Circle()
+                    .fill(status.accent)
+                    .frame(width: 8, height: 8)
+                Text(status.rawValue.uppercased())
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .tracking(0.65)
+                    .foregroundStyle(.primary.opacity(0.82))
+                    .accessibilityIdentifier("column-heading-\(status.accessibilityKey)")
+                Spacer(minLength: 4)
+                Text("\(tasks.count)")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.primary.opacity(0.055)))
+                if status == .backlog {
+                    Button(action: onAddTask) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .accessibilityLabel("Add task to Backlog")
+                    .accessibilityIdentifier("add-backlog-task-button")
+                    .help("Add task to Backlog")
+                }
+            }
+            .padding(.horizontal, 3)
+
+            if tasks.isEmpty {
+                emptyState
+            } else {
+                ForEach(tasks) { task in
+                    draggableTaskCard(task)
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 480, alignment: .topLeading)
+        .background {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.78))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.075), lineWidth: 1)
+        }
+    }
+
+    @ViewBuilder
+    private var dropTarget: some View {
+        if #available(macOS 26.0, *) {
+            NativeMoveDropDestination { taskID in
+                onMoveTask(taskID, status)
+            } content: {
+                columnContent
+            }
+        } else {
+            columnContent
+                .onDrop(of: [.plainText], delegate: KanbanTaskDropDelegate(
+                    status: status,
+                    draggedTaskID: $draggedTaskID,
+                    onMoveTask: onMoveTask
+                ))
+        }
+    }
+
+    @ViewBuilder
+    private func draggableTaskCard(_ task: BoardTask) -> some View {
+        let card = TaskCardView(task: task, onOpen: { onOpenTask(task) })
+
+        if #available(macOS 26.0, *) {
+            card
+                .draggable(task.id.uuidString) {
+                    TaskCardView(task: task, onOpen: {})
+                }
+                .dragConfiguration(
+                    DragConfiguration(
+                        operationsWithinApp: .init(
+                            allowCopy: false,
+                            allowMove: true,
+                            allowDelete: false
+                        ),
+                        operationsOutsideApp: .init(
+                            allowCopy: false,
+                            allowMove: false,
+                            allowDelete: false
+                        )
+                    )
+                )
+        } else {
+            card
+                .onDrag {
+                    draggedTaskID = task.id
+                    return NSItemProvider(object: task.id.uuidString as NSString)
+                }
+        }
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 9) {
+            Image(systemName: status == .done ? "checkmark.circle" : "tray")
+                .font(.system(size: 18, weight: .regular))
+                .foregroundStyle(status.accent.opacity(0.75))
+            Text("No tasks yet")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+            Text(status == .backlog ? "Create a task to get started" : "Drop a task here")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, minHeight: 124)
+        .background {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.10), style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("empty-state-\(status.accessibilityKey)")
+    }
+}
+
+private struct NativeMoveDropDestination<Content: View>: NSViewRepresentable {
+    let onMoveTask: (UUID) -> Void
+    @ViewBuilder let content: Content
+
+    func makeNSView(context: Context) -> NativeMoveDropContainer<Content> {
+        NativeMoveDropContainer(rootView: content, onMoveTask: onMoveTask)
+    }
+
+    func updateNSView(_ nsView: NativeMoveDropContainer<Content>, context: Context) {
+        nsView.rootView = content
+        nsView.onMoveTask = onMoveTask
+    }
+}
+
+@MainActor
+private final class NativeMoveDropContainer<Content: View>: NSView {
+    private let hostingView: NSHostingView<Content>
+    var onMoveTask: (UUID) -> Void
+
+    var rootView: Content {
+        get { hostingView.rootView }
+        set { hostingView.rootView = newValue }
+    }
+
+    private let textPasteboardTypes: [NSPasteboard.PasteboardType] = [
+        .string,
+        NSPasteboard.PasteboardType("public.plain-text"),
+        NSPasteboard.PasteboardType("public.utf8-plain-text")
+    ]
+
+    init(rootView: Content, onMoveTask: @escaping (UUID) -> Void) {
+        hostingView = NSHostingView(rootView: rootView)
+        self.onMoveTask = onMoveTask
+        super.init(frame: .zero)
+
+        registerForDraggedTypes(textPasteboardTypes)
+        addSubview(hostingView)
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            hostingView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            hostingView.topAnchor.constraint(equalTo: topAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        offeredMoveOperation(for: sender)
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        offeredMoveOperation(for: sender)
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard offeredMoveOperation(for: sender) == .move,
+              taskID(from: sender) != nil else {
+            return false
+        }
+
+        // AppKit otherwise animates the drag image to its destination after the drop.
+        sender.animatesToDestination = false
+        return true
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard offeredMoveOperation(for: sender) == .move,
+              let taskID = taskID(from: sender) else {
+            return false
+        }
+
+        onMoveTask(taskID)
+        return true
+    }
+
+    private func offeredMoveOperation(for sender: NSDraggingInfo) -> NSDragOperation {
+        guard sender.draggingSourceOperationMask.contains(.move),
+              taskID(from: sender) != nil else {
+            return []
+        }
+
+        return .move
+    }
+
+    private func taskID(from sender: NSDraggingInfo) -> UUID? {
+        guard let type = sender.draggingPasteboard.availableType(from: textPasteboardTypes),
+              let identifier = sender.draggingPasteboard.string(forType: type) else {
+            return nil
+        }
+
+        return UUID(uuidString: identifier)
+    }
+}
+
+private struct KanbanTaskDropDelegate: DropDelegate {
+    let status: TaskStatus
+    @Binding var draggedTaskID: UUID?
+    let onMoveTask: (UUID, TaskStatus) -> Void
+
+    func validateDrop(info: DropInfo) -> Bool {
+        true
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        guard let id = draggedTaskID else { return false }
+        onMoveTask(id, status)
+        draggedTaskID = nil
+        return true
+    }
+}
+
+private struct TaskCardView: View {
+    let task: BoardTask
+    let onOpen: () -> Void
+
+    var body: some View {
+        Button(action: onOpen) {
+            VStack(alignment: .leading, spacing: 13) {
+                HStack(spacing: 6) {
+                    Image(systemName: "circle.inset.filled")
+                        .font(.system(size: 9))
+                        .foregroundStyle(task.status.accent)
+                    Text(task.status.rawValue)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    Image(systemName: "line.3.horizontal")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                }
+
+                Text(task.title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("task-title-\(task.id.uuidString)")
+
+                HStack(spacing: 6) {
+                    Image(systemName: "clock")
+                        .font(.system(size: 10))
+                    Text(task.createdAt.formatted(date: .abbreviated, time: .omitted))
+                        .font(.system(size: 10))
+                }
+                .foregroundStyle(.tertiary)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color(nsColor: .windowBackgroundColor))
+                    .shadow(color: .black.opacity(0.035), radius: 5, x: 0, y: 2)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(task.title)
+        .accessibilityHint("Open task")
+        .accessibilityIdentifier("task-card-\(task.id.uuidString)")
+    }
+}
