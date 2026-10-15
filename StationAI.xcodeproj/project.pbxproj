@@ -13,6 +13,7 @@
 			A10000000000000000000004 /* NewTaskSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* NewTaskSheet.swift */; };
 			A10000000000000000000005 /* StationAIUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* StationAIUITests.swift */; };
 			A10000000000000000000006 /* TaskConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* TaskConversationView.swift */; };
+			A10000000000000000000007 /* CodexAppServerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* CodexAppServerClient.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -32,6 +33,7 @@
 			A20000000000000000000004 /* NewTaskSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewTaskSheet.swift; sourceTree = "<group>"; };
 			A20000000000000000000005 /* StationAIUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StationAIUITests.swift; sourceTree = "<group>"; };
 			A20000000000000000000008 /* TaskConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskConversationView.swift; sourceTree = "<group>"; };
+			A20000000000000000000009 /* CodexAppServerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexAppServerClient.swift; sourceTree = "<group>"; };
 			A20000000000000000000006 /* StationAI.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = StationAI.app; sourceTree = BUILT_PRODUCTS_DIR; };
 			A20000000000000000000007 /* StationAIUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = StationAIUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -59,6 +61,7 @@
 					A20000000000000000000003 /* KanbanBoardView.swift */,
 					A20000000000000000000004 /* NewTaskSheet.swift */,
 				A20000000000000000000008 /* TaskConversationView.swift */,
+				A20000000000000000000009 /* CodexAppServerClient.swift */,
 				);
 				path = StationAI/App;
 				sourceTree = "<group>";
@@ -135,7 +138,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-			A60000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* StationAIApp.swift in Sources */, A10000000000000000000002 /* BoardTask.swift in Sources */, A10000000000000000000003 /* KanbanBoardView.swift in Sources */, A10000000000000000000004 /* NewTaskSheet.swift in Sources */, A10000000000000000000006 /* TaskConversationView.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
+			A60000000000000000000003 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* StationAIApp.swift in Sources */, A10000000000000000000002 /* BoardTask.swift in Sources */, A10000000000000000000003 /* KanbanBoardView.swift in Sources */, A10000000000000000000004 /* NewTaskSheet.swift in Sources */, A10000000000000000000006 /* TaskConversationView.swift in Sources */, A10000000000000000000007 /* CodexAppServerClient.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
 			A60000000000000000000005 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000005 /* StationAIUITests.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 

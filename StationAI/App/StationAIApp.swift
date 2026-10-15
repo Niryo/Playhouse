@@ -4,6 +4,7 @@ import SwiftUI
 @main
 struct StationAIApp: App {
     private let modelContainer: ModelContainer
+    @StateObject private var codexClient = CodexAppServerClient()
 
     init() {
         let schema = Schema([BoardTask.self])
@@ -46,6 +47,7 @@ struct StationAIApp: App {
         WindowGroup {
             KanbanBoardView()
                 .modelContainer(modelContainer)
+                .environmentObject(codexClient)
         }
         .defaultSize(width: 1280, height: 820)
         .windowResizability(.contentSize)

@@ -32,6 +32,7 @@ final class BoardTask {
     var title: String
     var statusRawValue: String
     var createdAt: Date
+    var codexThreadID: String?
 
     var status: TaskStatus {
         get { TaskStatus(rawValue: statusRawValue) ?? .backlog }
@@ -43,5 +44,6 @@ final class BoardTask {
         self.title = title
         statusRawValue = status.rawValue
         createdAt = .now
+        codexThreadID = nil
     }
 }

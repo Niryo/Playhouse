@@ -1,0 +1,600 @@
+import Combine
+import Foundation
+
+enum CodexChatRole: String, Equatable {
+    case user
+    case assistant
+}
+
+struct CodexChatMessage: Identifiable, Equatable {
+    let id: String
+    let role: CodexChatRole
+    var text: String
+}
+
+@MainActor
+final class CodexAppServerClient: ObservableObject {
+    nonisolated static let modelID = "gpt-6-luna"
+
+    private enum ClientError: LocalizedError {
+        case cliNotFound
+        case processStart(String)
+        case processExited(String)
+        case protocolFailure(String)
+        case server(String)
+        case authentication(String)
+        case modelMismatch(String)
+        case turnFailed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .cliNotFound:
+                "Codex CLI wasn't found. Install Codex CLI or add it to PATH, then restart StationAI."
+            case .processStart(let detail):
+                "StationAI couldn't start Codex CLI: \(detail)"
+            case .processExited(let detail):
+                "The Codex app-server stopped unexpectedly. \(detail)"
+            case .protocolFailure(let detail):
+                "StationAI couldn't communicate with Codex: \(detail)"
+            case .server(let detail):
+                detail
+            case .authentication(let detail):
+                "Codex CLI needs a valid sign-in. Run `codex login` in Terminal, then try again. \(detail)"
+            case .modelMismatch(let model):
+                "Codex selected \(model) instead of \(CodexAppServerClient.modelID). StationAI stopped without switching models."
+            case .turnFailed(let detail):
+                detail
+            }
+        }
+    }
+
+    private let outputQueue = DispatchQueue(label: "com.stationai.codex.stdout")
+    private var stdoutBuffer = Data()
+    private var process: Process?
+    private var inputPipe: Pipe?
+    private var outputPipe: Pipe?
+    private var stderrPipe: Pipe?
+    private var pendingRequests: [Int: CheckedContinuation<[String: Any], Error>] = [:]
+    private var nextRequestID = 1
+    private var initialized = false
+    private var resumedThreadIDs = Set<String>()
+    private var activeThreadID: String?
+    private var activeDeltaHandler: ((String) -> Void)?
+    private var actionRequestHandler: (() -> Void)?
+    private var turnWaiters: [String: CheckedContinuation<Void, Error>] = [:]
+    private var completedTurns: [String: Result<Void, Error>] = [:]
+
+    func loadThread(
+        id threadID: String,
+        workspaceURL: URL,
+        onActionRequest: @escaping () -> Void
+    ) async throws -> [CodexChatMessage] {
+        actionRequestHandler = onActionRequest
+        try await resumeThreadIfNeeded(id: threadID, workspaceURL: workspaceURL)
+        return try await readMessages(threadID: threadID)
+    }
+
+    func startThread(workspaceURL: URL) async throws -> String {
+        try await ensureInitialized(workspaceURL: workspaceURL)
+
+        let response = try await request(
+            method: "thread/start",
+            params: [
+                "model": Self.modelID,
+                "allowProviderModelFallback": false,
+                "cwd": workspaceURL.path,
+                "sandbox": "read-only",
+                "approvalPolicy": "never",
+                "approvalsReviewer": "user",
+                "historyMode": "paginated",
+                "dynamicTools": [],
+                "environments": [],
+                "selectedCapabilityRoots": [],
+                "runtimeWorkspaceRoots": [workspaceURL.path]
+            ]
+        )
+
+        guard let thread = response["thread"] as? [String: Any],
+              let threadID = thread["id"] as? String else {
+            throw ClientError.protocolFailure("Codex did not return a thread ID.")
+        }
+        try confirmModel(response["model"] as? String)
+        resumedThreadIDs.insert(threadID)
+        return threadID
+    }
+
+    func sendMessage(
+        _ text: String,
+        threadID: String,
+        workspaceURL: URL,
+        onDelta: @escaping (String) -> Void,
+        onActionRequest: @escaping () -> Void
+    ) async throws {
+        actionRequestHandler = onActionRequest
+        try await resumeThreadIfNeeded(id: threadID, workspaceURL: workspaceURL)
+
+        activeThreadID = threadID
+        activeDeltaHandler = onDelta
+        defer {
+            activeThreadID = nil
+            activeDeltaHandler = nil
+        }
+
+        let response = try await request(
+            method: "turn/start",
+            params: [
+                "threadId": threadID,
+                "input": [["type": "text", "text": text]],
+                "model": Self.modelID,
+                "cwd": workspaceURL.path,
+                "runtimeWorkspaceRoots": [workspaceURL.path],
+                "sandboxPolicy": ["type": "readOnly", "networkAccess": false],
+                "approvalPolicy": "never",
+                "approvalsReviewer": "user",
+                "environments": []
+            ]
+        )
+
+        guard let turn = response["turn"] as? [String: Any],
+              let turnID = turn["id"] as? String else {
+            throw ClientError.protocolFailure("Codex did not return a turn ID.")
+        }
+
+        let turnKey = Self.turnKey(threadID: threadID, turnID: turnID)
+        switch turn["status"] as? String {
+        case "completed":
+            return
+        case "failed", "interrupted":
+            throw ClientError.turnFailed(Self.turnFailureDescription(turn))
+        default:
+            try await waitForTurn(turnKey)
+        }
+    }
+
+    private func ensureInitialized(workspaceURL: URL) async throws {
+        if initialized, process?.isRunning == true {
+            return
+        }
+
+        if process?.isRunning != true {
+            if let stoppedProcess = process {
+                processDidTerminate(stoppedProcess)
+            }
+            try launchProcess(workspaceURL: workspaceURL)
+        }
+
+        _ = try await request(
+            method: "initialize",
+            params: [
+                "clientInfo": [
+                    "name": "stationai",
+                    "title": "StationAI",
+                    "version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+                ],
+                "capabilities": ["experimentalApi": true]
+            ]
+        )
+        try sendNotification(method: "initialized")
+        initialized = true
+    }
+
+    private func launchProcess(workspaceURL: URL) throws {
+        guard let executablePath = Self.findCodexExecutable() else {
+            throw ClientError.cliNotFound
+        }
+
+        let child = Process()
+        let stdin = Pipe()
+        let stdout = Pipe()
+        let stderr = Pipe()
+
+        child.executableURL = URL(fileURLWithPath: executablePath)
+        child.arguments = [
+            "app-server",
+            "--listen", "stdio://",
+            "--disable", "apps",
+            "--disable", "shell_tool",
+            "--disable", "unified_exec",
+            "--disable", "multi_agent",
+            "--disable", "remote_plugin",
+            "--disable", "hooks",
+            "-c", "mcp_servers={}",
+            "-c", "web_search=\"disabled\""
+        ]
+        child.currentDirectoryURL = workspaceURL
+        child.standardInput = stdin
+        child.standardOutput = stdout
+        child.standardError = stderr
+
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = Self.expandedSearchPath(environment["PATH"])
+        child.environment = environment
+
+        process = child
+        inputPipe = stdin
+        outputPipe = stdout
+        stderrPipe = stderr
+        stdoutBuffer.removeAll(keepingCapacity: true)
+
+        let stdoutQueue = outputQueue
+        stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            stdoutQueue.async { [weak self] in
+                let data = handle.availableData
+                guard !data.isEmpty else { return }
+                Task { @MainActor [weak self] in
+                    self?.consumeOutput(data)
+                }
+            }
+        }
+        stderr.fileHandleForReading.readabilityHandler = { handle in
+            _ = handle.availableData
+        }
+        child.terminationHandler = { [weak self] terminatedProcess in
+            Task { @MainActor [weak self] in
+                self?.processDidTerminate(terminatedProcess)
+            }
+        }
+
+        do {
+            try child.run()
+        } catch {
+            stdout.fileHandleForReading.readabilityHandler = nil
+            stderr.fileHandleForReading.readabilityHandler = nil
+            process = nil
+            inputPipe = nil
+            outputPipe = nil
+            stderrPipe = nil
+            throw ClientError.processStart(error.localizedDescription)
+        }
+    }
+
+    private func resumeThreadIfNeeded(id threadID: String, workspaceURL: URL) async throws {
+        if resumedThreadIDs.contains(threadID), process?.isRunning == true, initialized {
+            return
+        }
+
+        try await ensureInitialized(workspaceURL: workspaceURL)
+        let response = try await request(
+            method: "thread/resume",
+            params: [
+                "threadId": threadID,
+                "model": Self.modelID,
+                "cwd": workspaceURL.path,
+                "sandbox": "read-only",
+                "approvalPolicy": "never",
+                "approvalsReviewer": "user",
+                "runtimeWorkspaceRoots": [workspaceURL.path]
+            ]
+        )
+        try confirmModel(response["model"] as? String)
+        resumedThreadIDs.insert(threadID)
+    }
+
+    private func readMessages(threadID: String) async throws -> [CodexChatMessage] {
+        var messages: [CodexChatMessage] = []
+        var cursor: String?
+        var visitedCursors = Set<String>()
+
+        repeat {
+            var params: [String: Any] = [
+                "threadId": threadID,
+                "sortDirection": "asc",
+                "limit": 100
+            ]
+            if let cursor {
+                params["cursor"] = cursor
+            }
+
+            let response = try await request(method: "thread/items/list", params: params)
+            let data = response["data"] as? [[String: Any]] ?? []
+            messages.append(contentsOf: data.compactMap(Self.chatMessage(from:)))
+            cursor = response["nextCursor"] as? String
+
+            if let cursor, !visitedCursors.insert(cursor).inserted {
+                throw ClientError.protocolFailure("Codex returned a repeated history cursor.")
+            }
+        } while cursor != nil
+
+        return messages
+    }
+
+    private func request(method: String, params: [String: Any]) async throws -> [String: Any] {
+        let requestID = nextRequestID
+        nextRequestID += 1
+
+        return try await withCheckedThrowingContinuation { continuation in
+            pendingRequests[requestID] = continuation
+            do {
+                try sendJSON([
+                    "jsonrpc": "2.0",
+                    "id": requestID,
+                    "method": method,
+                    "params": params
+                ])
+            } catch {
+                pendingRequests.removeValue(forKey: requestID)
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
+    private func sendNotification(method: String) throws {
+        try sendJSON(["jsonrpc": "2.0", "method": method])
+    }
+
+    private func sendJSON(_ object: [String: Any]) throws {
+        guard let process, process.isRunning, let inputPipe else {
+            throw ClientError.processExited("Restart StationAI and try again.")
+        }
+
+        do {
+            var data = try JSONSerialization.data(withJSONObject: object)
+            data.append(0x0A)
+            try inputPipe.fileHandleForWriting.write(contentsOf: data)
+        } catch {
+            throw ClientError.protocolFailure(error.localizedDescription)
+        }
+    }
+
+    private func consumeOutput(_ data: Data) {
+        stdoutBuffer.append(data)
+        let newline = Data([0x0A])
+        while let range = stdoutBuffer.range(of: newline) {
+            let line = stdoutBuffer.subdata(in: stdoutBuffer.startIndex..<range.lowerBound)
+            stdoutBuffer.removeSubrange(stdoutBuffer.startIndex..<range.upperBound)
+            Task { @MainActor [weak self] in
+                self?.consume(line: line)
+            }
+        }
+    }
+
+    private func consume(line: Data) {
+        guard !line.isEmpty,
+              let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else {
+            return
+        }
+
+        if let method = message["method"] as? String {
+            if let requestID = message["id"] {
+                handleServerRequest(method: method, requestID: requestID)
+            } else {
+                handleNotification(method: method, params: message["params"] as? [String: Any] ?? [:])
+            }
+            return
+        }
+
+        guard let requestID = message["id"] as? Int,
+              let continuation = pendingRequests.removeValue(forKey: requestID) else {
+            return
+        }
+
+        if let serverError = message["error"] as? [String: Any] {
+            let detail = serverError["message"] as? String ?? "Codex returned an unspecified error."
+            continuation.resume(throwing: Self.error(forServerMessage: detail))
+        } else if let result = message["result"] as? [String: Any] {
+            continuation.resume(returning: result)
+        } else {
+            continuation.resume(throwing: ClientError.protocolFailure("Codex returned an empty response."))
+        }
+    }
+
+    private func handleNotification(method: String, params: [String: Any]) {
+        switch method {
+        case "item/agentMessage/delta":
+            guard params["threadId"] as? String == activeThreadID,
+                  let delta = params["delta"] as? String else { return }
+            activeDeltaHandler?(delta)
+        case "turn/completed":
+            guard let threadID = params["threadId"] as? String,
+                  let turn = params["turn"] as? [String: Any],
+                  let turnID = turn["id"] as? String else { return }
+
+            let key = Self.turnKey(threadID: threadID, turnID: turnID)
+            let result: Result<Void, Error>
+            if turn["status"] as? String == "completed" {
+                result = .success(())
+            } else {
+                result = .failure(ClientError.turnFailed(Self.turnFailureDescription(turn)))
+            }
+
+            if let waiter = turnWaiters.removeValue(forKey: key) {
+                switch result {
+                case .success:
+                    waiter.resume()
+                case .failure(let error):
+                    waiter.resume(throwing: error)
+                }
+            } else {
+                completedTurns[key] = result
+            }
+        default:
+            break
+        }
+    }
+
+    private func handleServerRequest(method: String, requestID: Any) {
+        let normalizedMethod = method.lowercased()
+        if normalizedMethod.contains("approval") || normalizedMethod.contains("item/tool/") ||
+            normalizedMethod.contains("elicitation") {
+            actionRequestHandler?()
+        }
+
+        let result: [String: Any]
+        switch method {
+        case "item/commandExecution/requestApproval", "item/fileChange/requestApproval":
+            result = ["decision": "decline"]
+        case "item/permissions/requestApproval":
+            result = ["permissions": [:], "scope": "turn"]
+        case "applyPatchApproval", "execCommandApproval":
+            result = [
+                "decision": [
+                    "denied": ["rejection": "StationAI's text-only MVP does not allow actions."]
+                ]
+            ]
+        case "mcpServer/elicitation/request":
+            result = ["action": "decline"]
+        default:
+            sendServerError(
+                requestID: requestID,
+                code: -32601,
+                message: "StationAI's text-only MVP does not provide this action."
+            )
+            return
+        }
+
+        do {
+            try sendJSON(["jsonrpc": "2.0", "id": requestID, "result": result])
+        } catch {
+            actionRequestHandler?()
+        }
+    }
+
+    private func sendServerError(requestID: Any, code: Int, message: String) {
+        try? sendJSON([
+            "jsonrpc": "2.0",
+            "id": requestID,
+            "error": ["code": code, "message": message]
+        ])
+    }
+
+    private func waitForTurn(_ key: String) async throws {
+        if let result = completedTurns.removeValue(forKey: key) {
+            return try result.get()
+        }
+
+        try await withCheckedThrowingContinuation { continuation in
+            turnWaiters[key] = continuation
+        }
+    }
+
+    private func processDidTerminate(_ terminatedProcess: Process) {
+        guard process === terminatedProcess else { return }
+
+        let exitDetail = "Codex CLI exited with status \(terminatedProcess.terminationStatus)."
+        let error = ClientError.processExited(exitDetail)
+        process = nil
+        inputPipe = nil
+        outputPipe?.fileHandleForReading.readabilityHandler = nil
+        stderrPipe?.fileHandleForReading.readabilityHandler = nil
+        outputPipe = nil
+        stderrPipe = nil
+        initialized = false
+        resumedThreadIDs.removeAll()
+        activeThreadID = nil
+        activeDeltaHandler = nil
+
+        for continuation in pendingRequests.values {
+            continuation.resume(throwing: error)
+        }
+        pendingRequests.removeAll()
+        for continuation in turnWaiters.values {
+            continuation.resume(throwing: error)
+        }
+        turnWaiters.removeAll()
+        completedTurns.removeAll()
+    }
+
+    private func confirmModel(_ model: String?) throws {
+        guard let model else {
+            throw ClientError.protocolFailure("Codex did not report which model it selected.")
+        }
+        guard model == Self.modelID else {
+            throw ClientError.modelMismatch(model)
+        }
+    }
+
+    private static func chatMessage(from entry: [String: Any]) -> CodexChatMessage? {
+        guard let item = entry["item"] as? [String: Any],
+              let itemID = item["id"] as? String,
+              let type = item["type"] as? String else {
+            return nil
+        }
+
+        switch type {
+        case "userMessage":
+            let content = item["content"] as? [[String: Any]] ?? []
+            let text = content.compactMap { part -> String? in
+                guard part["type"] as? String == "text" else { return nil }
+                return part["text"] as? String
+            }.joined()
+            guard !text.isEmpty else { return nil }
+            return CodexChatMessage(id: itemID, role: .user, text: text)
+        case "agentMessage":
+            guard let text = item["text"] as? String, !text.isEmpty else { return nil }
+            return CodexChatMessage(id: itemID, role: .assistant, text: text)
+        default:
+            return nil
+        }
+    }
+
+    private static func turnKey(threadID: String, turnID: String) -> String {
+        "\(threadID):\(turnID)"
+    }
+
+    private static func turnFailureDescription(_ turn: [String: Any]) -> String {
+        if let error = turn["error"] as? [String: Any] {
+            if let message = error["message"] as? String, !message.isEmpty {
+                return turnFailureDescription(message)
+            }
+            if JSONSerialization.isValidJSONObject(error),
+               let data = try? JSONSerialization.data(withJSONObject: error),
+               let detail = String(data: data, encoding: .utf8) {
+                return "Codex couldn't complete this turn: \(detail)"
+            }
+        }
+        return "Codex couldn't complete this turn. Check your CLI sign-in and model access, then try again."
+    }
+
+    private static func turnFailureDescription(_ message: String) -> String {
+        let normalized = message.lowercased()
+        if normalized.contains(Self.modelID) &&
+            (normalized.contains("not supported") || normalized.contains("unsupported") ||
+                normalized.contains("not available") || normalized.contains("unavailable")) {
+            return "Codex Luna (\(Self.modelID)) isn't available to the current Codex sign-in. StationAI didn't switch models. Sign in with an account or provider that supports this model, then try again."
+        }
+        return message
+    }
+
+    private static func error(forServerMessage message: String) -> Error {
+        let normalized = message.lowercased()
+        if normalized.contains("unauthorized") || normalized.contains("authentication") ||
+            normalized.contains("not logged in") || normalized.contains("sign in") ||
+            normalized.contains("401") {
+            return ClientError.authentication(message)
+        }
+        if normalized.contains("model") &&
+            (normalized.contains("not found") || normalized.contains("unavailable") || normalized.contains("unknown") ||
+                normalized.contains("not supported") || normalized.contains("unsupported")) {
+            return ClientError.server("Codex couldn't use \(Self.modelID): \(message). StationAI won't switch models.")
+        }
+        return ClientError.server(message)
+    }
+
+    private static func findCodexExecutable() -> String? {
+        let home = NSHomeDirectory()
+        let commonPaths = [
+            "/opt/homebrew/bin/codex",
+            "/usr/local/bin/codex",
+            "/opt/local/bin/codex",
+            "\(home)/.local/bin/codex",
+            "\(home)/.npm-global/bin/codex"
+        ]
+        let pathEntries = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":")
+            .map(String.init)
+            .map { URL(fileURLWithPath: $0).appendingPathComponent("codex").path }
+
+        for candidate in pathEntries + commonPaths {
+            if FileManager.default.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    private static func expandedSearchPath(_ existingPath: String?) -> String {
+        var paths = (existingPath ?? "").split(separator: ":").map(String.init)
+        paths.append(contentsOf: ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin", "/usr/bin", "/bin"])
+        return Array(NSOrderedSet(array: paths)).compactMap { $0 as? String }.joined(separator: ":")
+    }
+}
