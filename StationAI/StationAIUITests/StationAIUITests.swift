@@ -370,6 +370,64 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Blank composer leaves send disabled")
     }
 
+    // case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation.
+    func test_task_workspace_changes_group_staged_and_unstaged_diffs() throws {
+        _ = try runCLI([
+            "task", "create", "--title", "Git changes", "--root", fixture.changes.path
+        ])
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Git changes")
+
+        XCTAssertTrue(element("staged-changes-section").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("working-changes-section").exists)
+        XCTAssertTrue(element("workspace-change-staged-shared.txt").exists)
+        XCTAssertTrue(element("workspace-change-working-shared.txt").exists)
+        XCTAssertTrue(element("workspace-change-working-untracked.txt").exists)
+        XCTAssertTrue(element("workspace-change-working-deleted.txt").exists)
+        XCTAssertTrue(element("workspace-change-working-syntax.json").exists)
+        XCTAssertTrue(element("workspace-change-staged-staged-deleted.txt").exists)
+
+        let taskID = try taskID(named: "Git changes")
+        let inventory = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        XCTAssertEqual((inventory?["staged"] as? [[String: Any]])?.count, 3)
+        XCTAssertEqual((inventory?["working"] as? [[String: Any]])?.count, 5)
+        let stagedDiff = try runCLI([
+            "task", "changes", "diff", taskID,
+            "--repository", fixture.changes.path,
+            "--path", "shared.txt",
+            "--group", "staged"
+        ])["result"] as? [String: Any]
+        XCTAssertEqual(stagedDiff?["original"] as? String, "Shared baseline.\n")
+        XCTAssertEqual(stagedDiff?["modified"] as? String, "Shared index version.\n")
+
+        element("workspace-change-staged-shared.txt").click()
+        XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
+        assertText("workspace-diff-title", equals: "shared.txt")
+        assertText("workspace-diff-source", equals: "suggested-parent/changes · Staged")
+        assertText("workspace-diff-editor-status", equals: "Side-by-side")
+        assertText("workspace-diff-highlight-status", equals: "1 change highlighted")
+        attachScreenshot(named: "Monaco staged diff overlays the task conversation")
+
+        element("workspace-change-working-shared.txt").click()
+        assertText("workspace-diff-source", equals: "suggested-parent/changes · Working tree")
+        assertText("workspace-diff-editor-status", equals: "Side-by-side")
+        assertText("workspace-diff-highlight-status", equals: "1 change highlighted")
+
+        element("workspace-change-working-untracked.txt").click()
+        assertText("workspace-diff-title", equals: "untracked.txt")
+        assertText("workspace-diff-editor-status", equals: "Side-by-side")
+
+        element("workspace-change-working-syntax.json").click()
+        assertText("workspace-diff-title", equals: "syntax.json")
+        assertText("workspace-diff-editor-status", equals: "Side-by-side")
+        assertText("workspace-diff-highlight-status", equals: "1 change highlighted")
+        attachScreenshot(named: "Monaco JSON diff uses the local JSON language worker")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertFalse(element("workspace-diff-overlay").waitForExistence(timeout: 2))
+        XCTAssertTrue(element("empty-conversation").exists, "Closing the diff should reveal the conversation again.")
+        attachScreenshot(named: "Conversation returns after closing the Monaco diff")
+    }
+
     private func launchApp(defaultParent: String?) {
         app = XCUIApplication()
         app.launchEnvironment["STATIONAI_DATA_DIRECTORY"] = dataDirectory.path
@@ -602,6 +660,7 @@ private struct WorkspaceFixture {
     let alternate: URL
     let alternateParent: URL
     let custom: URL
+    let changes: URL
     let missing: URL
     let nested: URL
     let linkedOutside: URL
@@ -621,6 +680,7 @@ private struct WorkspaceFixture {
             "alternateParent": parent.appendingPathComponent("alternate-parent", isDirectory: true),
             "alternate": parent.appendingPathComponent("alternate-parent/alternate", isDirectory: true),
             "custom": parent.appendingPathComponent("custom-folder", isDirectory: true),
+            "changes": parent.appendingPathComponent("changes", isDirectory: true),
             "nested": parent.appendingPathComponent("primary/nested", isDirectory: true),
             "linkedOutside": parent.appendingPathComponent("linked-outside", isDirectory: true)
         ]
@@ -638,9 +698,11 @@ private struct WorkspaceFixture {
             alternate: locations["alternate"]!,
             alternateParent: locations["alternateParent"]!,
             custom: locations["custom"]!,
+            changes: locations["changes"]!,
             missing: parent.appendingPathComponent("missing", isDirectory: true),
             nested: locations["nested"]!,
             linkedOutside: locations["linkedOutside"]!
         )
     }
+
 }

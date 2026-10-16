@@ -18,6 +18,9 @@
 		A10000000000000000000008 /* WorkspaceSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* WorkspaceSupport.swift */; };
 		A10000000000000000000009 /* BridgeCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000B /* BridgeCore.swift */; };
 		A1000000000000000000000A /* BridgeContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* BridgeContract.swift */; };
+		A1000000000000000000000D /* WorkspaceChanges.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* WorkspaceChanges.swift */; };
+		A1000000000000000000000E /* MonacoDiffEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* MonacoDiffEditor.swift */; };
+		A1000000000000000000000F /* Monaco in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000F /* Monaco */; };
 		B4144B03272C978E6BEE8876 /* StationAIBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7A603F3AB342E594B68ED99 /* StationAIBridgeTests.swift */; };
 		D564A1A1B70481ED860871B3 /* StationAIUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60C95D59E3D25AB8C146839F /* StationAIUITests.swift */; };
 		FFFE07E201DA471E79F027E4 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D270EEC09920B3D8C0579AD1 /* Cocoa.framework */; };
@@ -45,6 +48,9 @@
 		A2000000000000000000000A /* WorkspaceSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSupport.swift; sourceTree = "<group>"; };
 		A2000000000000000000000B /* BridgeCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeCore.swift; sourceTree = "<group>"; };
 		A2000000000000000000000C /* BridgeContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Bridge/BridgeContract.swift; sourceTree = "<group>"; };
+		A2000000000000000000000D /* WorkspaceChanges.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceChanges.swift; sourceTree = "<group>"; };
+		A2000000000000000000000E /* MonacoDiffEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MonacoDiffEditor.swift; sourceTree = "<group>"; };
+		A2000000000000000000000F /* Monaco */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Monaco; sourceTree = "<group>"; };
 		C7A603F3AB342E594B68ED99 /* StationAIBridgeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StationAIBridgeTests.swift; sourceTree = "<group>"; };
 		C9A25888C010E63EF23C9AA7 /* StationAIBridgeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = StationAIBridgeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D270EEC09920B3D8C0579AD1 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.15.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
@@ -101,6 +107,7 @@
 			isa = PBXGroup;
 			children = (
 				A70000000000000000000002 /* App */,
+				B70000000000000000000001 /* Monaco Resources */,
 				A70000000000000000000004 /* Products */,
 				1A66A98F63E7B89B922CAB80 /* Frameworks */,
 				E4BD2AF3868744E5F8663F07 /* StationAIBridgeTests */,
@@ -120,8 +127,18 @@
 				A2000000000000000000000A /* WorkspaceSupport.swift */,
 				A2000000000000000000000B /* BridgeCore.swift */,
 				A2000000000000000000000C /* BridgeContract.swift */,
+				A2000000000000000000000D /* WorkspaceChanges.swift */,
+				A2000000000000000000000E /* MonacoDiffEditor.swift */,
 			);
 			path = StationAI/App;
+			sourceTree = "<group>";
+		};
+		B70000000000000000000001 /* Monaco Resources */ = {
+			isa = PBXGroup;
+			children = (
+				A2000000000000000000000F /* Monaco */,
+			);
+			path = StationAI/Resources;
 			sourceTree = "<group>";
 		};
 		A70000000000000000000004 /* Products */ = {
@@ -251,6 +268,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1000000000000000000000F /* Monaco in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -328,6 +346,8 @@
 				A10000000000000000000008 /* WorkspaceSupport.swift in Sources */,
 				A10000000000000000000009 /* BridgeCore.swift in Sources */,
 				A1000000000000000000000A /* BridgeContract.swift in Sources */,
+				A1000000000000000000000D /* WorkspaceChanges.swift in Sources */,
+				A1000000000000000000000E /* MonacoDiffEditor.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

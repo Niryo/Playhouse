@@ -2,8 +2,15 @@ import SwiftData
 import SwiftUI
 
 struct TaskConversationView: View {
+    private struct ChangeRepositoryGroup: Identifiable {
+        let repository: String
+        let entries: [WorkspaceChangeEntry]
+        var id: String { repository }
+    }
+
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var codexClient: CodexAppServerClient
+    @Environment(\.colorScheme) private var colorScheme
     @AppStorage(WorkspaceSettings.defaultParentFolderKey, store: WorkspaceSettings.preferencesStore) private var defaultParentFolderPath = ""
 
     let task: BoardTask
@@ -12,8 +19,17 @@ struct TaskConversationView: View {
     @State private var draft = ""
     @State private var messages: [CodexChatMessage] = []
     @State private var activities: [CodexActivity] = []
-    @State private var turnDiff: CodexTurnDiff?
-    @State private var isDiffExpanded = false
+    @State private var changeInventory = WorkspaceChangeInventory(staged: [], working: [])
+    @State private var isLoadingChanges = false
+    @State private var changesError: String?
+    @State private var selectedChange: WorkspaceChangeEntry?
+    @State private var selectedDiff: WorkspaceFileDiff?
+    @State private var isDiffPresented = false
+    @State private var isLoadingDiff = false
+    @State private var diffError: String?
+    @State private var isMonacoReady = false
+    @State private var monacoError: String?
+    @State private var diffChangeCount: Int?
     @State private var isLoadingHistory = false
     @State private var isResponding = false
     @State private var errorMessage: String?
@@ -25,6 +41,12 @@ struct TaskConversationView: View {
         draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || workspaceRootURLs.isEmpty || isResponding || isLoadingHistory
     }
 
+    private var diffHighlightStatus: String {
+        guard let diffChangeCount else { return "Calculating changes…" }
+        guard diffChangeCount > 0 else { return "No text changes" }
+        return "\(diffChangeCount) change\(diffChangeCount == 1 ? "" : "s") highlighted"
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             taskSidebar
@@ -33,6 +55,227 @@ struct TaskConversationView: View {
                 .fill(Color.primary.opacity(0.08))
                 .frame(width: 1)
 
+            conversationPanel
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+        .sheet(isPresented: $isShowingWorkspaceEditor) {
+            WorkspaceRootsEditor(
+                parentFolderURL: WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath),
+                initialRoots: workspaceRootURLs,
+                onSave: updateWorkspaceRoots
+            )
+        }
+        .task {
+            await loadConversation()
+            await refreshWorkspaceChanges()
+        }
+    }
+
+    private var taskSidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Text("Changes")
+                    .font(.system(size: 13, weight: .semibold))
+                    .accessibilityIdentifier("workspace-changes-title")
+                Spacer(minLength: 0)
+                Button {
+                    Task { await refreshWorkspaceChanges() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11, weight: .medium))
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .help("Refresh workspace changes")
+                .accessibilityLabel("Refresh workspace changes")
+                .accessibilityIdentifier("refresh-workspace-changes-button")
+                .disabled(isLoadingChanges)
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 16)
+            .padding(.bottom, 10)
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.07))
+                .frame(height: 1)
+
+            if let changesError {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Couldn't read Git changes", systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.red)
+                    Text(changesError)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Retry") {
+                        Task { await refreshWorkspaceChanges() }
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                    .accessibilityIdentifier("retry-workspace-changes-button")
+                }
+                .padding(12)
+                .accessibilityIdentifier("workspace-changes-error")
+            } else if isLoadingChanges && changeInventory.isEmpty {
+                ProgressView("Checking folders…")
+                    .controlSize(.small)
+                    .font(.system(size: 11))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityIdentifier("workspace-changes-loading")
+            } else if changeInventory.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.secondary)
+                    Text("No changes")
+                        .font(.system(size: 12, weight: .medium))
+                    Text("Changes in Git repositories under this task's folders will appear here.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(15)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityIdentifier("workspace-changes-empty")
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 15) {
+                        changeSection(title: "Staged Changes", entries: changeInventory.staged)
+                        changeSection(title: "Changes", entries: changeInventory.working)
+                    }
+                    .padding(.vertical, 12)
+                }
+                .scrollIndicators(.visible)
+                .accessibilityIdentifier("workspace-changes-list")
+            }
+        }
+        .frame(width: 232)
+        .frame(maxHeight: .infinity)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.62))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("task-sidebar")
+    }
+
+    private func changeSection(title: String, entries: [WorkspaceChangeEntry]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 7) {
+                Image(systemName: title == "Staged Changes" ? "checkmark.circle.fill" : "circle.dashed")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(title == "Staged Changes" ? .green : .secondary)
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                Text("\(entries.count)")
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 14)
+            .accessibilityIdentifier(title == "Staged Changes" ? "staged-changes-section" : "working-changes-section")
+
+            if entries.isEmpty {
+                Text("No files")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 31)
+                    .padding(.vertical, 3)
+            } else {
+                let groups = repositoryGroups(entries)
+                ForEach(groups, id: \.repository) { repositoryGroup in
+                    if Set(changeInventory.staged.map(\.repository) + changeInventory.working.map(\.repository)).count > 1 {
+                        Text(repositoryLabel(repositoryGroup.repository))
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .padding(.leading, 17)
+                            .padding(.top, 4)
+                            .accessibilityIdentifier("workspace-repository-\(repositoryGroup.repository.hashValue)")
+                    }
+                    ForEach(repositoryGroup.entries) { entry in
+                        Button {
+                            openDiff(entry)
+                        } label: {
+                            HStack(spacing: 7) {
+                                Image(systemName: changeSymbol(for: entry.status))
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(changeColor(for: entry.status))
+                                    .frame(width: 12)
+                                Text(entry.path)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer(minLength: 0)
+                                Text(statusBadge(for: entry))
+                                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(changeColor(for: entry.status))
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .contentShape(Rectangle())
+                            .background(
+                                selectedChange?.id == entry.id
+                                    ? Color.accentColor.opacity(0.15)
+                                    : Color.clear,
+                                in: RoundedRectangle(cornerRadius: 5)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .help("View \(entry.group.rawValue) diff for \(entry.path)")
+                        .accessibilityLabel("\(entry.path), \(entry.status), \(entry.group.rawValue)")
+                        .accessibilityIdentifier("workspace-change-\(entry.group.rawValue)-\(entry.path)")
+                        .padding(.horizontal, 7)
+                    }
+                }
+            }
+        }
+    }
+
+    private func repositoryGroups(_ entries: [WorkspaceChangeEntry]) -> [ChangeRepositoryGroup] {
+        Dictionary(grouping: entries, by: \.repository)
+            .keys
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            .map { repository in
+                ChangeRepositoryGroup(repository: repository, entries: entries.filter { $0.repository == repository })
+            }
+    }
+
+    private func repositoryLabel(_ path: String) -> String {
+        let components = URL(fileURLWithPath: path).pathComponents
+        return components.suffix(2).joined(separator: "/")
+    }
+
+    private func statusBadge(for entry: WorkspaceChangeEntry) -> String {
+        if entry.statusCode == "??" { return "U" }
+        if entry.statusCode.contains("R") { return "R" }
+        if entry.statusCode.contains("A") { return "A" }
+        if entry.statusCode.contains("D") { return "D" }
+        if entry.status == "conflict" { return "!" }
+        return "M"
+    }
+
+    private func changeSymbol(for status: String) -> String {
+        switch status {
+        case "added", "untracked": "plus.square.fill"
+        case "deleted": "minus.square.fill"
+        case "renamed", "copied": "arrow.turn.up.right"
+        case "conflict": "exclamationmark.triangle.fill"
+        default: "doc.text"
+        }
+    }
+
+    private func changeColor(for status: String) -> Color {
+        switch status {
+        case "added", "untracked": .green
+        case "deleted", "conflict": .red
+        case "renamed", "copied": .orange
+        default: .secondary
+        }
+    }
+
+    private var conversationPanel: some View {
+        ZStack(alignment: .leading) {
             VStack(spacing: 0) {
                 conversationHeader
 
@@ -50,30 +293,215 @@ struct TaskConversationView: View {
 
                 composer
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if isDiffPresented {
+                fileDiffOverlay
+                    .transition(.move(edge: .leading))
+                    .zIndex(1)
+            }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
-        .sheet(isPresented: $isShowingWorkspaceEditor) {
-            WorkspaceRootsEditor(
-                parentFolderURL: WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath),
-                initialRoots: workspaceRootURLs,
-                onSave: updateWorkspaceRoots
-            )
-        }
-        .task {
-            await loadConversation()
+        .clipped()
+        .animation(.easeInOut(duration: 0.24), value: isDiffPresented)
+        .onExitCommand {
+            if isDiffPresented { closeDiff() }
         }
     }
 
-    private var taskSidebar: some View {
+    private var fileDiffOverlay: some View {
         VStack(spacing: 0) {
-            Spacer(minLength: 0)
+            HStack(spacing: 11) {
+                Button(action: closeDiff) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(width: 26, height: 26)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Close diff")
+                .accessibilityLabel("Close diff")
+                .accessibilityIdentifier("close-workspace-diff-button")
+
+                if let selectedChange {
+                    Image(systemName: changeSymbol(for: selectedChange.status))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(changeColor(for: selectedChange.status))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(selectedChange.path)
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .accessibilityIdentifier("workspace-diff-title")
+                        Text("\(repositoryLabel(selectedChange.repository)) · \(selectedChange.group == .staged ? "Staged" : "Working tree")")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("workspace-diff-source")
+                    }
+                } else {
+                    Text("File diff")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+
+                Spacer(minLength: 0)
+                if selectedDiff?.isText == true {
+                    Text(isMonacoReady ? "Side-by-side" : "Starting editor")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("workspace-diff-editor-status")
+                    if isMonacoReady {
+                        Text(diffHighlightStatus)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(diffChangeCount.map { $0 > 0 ? Color.green : Color.secondary } ?? Color.secondary)
+                            .accessibilityIdentifier("workspace-diff-highlight-status")
+                    }
+                }
+                Text("READ ONLY")
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .tracking(0.5)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                    .background(Color.primary.opacity(0.06), in: Capsule())
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(nsColor: .windowBackgroundColor))
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.09))
+                .frame(height: 1)
+
+            Group {
+                if isLoadingDiff {
+                    ProgressView("Loading file diff…")
+                        .controlSize(.small)
+                        .accessibilityIdentifier("workspace-diff-loading")
+                } else if let diffError {
+                    VStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(diffError)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .padding(24)
+                    .accessibilityIdentifier("workspace-diff-error")
+                } else if let selectedDiff, selectedDiff.isText {
+                    if let monacoError {
+                        VStack(spacing: 9) {
+                            Text(monacoError)
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                            Button("Reload editor") {
+                                isMonacoReady = false
+                                diffChangeCount = nil
+                                self.monacoError = nil
+                                self.selectedDiff = nil
+                                if let selectedChange { openDiff(selectedChange) }
+                            }
+                            .font(.system(size: 11, weight: .medium))
+                        }
+                        .padding(24)
+                    } else {
+                        ZStack {
+                            MonacoDiffEditor(
+                                diff: selectedDiff,
+                                theme: colorScheme == .dark ? "vs-dark" : "vs",
+                                isReady: $isMonacoReady,
+                                loadError: $monacoError,
+                                diffChangeCount: $diffChangeCount
+                            )
+                            .accessibilityIdentifier("workspace-diff-editor")
+
+                            if !isMonacoReady {
+                                ProgressView("Starting Monaco…")
+                                    .controlSize(.small)
+                                    .padding(12)
+                                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                                    .accessibilityIdentifier("workspace-diff-editor-loading")
+                            }
+                        }
+                    }
+                } else if let selectedDiff {
+                    VStack(spacing: 9) {
+                        Image(systemName: "doc.text.magnifyingglass")
+                            .font(.system(size: 22))
+                            .foregroundStyle(.secondary)
+                        Text(selectedDiff.message ?? "This file can't be shown as a text diff.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .accessibilityIdentifier("workspace-diff-unsupported")
+                    }
+                    .padding(24)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: .textBackgroundColor))
         }
-        .frame(width: 232)
-        .frame(maxHeight: .infinity)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .windowBackgroundColor))
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("task-sidebar")
+        .accessibilityIdentifier("workspace-diff-overlay")
+        .background(EscapeKeyMonitor(onEscape: closeDiff).frame(width: 0, height: 0))
+    }
+
+    private func openDiff(_ entry: WorkspaceChangeEntry) {
+        selectedChange = entry
+        selectedDiff = nil
+        isLoadingDiff = true
+        diffError = nil
+        monacoError = nil
+        isMonacoReady = false
+        diffChangeCount = nil
+        withAnimation(.easeInOut(duration: 0.24)) {
+            isDiffPresented = true
+        }
+
+        Task {
+            do {
+                let diff = try await workspaceManager.diff(
+                    for: task.id,
+                    repository: entry.repository,
+                    path: entry.path,
+                    group: entry.group.rawValue
+                )
+                guard selectedChange?.id == entry.id else { return }
+                selectedDiff = diff
+            } catch {
+                guard selectedChange?.id == entry.id else { return }
+                diffError = error.localizedDescription
+            }
+            if selectedChange?.id == entry.id { isLoadingDiff = false }
+        }
+    }
+
+    private func closeDiff() {
+        withAnimation(.easeInOut(duration: 0.24)) {
+            isDiffPresented = false
+        }
+    }
+
+    private func refreshWorkspaceChanges() async {
+        guard !isLoadingChanges else { return }
+        isLoadingChanges = true
+        defer { isLoadingChanges = false }
+
+        do {
+            let inventory = try await workspaceManager.changes(for: task.id)
+            changeInventory = inventory
+            changesError = nil
+            if let selectedChange,
+               !(inventory.staged + inventory.working).contains(where: { $0.id == selectedChange.id }) {
+                self.selectedChange = nil
+                selectedDiff = nil
+                diffError = "This file no longer has a Git change. Refresh the list and choose another file."
+            }
+        } catch {
+            changesError = error.localizedDescription
+        }
     }
 
     private var conversationHeader: some View {
@@ -184,10 +612,6 @@ struct TaskConversationView: View {
                     if !activities.isEmpty {
                         activityList
                     }
-                    if let turnDiff, !turnDiff.unifiedDiff.isEmpty {
-                        diffCard(turnDiff)
-                            .id("latest-turn-diff")
-                    }
                 }
                 .padding(.horizontal, 28)
                 .padding(.vertical, 24)
@@ -196,12 +620,6 @@ struct TaskConversationView: View {
             }
             .scrollIndicators(.visible)
             .accessibilityIdentifier("conversation-scroll-view")
-            .onChange(of: isDiffExpanded) { _, isExpanded in
-                guard isExpanded, turnDiff != nil else { return }
-                withAnimation(.easeOut(duration: 0.2)) {
-                    scrollProxy.scrollTo("latest-turn-diff", anchor: .bottom)
-                }
-            }
             .onChange(of: messages.count) { _, _ in
                 scrollToLatest(using: scrollProxy)
             }
@@ -210,9 +628,6 @@ struct TaskConversationView: View {
             }
             .onChange(of: activities) { _, _ in
                 if isResponding { scrollToLatest(using: scrollProxy) }
-            }
-            .onChange(of: turnDiff?.unifiedDiff) { _, _ in
-                scrollToLatest(using: scrollProxy)
             }
         }
     }
@@ -245,54 +660,6 @@ struct TaskConversationView: View {
             }
         }
         .accessibilityIdentifier("codex-activity-list")
-    }
-
-    private func diffCard(_ diff: CodexTurnDiff) -> some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Label("Changes", systemImage: "doc.text.magnifyingglass")
-                .font(.system(size: 12, weight: .semibold))
-            if !diff.changedFiles.isEmpty {
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(diff.changedFiles, id: \.self) { path in
-                        Label(path, systemImage: "doc.text")
-                            .font(.system(size: 10, design: .monospaced))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .textSelection(.enabled)
-                            .accessibilityElement(children: .ignore)
-                            .accessibilityLabel(path)
-                            .accessibilityIdentifier("codex-changed-file-\(URL(fileURLWithPath: path).lastPathComponent)")
-                    }
-                }
-            }
-            Button {
-                isDiffExpanded.toggle()
-            } label: {
-                Label("View diff", systemImage: isDiffExpanded ? "chevron.down" : "chevron.right")
-            }
-            .buttonStyle(.plain)
-            .font(.system(size: 11, weight: .medium))
-            .accessibilityIdentifier("codex-view-diff-toggle")
-
-            if isDiffExpanded {
-                ScrollView([.horizontal, .vertical]) {
-                    Text(diff.unifiedDiff)
-                        .font(.system(size: 10, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
-                        .accessibilityLabel(diff.unifiedDiff)
-                        .accessibilityIdentifier("codex-unified-diff")
-                }
-                .frame(maxHeight: 260)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
-                .accessibilityIdentifier("codex-unified-diff-scroll")
-            }
-        }
-        .padding(12)
-        .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 11))
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("codex-turn-diff")
     }
 
     @ViewBuilder
@@ -426,7 +793,6 @@ struct TaskConversationView: View {
             }
             messages = history.messages
             activities = history.activities
-            turnDiff = history.diff
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -444,8 +810,6 @@ struct TaskConversationView: View {
         errorMessage = nil
         actionNotice = nil
         activities = []
-        turnDiff = nil
-        isDiffExpanded = false
 
         Task { @MainActor in
             do {
@@ -467,14 +831,14 @@ struct TaskConversationView: View {
                             activities.append(activity)
                         }
                     case "diff":
-                        guard let unifiedDiff = update.diff else { return }
-                        let diff = CodexTurnDiff(unifiedDiff: unifiedDiff)
-                        turnDiff = turnDiff?.merging(diff) ?? diff
+                        break
                     case "history", "completed":
                         guard let history = update.history else { return }
                         messages = history.messages
                         activities = history.activities
-                        turnDiff = history.diff
+                        if update.type == "completed" {
+                            Task { await refreshWorkspaceChanges() }
+                        }
                     case "action_notice":
                         actionNotice = update.message
                     default:
@@ -508,10 +872,15 @@ struct TaskConversationView: View {
         )
     }
 
+    private var workspaceManager: WorkspaceManager {
+        WorkspaceManager(taskManager: BoardTaskManager(modelContext: modelContext))
+    }
+
     private func updateWorkspaceRoots(_ roots: [URL]) {
         do {
             _ = try WorkspaceManager(taskManager: BoardTaskManager(modelContext: modelContext))
                 .setRoots(roots.map { $0.standardizedFileURL.path }, for: task.id)
+            Task { await refreshWorkspaceChanges() }
         } catch {
             errorMessage = "Couldn't save working folders: \(error.localizedDescription)"
         }
@@ -523,8 +892,6 @@ struct TaskConversationView: View {
             target = latestMessage.id
         } else if let latestActivity = activities.last {
             target = latestActivity.id
-        } else if turnDiff != nil {
-            target = "latest-turn-diff"
         } else {
             return
         }

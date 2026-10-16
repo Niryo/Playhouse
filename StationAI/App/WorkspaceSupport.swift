@@ -196,7 +196,7 @@ enum RepositoryScanner {
         }.value
     }
 
-    private static func scanSynchronously(parent: URL) -> [URL] {
+    static func scanSynchronously(parent: URL) -> [URL] {
         let manager = FileManager.default
         var isDirectory: ObjCBool = false
         guard manager.fileExists(atPath: parent.path, isDirectory: &isDirectory), isDirectory.boolValue,

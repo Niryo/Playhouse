@@ -2,6 +2,7 @@
 
 import shutil
 import subprocess
+import argparse
 from pathlib import Path
 
 
@@ -39,7 +40,25 @@ def create_repository(repository: Path, files: dict[str, str]) -> None:
         raise RuntimeError(f"Fixture repository {repository} is not clean after commit: {status}")
 
 
-def prepare() -> None:
+def prepare_workspace_changes(repository: Path) -> None:
+    marker = FIXTURE_ROOT / OWNER_MARKER
+    if not marker.is_file() or marker.read_text(encoding="utf-8") != OWNER_CONTENTS:
+        raise RuntimeError(
+            f"Refusing to modify the Git fixture without its ownership marker: {FIXTURE_ROOT}"
+        )
+
+    (repository / "staged.txt").write_text("Staged index version.\n", encoding="utf-8")
+    (repository / "shared.txt").write_text("Shared index version.\n", encoding="utf-8")
+    (repository / "syntax.json").write_text('{"value":"working version"}\n', encoding="utf-8")
+    run_git(repository, "add", "staged.txt", "shared.txt")
+    (repository / "shared.txt").write_text("Shared working version.\n", encoding="utf-8")
+    (repository / "working.txt").write_text("Working tree version.\n", encoding="utf-8")
+    (repository / "deleted.txt").unlink()
+    (repository / "untracked.txt").write_text("Untracked file.\n", encoding="utf-8")
+    run_git(repository, "rm", "staged-deleted.txt")
+
+
+def prepare(workspace_changes: bool = False) -> None:
     if FIXTURE_ROOT.exists():
         marker = FIXTURE_ROOT / OWNER_MARKER
         if not marker.is_file() or marker.read_text(encoding="utf-8") != OWNER_CONTENTS:
@@ -57,6 +76,7 @@ def prepare() -> None:
     unavailable = suggested_parent / "unavailable-folder"
     alternate_parent = suggested_parent / "alternate-parent"
     alternate = alternate_parent / "alternate"
+    changes = suggested_parent / "changes"
 
     suggested_parent.mkdir(parents=True)
     (FIXTURE_ROOT / OWNER_MARKER).write_text(OWNER_CONTENTS, encoding="utf-8")
@@ -72,6 +92,19 @@ def prepare() -> None:
     create_repository(secondary, {"stationai-secondary.txt": "Secondary baseline.\n"})
     create_repository(external, {"external-note.txt": "Outside baseline.\n"})
     create_repository(alternate, {"alternate-note.txt": "Alternate baseline.\n"})
+    create_repository(
+        changes,
+        {
+            "staged.txt": "Staged baseline.\n",
+            "shared.txt": "Shared baseline.\n",
+            "working.txt": "Working baseline.\n",
+            "deleted.txt": "Deleted baseline.\n",
+            "staged-deleted.txt": "Staged deletion baseline.\n",
+            "syntax.json": '{"value":"baseline"}\n',
+        },
+    )
+    if workspace_changes:
+        prepare_workspace_changes(changes)
     custom.mkdir(parents=True)
     (custom / "stationai-custom.txt").write_text("Custom folder baseline.\n", encoding="utf-8")
     unavailable.mkdir(parents=True)
@@ -82,4 +115,10 @@ def prepare() -> None:
 
 
 if __name__ == "__main__":
-    prepare()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--workspace-changes",
+        action="store_true",
+        help="prepare the owned Git fixture with staged and working changes for the UI case",
+    )
+    prepare(workspace_changes=parser.parse_args().workspace_changes)

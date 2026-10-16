@@ -46,5 +46,9 @@
   {
     "id": "test_blank_conversation_send_is_rejected_without_starting_a_turn",
     "expectation": "Blank messages cannot be sent and do not create conversation history."
+  },
+  {
+    "id": "test_task_workspace_changes_group_staged_and_unstaged_diffs",
+    "expectation": "The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation."
   }
 ]

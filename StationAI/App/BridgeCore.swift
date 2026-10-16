@@ -224,6 +224,33 @@ final class WorkspaceManager {
         guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
         return try taskManager.setWorkspaceRoots(taskID, roots: roots)
     }
+
+    func changes(for taskID: UUID) async throws -> WorkspaceChangeInventory {
+        guard taskManager != nil else {
+            throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.")
+        }
+        return try await WorkspaceChangeScanner.inventory(workspaceRoots: roots(for: taskID))
+    }
+
+    func diff(
+        for taskID: UUID,
+        repository: String,
+        path: String,
+        group: String
+    ) async throws -> WorkspaceFileDiff {
+        guard taskManager != nil else {
+            throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.")
+        }
+        guard let changeGroup = WorkspaceChangeGroup(rawValue: group) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Change group must be 'staged' or 'working'.")
+        }
+        return try await WorkspaceChangeScanner.diff(
+            workspaceRoots: roots(for: taskID),
+            repositoryPath: repository,
+            relativePath: path,
+            group: changeGroup
+        )
+    }
 }
 
 struct ConversationUpdate: Codable {
@@ -377,6 +404,15 @@ final class StationAIBridgeRuntime {
             case "task.roots.set":
                 let roots = try request.requiredStrings("roots")
                 result = try Self.value(workspaces.setRoots(roots, for: request.requiredUUID("taskID")))
+            case "task.changes.list":
+                result = try Self.value(await workspaces.changes(for: request.requiredUUID("taskID")))
+            case "task.changes.diff":
+                result = try Self.value(await workspaces.diff(
+                    for: request.requiredUUID("taskID"),
+                    repository: request.requiredString("repository"),
+                    path: request.requiredString("path"),
+                    group: request.requiredString("group")
+                ))
             case "workspace.suggest":
                 let parent = try request.requiredString("parent")
                 result = .object(["repositories": .array(try await workspaces.suggestedRepositories(parentPath: parent).map(BridgeValue.string))])

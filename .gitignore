@@ -3,3 +3,5 @@ DerivedData/
 build/
 *.xcresult/
 .e2e.lock
+node_modules/
+scripts/monaco-diff/dist/

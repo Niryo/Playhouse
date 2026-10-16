@@ -89,6 +89,31 @@ enum StationAICLI {
                 return BridgeRequest(command: "task.roots.set", arguments: [
                     "taskID": .string(id), "roots": .array((flags["--root"] ?? []).map(BridgeValue.string))
                 ])
+            case "changes":
+                guard let action = tail.first else {
+                    throw CLIError.usage("Use: stationai task changes list <task-id> or task changes diff <task-id> --repository <path> --path <relative-path> --group <staged|working>")
+                }
+                switch action {
+                case "list":
+                    guard tail.count == 2 else { throw CLIError.usage("Use: stationai task changes list <task-id>") }
+                    return BridgeRequest(command: "task.changes.list", arguments: ["taskID": .string(tail[1])])
+                case "diff":
+                    guard tail.count >= 2 else {
+                        throw CLIError.usage("Use: stationai task changes diff <task-id> --repository <path> --path <relative-path> --group <staged|working>")
+                    }
+                    let flags = try parseFlags(
+                        Array(tail.dropFirst(2)),
+                        valueFlags: ["--repository", "--path", "--group"]
+                    )
+                    return BridgeRequest(command: "task.changes.diff", arguments: [
+                        "taskID": .string(tail[1]),
+                        "repository": .string(try requiredFlag("--repository", flags: flags).first!),
+                        "path": .string(try requiredFlag("--path", flags: flags).first!),
+                        "group": .string(try requiredFlag("--group", flags: flags).first!),
+                    ])
+                default:
+                    throw CLIError.usage("Unknown task changes operation '\(action)'.")
+                }
             default:
                 throw CLIError.usage("Unknown task operation '\(operation)'.")
             }
@@ -182,6 +207,8 @@ enum StationAICLI {
       stationai task rename <task-id> --title <title>
       stationai task roots get <task-id>
       stationai task roots set <task-id> --root <path> [--root <path>...]
+      stationai task changes list <task-id>
+      stationai task changes diff <task-id> --repository <path> --path <relative-path> --group <staged|working>
       stationai task delete <task-id>
       stationai workspace suggest --parent <path>
       stationai settings get|clear-parent|set-parent <path>

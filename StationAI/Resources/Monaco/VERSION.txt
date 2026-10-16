@@ -1,0 +1,4 @@
+Monaco Editor 0.55.1
+Integration: ESM/Webpack custom diff bundle
+DOMPurify override: 3.4.16
+Language support: syntax definitions only; language-service workers omitted

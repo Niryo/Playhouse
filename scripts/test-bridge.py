@@ -30,6 +30,7 @@ class StationAIBridgeTests(unittest.TestCase):
         cls.secondary = cls.fixture / "suggested-parent" / "group" / "secondary"
         cls.alternate = cls.fixture / "suggested-parent" / "alternate-parent" / "alternate"
         cls.custom = cls.fixture / "suggested-parent" / "custom-folder"
+        cls.changes = cls.fixture / "suggested-parent" / "changes"
         cls.nested = cls.primary / "nested"
         cls.external = cls.fixture / "outside-parent" / "linked-outside"
         for path in [cls.primary, cls.secondary, cls.alternate, cls.custom, cls.nested, cls.external]:
@@ -86,6 +87,42 @@ class StationAIBridgeTests(unittest.TestCase):
             command.extend(["--root", root])
         response, _ = self.call_cli(*command)
         return self.assert_success(response)
+
+    def prepare_workspace_changes(self):
+        marker = self.fixture / ".stationai-bridge-fixture"
+        if not marker.is_file() or marker.read_text(encoding="utf-8") != "StationAI bridge tests own this deterministic fixture (v1).\n":
+            raise RuntimeError(f"Refusing to modify the Git fixture without its ownership marker: {self.fixture}")
+
+        (self.changes / "staged.txt").write_text("Staged index version.\n", encoding="utf-8")
+        (self.changes / "shared.txt").write_text("Shared index version.\n", encoding="utf-8")
+        (self.changes / "syntax.json").write_text('{"value":"working version"}\n', encoding="utf-8")
+        for path in ["staged.txt", "shared.txt"]:
+            self.run_git(self.changes, "add", path)
+        (self.changes / "shared.txt").write_text("Shared working version.\n", encoding="utf-8")
+        (self.changes / "working.txt").write_text("Working tree version.\n", encoding="utf-8")
+        (self.changes / "deleted.txt").unlink()
+        (self.changes / "untracked.txt").write_text("Untracked file.\n", encoding="utf-8")
+        self.run_git(self.changes, "rm", "staged-deleted.txt")
+
+    def run_git(self, repository, *arguments):
+        completed = subprocess.run(
+            ["git", "-C", str(repository), *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return completed.stdout
+
+    def changes_diff(self, task_id, path, group, expected_status=0):
+        response, _ = self.call_cli(
+            "task", "changes", "diff", task_id,
+            "--repository", self.changes,
+            "--path", path,
+            "--group", group,
+            expected_status=expected_status,
+        )
+        return response
 
     # case-contract: test_service_reports_bridge_version | The real app window opens and the bridge reports StationAI API version 1.
     def test_service_reports_bridge_version(self):
@@ -200,7 +237,7 @@ class StationAIBridgeTests(unittest.TestCase):
     def test_repository_suggestions_skip_nested_repositories_and_symlinks(self):
         response, _ = self.call_cli("workspace", "suggest", "--parent", self.fixture / "suggested-parent")
         repositories = self.assert_success(response)["repositories"]
-        self.assertEqual(repositories, sorted([str(self.primary), str(self.secondary), str(self.alternate)]))
+        self.assertEqual(repositories, sorted([str(self.primary), str(self.secondary), str(self.alternate), str(self.changes)]))
         self.assertNotIn(str(self.nested), repositories)
         self.assertNotIn(str(self.external), repositories)
 
@@ -232,6 +269,50 @@ class StationAIBridgeTests(unittest.TestCase):
         history = self.assert_success(response)
         self.assertEqual(history["activities"], [])
         self.assertEqual(history["messages"], [])
+
+    # case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation.
+    def test_task_workspace_changes_group_staged_and_unstaged_diffs(self):
+        self.prepare_workspace_changes()
+        task_id = self.create_task(title="Workspace changes", roots=[self.changes])["id"]
+
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        inventory = self.assert_success(response)
+        staged = {entry["path"]: entry for entry in inventory["staged"]}
+        working = {entry["path"]: entry for entry in inventory["working"]}
+        self.assertEqual(set(staged), {"shared.txt", "staged-deleted.txt", "staged.txt"})
+        self.assertEqual(set(working), {"deleted.txt", "shared.txt", "syntax.json", "untracked.txt", "working.txt"})
+        self.assertEqual(staged["staged-deleted.txt"]["status"], "deleted")
+        self.assertEqual(working["deleted.txt"]["status"], "deleted")
+        self.assertEqual(working["untracked.txt"]["status"], "untracked")
+
+        staged_shared = self.assert_success(self.changes_diff(task_id, "shared.txt", "staged"))
+        self.assertEqual(staged_shared["original"], "Shared baseline.\n")
+        self.assertEqual(staged_shared["modified"], "Shared index version.\n")
+        self.assertNotEqual(staged_shared["original"], staged_shared["modified"])
+        self.assertTrue(staged_shared["isText"])
+
+        working_shared = self.assert_success(self.changes_diff(task_id, "shared.txt", "working"))
+        self.assertEqual(working_shared["original"], "Shared index version.\n")
+        self.assertEqual(working_shared["modified"], "Shared working version.\n")
+
+        syntax = self.assert_success(self.changes_diff(task_id, "syntax.json", "working"))
+        self.assertEqual(syntax["original"], '{"value":"baseline"}\n')
+        self.assertEqual(syntax["modified"], '{"value":"working version"}\n')
+        self.assertTrue(syntax["isText"])
+
+        untracked = self.assert_success(self.changes_diff(task_id, "untracked.txt", "working"))
+        self.assertEqual(untracked["original"], "")
+        self.assertEqual(untracked["modified"], "Untracked file.\n")
+
+        deleted = self.assert_success(self.changes_diff(task_id, "deleted.txt", "working"))
+        self.assertEqual(deleted["original"], "Deleted baseline.\n")
+        self.assertEqual(deleted["modified"], "")
+
+        staged_deleted = self.assert_success(self.changes_diff(task_id, "staged-deleted.txt", "staged"))
+        self.assertEqual(staged_deleted["original"], "Staged deletion baseline.\n")
+        self.assertEqual(staged_deleted["modified"], "")
+
+        self.assert_failure(self.changes_diff(task_id, "stale.txt", "working", expected_status=3), "not_found")
 
 
 

@@ -27,7 +27,23 @@ while (( $# > 0 )); do
   esac
 done
 
-python3 "${repository_root}/scripts/prepare-e2e-fixture.py"
+prepare_workspace_changes=0
+if (( ${#ui_cases[@]} == 0 )); then
+  prepare_workspace_changes=1
+else
+  for ui_case in "${ui_cases[@]}"; do
+    if [[ "${ui_case}" == "test_task_workspace_changes_group_staged_and_unstaged_diffs" ]]; then
+      prepare_workspace_changes=1
+      break
+    fi
+  done
+fi
+
+fixture_arguments=()
+if (( prepare_workspace_changes == 1 )); then
+  fixture_arguments+=(--workspace-changes)
+fi
+python3 "${repository_root}/scripts/prepare-e2e-fixture.py" "${fixture_arguments[@]}"
 python3 "${repository_root}/scripts/check-test-parity.py"
 
 contract_path="${repository_root}/StationAI/BridgeTests/BridgeTestContracts.json"
