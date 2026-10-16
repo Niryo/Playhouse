@@ -50,5 +50,9 @@
   {
     "id": "test_task_workspace_changes_group_staged_and_unstaged_diffs",
     "expectation": "The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation."
+  },
+  {
+    "id": "test_external_git_edits_and_commit_refresh_workspace_changes",
+    "expectation": "External file edits and Git commits update the open task's changes sidebar automatically, and fresh CLI connections report the same Git status."
   }
 ]

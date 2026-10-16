@@ -314,6 +314,43 @@ class StationAIBridgeTests(unittest.TestCase):
 
         self.assert_failure(self.changes_diff(task_id, "stale.txt", "working", expected_status=3), "not_found")
 
+    # case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | External file edits and Git commits update the open task's changes sidebar automatically, and fresh CLI connections report the same Git status.
+    def test_external_git_edits_and_commit_refresh_workspace_changes(self):
+        repository = self.data_directory / "external-git"
+        repository.mkdir()
+        (repository / "tracked.txt").write_text("Baseline.\n", encoding="utf-8")
+        self.run_git(repository, "init", "--initial-branch=main")
+        self.run_git(repository, "config", "user.name", "StationAI Bridge Test")
+        self.run_git(repository, "config", "user.email", "stationai-bridge-test@example.invalid")
+        self.run_git(repository, "add", "tracked.txt")
+        self.run_git(repository, "commit", "-m", "Baseline")
+        task_id = self.create_task(title="External Git", roots=[repository])["id"]
+
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        self.assertEqual(self.assert_success(response), {"staged": [], "working": []})
+
+        (repository / "tracked.txt").write_text("Edited externally.\n", encoding="utf-8")
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        inventory = self.assert_success(response)
+        self.assertEqual(inventory["staged"], [])
+        self.assertEqual([entry["path"] for entry in inventory["working"]], ["tracked.txt"])
+
+        self.run_git(repository, "add", "tracked.txt")
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        inventory = self.assert_success(response)
+        self.assertEqual([entry["path"] for entry in inventory["staged"]], ["tracked.txt"])
+        self.assertEqual(inventory["working"], [])
+
+        self.run_git(repository, "commit", "-m", "External commit")
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        self.assertEqual(self.assert_success(response), {"staged": [], "working": []})
+        response, _ = self.call_cli(
+            "task", "changes", "diff", task_id,
+            "--repository", repository, "--path", "tracked.txt", "--group", "staged",
+            expected_status=3,
+        )
+        self.assert_failure(response, "not_found")
+
 
 
 if __name__ == "__main__":

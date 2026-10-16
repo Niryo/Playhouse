@@ -39,11 +39,11 @@ else
   done
 fi
 
-fixture_arguments=()
 if (( prepare_workspace_changes == 1 )); then
-  fixture_arguments+=(--workspace-changes)
+  python3 "${repository_root}/scripts/prepare-e2e-fixture.py" --workspace-changes
+else
+  python3 "${repository_root}/scripts/prepare-e2e-fixture.py"
 fi
-python3 "${repository_root}/scripts/prepare-e2e-fixture.py" "${fixture_arguments[@]}"
 python3 "${repository_root}/scripts/check-test-parity.py"
 
 contract_path="${repository_root}/StationAI/BridgeTests/BridgeTestContracts.json"

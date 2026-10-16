@@ -1,4 +1,87 @@
 import Foundation
+import CoreServices
+
+final class WorkspaceChangeWatcher {
+    private let paths: [String]
+    private let onChange: () -> Void
+    private var stream: FSEventStreamRef?
+    private var pendingRefresh: DispatchWorkItem?
+
+    init(paths: [String], onChange: @escaping () -> Void) {
+        self.paths = paths
+        self.onChange = onChange
+    }
+
+    static func watchPaths(workspaceRoots: [String]) async -> [String] {
+        await Task.detached(priority: .utility) {
+            var paths = Set(workspaceRoots.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL.path })
+            for rootPath in workspaceRoots {
+                let root = URL(fileURLWithPath: rootPath, isDirectory: true)
+                for repository in RepositoryScanner.scanSynchronously(parent: root) {
+                    let marker = repository.appendingPathComponent(".git")
+                    guard let contents = try? String(contentsOf: marker, encoding: .utf8),
+                          contents.hasPrefix("gitdir: ") else { continue }
+                    let reference = contents.dropFirst("gitdir: ".count).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let gitDirectory = URL(fileURLWithPath: reference, relativeTo: repository).standardizedFileURL
+                    if WorkspaceSettings.validDirectoryURL(for: gitDirectory.path) != nil {
+                        paths.insert(gitDirectory.path)
+                    }
+                }
+            }
+            return paths.sorted()
+        }.value
+    }
+
+    func start() {
+        guard stream == nil, !paths.isEmpty else { return }
+        var context = FSEventStreamContext(
+            version: 0,
+            info: Unmanaged.passUnretained(self).toOpaque(),
+            retain: nil,
+            release: nil,
+            copyDescription: nil
+        )
+        let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
+            guard let info else { return }
+            Unmanaged<WorkspaceChangeWatcher>.fromOpaque(info).takeUnretainedValue().scheduleRefresh()
+        }
+        guard let stream = FSEventStreamCreate(
+            kCFAllocatorDefault,
+            callback,
+            &context,
+            paths as CFArray,
+            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+            0.1,
+            FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagWatchRoot)
+        ) else { return }
+        FSEventStreamSetDispatchQueue(stream, .main)
+        guard FSEventStreamStart(stream) else {
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            return
+        }
+        self.stream = stream
+    }
+
+    func stop() {
+        pendingRefresh?.cancel()
+        pendingRefresh = nil
+        guard let stream else { return }
+        FSEventStreamStop(stream)
+        FSEventStreamInvalidate(stream)
+        FSEventStreamRelease(stream)
+        self.stream = nil
+    }
+
+    private func scheduleRefresh() {
+        pendingRefresh?.cancel()
+        let refresh = DispatchWorkItem { [weak self] in self?.onChange() }
+        pendingRefresh = refresh
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250), execute: refresh)
+    }
+
+    deinit { stop() }
+}
 
 enum WorkspaceChangeGroup: String, Codable, CaseIterable {
     case staged

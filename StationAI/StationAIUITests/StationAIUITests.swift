@@ -428,6 +428,40 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Conversation returns after closing the Monaco diff")
     }
 
+    // case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | External file edits and Git commits update the open task's changes sidebar automatically, and fresh CLI connections report the same Git status.
+    func test_external_git_edits_and_commit_refresh_workspace_changes() throws {
+        let repository = runDirectory.appendingPathComponent("external-git", isDirectory: true)
+        try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
+        let trackedFile = repository.appendingPathComponent("tracked.txt")
+        try "Baseline.\n".write(to: trackedFile, atomically: true, encoding: .utf8)
+        try runGit(repository, "init", "--initial-branch=main")
+        try runGit(repository, "config", "user.name", "StationAI UI Test")
+        try runGit(repository, "config", "user.email", "stationai-ui-test@example.invalid")
+        try runGit(repository, "add", "tracked.txt")
+        try runGit(repository, "commit", "-m", "Baseline")
+
+        let created = try runCLI(["task", "create", "--title", "External Git", "--root", repository.path])
+        XCTAssertEqual(created["ok"] as? Bool, true)
+        let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "External Git")
+        XCTAssertTrue(element("workspace-changes-empty").waitForExistence(timeout: 10))
+
+        try "Edited externally.\n".write(to: trackedFile, atomically: true, encoding: .utf8)
+        XCTAssertTrue(element("workspace-change-working-tracked.txt").waitForExistence(timeout: 10))
+        let working = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        XCTAssertEqual((working?["working"] as? [[String: Any]])?.map { $0["path"] as? String }, ["tracked.txt"])
+
+        try runGit(repository, "add", "tracked.txt")
+        XCTAssertTrue(element("workspace-change-staged-tracked.txt").waitForExistence(timeout: 10))
+        try runGit(repository, "commit", "-m", "External commit")
+        XCTAssertTrue(element("workspace-changes-empty").waitForExistence(timeout: 10))
+        let clean = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        XCTAssertEqual((clean?["staged"] as? [Any])?.count, 0)
+        XCTAssertEqual((clean?["working"] as? [Any])?.count, 0)
+        attachScreenshot(named: "External Git commit clears the open changes sidebar")
+    }
+
     private func launchApp(defaultParent: String?) {
         app = XCUIApplication()
         app.launchEnvironment["STATIONAI_DATA_DIRECTORY"] = dataDirectory.path
@@ -606,6 +640,29 @@ final class StationAIUITests: XCTestCase {
         )
         XCTAssertEqual(response["version"] as? Int, 1)
         return response
+    }
+
+    private func runGit(_ repository: URL, _ arguments: String...) throws {
+        let directGitPaths = [
+            "/opt/homebrew/bin/git",
+            "/usr/local/bin/git",
+            "/Library/Developer/CommandLineTools/usr/bin/git",
+            "/Applications/Xcode.app/Contents/Developer/usr/bin/git"
+        ]
+        let gitPath = try XCTUnwrap(
+            directGitPaths.first { FileManager.default.isExecutableFile(atPath: $0) },
+            "UI tests need a direct Git executable; /usr/bin/git uses xcrun and cannot run in the test sandbox."
+        )
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: gitPath)
+        process.arguments = ["-C", repository.path] + arguments
+        let stderr = Pipe()
+        process.standardOutput = Pipe()
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+        let errorOutput = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 0, "Git failed: \(errorOutput)")
     }
 
     private func assertCLIError(

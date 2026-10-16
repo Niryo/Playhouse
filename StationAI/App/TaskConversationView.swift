@@ -21,6 +21,8 @@ struct TaskConversationView: View {
     @State private var activities: [CodexActivity] = []
     @State private var changeInventory = WorkspaceChangeInventory(staged: [], working: [])
     @State private var isLoadingChanges = false
+    @State private var changesNeedRefresh = false
+    @State private var changeWatcher: WorkspaceChangeWatcher?
     @State private var changesError: String?
     @State private var selectedChange: WorkspaceChangeEntry?
     @State private var selectedDiff: WorkspaceFileDiff?
@@ -68,7 +70,20 @@ struct TaskConversationView: View {
         }
         .task {
             await loadConversation()
+        }
+        .task(id: task.workspaceRootPaths) {
+            let watchPaths = await WorkspaceChangeWatcher.watchPaths(workspaceRoots: task.workspaceRootPaths)
+            guard !Task.isCancelled else { return }
+            changeWatcher?.stop()
+            changeWatcher = WorkspaceChangeWatcher(paths: watchPaths) {
+                Task { await refreshWorkspaceChanges() }
+            }
+            changeWatcher?.start()
             await refreshWorkspaceChanges()
+        }
+        .onDisappear {
+            changeWatcher?.stop()
+            changeWatcher = nil
         }
     }
 
@@ -485,23 +500,51 @@ struct TaskConversationView: View {
     }
 
     private func refreshWorkspaceChanges() async {
-        guard !isLoadingChanges else { return }
+        guard !isLoadingChanges else {
+            changesNeedRefresh = true
+            return
+        }
         isLoadingChanges = true
         defer { isLoadingChanges = false }
 
-        do {
-            let inventory = try await workspaceManager.changes(for: task.id)
-            changeInventory = inventory
-            changesError = nil
-            if let selectedChange,
-               !(inventory.staged + inventory.working).contains(where: { $0.id == selectedChange.id }) {
-                self.selectedChange = nil
-                selectedDiff = nil
-                diffError = "This file no longer has a Git change. Refresh the list and choose another file."
+        repeat {
+            changesNeedRefresh = false
+            do {
+                let inventory = try await workspaceManager.changes(for: task.id)
+                changeInventory = inventory
+                changesError = nil
+                if let selectedChange {
+                    if let current = (inventory.staged + inventory.working).first(where: { $0.id == selectedChange.id }) {
+                        self.selectedChange = current
+                        if isDiffPresented {
+                            do {
+                                let diff = try await workspaceManager.diff(
+                                    for: task.id,
+                                    repository: current.repository,
+                                    path: current.path,
+                                    group: current.group.rawValue
+                                )
+                                if self.selectedChange?.id == current.id {
+                                    selectedDiff = diff
+                                    diffError = nil
+                                }
+                            } catch {
+                                if self.selectedChange?.id == current.id {
+                                    selectedDiff = nil
+                                    diffError = error.localizedDescription
+                                }
+                            }
+                        }
+                    } else {
+                        self.selectedChange = nil
+                        selectedDiff = nil
+                        diffError = "This file no longer has a Git change."
+                    }
+                }
+            } catch {
+                changesError = error.localizedDescription
             }
-        } catch {
-            changesError = error.localizedDescription
-        }
+        } while changesNeedRefresh
     }
 
     private var conversationHeader: some View {
