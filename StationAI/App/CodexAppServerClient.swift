@@ -1,12 +1,12 @@
 import Combine
 import Foundation
 
-enum CodexChatRole: String, Equatable {
+enum CodexChatRole: String, Codable, Equatable {
     case user
     case assistant
 }
 
-struct CodexChatMessage: Identifiable, Equatable {
+struct CodexChatMessage: Codable, Identifiable, Equatable {
     let id: String
     let role: CodexChatRole
     var text: String
@@ -60,37 +60,40 @@ final class CodexAppServerClient: ObservableObject {
     private var resumedThreadIDs = Set<String>()
     private var activeThreadID: String?
     private var activeDeltaHandler: ((String) -> Void)?
+    private var activeFinalMessageHandler: ((String) -> Void)?
+    private var activeActivityHandler: ((CodexActivity) -> Void)?
+    private var activeDiffHandler: ((CodexTurnDiff) -> Void)?
+    private var activeActivities: [String: CodexActivity] = [:]
     private var actionRequestHandler: (() -> Void)?
     private var turnWaiters: [String: CheckedContinuation<Void, Error>] = [:]
     private var completedTurns: [String: Result<Void, Error>] = [:]
 
     func loadThread(
         id threadID: String,
-        workspaceURL: URL,
+        workspace: CodexWorkspaceContext,
         onActionRequest: @escaping () -> Void
-    ) async throws -> [CodexChatMessage] {
+    ) async throws -> CodexThreadHistory {
         actionRequestHandler = onActionRequest
-        try await resumeThreadIfNeeded(id: threadID, workspaceURL: workspaceURL)
+        try await resumeThreadIfNeeded(id: threadID, workspace: workspace)
         return try await readMessages(threadID: threadID)
     }
 
-    func startThread(workspaceURL: URL) async throws -> String {
-        try await ensureInitialized(workspaceURL: workspaceURL)
+    func startThread(workspace: CodexWorkspaceContext) async throws -> String {
+        try await ensureInitialized(workspace: workspace)
 
         let response = try await request(
             method: "thread/start",
             params: [
                 "model": Self.modelID,
                 "allowProviderModelFallback": false,
-                "cwd": workspaceURL.path,
-                "sandbox": "read-only",
+                "cwd": workspace.cwd.path,
+                "sandbox": "danger-full-access",
                 "approvalPolicy": "never",
                 "approvalsReviewer": "user",
                 "historyMode": "paginated",
                 "dynamicTools": [],
-                "environments": [],
                 "selectedCapabilityRoots": [],
-                "runtimeWorkspaceRoots": [workspaceURL.path]
+                "runtimeWorkspaceRoots": workspace.roots.map(\.path)
             ]
         )
 
@@ -106,18 +109,30 @@ final class CodexAppServerClient: ObservableObject {
     func sendMessage(
         _ text: String,
         threadID: String,
-        workspaceURL: URL,
+        workspace: CodexWorkspaceContext,
         onDelta: @escaping (String) -> Void,
+        onFinalMessage: @escaping (String) -> Void,
+        onActivity: @escaping (CodexActivity) -> Void,
+        onDiff: @escaping (CodexTurnDiff) -> Void,
+        onHistory: @escaping (CodexThreadHistory) -> Void,
         onActionRequest: @escaping () -> Void
     ) async throws {
         actionRequestHandler = onActionRequest
-        try await resumeThreadIfNeeded(id: threadID, workspaceURL: workspaceURL)
+        try await resumeThreadIfNeeded(id: threadID, workspace: workspace)
 
         activeThreadID = threadID
         activeDeltaHandler = onDelta
+        activeFinalMessageHandler = onFinalMessage
+        activeActivityHandler = onActivity
+        activeDiffHandler = onDiff
+        activeActivities.removeAll()
         defer {
             activeThreadID = nil
             activeDeltaHandler = nil
+            activeFinalMessageHandler = nil
+            activeActivityHandler = nil
+            activeDiffHandler = nil
+            activeActivities.removeAll()
         }
 
         let response = try await request(
@@ -126,12 +141,10 @@ final class CodexAppServerClient: ObservableObject {
                 "threadId": threadID,
                 "input": [["type": "text", "text": text]],
                 "model": Self.modelID,
-                "cwd": workspaceURL.path,
-                "runtimeWorkspaceRoots": [workspaceURL.path],
-                "sandboxPolicy": ["type": "readOnly", "networkAccess": false],
+                "cwd": workspace.cwd.path,
+                "runtimeWorkspaceRoots": workspace.roots.map(\.path),
                 "approvalPolicy": "never",
-                "approvalsReviewer": "user",
-                "environments": []
+                "approvalsReviewer": "user"
             ]
         )
 
@@ -143,15 +156,19 @@ final class CodexAppServerClient: ObservableObject {
         let turnKey = Self.turnKey(threadID: threadID, turnID: turnID)
         switch turn["status"] as? String {
         case "completed":
-            return
+            break
         case "failed", "interrupted":
             throw ClientError.turnFailed(Self.turnFailureDescription(turn))
         default:
             try await waitForTurn(turnKey)
         }
+
+        if let history = try? await readMessages(threadID: threadID) {
+            onHistory(history)
+        }
     }
 
-    private func ensureInitialized(workspaceURL: URL) async throws {
+    private func ensureInitialized(workspace: CodexWorkspaceContext) async throws {
         if initialized, process?.isRunning == true {
             return
         }
@@ -160,7 +177,7 @@ final class CodexAppServerClient: ObservableObject {
             if let stoppedProcess = process {
                 processDidTerminate(stoppedProcess)
             }
-            try launchProcess(workspaceURL: workspaceURL)
+            try launchProcess(workspaceURL: workspace.cwd)
         }
 
         _ = try await request(
@@ -193,13 +210,10 @@ final class CodexAppServerClient: ObservableObject {
             "app-server",
             "--listen", "stdio://",
             "--disable", "apps",
-            "--disable", "shell_tool",
-            "--disable", "unified_exec",
             "--disable", "multi_agent",
             "--disable", "remote_plugin",
             "--disable", "hooks",
-            "-c", "mcp_servers={}",
-            "-c", "web_search=\"disabled\""
+            "-c", "mcp_servers={}"
         ]
         child.currentDirectoryURL = workspaceURL
         child.standardInput = stdin
@@ -248,30 +262,32 @@ final class CodexAppServerClient: ObservableObject {
         }
     }
 
-    private func resumeThreadIfNeeded(id threadID: String, workspaceURL: URL) async throws {
+    private func resumeThreadIfNeeded(id threadID: String, workspace: CodexWorkspaceContext) async throws {
         if resumedThreadIDs.contains(threadID), process?.isRunning == true, initialized {
             return
         }
 
-        try await ensureInitialized(workspaceURL: workspaceURL)
+        try await ensureInitialized(workspace: workspace)
         let response = try await request(
             method: "thread/resume",
             params: [
                 "threadId": threadID,
                 "model": Self.modelID,
-                "cwd": workspaceURL.path,
-                "sandbox": "read-only",
+                "cwd": workspace.cwd.path,
+                "sandbox": "danger-full-access",
                 "approvalPolicy": "never",
                 "approvalsReviewer": "user",
-                "runtimeWorkspaceRoots": [workspaceURL.path]
+                "runtimeWorkspaceRoots": workspace.roots.map(\.path)
             ]
         )
         try confirmModel(response["model"] as? String)
         resumedThreadIDs.insert(threadID)
     }
 
-    private func readMessages(threadID: String) async throws -> [CodexChatMessage] {
+    private func readMessages(threadID: String) async throws -> CodexThreadHistory {
         var messages: [CodexChatMessage] = []
+        var latestTurnItems: [[String: Any]] = []
+        var lastAssistantTurnID: String?
         var cursor: String?
         var visitedCursors = Set<String>()
 
@@ -287,7 +303,25 @@ final class CodexAppServerClient: ObservableObject {
 
             let response = try await request(method: "thread/items/list", params: params)
             let data = response["data"] as? [[String: Any]] ?? []
-            messages.append(contentsOf: data.compactMap(Self.chatMessage(from:)))
+            for entry in data {
+                guard let item = entry["item"] as? [String: Any] else { continue }
+                if item["type"] as? String == "userMessage" {
+                    latestTurnItems.removeAll()
+                }
+                latestTurnItems.append(item)
+                if let message = Self.chatMessage(from: entry) {
+                    if message.role == .assistant,
+                       let turnID = entry["turnId"] as? String,
+                       turnID == lastAssistantTurnID,
+                       let lastIndex = messages.indices.last,
+                       messages[lastIndex].role == .assistant {
+                        messages[lastIndex].text += "\n\n" + message.text
+                    } else {
+                        messages.append(message)
+                    }
+                    lastAssistantTurnID = message.role == .assistant ? entry["turnId"] as? String : nil
+                }
+            }
             cursor = response["nextCursor"] as? String
 
             if let cursor, !visitedCursors.insert(cursor).inserted {
@@ -295,7 +329,12 @@ final class CodexAppServerClient: ObservableObject {
             }
         } while cursor != nil
 
-        return messages
+        let activities = latestTurnItems.compactMap(CodexActivity.from)
+        return CodexThreadHistory(
+            messages: messages,
+            activities: activities,
+            diff: CodexTurnDiff.fromFileChangeItems(latestTurnItems)
+        )
     }
 
     private func request(method: String, params: [String: Any]) async throws -> [String: Any] {
@@ -342,9 +381,7 @@ final class CodexAppServerClient: ObservableObject {
         while let range = stdoutBuffer.range(of: newline) {
             let line = stdoutBuffer.subdata(in: stdoutBuffer.startIndex..<range.lowerBound)
             stdoutBuffer.removeSubrange(stdoutBuffer.startIndex..<range.upperBound)
-            Task { @MainActor [weak self] in
-                self?.consume(line: line)
-            }
+            consume(line: line)
         }
     }
 
@@ -384,6 +421,36 @@ final class CodexAppServerClient: ObservableObject {
             guard params["threadId"] as? String == activeThreadID,
                   let delta = params["delta"] as? String else { return }
             activeDeltaHandler?(delta)
+        case "item/started", "item/completed":
+            guard params["threadId"] as? String == activeThreadID,
+                  let item = params["item"] as? [String: Any] else { return }
+            if method == "item/completed",
+               item["type"] as? String == "agentMessage",
+               let text = item["text"] as? String,
+               !text.isEmpty {
+                activeFinalMessageHandler?(text)
+            }
+            guard let activity = CodexActivity.from(item: item) else { return }
+            activeActivities[activity.id] = activity
+            activeActivityHandler?(activity)
+        case "item/commandExecution/outputDelta":
+            guard params["threadId"] as? String == activeThreadID,
+                  let itemID = params["itemId"] as? String,
+                  let delta = params["delta"] as? String,
+                  var activity = activeActivities[itemID] else { return }
+            let output = String((activity.detail + delta).suffix(2_000))
+            activity = CodexActivity(
+                id: activity.id,
+                title: activity.title,
+                detail: output,
+                status: activity.status
+            )
+            activeActivities[itemID] = activity
+            activeActivityHandler?(activity)
+        case "turn/diff/updated":
+            guard params["threadId"] as? String == activeThreadID,
+                  let diff = params["diff"] as? String, !diff.isEmpty else { return }
+            activeDiffHandler?(CodexTurnDiff(unifiedDiff: diff))
         case "turn/completed":
             guard let threadID = params["threadId"] as? String,
                   let turn = params["turn"] as? [String: Any],
@@ -428,7 +495,7 @@ final class CodexAppServerClient: ObservableObject {
         case "applyPatchApproval", "execCommandApproval":
             result = [
                 "decision": [
-                    "denied": ["rejection": "StationAI's text-only MVP does not allow actions."]
+                    "denied": ["rejection": "StationAI is configured without approval prompts; this action was not approved."]
                 ]
             ]
         case "mcpServer/elicitation/request":
@@ -437,7 +504,7 @@ final class CodexAppServerClient: ObservableObject {
             sendServerError(
                 requestID: requestID,
                 code: -32601,
-                message: "StationAI's text-only MVP does not provide this action."
+                message: "StationAI does not provide this optional integration."
             )
             return
         }

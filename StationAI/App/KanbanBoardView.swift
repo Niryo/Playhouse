@@ -5,11 +5,14 @@ import SwiftUI
 struct KanbanBoardView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \BoardTask.createdAt, order: .reverse) private var tasks: [BoardTask]
-
     @State private var isShowingNewTask = false
+    @State private var isChoosingDefaultParent = false
     @State private var saveError: String?
     @State private var draggedTaskID: UUID?
     @State private var selectedTask: BoardTask?
+    @State private var taskBeingRenamed: BoardTask?
+    @State private var taskBeingDeleted: BoardTask?
+    @State private var isShowingDeleteConfirmation = false
 
     var body: some View {
         Group {
@@ -26,6 +29,43 @@ struct KanbanBoardView: View {
         .frame(minWidth: 980, minHeight: 640)
         .sheet(isPresented: $isShowingNewTask) {
             NewTaskSheet(onCreate: createTask)
+        }
+        .sheet(isPresented: Binding(
+            get: { taskBeingRenamed != nil },
+            set: { if !$0 { taskBeingRenamed = nil } }
+        )) {
+            if let taskBeingRenamed {
+                RenameTaskSheet(title: taskBeingRenamed.title) { title in
+                    do {
+                        _ = try BoardTaskManager(modelContext: modelContext).rename(taskBeingRenamed.id, title: title)
+                    } catch {
+                        saveError = error.localizedDescription
+                    }
+                    self.taskBeingRenamed = nil
+                }
+            }
+        }
+        .confirmationDialog(
+            "Delete this task?",
+            isPresented: $isShowingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Task", role: .destructive) {
+                guard let taskBeingDeleted else { return }
+                do {
+                    try BoardTaskManager(modelContext: modelContext).delete(taskBeingDeleted.id)
+                } catch {
+                    saveError = error.localizedDescription
+                }
+                self.taskBeingDeleted = nil
+            }
+            .accessibilityIdentifier("confirm-delete-task-button")
+            Button("Cancel", role: .cancel) {
+                taskBeingDeleted = nil
+            }
+            .accessibilityIdentifier("cancel-delete-task-button")
+        } message: {
+            Text("The task conversation and saved working folders will also be deleted.")
         }
         .alert("Couldn't save changes", isPresented: isShowingSaveError) {
             Button("OK", role: .cancel) {
@@ -51,8 +91,13 @@ struct KanbanBoardView: View {
                             status: status,
                             tasks: tasks.filter { $0.status == status },
                             onMoveTask: moveTask,
-                            onAddTask: { isShowingNewTask = true },
+                            onAddTask: openNewTask,
                             onOpenTask: { selectedTask = $0 },
+                            onRenameTask: { taskBeingRenamed = $0 },
+                            onDeleteTask: {
+                                taskBeingDeleted = $0
+                                isShowingDeleteConfirmation = true
+                            },
                             draggedTaskID: $draggedTaskID
                         )
                         .frame(width: 264)
@@ -105,7 +150,7 @@ struct KanbanBoardView: View {
                     .accessibilityIdentifier("task-count")
 
                 Button {
-                    isShowingNewTask = true
+                    openNewTask()
                 } label: {
                     Label("New Task", systemImage: "plus")
                         .font(.system(size: 13, weight: .semibold))
@@ -129,27 +174,58 @@ struct KanbanBoardView: View {
         )
     }
 
-    private func createTask(title: String) {
-        let task = BoardTask(title: title, status: .backlog)
-        modelContext.insert(task)
-        saveChanges()
-    }
+    private func openNewTask() {
+        guard !isChoosingDefaultParent else { return }
+        let settings = WorkspaceSettingsManager()
+        guard settings.defaultParentFolderURL == nil else {
+            isShowingNewTask = true
+            return
+        }
 
-    private func moveTask(id: UUID, to status: TaskStatus) {
-        guard let task = tasks.first(where: { $0.id == id }), task.status != status else { return }
-        task.status = status
-        Task { @MainActor in
-            saveChanges()
+        let panel = NSOpenPanel()
+        panel.title = "Choose default parent folder"
+        panel.message = "StationAI will suggest Git repositories found below this folder."
+        panel.prompt = "Use This Folder"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+        isChoosingDefaultParent = true
+        panel.begin { response in
+            DispatchQueue.main.async {
+                isChoosingDefaultParent = false
+                guard response == .OK, let selected = panel.url else { return }
+                do {
+                    try settings.setDefaultParentFolder(selected.standardizedFileURL.path)
+                } catch {
+                    saveError = error.localizedDescription
+                    return
+                }
+                isShowingNewTask = true
+            }
         }
     }
 
-    private func saveChanges() {
+    private func createTask(title: String, roots: [URL]) {
         do {
-            try modelContext.save()
+            _ = try BoardTaskManager(modelContext: modelContext).create(
+                title: title,
+                workspaceRoots: roots.map { $0.standardizedFileURL.path }
+            )
         } catch {
             saveError = error.localizedDescription
         }
     }
+
+    private func moveTask(id: UUID, to status: TaskStatus) {
+        guard let task = tasks.first(where: { $0.id == id }), task.status != status else { return }
+        do {
+            _ = try BoardTaskManager(modelContext: modelContext).move(id, to: status.rawValue)
+        } catch {
+            saveError = error.localizedDescription
+        }
+    }
+
 }
 
 private struct KanbanColumnView: View {
@@ -158,6 +234,8 @@ private struct KanbanColumnView: View {
     let onMoveTask: (UUID, TaskStatus) -> Void
     let onAddTask: () -> Void
     let onOpenTask: (BoardTask) -> Void
+    let onRenameTask: (BoardTask) -> Void
+    let onDeleteTask: (BoardTask) -> Void
     @Binding var draggedTaskID: UUID?
 
     var body: some View {
@@ -240,12 +318,17 @@ private struct KanbanColumnView: View {
 
     @ViewBuilder
     private func draggableTaskCard(_ task: BoardTask) -> some View {
-        let card = TaskCardView(task: task, onOpen: { onOpenTask(task) })
+        let card = TaskCardView(
+            task: task,
+            onOpen: { onOpenTask(task) },
+            onRename: { onRenameTask(task) },
+            onDelete: { onDeleteTask(task) }
+        )
 
         if #available(macOS 26.0, *) {
             card
                 .draggable(task.id.uuidString) {
-                    TaskCardView(task: task, onOpen: {})
+                    TaskCardView(task: task, onOpen: {}, onRename: {}, onDelete: {})
                 }
                 .dragConfiguration(
                     DragConfiguration(
@@ -415,6 +498,8 @@ private struct KanbanTaskDropDelegate: DropDelegate {
 private struct TaskCardView: View {
     let task: BoardTask
     let onOpen: () -> Void
+    let onRename: () -> Void
+    let onDelete: () -> Void
 
     var body: some View {
         Button(action: onOpen) {
@@ -463,5 +548,51 @@ private struct TaskCardView: View {
         .accessibilityLabel(task.title)
         .accessibilityHint("Open task")
         .accessibilityIdentifier("task-card-\(task.id.uuidString)")
+        .contextMenu {
+            Button("Rename…", systemImage: "pencil", action: onRename)
+                .accessibilityIdentifier("rename-task-menu-item")
+            Button("Delete Task", systemImage: "trash", role: .destructive, action: onDelete)
+                .accessibilityIdentifier("delete-task-menu-item")
+        }
+    }
+}
+
+private struct RenameTaskSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var title: String
+
+    let onSave: (String) -> Void
+
+    init(title: String, onSave: @escaping (String) -> Void) {
+        _title = State(initialValue: title)
+        self.onSave = onSave
+    }
+
+    private var normalizedTitle: String {
+        title.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Rename task")
+                .font(.system(size: 19, weight: .semibold, design: .rounded))
+            TextField("Task title", text: $title)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("rename-task-title-field")
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") {
+                    onSave(normalizedTitle)
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(normalizedTitle.isEmpty)
+                .accessibilityIdentifier("save-task-rename-button")
+            }
+        }
+        .padding(24)
+        .frame(width: 420)
     }
 }

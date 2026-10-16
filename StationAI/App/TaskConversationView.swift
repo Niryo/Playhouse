@@ -4,20 +4,25 @@ import SwiftUI
 struct TaskConversationView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var codexClient: CodexAppServerClient
+    @AppStorage(WorkspaceSettings.defaultParentFolderKey, store: WorkspaceSettings.preferencesStore) private var defaultParentFolderPath = ""
 
     let task: BoardTask
     let onBack: () -> Void
 
     @State private var draft = ""
     @State private var messages: [CodexChatMessage] = []
+    @State private var activities: [CodexActivity] = []
+    @State private var turnDiff: CodexTurnDiff?
+    @State private var isDiffExpanded = false
     @State private var isLoadingHistory = false
     @State private var isResponding = false
     @State private var errorMessage: String?
     @State private var actionNotice: String?
+    @State private var isShowingWorkspaceEditor = false
     @FocusState private var isComposerFocused: Bool
 
     private var isSendDisabled: Bool {
-        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isResponding || isLoadingHistory
+        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || workspaceRootURLs.isEmpty || isResponding || isLoadingHistory
     }
 
     var body: some View {
@@ -48,6 +53,13 @@ struct TaskConversationView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .sheet(isPresented: $isShowingWorkspaceEditor) {
+            WorkspaceRootsEditor(
+                parentFolderURL: WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath),
+                initialRoots: workspaceRootURLs,
+                onSave: updateWorkspaceRoots
+            )
+        }
         .task {
             await loadConversation()
         }
@@ -94,6 +106,16 @@ struct TaskConversationView: View {
             }
 
             Spacer(minLength: 0)
+
+            Button {
+                isShowingWorkspaceEditor = true
+            } label: {
+                Label("Folders", systemImage: "folder")
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .buttonStyle(.bordered)
+            .help("Edit working folders for this task")
+            .accessibilityIdentifier("edit-workspace-roots-button")
         }
         .padding(.horizontal, 26)
         .padding(.vertical, 15)
@@ -102,58 +124,175 @@ struct TaskConversationView: View {
     }
 
     private var safetyNotice: some View {
-        Label("Text replies only · no project files shared", systemImage: "lock.shield")
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: 820, alignment: .leading)
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 28)
-            .padding(.top, 12)
+        VStack(alignment: .leading, spacing: 7) {
+            Label("Full machine and network access · working folders provide context only", systemImage: "exclamationmark.triangle.fill")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.orange)
+            if workspaceRootURLs.isEmpty {
+                Text("No working folders are set. Add one or more folders before sending a message.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            } else {
+                let folderSummary = "Working in: " + workspaceRootURLs.map(\.path).joined(separator: " · ")
+                Text(folderSummary)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+                    .accessibilityLabel(folderSummary)
+                    .accessibilityIdentifier("working-folders-summary")
+            }
+        }
+        .frame(maxWidth: 820, alignment: .leading)
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 28)
+        .padding(.top, 12)
     }
 
     private var conversation: some View {
         ScrollViewReader { scrollProxy in
             ScrollView {
-                if messages.isEmpty {
-                    VStack(spacing: 12) {
-                        if isLoadingHistory {
-                            ProgressView("Loading conversation…")
-                                .controlSize(.small)
-                        } else {
-                            Image(systemName: "bubble.left.and.bubble.right")
-                                .font(.system(size: 25, weight: .regular))
-                                .foregroundStyle(Color.accentColor.opacity(0.8))
-                            Text("Start a conversation")
-                                .font(.system(size: 17, weight: .semibold))
-                            Text("Send a message to Codex · Luna.")
-                                .font(.system(size: 13))
-                                .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 16) {
+                    if messages.isEmpty {
+                        VStack(spacing: 12) {
+                            if isLoadingHistory {
+                                ProgressView("Loading conversation…")
+                                    .controlSize(.small)
+                            } else {
+                                Image(systemName: "bubble.left.and.bubble.right")
+                                    .font(.system(size: 25, weight: .regular))
+                                    .foregroundStyle(Color.accentColor.opacity(0.8))
+                                Text("Start a conversation")
+                                    .font(.system(size: 17, weight: .semibold))
+                                Text("Send a message to Codex · Luna.")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 210)
+                        .padding(30)
+                        .accessibilityIdentifier("empty-conversation")
+                    } else {
+                        LazyVStack(alignment: .leading, spacing: 16) {
+                            ForEach(messages) { message in
+                                messageBubble(message)
+                                    .id(message.id)
+                            }
                         }
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(30)
-                    .accessibilityIdentifier("empty-conversation")
-                } else {
-                    LazyVStack(alignment: .leading, spacing: 16) {
-                        ForEach(messages) { message in
-                            messageBubble(message)
-                                .id(message.id)
-                        }
+
+                    if !activities.isEmpty {
+                        activityList
                     }
-                    .padding(.horizontal, 28)
-                    .padding(.vertical, 24)
-                    .frame(maxWidth: 820)
-                    .frame(maxWidth: .infinity)
+                    if let turnDiff, !turnDiff.unifiedDiff.isEmpty {
+                        diffCard(turnDiff)
+                            .id("latest-turn-diff")
+                    }
                 }
+                .padding(.horizontal, 28)
+                .padding(.vertical, 24)
+                .frame(maxWidth: 820)
+                .frame(maxWidth: .infinity)
             }
             .scrollIndicators(.visible)
+            .accessibilityIdentifier("conversation-scroll-view")
+            .onChange(of: isDiffExpanded) { _, isExpanded in
+                guard isExpanded, turnDiff != nil else { return }
+                withAnimation(.easeOut(duration: 0.2)) {
+                    scrollProxy.scrollTo("latest-turn-diff", anchor: .bottom)
+                }
+            }
             .onChange(of: messages.count) { _, _ in
                 scrollToLatest(using: scrollProxy)
             }
             .onChange(of: messages.map(\.text)) { _, _ in
                 scrollToLatest(using: scrollProxy)
             }
+            .onChange(of: activities) { _, _ in
+                if isResponding { scrollToLatest(using: scrollProxy) }
+            }
+            .onChange(of: turnDiff?.unifiedDiff) { _, _ in
+                scrollToLatest(using: scrollProxy)
+            }
         }
+    }
+
+    private var activityList: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Codex activity")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            ForEach(activities) { activity in
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 7) {
+                        Image(systemName: activity.status == "completed" ? "checkmark.circle.fill" : "gearshape.2.fill")
+                            .foregroundStyle(activity.status == "completed" ? .green : .accentColor)
+                        Text(activity.title)
+                            .font(.system(size: 11, weight: .medium))
+                            .textSelection(.enabled)
+                    }
+                    if !activity.detail.isEmpty {
+                        Text(activity.detail)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .lineLimit(4)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(9)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
+        .accessibilityIdentifier("codex-activity-list")
+    }
+
+    private func diffCard(_ diff: CodexTurnDiff) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Label("Changes", systemImage: "doc.text.magnifyingglass")
+                .font(.system(size: 12, weight: .semibold))
+            if !diff.changedFiles.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(diff.changedFiles, id: \.self) { path in
+                        Label(path, systemImage: "doc.text")
+                            .font(.system(size: 10, design: .monospaced))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel(path)
+                            .accessibilityIdentifier("codex-changed-file-\(URL(fileURLWithPath: path).lastPathComponent)")
+                    }
+                }
+            }
+            Button {
+                isDiffExpanded.toggle()
+            } label: {
+                Label("View diff", systemImage: isDiffExpanded ? "chevron.down" : "chevron.right")
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 11, weight: .medium))
+            .accessibilityIdentifier("codex-view-diff-toggle")
+
+            if isDiffExpanded {
+                ScrollView([.horizontal, .vertical]) {
+                    Text(diff.unifiedDiff)
+                        .font(.system(size: 10, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .accessibilityLabel(diff.unifiedDiff)
+                        .accessibilityIdentifier("codex-unified-diff")
+                }
+                .frame(maxHeight: 260)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+                .accessibilityIdentifier("codex-unified-diff-scroll")
+            }
+        }
+        .padding(12)
+        .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 11))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("codex-turn-diff")
     }
 
     @ViewBuilder
@@ -194,6 +333,7 @@ struct TaskConversationView: View {
                 Color(nsColor: .controlBackgroundColor),
                 in: RoundedRectangle(cornerRadius: 17, style: .continuous)
             )
+            .accessibilityLabel(message.text.isEmpty ? "Waiting for Codex response" : message.text)
             .accessibilityIdentifier("assistant-message-\(message.id)")
         }
         .frame(maxWidth: 620, alignment: .leading)
@@ -229,6 +369,8 @@ struct TaskConversationView: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(errorMessage)
                     .accessibilityIdentifier("codex-chat-error")
             }
 
@@ -274,16 +416,17 @@ struct TaskConversationView: View {
     }
 
     private func loadConversation() async {
-        guard let threadID = task.codexThreadID else { return }
         isLoadingHistory = true
         errorMessage = nil
         defer { isLoadingHistory = false }
 
         do {
-            let directory = try workspaceURL()
-            messages = try await codexClient.loadThread(id: threadID, workspaceURL: directory) {
-                actionNotice = "Codex requested an action. StationAI denied it in text-only mode."
+            let history = try await conversationManager.history(taskID: task.id) {
+                actionNotice = "Codex requested an approval. StationAI denied it because approval prompts are disabled."
             }
+            messages = history.messages
+            activities = history.activities
+            turnDiff = history.diff
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -300,38 +443,44 @@ struct TaskConversationView: View {
         isResponding = true
         errorMessage = nil
         actionNotice = nil
+        activities = []
+        turnDiff = nil
+        isDiffExpanded = false
 
         Task { @MainActor in
             do {
-                let directory = try workspaceURL()
-                let threadID: String
-
-                if let existingThreadID = task.codexThreadID {
-                    threadID = existingThreadID
-                } else {
-                    let createdThreadID = try await codexClient.startThread(workspaceURL: directory)
-                    task.codexThreadID = createdThreadID
-                    do {
-                        try modelContext.save()
-                    } catch {
-                        task.codexThreadID = nil
-                        throw error
-                    }
-                    threadID = createdThreadID
-                }
-
-                try await codexClient.sendMessage(
-                    text,
-                    threadID: threadID,
-                    workspaceURL: directory,
-                    onDelta: { delta in
+                _ = try await conversationManager.send(taskID: task.id, text: text) { update in
+                    switch update.type {
+                    case "text_delta":
+                        guard let delta = update.text else { return }
                         guard let messageIndex = messages.firstIndex(where: { $0.id == assistantMessageID }) else { return }
                         messages[messageIndex].text += delta
-                    },
-                    onActionRequest: {
-                        actionNotice = "Codex requested an action. StationAI denied it in text-only mode."
+                    case "assistant_final":
+                        guard let text = update.text else { return }
+                        guard let messageIndex = messages.lastIndex(where: { $0.role == .assistant }) else { return }
+                        messages[messageIndex].text = text
+                    case "activity":
+                        guard let activity = update.activity else { return }
+                        if let index = activities.firstIndex(where: { $0.id == activity.id }) {
+                            activities[index] = activity
+                        } else {
+                            activities.append(activity)
+                        }
+                    case "diff":
+                        guard let unifiedDiff = update.diff else { return }
+                        let diff = CodexTurnDiff(unifiedDiff: unifiedDiff)
+                        turnDiff = turnDiff?.merging(diff) ?? diff
+                    case "history", "completed":
+                        guard let history = update.history else { return }
+                        messages = history.messages
+                        activities = history.activities
+                        turnDiff = history.diff
+                    case "action_notice":
+                        actionNotice = update.message
+                    default:
+                        break
                     }
-                )
+                }
 
                 if messages.first(where: { $0.id == assistantMessageID })?.text.isEmpty == true {
                     messages.removeAll { $0.id == assistantMessageID }
@@ -348,25 +497,39 @@ struct TaskConversationView: View {
         }
     }
 
-    private func workspaceURL() throws -> URL {
-        let applicationSupport = try FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
+    private var workspaceRootURLs: [URL] {
+        task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL }
+    }
+
+    private var conversationManager: CodexConversationManager {
+        CodexConversationManager(
+            tasks: BoardTaskManager(modelContext: modelContext),
+            client: codexClient
         )
-        let taskDirectory = applicationSupport
-            .appendingPathComponent("StationAI", isDirectory: true)
-            .appendingPathComponent("CodexWorkspaces", isDirectory: true)
-            .appendingPathComponent(task.id.uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: taskDirectory, withIntermediateDirectories: true)
-        return taskDirectory
+    }
+
+    private func updateWorkspaceRoots(_ roots: [URL]) {
+        do {
+            _ = try WorkspaceManager(taskManager: BoardTaskManager(modelContext: modelContext))
+                .setRoots(roots.map { $0.standardizedFileURL.path }, for: task.id)
+        } catch {
+            errorMessage = "Couldn't save working folders: \(error.localizedDescription)"
+        }
     }
 
     private func scrollToLatest(using proxy: ScrollViewProxy) {
-        guard let latestMessage = messages.last else { return }
+        let target: String
+        if let latestMessage = messages.last {
+            target = latestMessage.id
+        } else if let latestActivity = activities.last {
+            target = latestActivity.id
+        } else if turnDiff != nil {
+            target = "latest-turn-diff"
+        } else {
+            return
+        }
         withAnimation(.easeOut(duration: 0.2)) {
-            proxy.scrollTo(latestMessage.id, anchor: .bottom)
+            proxy.scrollTo(target, anchor: .bottom)
         }
     }
 }

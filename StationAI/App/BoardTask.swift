@@ -33,17 +33,29 @@ final class BoardTask {
     var statusRawValue: String
     var createdAt: Date
     var codexThreadID: String?
+    var workspaceRootPathsData: Data?
+
+    var workspaceRootPaths: [String] {
+        get {
+            guard let workspaceRootPathsData else { return [] }
+            return (try? JSONDecoder().decode([String].self, from: workspaceRootPathsData)) ?? []
+        }
+        set {
+            workspaceRootPathsData = try? JSONEncoder().encode(newValue)
+        }
+    }
 
     var status: TaskStatus {
         get { TaskStatus(rawValue: statusRawValue) ?? .backlog }
         set { statusRawValue = newValue.rawValue }
     }
 
-    init(title: String, status: TaskStatus = .backlog) {
+    init(title: String, status: TaskStatus = .backlog, workspaceRootPaths: [String] = []) {
         id = UUID()
         self.title = title
         statusRawValue = status.rawValue
         createdAt = .now
         codexThreadID = nil
+        workspaceRootPathsData = try? JSONEncoder().encode(workspaceRootPaths)
     }
 }

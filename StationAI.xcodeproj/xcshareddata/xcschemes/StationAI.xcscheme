@@ -20,20 +20,34 @@
                ReferencedContainer = "container:StationAI.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
-         <BuildActionEntry
-            buildForTesting = "YES"
-            buildForRunning = "NO"
-            buildForProfiling = "NO"
-            buildForArchiving = "NO"
-            buildForAnalyzing = "YES">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "A50000000000000000000007"
-               BuildableName = "StationAIUITests.xctest"
-               BlueprintName = "StationAIUITests"
-               ReferencedContainer = "container:StationAI.xcodeproj">
-            </BuildableReference>
-         </BuildActionEntry>
+      <BuildActionEntry
+         buildForTesting = "YES"
+         buildForRunning = "NO"
+         buildForProfiling = "NO"
+         buildForArchiving = "NO"
+         buildForAnalyzing = "YES">
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "5A40831D8B63DA940A67AAF9"
+            BuildableName = "StationAIBridgeTests.xctest"
+            BlueprintName = "StationAIBridgeTests"
+            ReferencedContainer = "container:StationAI.xcodeproj">
+         </BuildableReference>
+      </BuildActionEntry>
+      <BuildActionEntry
+         buildForTesting = "YES"
+         buildForRunning = "NO"
+         buildForProfiling = "NO"
+         buildForArchiving = "NO"
+         buildForAnalyzing = "YES">
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "16459874D5F62D2584276025"
+            BuildableName = "StationAIUITests.xctest"
+            BlueprintName = "StationAIUITests"
+            ReferencedContainer = "container:StationAI.xcodeproj">
+         </BuildableReference>
+      </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -43,11 +57,19 @@
       shouldUseLaunchSchemeArgsEnv = "YES"
       shouldAutocreateTestPlan = "YES">
       <Testables>
-         <TestableReference
-            skipped = "NO">
+         <TestableReference skipped = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "A50000000000000000000007"
+               BlueprintIdentifier = "5A40831D8B63DA940A67AAF9"
+               BuildableName = "StationAIBridgeTests.xctest"
+               BlueprintName = "StationAIBridgeTests"
+               ReferencedContainer = "container:StationAI.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "16459874D5F62D2584276025"
                BuildableName = "StationAIUITests.xctest"
                BlueprintName = "StationAIUITests"
                ReferencedContainer = "container:StationAI.xcodeproj">

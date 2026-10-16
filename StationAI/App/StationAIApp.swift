@@ -4,40 +4,30 @@ import SwiftUI
 @main
 struct StationAIApp: App {
     private let modelContainer: ModelContainer
+    private let appPreferences: UserDefaults
     @StateObject private var codexClient = CodexAppServerClient()
 
     init() {
-        let schema = Schema([BoardTask.self])
-        let configuration: ModelConfiguration
-
-        if let directoryPath = ProcessInfo.processInfo.environment["STATIONAI_DATA_DIRECTORY"] {
-            let directoryURL = URL(fileURLWithPath: directoryPath, isDirectory: true)
-            do {
-                try FileManager.default.createDirectory(
-                    at: directoryURL,
-                    withIntermediateDirectories: true
-                )
-            } catch {
-                fatalError("Couldn't prepare the StationAI data directory: \(error.localizedDescription)")
+        #if DEBUG
+        let environment = ProcessInfo.processInfo.environment
+        if let suiteName = environment["STATIONAI_E2E_DEFAULTS_SUITE"],
+           let isolatedPreferences = UserDefaults(suiteName: suiteName) {
+            appPreferences = isolatedPreferences
+            if let parentPath = environment["STATIONAI_E2E_DEFAULT_PARENT_FOLDER"] {
+                let configuredPath = parentPath == "__unset__" ? "" : parentPath
+                isolatedPreferences.set(configuredPath, forKey: WorkspaceSettings.defaultParentFolderKey)
             }
-
-            configuration = ModelConfiguration(
-                "StationAI",
-                schema: schema,
-                url: directoryURL.appendingPathComponent("StationAI.store"),
-                cloudKitDatabase: .none
-            )
         } else {
-            configuration = ModelConfiguration(
-                "StationAI",
-                schema: schema,
-                isStoredInMemoryOnly: false,
-                cloudKitDatabase: .none
-            )
+            appPreferences = .standard
         }
+        #else
+        appPreferences = .standard
+        #endif
 
         do {
-            modelContainer = try ModelContainer(for: schema, configurations: [configuration])
+            modelContainer = try StationAIStore.makeContainer(
+                dataDirectory: ProcessInfo.processInfo.environment["STATIONAI_DATA_DIRECTORY"]
+            )
         } catch {
             fatalError("Couldn't open the StationAI task store: \(error.localizedDescription)")
         }
@@ -48,8 +38,14 @@ struct StationAIApp: App {
             KanbanBoardView()
                 .modelContainer(modelContainer)
                 .environmentObject(codexClient)
+                .defaultAppStorage(appPreferences)
         }
         .defaultSize(width: 1280, height: 820)
         .windowResizability(.contentSize)
+
+        Settings {
+            WorkspaceSettingsView()
+                .defaultAppStorage(appPreferences)
+        }
     }
 }

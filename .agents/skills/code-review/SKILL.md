@@ -1,39 +1,38 @@
 ---
 name: code-review
-description: Review a StationAI implementation task by directly exercising app behavior, auditing unauthorized mocks, and checking user-visible UI quality before it is considered done.
+description: Review a StationAI implementation task through the real CLI/XPC bridge, real persistence, and real-app screenshots.
 ---
 
 # StationAI task review
 
-Use this skill after each implementation task in this repository. Review the task against the user's request and the relevant product requirements, then return a clear `APPROVED` or `REJECTED` decision. The task is complete only when the verifier approves it.
+Use this skill after each implementation task in this repository. Review the task against the user's request and product requirements, then return `APPROVED` or `REJECTED`. The task is complete only after approval.
 
 ## Review process
 
-1. Read the task request, applicable `AGENTS.md` instructions, and relevant product documentation. Use read-only Git status/diff to define the current task's unstaged scope. Review only unstaged changes for this task, including relevant untracked files; do not approve staged-only files or staged hunks. For a partially staged file, assess the unstaged delta and use staged content only as context.
-2. Identify requirements and classify the in-scope changes by their effect on app behavior, UI, tests, documentation, process rules, and configuration. Trace relevant requirements to the implementation. Look for missing states, broken interactions, regressions, accessibility or visibility issues, and scope drift where applicable.
-3. For app behavior changes, build and launch the real app, then directly interact with the relevant workflows through the macOS accessibility interface or another available GUI driver. Use a fresh temporary `STATIONAI_DATA_DIRECTORY` when creating or moving data. If StationAI is already running, launch a separate instance and never reuse or terminate the pre-existing process. Check the actual app state, persistence, validation, and failure behavior that applies. The task verifier must not run automated tests, including XCTest or `scripts/test-e2e.sh`.
-4. For documentation, process-rule, or verifier-configuration-only changes that cannot affect app behavior, do not launch the app; use relevant syntax or consistency checks on the changed artifacts and state why no app interaction applies. If the app cannot be launched or direct interaction is unavailable for an app-behavior task, report that gap instead of falling back to tests.
-5. Audit in-scope test and production code for mocks, stubs, fakes, or simulated dependencies. Any such addition without explicit user permission is a rejection. Do not treat a separate directory for real test data as a mock.
-6. Capture and inspect screenshots from the real app when the in-scope task changes user-visible app behavior or UI. Evaluate alignment, spacing, clipping, overlap, hierarchy, readable text, and control visibility. Use direct app capture during the interactive session, never a mock or static reconstruction. When the changes have no UI impact, screenshots are not applicable and should not trigger an unrelated app launch.
-   - For drag-and-drop changes, capture the screenshot at the first possible moment after the drop action, before waiting for elements or UI quiescence. Inspect it for both the placed card and a leftover floating drag image or placeholder. If both are visible, reject the change and identify the duplicate in the screenshot.
-   - Also record the real interaction from before pointer movement through mouse-up and the preview's disappearance. Inspect the recording frame by frame around release: the preview should track the pointer smoothly, the destination card should appear as the drag completes, and the floating preview should be gone by the next rendered frame. A screenshot of the final board or accessibility/model state alone does not verify animation timing.
+1. Read the task request, applicable `AGENTS.md`, and relevant product documentation. Use read-only Git status/diff to define the current task's unstaged scope. Include relevant untracked files, exclude staged-only files and staged hunks, and assess only the unstaged delta in partially staged files.
+2. Map every in-scope semantic product capability to a manager operation, CLI command, and bridge assertion. Review validation and failure paths, persistence across fresh XPC connections, ordering/state behavior, conversation history, and UI wiring. Transient focus, sheet, or selection state is outside the bridge contract.
+3. Check test parity with `scripts/check-test-parity.py`: every Python CLI test and Swift UI test must have the same case name and the same expectation annotation from `StationAI/BridgeTests/BridgeTestContracts.json`. Missing, extra, duplicate, or mismatched cases reject the task. Each case should focus on one logical behavior or contract; small related expectations can extend an existing case, while independent capabilities or failure paths get separate cases.
+4. Run `scripts/test-e2e.sh` first for app behavior changes. Require a CLI assertion added or extended for each changed behavior/bug fix, then require the matching UI case and shared expectation. The suite must execute every named CLI case from the shared contract with no skips or failures. Review inner case names and assertions; the Xcode adapter count alone is not coverage. It uses committed Git fixtures, isolated real SwiftData and preferences, and the app-bundled CLI/XPC service. It does not require Codex sign-in. Reject mocks, stubs, fakes, simulated persistence, or test-only behavior in production paths.
+5. Only after the CLI suite and parity checks pass, call the UI verifier defined in `.codex/agents/ui-verifier.toml`. Give it the exact paired UI case IDs that cover the changed behavior. It runs those cases with `scripts/test-ui.sh --case <case-id>` and may directly exercise any important UI interaction the paired case misses. It must verify focused UI interactions and screenshot-visible quality when UI changed; it does not run the entire UI suite during routine fast cycles. `scripts/test-full-e2e.sh` remains the explicit command for full CLI plus full UI coverage.
+6. Exercise additional semantic workflows through `scripts/stationai.sh`, which uses the bundled CLI and XPC service. UI tests may click/type; screenshot inspection must not interact with the app. Use the separate live Codex integration suite only when the task changes Codex turn behavior and the task calls for that opt-in run.
+7. For docs, process, or verifier-only changes, validate changed artifacts with syntax/consistency checks. A change to the UI test runner must also be checked by the UI verifier with a focused case so its selection and result-count enforcement are exercised.
+8. Audit in-scope production and test code for unapproved mocks. Keep the review read-only and do not run Git write operations.
 
 ## Decision
 
-Return `REJECTED` when a required feature is missing, the verifier cannot directly exercise its relevant app workflow, the app does not build or interaction fails, an unapproved mock was added, or applicable screenshots show a material layout defect. Give concrete findings with file and line references when possible, plus the exact work needed to pass review. The implementing agent must address those findings and ask the verifier to review again.
+Return `REJECTED` when an in-scope product capability lacks CLI/XPC or paired UI coverage, parity fails, the CLI suite has missing cases, skips, failures, or incomplete results, the app does not build, an unapproved mock was added, the focused UI verifier fails, or applicable screenshots show a material defect. Give concrete findings with file and line references and the work needed to pass review.
 
-Return `APPROVED` only when all requirements are accounted for, every applicable direct-interaction or artifact check passes, no unapproved mocks are present, and applicable screenshot review finds no material visual defects. A task with no relevant app interaction or UI impact may be approved after the in-scope checks pass, with those exclusions explained in the report.
-
-Keep the review read-only. Do not fix the implementation while acting as verifier. Do not run Git write operations.
+Return `APPROVED` only when requirements map to implementation and passing bridge assertions, persistence and failure behavior are covered, no unapproved mocks are present, and any applicable screenshot review finds no material defect. State any Codex sign-in/model limitation when the opt-in live integration suite was not run.
 
 ## Review report
 
 Include:
 
 - Decision: `APPROVED` or `REJECTED`.
-- Requirement-to-implementation and direct-interaction summary.
-- Unstaged files reviewed; identify staged/untracked scope handling.
-- App workflows exercised through direct interaction and their results, or why no app interaction applies.
-- Screenshot path(s) and visual assessment, or why screenshots are not applicable.
+- Requirement-to-manager/CLI/XPC mapping and behavioral summary.
+- Shared CLI/UI test case names and counts (separate from Xcode wrapper counts), expectation parity, matched assertions, fixture details, persistence coverage, full CLI result, and focused UI result.
+- Unstaged files reviewed; explain staged/untracked scope handling.
+- Additional CLI/XPC workflows exercised or why none were needed.
+- Screenshot path(s) and visual assessment, or why screenshots were not applicable.
 - Mock audit result.
 - Findings ordered by severity, if any.

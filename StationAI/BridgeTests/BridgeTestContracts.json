@@ -1,0 +1,50 @@
+[
+  {
+    "id": "test_service_reports_bridge_version",
+    "expectation": "The real app window opens and the bridge reports StationAI API version 1."
+  },
+  {
+    "id": "test_task_creation_rejects_invalid_title_roots_and_missing_folder",
+    "expectation": "Blank titles, missing roots, and unavailable roots cannot create a task."
+  },
+  {
+    "id": "test_task_creation_persists_ordered_roots_across_fresh_connections",
+    "expectation": "A task retains its title, Backlog state, and ordered roots after reopening."
+  },
+  {
+    "id": "test_task_status_transitions_and_rejects_unknown_status",
+    "expectation": "Tasks move through each supported status; invalid status leaves the task unchanged."
+  },
+  {
+    "id": "test_task_rename_persists_and_rejects_blank_title",
+    "expectation": "A rename persists; rejecting a blank rename preserves the last valid title."
+  },
+  {
+    "id": "test_task_roots_set_get_order_deduplication_and_validation",
+    "expectation": "Root editing preserves order, removes duplicates, and rejects an empty list."
+  },
+  {
+    "id": "test_task_delete_removes_task_and_later_lookup_is_not_found",
+    "expectation": "Deleting a task removes it from the board and future lookup returns not found."
+  },
+  {
+    "id": "test_default_parent_settings_read_write_clear_and_validation",
+    "expectation": "The default parent can be read, changed, cleared, and an unavailable path is rejected."
+  },
+  {
+    "id": "test_repository_suggestions_skip_nested_repositories_and_symlinks",
+    "expectation": "Suggestions include top-level Git roots and skip nested repositories and symlink targets."
+  },
+  {
+    "id": "test_task_roots_remain_after_default_parent_is_cleared",
+    "expectation": "Clearing the default parent does not change roots already saved on a task."
+  },
+  {
+    "id": "test_new_task_has_empty_conversation_history",
+    "expectation": "A newly created task shows an empty conversation and has no stored messages or activity."
+  },
+  {
+    "id": "test_blank_conversation_send_is_rejected_without_starting_a_turn",
+    "expectation": "Blank messages cannot be sent and do not create conversation history."
+  }
+]
