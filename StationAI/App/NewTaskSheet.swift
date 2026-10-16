@@ -65,12 +65,6 @@ struct NewTaskSheet: View {
                 .frame(maxWidth: .infinity, minHeight: 180, alignment: .center)
             }
 
-            Label("Codex can access your entire machine and the network. These folders are task context, not an access restriction.", systemImage: "exclamationmark.triangle.fill")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.orange)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("full-access-notice")
-
             HStack(spacing: 10) {
                 Spacer()
                 Button("Cancel") {

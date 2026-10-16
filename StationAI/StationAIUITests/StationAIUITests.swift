@@ -68,6 +68,7 @@ final class StationAIUITests: XCTestCase {
     func test_task_creation_rejects_invalid_title_roots_and_missing_folder() throws {
         launchApp(defaultParent: fixture.parent.path)
         openNewTaskSheet()
+        XCTAssertFalse(element("full-access-notice").exists, "The task creation sheet should not show the full-access notice.")
         let titleField = element("task-title-field")
         XCTAssertTrue(titleField.waitForExistence(timeout: 5))
         let done = element("create-task-button")
