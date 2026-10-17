@@ -5,6 +5,8 @@
 import json
 import os
 import sys
+import time
+from pathlib import Path
 
 
 def write(value):
@@ -44,7 +46,7 @@ def question_request(request_id):
             "turnId": "turn_stationai_fixture",
             "itemId": "item_stationai_question",
             "questions": questions,
-            "isBlocking": True,
+            "isBlocking": "-nonblocking" not in mode,
         },
     })
 
@@ -53,6 +55,7 @@ def main():
     mode = os.path.basename(sys.argv[0])
     answers = None
     saw_question = False
+    saw_turn = False
     for line in sys.stdin:
         try:
             message = json.loads(line)
@@ -69,22 +72,57 @@ def main():
         elif message.get("method") == "thread/resume":
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": "thr_stationai_fixture"}, "model": "gpt-6-luna"}})
         elif message.get("method") == "turn/start":
+            saw_turn = True
             saw_question = True
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": "turn_stationai_fixture", "status": "inProgress"}}})
-            question_request(901)
+            if mode.endswith("-abort"):
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": "thr_stationai_fixture",
+                    "turn": {"id": "turn_stationai_fixture", "status": "interrupted", "error": {"message": "Fixture interrupted the conflict-resolution turn."}},
+                }})
+            elif mode.endswith("-success"):
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": "thr_stationai_fixture",
+                    "turn": {"id": "turn_stationai_fixture", "status": "completed"},
+                }})
+            elif mode.endswith("-success-wait"):
+                ready = Path(str(sys.argv[0]) + ".resolve-ready")
+                resume = Path(str(sys.argv[0]) + ".resolve-continue")
+                ready.write_text("Codex conflict-resolution turn is active.\n", encoding="utf-8")
+                deadline = time.monotonic() + 30
+                while not resume.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                if not resume.exists():
+                    return 3
+                ready.unlink(missing_ok=True)
+                resume.unlink(missing_ok=True)
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": "thr_stationai_fixture",
+                    "turn": {"id": "turn_stationai_fixture", "status": "completed"},
+                }})
+            elif mode.endswith("-hold"):
+                time.sleep(30)
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": "thr_stationai_fixture",
+                    "turn": {"id": "turn_stationai_fixture", "status": "completed"},
+                }})
+            else:
+                question_request(901)
         elif message.get("id") == 901:
             if "error" in message:
                 answers = None
             else:
                 answers = message.get("result", {}).get("answers")
-            failed = mode.endswith("-empty") or answers != {
+            if "-slow" in mode and not mode.endswith("-interrupted"):
+                time.sleep(2)
+            failed = mode.endswith("-empty") or mode.endswith("-fail") or answers != {
                 "color": {"answers": ["Blue"]},
                 "token": {"answers": ["fixture-secret"]},
             }
             write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                 "threadId": "thr_stationai_fixture",
-                "turn": {"id": "turn_stationai_fixture", "status": "failed" if failed else "completed",
-                         **({"error": {"message": "Question response was missing or incorrect."}} if failed else {})},
+                "turn": {"id": "turn_stationai_fixture", "status": "interrupted" if mode.endswith("-interrupted") else ("failed" if failed else "completed"),
+                         **({"error": {"message": "Codex interrupted this turn."}} if mode.endswith("-interrupted") else ({"error": {"message": "Question response was missing or incorrect."}} if failed else {}))},
             }})
         elif message.get("method") == "thread/items/list":
             contents = [
@@ -95,7 +133,7 @@ def main():
                 "data": [{"item": item, "turnId": "turn_stationai_fixture"} for item in contents],
                 "nextCursor": None,
             }})
-    if not saw_question:
+    if not saw_turn:
         return 2
     return 0
 

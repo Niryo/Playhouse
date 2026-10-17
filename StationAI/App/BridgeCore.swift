@@ -1,6 +1,7 @@
 import Foundation
 import SwiftData
 
+@MainActor
 enum StationAIStore {
     static func makeContainer(dataDirectory: String? = nil) throws -> ModelContainer {
         let schema = Schema([BoardTask.self])
@@ -26,7 +27,39 @@ enum StationAIStore {
             url: storeURL,
             cloudKitDatabase: .none
         )
-        return try ModelContainer(for: schema, configurations: [configuration])
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        let migrationMarker = storeURL.deletingLastPathComponent().appendingPathComponent("task-lifecycle-v2-reset")
+        if !FileManager.default.fileExists(atPath: migrationMarker.path) {
+            let context = ModelContext(container)
+            let dirtyWorktrees = try BoardTaskManager(modelContext: context).resetAllTasksForLifecycle()
+            if !dirtyWorktrees.isEmpty {
+                let notice = storeURL.deletingLastPathComponent().appendingPathComponent("task-lifecycle-v2-notice.json")
+                try JSONEncoder().encode(dirtyWorktrees).write(to: notice, options: .atomic)
+            }
+            try Data("1\n".utf8).write(to: migrationMarker, options: .atomic)
+        }
+        return container
+    }
+
+    static func takeLifecycleResetNotice(dataDirectory: String? = nil) -> [String] {
+        let directory: URL
+        if let dataDirectory {
+            directory = URL(fileURLWithPath: dataDirectory, isDirectory: true)
+        } else if let support = try? FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        ) {
+            directory = support.appendingPathComponent("StationAI", isDirectory: true)
+        } else {
+            return []
+        }
+        let notice = directory.appendingPathComponent("task-lifecycle-v2-notice.json")
+        guard let data = try? Data(contentsOf: notice),
+              let paths = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+        try? FileManager.default.removeItem(at: notice)
+        return paths
     }
 }
 
@@ -34,6 +67,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let id: UUID
     let title: String
     let status: String
+    let statusMessage: String?
     let createdAt: Date
     let codexThreadID: String?
     let workspaceRoots: [String]
@@ -44,6 +78,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         id = task.id
         title = task.title
         status = task.status.rawValue
+        statusMessage = task.statusMessage
         createdAt = task.createdAt
         codexThreadID = task.codexThreadID
         workspaceRoots = task.workspaceRootPaths
@@ -61,6 +96,7 @@ enum StationAIManagerError: LocalizedError {
     case invalidParentFolder(String)
     case invalidMessage
     case repositoryAssigned(String)
+    case invalidTransition(String)
 
     var errorDescription: String? {
         switch self {
@@ -80,6 +116,8 @@ enum StationAIManagerError: LocalizedError {
             "Message can't be empty."
         case .repositoryAssigned(let path):
             "This branch worktree is already assigned to another active task: \(path). Choose another branch or finish that task first."
+        case .invalidTransition(let message):
+            message
         }
     }
 }
@@ -151,29 +189,135 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func move(_ id: UUID, to statusName: String) throws -> BoardTaskRecord {
+    func move(
+        _ id: UUID,
+        to statusName: String,
+        client: CodexAppServerClient? = nil,
+        onConflictResolutionStart: (() -> Void)? = nil
+    ) async throws -> BoardTaskRecord {
         guard let status = TaskStatus(rawValue: statusName) else {
             throw StationAIManagerError.invalidStatus(statusName)
         }
         let task = try requireTask(id)
-        if status == .done, task.status != .done {
-            for worktree in task.repositoryWorktrees { try StationAIWorktreeManager.preflightRemoval(worktree) }
-            for worktree in task.repositoryWorktrees { try StationAIWorktreeManager.remove(worktree) }
-            task.workspaceRootPaths = task.contextFolderPaths
-        } else if task.status == .done, status != .done {
-            let worktrees = try task.repositoryWorktrees.map { record in
-                try StationAIWorktreeManager.resolve(
-                    spec: RepositoryWorktreeSpec(repositoryPath: record.repositoryPath, branch: record.branch, branchFrom: record.branchFrom),
-                    title: task.title,
-                    root: worktreeRoot
-                )
-            }
-            task.repositoryWorktrees = worktrees
-            task.workspaceRootPaths = try Self.normalizeOptionalRoots(worktrees.map(\.worktreePath) + task.contextFolderPaths)
+        guard status == .done else {
+            throw StationAIManagerError.invalidTransition("Task status is controlled by Codex. Start or continue a conversation to update it.")
         }
+        guard task.status != .done else { return BoardTaskRecord(task: task) }
+        guard task.status == .review else {
+            throw StationAIManagerError.invalidTransition("Only a task in Review can move to Done.")
+        }
+
+        do {
+            let mergeCandidates = task.repositoryWorktrees.enumerated().filter { !$0.element.mergeCompleted }
+            var conflicts: [(offset: Int, element: RepositoryWorktreeRecord)] = []
+            for candidate in mergeCandidates {
+                if try StationAIWorktreeManager.preflightMerge(candidate.element) {
+                    conflicts.append(candidate)
+                }
+            }
+
+            if !conflicts.isEmpty {
+                for (index, record) in conflicts {
+                    try StationAIWorktreeManager.beginConflictResolution(record)
+                    var updated = task.repositoryWorktrees
+                    updated[index].mergeError = "Codex is resolving conflicts with \(record.mergeTarget ?? "the target branch")."
+                    task.repositoryWorktrees = updated
+                }
+                task.status = .inProgress
+                task.statusMessage = "Codex is resolving merge conflicts before the task can be merged."
+                try modelContext.save()
+                guard let client else {
+                    throw BridgeCommandError(code: "operation_failed", message: "A Codex client is required to resolve merge conflicts.")
+                }
+                let repositorySummary = conflicts.map {
+                    "\($0.element.branch) into \($0.element.mergeTarget ?? "target") in \($0.element.repositoryPath)"
+                }.joined(separator: "\n")
+                _ = try await CodexConversationManager(tasks: self, client: client).send(
+                    taskID: id,
+                    text: "Resolve the active Git merge conflicts for this task. Preserve the task branch's intended changes and the target branch's changes. Do not discard unrelated work. Resolve every unmerged path and explain the resolution. Repositories:\n\(repositorySummary)",
+                    onTurnStarting: onConflictResolutionStart
+                )
+                for (index, record) in conflicts {
+                    try StationAIWorktreeManager.finishConflictResolution(record)
+                    var updated = task.repositoryWorktrees
+                    updated[index].mergeError = nil
+                    task.repositoryWorktrees = updated
+                }
+                task.status = .review
+                task.statusMessage = "Merge conflicts are resolved. Review the changes, then move the task to Done to retry the merge."
+                try modelContext.save()
+                return BoardTaskRecord(task: task)
+            }
+
+            for (index, record) in mergeCandidates {
+                try StationAIWorktreeManager.mergeIntoTarget(record)
+                var updated = task.repositoryWorktrees
+                updated[index].mergeCompleted = true
+                updated[index].mergeError = nil
+                task.repositoryWorktrees = updated
+                try modelContext.save()
+            }
+            for record in task.repositoryWorktrees where record.createdByStationAI {
+                if FileManager.default.fileExists(atPath: record.worktreePath) {
+                    try StationAIWorktreeManager.remove(record)
+                }
+            }
+            let retainedExternalRoots = task.repositoryWorktrees.filter { !$0.createdByStationAI }.map(\.worktreePath)
+            task.workspaceRootPaths = try Self.normalizeOptionalRoots(retainedExternalRoots + task.contextFolderPaths)
+            task.status = .done
+            task.statusMessage = nil
+            try modelContext.save()
+            return BoardTaskRecord(task: task)
+        } catch {
+            task.status = .blocked
+            task.statusMessage = error.localizedDescription
+            try? modelContext.save()
+            throw error
+        }
+    }
+
+    func setLifecycleStatus(_ id: UUID, to status: TaskStatus, message: String? = nil) throws -> BoardTaskRecord {
+        let task = try requireTask(id)
+        guard task.status != .done else { return BoardTaskRecord(task: task) }
         task.status = status
+        task.statusMessage = message
         try modelContext.save()
         return BoardTaskRecord(task: task)
+    }
+
+    func reconcileLifecycleStatusOnOpen(_ id: UUID, client: CodexAppServerClient) throws -> BoardTaskRecord {
+        let task = try requireTask(id)
+        guard let threadID = task.codexThreadID,
+              !client.isTurnActive(threadID: threadID),
+              !CodexAppServerClient.isTurnActiveInProcess(threadID: threadID) else {
+            return BoardTaskRecord(task: task)
+        }
+        switch task.status {
+        case .inProgress:
+            return try setLifecycleStatus(id, to: .blocked, message: "StationAI reopened before Codex reported that this turn finished. Review the conversation and send a prompt to retry.")
+        case .waitingResponse:
+            return try setLifecycleStatus(id, to: .blocked, message: "StationAI reopened before the pending question was answered. Review the conversation and send a prompt to continue.")
+        default:
+            return BoardTaskRecord(task: task)
+        }
+    }
+
+    func resetAllTasksForLifecycle() throws -> [String] {
+        let all = try listModels()
+        var dirtyManagedWorktrees: [String] = []
+        for task in all {
+            for record in task.repositoryWorktrees where record.createdByStationAI {
+                guard FileManager.default.fileExists(atPath: record.worktreePath) else { continue }
+                if (try? StationAIWorktreeManager.hasChanges(record)) != false {
+                    dirtyManagedWorktrees.append(record.worktreePath)
+                } else {
+                    try StationAIWorktreeManager.remove(record)
+                }
+            }
+            modelContext.delete(task)
+        }
+        try modelContext.save()
+        return dirtyManagedWorktrees
     }
 
     @discardableResult
@@ -383,6 +527,7 @@ struct ConversationUpdate: Codable {
     var history: CodexThreadHistory?
     var message: String?
     var userInputRequest: CodexUserInputRequest?
+    var taskStatus: String?
 }
 
 @MainActor
@@ -426,6 +571,7 @@ final class CodexConversationManager {
         mode: CodexConversationMode = .code,
         modelID: String = CodexAppServerClient.modelID,
         userInputAnswers: [String: [String]] = [:],
+        onTurnStarting: (() -> Void)? = nil,
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in },
         onUserInput: @escaping (CodexUserInputRequest) -> Void = { _ in }
     ) async throws -> CodexThreadHistory {
@@ -435,53 +581,85 @@ final class CodexConversationManager {
             throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
         }
         let task = try tasks.taskModel(taskID)
-        let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
-        let workspace = try CodexWorkspaceContext(roots: roots)
-        let threadID: String
-        if let existing = task.codexThreadID {
-            threadID = existing
-        } else {
-            threadID = try await client.startThread(workspace: workspace, modelID: modelID)
-            task.codexThreadID = threadID
-            do {
-                try tasks.save()
-            } catch {
-                task.codexThreadID = nil
-                throw error
+        defer {
+            if let threadID = task.codexThreadID {
+                client.clearTurnStarting(threadID: threadID)
             }
         }
-
-        onUpdate(ConversationUpdate(type: "started"))
-        try await client.sendMessage(
-            normalizedText,
-            mode: mode,
-            modelID: modelID,
-            threadID: threadID,
-            workspace: workspace,
-            onDelta: { delta in onUpdate(ConversationUpdate(type: "text_delta", text: delta)) },
-            onFinalMessage: { message in onUpdate(ConversationUpdate(type: "assistant_final", text: message)) },
-            onActivity: { activity in onUpdate(ConversationUpdate(type: "activity", activity: activity)) },
-            onDiff: { diff in onUpdate(ConversationUpdate(type: "diff", diff: diff.unifiedDiff)) },
-            onHistory: { history in onUpdate(ConversationUpdate(type: "history", history: history)) },
-            onActionRequest: {
-                let message = "Codex requested an approval. StationAI denied it because approval prompts are disabled."
-                onUpdate(ConversationUpdate(type: "action_notice", message: message))
-            },
-            onUserInput: { request in
-                onUpdate(ConversationUpdate(type: "user_input", userInputRequest: request))
-                if !userInputAnswers.isEmpty {
-                    let answersAccepted = self.client.answerUserInput(
-                        requestID: request.id,
-                        threadID: request.threadID,
-                        answers: userInputAnswers
-                    )
-                    if !answersAccepted {
-                        onUpdate(ConversationUpdate(type: "action_notice", message: "The supplied answers didn't match Codex's questions."))
-                    }
+        guard task.status != .done else {
+            throw StationAIManagerError.invalidTransition("Done tasks are closed. Create a new task for follow-up work.")
+        }
+        let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
+        let workspace = try CodexWorkspaceContext(roots: roots)
+        let started = try tasks.setLifecycleStatus(taskID, to: .inProgress)
+        onUpdate(ConversationUpdate(type: "started", taskStatus: started.status))
+        do {
+            let threadID: String
+            if let existing = task.codexThreadID {
+                threadID = existing
+            } else {
+                threadID = try await client.startThread(workspace: workspace, modelID: modelID)
+                task.codexThreadID = threadID
+                do {
+                    try tasks.save()
+                } catch {
+                    task.codexThreadID = nil
+                    throw error
                 }
-                onUserInput(request)
             }
-        )
+            if onTurnStarting != nil {
+                client.markTurnStarting(threadID: threadID)
+                onTurnStarting?()
+            }
+            try await client.sendMessage(
+                normalizedText,
+                mode: mode,
+                modelID: modelID,
+                threadID: threadID,
+                workspace: workspace,
+                onDelta: { delta in onUpdate(ConversationUpdate(type: "text_delta", text: delta)) },
+                onFinalMessage: { message in onUpdate(ConversationUpdate(type: "assistant_final", text: message)) },
+                onActivity: { activity in onUpdate(ConversationUpdate(type: "activity", activity: activity)) },
+                onDiff: { diff in onUpdate(ConversationUpdate(type: "diff", diff: diff.unifiedDiff)) },
+                onHistory: { history in onUpdate(ConversationUpdate(type: "history", history: history)) },
+                onActionRequest: {
+                    let message = "Codex requested an approval. StationAI denied it because approval prompts are disabled."
+                    onUpdate(ConversationUpdate(type: "action_notice", message: message))
+                },
+                onUserInput: { request in
+                    let status = request.isBlocking
+                        ? (try? self.tasks.setLifecycleStatus(taskID, to: .waitingResponse))
+                        : (try? self.tasks.get(taskID))
+                    onUpdate(ConversationUpdate(
+                        type: "user_input",
+                        userInputRequest: request,
+                        taskStatus: status?.status
+                    ))
+                    if !userInputAnswers.isEmpty {
+                        let answersAccepted = self.client.answerUserInput(
+                            requestID: request.id,
+                            threadID: request.threadID,
+                            answers: userInputAnswers
+                        )
+                        if answersAccepted, request.isBlocking {
+                            let resumed = try? self.tasks.setLifecycleStatus(taskID, to: .inProgress)
+                            onUpdate(ConversationUpdate(type: "task_status", taskStatus: resumed?.status))
+                        } else if !answersAccepted {
+                            onUpdate(ConversationUpdate(type: "action_notice", message: "The supplied answers didn't match Codex's questions."))
+                        }
+                    }
+                    onUserInput(request)
+                }
+            )
+            let current = try tasks.taskModel(taskID)
+            for record in current.repositoryWorktrees where record.mergeError != nil {
+                try StationAIWorktreeManager.finishConflictResolution(record)
+            }
+            _ = try tasks.setLifecycleStatus(taskID, to: .review)
+        } catch {
+            _ = try? tasks.setLifecycleStatus(taskID, to: .blocked, message: error.localizedDescription)
+            throw error
+        }
         let finalHistory = try await history(taskID: taskID) {
             onUpdate(ConversationUpdate(
                 type: "action_notice",
@@ -560,11 +738,16 @@ final class StationAIBridgeRuntime {
                 let repositories = try request.repositorySpecs("repositories")
                 result = try Self.value(taskManager.create(title: title, repositories: repositories, contextFolders: roots))
             case "task.get", "task.show":
-                result = try Self.value(taskManager.get(request.requiredUUID("taskID")))
+                let taskID = try request.requiredUUID("taskID")
+                result = try Self.value(taskManager.get(taskID))
             case "task.move":
                 let taskID = try request.requiredUUID("taskID")
                 let status = try request.requiredString("status")
-                result = try Self.value(taskManager.move(taskID, to: status))
+                result = try Self.value(await taskManager.move(
+                    taskID,
+                    to: status,
+                    client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
+                ))
             case "task.rename":
                 let taskID = try request.requiredUUID("taskID")
                 let title = try request.requiredString("title")
@@ -631,11 +814,11 @@ final class StationAIBridgeRuntime {
                     tasks: taskManager,
                     client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
                 )
-                let history = try await conversations.send(taskID: taskID, text: message, mode: mode, modelID: modelID, userInputAnswers: answers) { update in
+                let history = try await conversations.send(taskID: taskID, text: message, mode: mode, modelID: modelID, userInputAnswers: answers, onUpdate: { update in
                     if let payload = try? Self.value(update) {
                         eventHandler(BridgeEvent(requestID: request.id, type: update.type, payload: payload))
                     }
-                }
+                })
                 result = try Self.value(history)
             default:
                 throw BridgeCommandError(code: "unknown_command", message: "Unknown command '\(request.command)'. Run 'stationai help' to list commands.")
@@ -647,7 +830,7 @@ final class StationAIBridgeRuntime {
             let code: String
             switch error {
             case .taskNotFound: code = "not_found"
-            case .invalidTitle, .invalidStatus, .noWorkspaceRoots, .unavailableWorkspaceRoot, .invalidParentFolder, .invalidMessage, .repositoryAssigned: code = "invalid_argument"
+            case .invalidTitle, .invalidStatus, .noWorkspaceRoots, .unavailableWorkspaceRoot, .invalidParentFolder, .invalidMessage, .repositoryAssigned, .invalidTransition: code = "invalid_argument"
             }
             return .failure(request, code: code, message: error.localizedDescription)
         } catch {
@@ -719,7 +902,8 @@ private extension BridgeRequest {
             return RepositoryWorktreeSpec(
                 repositoryPath: path,
                 branch: object["branch"]?.string,
-                branchFrom: object["branchFrom"]?.string
+                branchFrom: object["branchFrom"]?.string,
+                mergeTarget: object["mergeTarget"]?.string
             )
         }
     }

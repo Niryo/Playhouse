@@ -4,10 +4,12 @@ import SwiftUI
 
 struct KanbanBoardView: View {
     @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject private var codexClient: CodexAppServerClient
     @Query(sort: \BoardTask.createdAt, order: .reverse) private var tasks: [BoardTask]
     @State private var isShowingNewTask = false
     @State private var isChoosingDefaultParent = false
     @State private var saveError: String?
+    @State private var lifecycleResetNotice: String?
     @State private var draggedTaskID: UUID?
     @State private var selectedTask: BoardTask?
     @State private var taskBeingRenamed: BoardTask?
@@ -28,6 +30,14 @@ struct KanbanBoardView: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .frame(minWidth: 980, minHeight: 640)
+        .onAppear {
+            let retained = StationAIStore.takeLifecycleResetNotice(
+                dataDirectory: ProcessInfo.processInfo.environment["STATIONAI_DATA_DIRECTORY"]
+            )
+            if !retained.isEmpty {
+                lifecycleResetNotice = "Existing tasks were cleared. These dirty managed worktrees were kept:\n\n" + retained.joined(separator: "\n")
+            }
+        }
         .sheet(isPresented: $isShowingNewTask) {
             NewTaskSheet(onCreate: createTask)
         }
@@ -74,6 +84,14 @@ struct KanbanBoardView: View {
             }
         } message: {
             Text(saveError ?? "Please try again.")
+        }
+        .alert("Some task worktrees were kept", isPresented: Binding(
+            get: { lifecycleResetNotice != nil },
+            set: { if !$0 { lifecycleResetNotice = nil } }
+        )) {
+            Button("OK", role: .cancel) { lifecycleResetNotice = nil }
+        } message: {
+            Text(lifecycleResetNotice ?? "")
         }
     }
 
@@ -223,10 +241,18 @@ struct KanbanBoardView: View {
 
     private func moveTask(id: UUID, to status: TaskStatus) {
         guard let task = tasks.first(where: { $0.id == id }), task.status != status else { return }
-        do {
-            _ = try BoardTaskManager(modelContext: modelContext).move(id, to: status.rawValue)
-        } catch {
-            saveError = error.localizedDescription
+        guard status == .done else { return }
+        Task { @MainActor in
+            do {
+                _ = try await BoardTaskManager(modelContext: modelContext).move(
+                    id,
+                    to: status.rawValue,
+                    client: codexClient,
+                    onConflictResolutionStart: { selectedTask = task }
+                )
+            } catch {
+                saveError = error.localizedDescription
+            }
         }
     }
 
@@ -360,7 +386,9 @@ private struct KanbanColumnView: View {
 
     @ViewBuilder
     private var dropTarget: some View {
-        if #available(macOS 26.0, *) {
+        if status != .done {
+            columnContent
+        } else if #available(macOS 26.0, *) {
             NativeMoveDropDestination { taskID in
                 onMoveTask(taskID, status)
             } content: {
@@ -382,12 +410,17 @@ private struct KanbanColumnView: View {
             task: task,
             onOpen: { onOpenTask(task) },
             onRename: { onRenameTask(task) },
-            onDelete: { onDeleteTask(task) }
+            onDelete: { onDeleteTask(task) },
+            onMoveToDone: task.status == .review ? { onMoveTask(task.id, .done) } : nil
         )
 
-        card.onDrag {
-            draggedTaskID = task.id
-            return NSItemProvider(object: task.id.uuidString as NSString)
+        if task.status == .review {
+            card.onDrag {
+                draggedTaskID = task.id
+                return NSItemProvider(object: task.id.uuidString as NSString)
+            }
+        } else {
+            card
         }
     }
 
@@ -537,6 +570,7 @@ private struct TaskCardView: View {
     let onOpen: () -> Void
     let onRename: () -> Void
     let onDelete: () -> Void
+    let onMoveToDone: (() -> Void)?
 
     var body: some View {
         Button(action: onOpen) {
@@ -552,6 +586,15 @@ private struct TaskCardView: View {
                     Image(systemName: "line.3.horizontal")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.tertiary)
+                }
+
+                if let statusMessage = task.statusMessage, !statusMessage.isEmpty {
+                    Text(statusMessage)
+                        .font(.system(size: 10))
+                        .foregroundStyle(task.status == .blocked ? Color.red : Color.secondary)
+                        .lineLimit(3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("task-status-message-\(task.id.uuidString)")
                 }
 
                 Text(task.title)
@@ -586,6 +629,10 @@ private struct TaskCardView: View {
         .accessibilityHint("Open task")
         .accessibilityIdentifier("task-card-\(task.id.uuidString)")
         .contextMenu {
+            if let onMoveToDone {
+                Button("Merge and move to Done", systemImage: "arrow.triangle.merge", action: onMoveToDone)
+                    .accessibilityIdentifier("move-task-to-done-menu-item")
+            }
             Button("Rename…", systemImage: "pencil", action: onRename)
                 .accessibilityIdentifier("rename-task-menu-item")
             Button("Delete Task", systemImage: "trash", role: .destructive, action: onDelete)

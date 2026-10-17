@@ -5,11 +5,11 @@
   },
   {
     "id": "test_task_creation_rejects_invalid_title_roots_and_missing_folder",
-    "expectation": "Blank titles, missing roots, and unavailable roots cannot create a task."
+    "expectation": "Blank titles, missing roots, unavailable roots, and nonexistent merge targets cannot create a task."
   },
   {
     "id": "test_task_creation_persists_ordered_roots_across_fresh_connections",
-    "expectation": "A repository task creates a title-derived worktree and persists its repository, branch, path, and task state across fresh connections."
+    "expectation": "A repository task creates a title-derived worktree and persists its repository, branch, path, explicit merge target, and task state across fresh connections."
   },
   {
     "id": "test_task_creation_reuses_existing_branch_worktree",
@@ -21,7 +21,7 @@
   },
   {
     "id": "test_task_creation_supports_non_git_folder_only_context",
-    "expectation": "A folder-only task remains usable and persists its context folder without repository worktrees."
+    "expectation": "A folder-only task persists its context without Git worktrees and reaches Done after a successful turn without attempting a merge."
   },
   {
     "id": "test_task_creation_rejects_worktree_assigned_to_active_task",
@@ -29,15 +29,35 @@
   },
   {
     "id": "test_task_done_removes_worktree_and_preserves_branch",
-    "expectation": "Moving a clean task to Done removes its worktree directory and keeps the Git branch."
+    "expectation": "After a successful Codex turn puts a task in Review, moving it to Done merges the task branch into its explicit target, removes the clean managed worktree, and retains the source branch."
   },
   {
     "id": "test_task_done_rejects_dirty_worktree",
-    "expectation": "A task with uncommitted work cannot move to Done and retains its active worktree."
+    "expectation": "A dirty task worktree cannot merge from Review, moves to Blocked with the reason, and remains intact."
+  },
+  {
+    "id": "test_task_done_rejects_dirty_merge_target",
+    "expectation": "A dirty local merge target is detected before the merge, leaves the target unchanged, and moves the reviewed task to Blocked with the reason."
+  },
+  {
+    "id": "test_task_done_rejects_inaccessible_merge_target",
+    "expectation": "A missing explicit local merge target leaves the branch unmerged and moves the reviewed task to Blocked with the reason."
+  },
+  {
+    "id": "test_task_done_retries_partial_multi_repository_merge",
+    "expectation": "A later repository merge failure preserves the earlier completed merge; after retry, StationAI skips it and finishes the remaining repository."
+  },
+  {
+    "id": "test_task_merge_conflict_resolution_returns_to_review_and_retries",
+    "expectation": "An active conflict-resolution turn remains In Progress when read, leaves the target branch unchanged, and returns the task to Review; a second Done request merges it."
+  },
+  {
+    "id": "test_task_lifecycle_rollout_clears_records_and_clean_worktrees",
+    "expectation": "The one-time lifecycle rollout clears task records and clean managed worktrees, preserves branches, and retains dirty managed worktrees with a notice."
   },
   {
     "id": "test_task_status_transitions_and_rejects_unknown_status",
-    "expectation": "Tasks move through each supported status; invalid status leaves the task unchanged."
+    "expectation": "The board shows the lifecycle columns in order without Ready, and user attempts to set Codex-owned statuses are rejected."
   },
   {
     "id": "test_task_rename_persists_and_rejects_blank_title",
@@ -77,11 +97,19 @@
   },
   {
     "id": "test_codex_questions_can_be_answered_over_cli_xpc",
-    "expectation": "A CLI/XPC conversation surfaces structured Codex questions, rejects blank answers, accepts keyed option and secret answers, and completes the same turn."
+    "expectation": "A blocking structured question moves the task to Waiting Response; submitting keyed option and secret answers resumes In Progress and successful turn completion moves it to Review."
+  },
+  {
+    "id": "test_codex_nonblocking_question_keeps_task_in_progress",
+    "expectation": "Non-blocking structured questions remain visible without moving the task out of In Progress, then successful completion moves it to Review."
+  },
+  {
+    "id": "test_codex_interrupted_turn_blocks_with_reason_and_can_retry",
+    "expectation": "Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes also persist Blocked across connections, and a new prompt can finish in Review."
   },
   {
     "id": "test_codex_empty_question_request_is_rejected",
-    "expectation": "An empty Codex question request returns a protocol error and fails the turn without presenting a prompt."
+    "expectation": "A failed structured-question turn moves the task to Blocked, and sending a retry completes into Review."
   },
   {
     "id": "test_task_workspace_changes_group_staged_and_unstaged_diffs",

@@ -62,12 +62,13 @@ enum StationAICLI {
             case "list":
                 return BridgeRequest(command: "task.list")
             case "create":
-                let flags = try parseFlags(tail, valueFlags: ["--title", "--root", "--repo", "--branch", "--branch-from"])
+                let flags = try parseFlags(tail, valueFlags: ["--title", "--root", "--repo", "--branch", "--branch-from", "--merge-target"])
                 let title = try requiredFlag("--title", flags: flags).first!
                 let roots = flags["--root"] ?? []
                 let repositories = flags["--repo"] ?? []
                 let branches = try keyedOptions(flags["--branch"] ?? [])
                 let branchFrom = try keyedOptions(flags["--branch-from"] ?? [])
+                let mergeTargets = try keyedOptions(flags["--merge-target"] ?? [])
                 return BridgeRequest(command: "task.create", arguments: [
                     "title": .string(title),
                     "roots": .array(roots.map(BridgeValue.string)),
@@ -76,6 +77,7 @@ enum StationAICLI {
                             "repositoryPath": .string(path),
                             "branch": branches[path].map(BridgeValue.string) ?? .null,
                             "branchFrom": branchFrom[path].map(BridgeValue.string) ?? .null,
+                            "mergeTarget": mergeTargets[path].map(BridgeValue.string) ?? .null,
                         ])
                     })
                 ])
@@ -252,8 +254,8 @@ enum StationAICLI {
       stationai board list
       stationai task list|get <task-id>
       stationai task create --title <title> --root <path> [--root <path>...]
-      stationai task create --title <title> --repo <path> [--repo <path>...] [--branch <repo-path>=<name>] [--branch-from <repo-path>=<ref>]
-      stationai task move <task-id> <Backlog|Ready|In Progress|Done>
+      stationai task create --title <title> --repo <path> [--repo <path>...] [--branch <repo-path>=<name>] [--branch-from <repo-path>=<ref>] [--merge-target <repo-path>=<local-branch>]
+      stationai task move <task-id> Done
       stationai task rename <task-id> --title <title>
       stationai task roots get <task-id>
       stationai task roots set <task-id> --root <path> [--root <path>...]

@@ -4,8 +4,10 @@ import SwiftUI
 
 enum TaskStatus: String, CaseIterable, Identifiable {
     case backlog = "Backlog"
-    case ready = "Ready"
     case inProgress = "In Progress"
+    case blocked = "Blocked"
+    case waitingResponse = "Waiting Response"
+    case review = "Review"
     case done = "Done"
 
     var id: String {
@@ -19,8 +21,10 @@ enum TaskStatus: String, CaseIterable, Identifiable {
     var accent: Color {
         switch self {
         case .backlog: Color(red: 0.52, green: 0.57, blue: 0.66)
-        case .ready: Color(red: 0.36, green: 0.49, blue: 0.91)
         case .inProgress: Color(red: 0.75, green: 0.48, blue: 0.20)
+        case .blocked: Color(red: 0.82, green: 0.30, blue: 0.30)
+        case .waitingResponse: Color(red: 0.64, green: 0.44, blue: 0.80)
+        case .review: Color(red: 0.28, green: 0.51, blue: 0.82)
         case .done: Color(red: 0.20, green: 0.62, blue: 0.45)
         }
     }
@@ -31,6 +35,7 @@ final class BoardTask {
     var id: UUID
     var title: String
     var statusRawValue: String
+    var statusMessage: String?
     var createdAt: Date
     var codexThreadID: String?
     var workspaceRootPathsData: Data?
@@ -66,6 +71,7 @@ final class BoardTask {
         id = UUID()
         self.title = title
         statusRawValue = status.rawValue
+        statusMessage = nil
         createdAt = .now
         codexThreadID = nil
         workspaceRootPathsData = try? JSONEncoder().encode(workspaceRootPaths)
@@ -78,6 +84,7 @@ struct RepositoryWorktreeSpec: Codable, Equatable {
     var repositoryPath: String
     var branch: String?
     var branchFrom: String?
+    var mergeTarget: String? = nil
 }
 
 struct RepositoryWorktreeRecord: Codable, Equatable {
@@ -86,4 +93,44 @@ struct RepositoryWorktreeRecord: Codable, Equatable {
     var worktreePath: String
     var branchFrom: String
     var createdByStationAI: Bool
+    var mergeTarget: String? = nil
+    var mergeCompleted: Bool = false
+    var mergeError: String? = nil
+
+    private enum CodingKeys: String, CodingKey {
+        case repositoryPath, branch, worktreePath, branchFrom, createdByStationAI
+        case mergeTarget, mergeCompleted, mergeError
+    }
+
+    init(
+        repositoryPath: String,
+        branch: String,
+        worktreePath: String,
+        branchFrom: String,
+        createdByStationAI: Bool,
+        mergeTarget: String? = nil,
+        mergeCompleted: Bool = false,
+        mergeError: String? = nil
+    ) {
+        self.repositoryPath = repositoryPath
+        self.branch = branch
+        self.worktreePath = worktreePath
+        self.branchFrom = branchFrom
+        self.createdByStationAI = createdByStationAI
+        self.mergeTarget = mergeTarget
+        self.mergeCompleted = mergeCompleted
+        self.mergeError = mergeError
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        repositoryPath = try values.decode(String.self, forKey: .repositoryPath)
+        branch = try values.decode(String.self, forKey: .branch)
+        worktreePath = try values.decode(String.self, forKey: .worktreePath)
+        branchFrom = try values.decode(String.self, forKey: .branchFrom)
+        createdByStationAI = try values.decode(Bool.self, forKey: .createdByStationAI)
+        mergeTarget = try values.decodeIfPresent(String.self, forKey: .mergeTarget)
+        mergeCompleted = try values.decodeIfPresent(Bool.self, forKey: .mergeCompleted) ?? false
+        mergeError = try values.decodeIfPresent(String.self, forKey: .mergeError)
+    }
 }

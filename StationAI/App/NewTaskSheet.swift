@@ -20,6 +20,7 @@ struct NewTaskSheet: View {
     private enum EditableRepositoryField: Hashable {
         case branch(Int)
         case branchFrom(Int)
+        case mergeTarget(Int)
     }
 
     let onCreate: (String, [RepositoryWorktreeSpec], [URL]) throws -> Void
@@ -96,6 +97,15 @@ struct NewTaskSheet: View {
                             field: .branchFrom(index),
                             text: branchFromBinding(at: index),
                             minimumWidth: 105
+                        )
+                        editableRepositoryTag(
+                            label: "merge into",
+                            value: repositories[index].mergeTarget ?? "default",
+                            identifier: "repository-merge-target-tag-\(index)",
+                            textFieldIdentifier: "repository-merge-target-\(index)",
+                            field: .mergeTarget(index),
+                            text: mergeTargetBinding(at: index),
+                            minimumWidth: 110
                         )
                         Button { repositories.remove(at: index) } label: { Image(systemName: "xmark.circle.fill") }
                             .buttonStyle(.plain).accessibilityLabel("Remove repository")
@@ -246,6 +256,13 @@ struct NewTaskSheet: View {
         )
     }
 
+    private func mergeTargetBinding(at index: Int) -> Binding<String> {
+        Binding(
+            get: { repositories.indices.contains(index) ? (repositories[index].mergeTarget ?? "") : "" },
+            set: { if repositories.indices.contains(index) { repositories[index].mergeTarget = $0.isEmpty ? nil : $0 } }
+        )
+    }
+
     @ViewBuilder
     private func editableRepositoryTag(
         label: String,
@@ -324,7 +341,8 @@ struct NewTaskSheet: View {
 
     private func repositorySpec(for path: String) -> RepositoryWorktreeSpec {
         let branchFrom = try? StationAIWorktreeManager.defaultBranchFrom(repositoryPath: path)
-        return RepositoryWorktreeSpec(repositoryPath: path, branchFrom: branchFrom)
+        let mergeTarget = try? StationAIWorktreeManager.defaultLocalBranch(repositoryPath: path)
+        return RepositoryWorktreeSpec(repositoryPath: path, branchFrom: branchFrom, mergeTarget: mergeTarget)
     }
 }
 

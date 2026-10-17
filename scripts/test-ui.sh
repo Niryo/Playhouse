@@ -52,7 +52,15 @@ if [[ "$(cat "${fixture_root}/.stationai-bridge-fixture" 2>/dev/null || true)" !
 fi
 cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-ui"
 cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-empty"
-chmod 755 "${fixture_root}/codex-fixture-ui" "${fixture_root}/codex-fixture-empty"
+cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-nonblocking"
+cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-slow"
+cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-interrupted"
+cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-abort"
+cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-success"
+cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-hold"
+cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-success-wait"
+cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-nonblocking-slow"
+chmod 755 "${fixture_root}/codex-fixture-ui" "${fixture_root}/codex-fixture-empty" "${fixture_root}/codex-fixture-nonblocking" "${fixture_root}/codex-fixture-slow" "${fixture_root}/codex-fixture-nonblocking-slow" "${fixture_root}/codex-fixture-interrupted" "${fixture_root}/codex-fixture-abort" "${fixture_root}/codex-fixture-success" "${fixture_root}/codex-fixture-hold" "${fixture_root}/codex-fixture-success-wait"
 python3 "${repository_root}/scripts/check-test-parity.py"
 
 contract_path="${repository_root}/StationAI/BridgeTests/BridgeTestContracts.json"

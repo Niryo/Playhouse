@@ -79,8 +79,22 @@ struct TaskConversationView: View {
             )
         }
         .task {
+            _ = try? BoardTaskManager(modelContext: modelContext)
+                .reconcileLifecycleStatusOnOpen(task.id, client: codexClient)
             await loadConversation()
             await loadModels()
+            if let request = codexClient.pendingUserInputRequest, request.threadID == task.codexThreadID {
+                userInputRequest = request
+            }
+        }
+        .onChange(of: codexClient.pendingUserInputRequest) { _, request in
+            guard let request, request.threadID == task.codexThreadID else { return }
+            userInputRequest = request
+            userInputAnswers = [:]
+            userInputOther = [:]
+            if request.isBlocking {
+                _ = try? BoardTaskManager(modelContext: modelContext).setLifecycleStatus(task.id, to: .waitingResponse)
+            }
         }
         .task(id: task.workspaceRootPaths) {
             let watchPaths = await WorkspaceChangeWatcher.watchPaths(workspaceRoots: task.workspaceRootPaths)
@@ -587,6 +601,13 @@ struct TaskConversationView: View {
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
+                if let statusMessage = task.statusMessage, !statusMessage.isEmpty {
+                    Text(statusMessage)
+                        .font(.system(size: 10))
+                        .foregroundStyle(task.status == .blocked ? Color.red : Color.secondary)
+                        .lineLimit(3)
+                        .accessibilityIdentifier("task-status-message")
+                }
             }
 
             Spacer(minLength: 0)
@@ -1012,7 +1033,13 @@ struct TaskConversationView: View {
             if let other = userInputOther[question.id]?.trimmingCharacters(in: .whitespacesAndNewlines), !other.isEmpty { values.append(other) }
             answers[question.id] = values
         }
-        _ = codexClient.answerUserInput(requestID: request.id, threadID: request.threadID, answers: answers)
+        guard codexClient.answerUserInput(requestID: request.id, threadID: request.threadID, answers: answers) else {
+            errorMessage = "Codex couldn't accept those answers. Please check the responses and try again."
+            return
+        }
+        if request.isBlocking {
+            _ = try? BoardTaskManager(modelContext: modelContext).setLifecycleStatus(task.id, to: .inProgress)
+        }
         userInputRequest = nil
         userInputAnswers = [:]
         userInputOther = [:]

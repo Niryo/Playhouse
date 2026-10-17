@@ -30,6 +30,7 @@ struct CodexUserInputRequest: Identifiable, Codable, Equatable {
     let id: String
     let threadID: String
     let questions: [CodexUserQuestion]
+    let isBlocking: Bool
 }
 
 enum CodexConversationMode: String, CaseIterable, Hashable {
@@ -53,7 +54,10 @@ struct CodexModelOption: Codable, Identifiable, Hashable {
 @MainActor
 final class CodexAppServerClient: ObservableObject {
     nonisolated static let modelID = "gpt-6-luna"
+    private static var processActiveThreadIDs = Set<String>()
+    private var startingThreadIDs = Set<String>()
     @Published private(set) var isTurnActive = false
+    @Published private(set) var pendingUserInputRequest: CodexUserInputRequest?
 
     private enum ClientError: LocalizedError {
         case cliNotFound
@@ -212,6 +216,7 @@ final class CodexAppServerClient: ObservableObject {
         activeDiffHandler = onDiff
         activeActivities.removeAll()
         defer {
+            Self.processActiveThreadIDs.remove(threadID)
             activeThreadID = nil
             activeTurnID = nil
             isTurnActive = false
@@ -250,6 +255,7 @@ final class CodexAppServerClient: ObservableObject {
         }
         activeTurnID = turnID
         isTurnActive = true
+        Self.processActiveThreadIDs.insert(threadID)
 
         let turnKey = Self.turnKey(threadID: threadID, turnID: turnID)
         switch turn["status"] as? String {
@@ -267,8 +273,8 @@ final class CodexAppServerClient: ObservableObject {
     }
 
     func answerUserInput(requestID: String, threadID: String, answers: [String: [String]]) -> Bool {
-        guard let pendingUserInputRequestID,
-              String(describing: pendingUserInputRequestID) == requestID,
+        guard let requestIDValue = pendingUserInputRequestID,
+              String(describing: requestIDValue) == requestID,
               pendingUserInputThreadID == threadID else { return false }
         let answersAreValid = Set(answers.keys) == Set(pendingUserInputQuestions.keys) &&
             answers.allSatisfy { questionID, values in
@@ -281,20 +287,40 @@ final class CodexAppServerClient: ObservableObject {
             self.pendingUserInputRequestID = nil
             pendingUserInputThreadID = nil
             pendingUserInputQuestions.removeAll()
-            sendServerError(requestID: pendingUserInputRequestID, code: -32602, message: "Answers must include a non-empty response for every question.")
+            pendingUserInputRequest = nil
+            sendServerError(requestID: requestIDValue, code: -32602, message: "Answers must include a non-empty response for every question.")
             return false
         }
         self.pendingUserInputRequestID = nil
         pendingUserInputThreadID = nil
         pendingUserInputQuestions.removeAll()
         do {
-            try sendJSON(["jsonrpc": "2.0", "id": pendingUserInputRequestID,
+            try sendJSON(["jsonrpc": "2.0", "id": requestIDValue,
                           "result": ["answers": answers.mapValues { ["answers": $0] }]])
+            self.pendingUserInputRequest = nil
             return true
         } catch {
             actionRequestHandler?()
             return false
         }
+    }
+
+    func isTurnActive(threadID: String) -> Bool {
+        startingThreadIDs.contains(threadID)
+            || (activeThreadID == threadID && activeTurnID != nil)
+            || pendingUserInputThreadID == threadID
+    }
+
+    func markTurnStarting(threadID: String) {
+        startingThreadIDs.insert(threadID)
+    }
+
+    func clearTurnStarting(threadID: String) {
+        startingThreadIDs.remove(threadID)
+    }
+
+    static func isTurnActiveInProcess(threadID: String) -> Bool {
+        processActiveThreadIDs.contains(threadID)
     }
 
     private func ensureInitialized(workspace: CodexWorkspaceContext) async throws {
@@ -547,11 +573,13 @@ final class CodexAppServerClient: ObservableObject {
     private func handleNotification(method: String, params: [String: Any]) {
         switch method {
         case "turn/started":
-            guard params["threadId"] as? String == activeThreadID,
+            guard let threadID = params["threadId"] as? String,
+                  threadID == activeThreadID,
                   let turn = params["turn"] as? [String: Any],
                   let turnID = turn["id"] as? String else { return }
             activeTurnID = turnID
             isTurnActive = true
+            Self.processActiveThreadIDs.insert(threadID)
         case "item/agentMessage/delta":
             guard params["threadId"] as? String == activeThreadID,
                   let delta = params["delta"] as? String else { return }
@@ -651,7 +679,14 @@ final class CodexAppServerClient: ObservableObject {
             pendingUserInputRequestID = requestID
             pendingUserInputThreadID = threadID
             pendingUserInputQuestions = Dictionary(uniqueKeysWithValues: questions.map { ($0.id, $0) })
-            userInputHandler?(CodexUserInputRequest(id: requestIDString, threadID: threadID, questions: questions))
+            let request = CodexUserInputRequest(
+                id: requestIDString,
+                threadID: threadID,
+                questions: questions,
+                isBlocking: params["isBlocking"] as? Bool ?? true
+            )
+            pendingUserInputRequest = request
+            userInputHandler?(request)
             return
         case "item/commandExecution/requestApproval", "item/fileChange/requestApproval":
             result = ["decision": "decline"]
