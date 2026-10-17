@@ -365,20 +365,33 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Edited ordered folders in task conversation")
     }
 
-    // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | Deleting a task removes it from the board and future lookup returns not found.
+    // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | Empty tasks and clean worktrees delete without confirmation, dirty worktrees require confirmation, and confirmed deletion removes the managed worktree and task.
     func test_task_delete_removes_task_and_later_lookup_is_not_found() throws {
         launchApp(defaultParent: fixture.parent.path)
         createTaskThroughUI(title: "Delete me", roots: ["primary"])
         let taskID = try taskID(named: "Delete me")
-        let card = app.buttons["Delete me"]
-        card.rightClick()
-        let deleteAction = element("delete-task-menu-item")
-        XCTAssertTrue(deleteAction.waitForExistence(timeout: 5), "The task context menu has no delete action.")
-        deleteAction.click()
+        let record = try XCTUnwrap(taskRecord(named: "Delete me"))
+        let worktrees = try XCTUnwrap(record["repositoryWorktrees"] as? [[String: Any]])
+        let worktreePath = try XCTUnwrap(worktrees.first?["worktreePath"] as? String)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktreePath))
+        let cleanCheck = try runCLI(["task", "delete-check", taskID])
+        XCTAssertEqual((cleanCheck["result"] as? [String: Any])?["requiresConfirmation"] as? Bool, false)
+        try "unsaved work\n".write(toFile: URL(fileURLWithPath: worktreePath).appendingPathComponent("trash-test.txt").path, atomically: true, encoding: .utf8)
+        let dirtyCheck = try runCLI(["task", "delete-check", taskID])
+        XCTAssertEqual((dirtyCheck["result"] as? [String: Any])?["requiresConfirmation"] as? Bool, true)
+        dragTaskToTrash("Delete me")
+        let cancel = element("cancel-delete-task-button")
+        XCTAssertTrue(cancel.waitForExistence(timeout: 5), "Dirty work dropped on trash must require confirmation.")
+        cancel.click()
+        XCTAssertTrue(app.buttons["Delete me"].exists, "Cancelling the trash confirmation must preserve the task.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktreePath), "Cancelling must preserve the worktree.")
+
+        dragTaskToTrash("Delete me")
         let confirmation = element("confirm-delete-task-button")
         XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
         confirmation.click()
         XCTAssertEqual(element("task-count").value as? String, "0")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktreePath), "Confirmed deletion must remove the task's dirty managed worktree.")
 
         assertCLIError(try runCLI(["task", "get", taskID], expectedStatus: 3), code: "not_found")
         XCTAssertEqual(try tasksFromBoardList().count, 0)
@@ -830,6 +843,14 @@ final class StationAIUITests: XCTestCase {
         let sourcePoint = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
         let destinationPoint = destination.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.65))
         sourcePoint.press(forDuration: 0.8, thenDragTo: destinationPoint)
+    }
+
+    private func dragTaskToTrash(_ title: String) {
+        let card = app.buttons[title]
+        XCTAssertTrue(card.waitForExistence(timeout: 5))
+        let sourcePoint = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        let dropPoint = app.windows.element.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0.55))
+        sourcePoint.press(forDuration: 0.8, thenDragTo: dropPoint)
     }
 
     private func assertOrderedRoots(_ paths: [String], file: StaticString = #filePath, line: UInt = #line) {

@@ -308,11 +308,28 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "roots", "get", task_id)
         self.assertEqual(self.assert_success(response)["roots"], expected_roots)
 
-    # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | Deleting a task removes it from the board and future lookup returns not found.
+    # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | Empty tasks and clean worktrees delete without confirmation, dirty worktrees require confirmation, and confirmed deletion removes the managed worktree and task.
     def test_task_delete_removes_task_and_later_lookup_is_not_found(self):
-        task_id = self.create_task()["id"]
+        task = self.create_repo_task("Delete me", [self.primary])
+        task_id = task["id"]
+        worktree_path = task["repositoryWorktrees"][0]["worktreePath"]
+        self.assertTrue(Path(worktree_path).is_dir())
+        response, _ = self.call_cli("task", "delete-check", task_id)
+        self.assertFalse(self.assert_success(response)["requiresConfirmation"], "An empty task with a clean worktree needs no confirmation.")
+
+        dirty_task = self.create_repo_task("Delete dirty", [self.secondary])
+        dirty_task_id = dirty_task["id"]
+        dirty_worktree = Path(dirty_task["repositoryWorktrees"][0]["worktreePath"])
+        (dirty_worktree / "unsaved-work.txt").write_text("work that needs confirmation\n", encoding="utf-8")
+        response, _ = self.call_cli("task", "delete-check", dirty_task_id)
+        self.assertTrue(self.assert_success(response)["requiresConfirmation"], "Uncommitted work must require confirmation.")
+        dirty_response, _ = self.call_cli("task", "delete", dirty_task_id)
+        self.assertTrue(self.assert_success(dirty_response)["deleted"])
+        self.assertFalse(dirty_worktree.exists(), "Confirmed deletion must remove the dirty managed worktree.")
+
         response, _ = self.call_cli("task", "delete", task_id)
         self.assertTrue(self.assert_success(response)["deleted"])
+        self.assertFalse(Path(worktree_path).exists(), "Deleting a task must remove its clean managed worktree.")
         response, _ = self.call_cli("task", "get", task_id, expected_status=3)
         self.assert_failure(response, "not_found")
         response, _ = self.call_cli("board", "list")

@@ -129,6 +129,8 @@ def main():
         require(secondary_file.read_text(encoding="utf-8") == secondary_baseline, "Plan mode changed the secondary repository file.")
         require(plan_history.get("messages"), "Plan mode did not return conversation messages.")
         require(any(event.get("type") == "text_delta" for event in plan_events), "Plan mode produced no streamed assistant text.")
+        deletion_check = run_cli("task", "delete-check", task_id)
+        require(deletion_check.get("requiresConfirmation") is True, "A task with real Codex conversation history must require confirmation before deletion.")
 
         first_history, first_events = stream_turn(
             task_id,

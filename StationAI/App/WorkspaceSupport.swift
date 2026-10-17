@@ -310,6 +310,17 @@ enum StationAIWorktreeManager {
         }
     }
 
+    static func hasChanges(_ record: RepositoryWorktreeRecord) throws -> Bool {
+        let status = try git(record.worktreePath, ["status", "--porcelain", "--untracked-files=all"]).output
+        return !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    static func removeAfterConfirmation(_ record: RepositoryWorktreeRecord) throws {
+        guard record.createdByStationAI,
+              FileManager.default.fileExists(atPath: record.worktreePath) else { return }
+        _ = try git(record.repositoryPath, ["worktree", "remove", "--force", record.worktreePath])
+    }
+
     static func remove(_ record: RepositoryWorktreeRecord) throws {
         try preflightRemoval(record)
         _ = try git(record.repositoryPath, ["worktree", "remove", record.worktreePath])

@@ -228,12 +228,26 @@ final class BoardTaskManager {
     }
 
     func delete(_ id: UUID) throws {
-        modelContext.delete(try requireTask(id))
+        let task = try requireTask(id)
+        for worktree in task.repositoryWorktrees {
+            try StationAIWorktreeManager.removeAfterConfirmation(worktree)
+        }
+        modelContext.delete(task)
         try modelContext.save()
     }
 
     func taskModel(_ id: UUID) throws -> BoardTask {
         try requireTask(id)
+    }
+
+    func deleteRequiresConfirmation(_ id: UUID, client: CodexAppServerClient) async throws -> Bool {
+        let task = try requireTask(id)
+        let dirtyWorktree = try task.repositoryWorktrees.contains { try StationAIWorktreeManager.hasChanges($0) }
+        guard task.codexThreadID != nil else { return dirtyWorktree }
+        let history = try await CodexConversationManager(tasks: self, client: client).history(taskID: id)
+        let hasConversation = history.messages.contains { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            || !history.activities.isEmpty || history.diff != nil
+        return dirtyWorktree || hasConversation
     }
 
     func save() throws {
@@ -541,6 +555,12 @@ final class StationAIBridgeRuntime {
             case "task.delete":
                 try taskManager.delete(request.requiredUUID("taskID"))
                 result = .object(["deleted": .boolean(true)])
+            case "task.delete.requires-confirmation":
+                let requiresConfirmation = try await taskManager.deleteRequiresConfirmation(
+                    request.requiredUUID("taskID"),
+                    client: CodexAppServerClient()
+                )
+                result = .object(["requiresConfirmation": .boolean(requiresConfirmation)])
             case "task.roots.get", "workspace.roots":
                 result = .object(["roots": .array(try workspaces.roots(for: request.requiredUUID("taskID")).map(BridgeValue.string))])
             case "task.roots.set":

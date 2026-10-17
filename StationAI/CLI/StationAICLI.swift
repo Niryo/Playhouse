@@ -90,6 +90,9 @@ enum StationAICLI {
             case "delete":
                 let id = try firstPositional(tail)
                 return BridgeRequest(command: "task.delete", arguments: ["taskID": .string(id)])
+            case "delete-check":
+                let id = try firstPositional(tail)
+                return BridgeRequest(command: "task.delete.requires-confirmation", arguments: ["taskID": .string(id)])
             case "roots":
                 guard let action = tail.first, tail.count >= 2 else { throw CLIError.usage("Use: stationai task roots get <task-id> or task roots set <task-id> --root <path>...") }
                 let id = tail[1]
@@ -241,6 +244,7 @@ enum StationAICLI {
       stationai task changes list <task-id>
       stationai task changes diff <task-id> --repository <path> --path <relative-path> --group <staged|working>
       stationai task delete <task-id>
+      stationai task delete-check <task-id>
       stationai workspace suggest --parent <path>
       stationai settings get|clear-parent|set-parent <path>
       stationai conversation history <task-id>
