@@ -12,6 +12,18 @@ struct CodexChatMessage: Codable, Identifiable, Equatable {
     var text: String
 }
 
+enum CodexConversationMode: String, CaseIterable, Hashable {
+    case code = "default"
+    case plan
+
+    var title: String {
+        switch self {
+        case .code: "Code mode"
+        case .plan: "Plan mode"
+        }
+    }
+}
+
 @MainActor
 final class CodexAppServerClient: ObservableObject {
     nonisolated static let modelID = "gpt-6-luna"
@@ -108,6 +120,7 @@ final class CodexAppServerClient: ObservableObject {
 
     func sendMessage(
         _ text: String,
+        mode: CodexConversationMode,
         threadID: String,
         workspace: CodexWorkspaceContext,
         onDelta: @escaping (String) -> Void,
@@ -144,7 +157,15 @@ final class CodexAppServerClient: ObservableObject {
                 "cwd": workspace.cwd.path,
                 "runtimeWorkspaceRoots": workspace.roots.map(\.path),
                 "approvalPolicy": "never",
-                "approvalsReviewer": "user"
+                "approvalsReviewer": "user",
+                "collaborationMode": [
+                    "mode": mode.rawValue,
+                    "settings": [
+                        "model": Self.modelID,
+                        "reasoningEffort": NSNull(),
+                        "developerInstructions": NSNull()
+                    ]
+                ]
             ]
         )
 

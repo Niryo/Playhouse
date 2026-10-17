@@ -72,6 +72,10 @@
     "expectation": "Blank messages cannot be sent and do not create conversation history."
   },
   {
+    "id": "test_conversation_mode_rejects_unknown_mode_without_starting_a_turn",
+    "expectation": "Plan mode is selectable in the composer and through /plan, while unsupported conversation modes are rejected before creating history."
+  },
+  {
     "id": "test_task_workspace_changes_group_staged_and_unstaged_diffs",
     "expectation": "The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation."
   },

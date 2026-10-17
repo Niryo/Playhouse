@@ -371,6 +371,18 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(history["activities"], [])
         self.assertEqual(history["messages"], [])
 
+    # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | Plan mode is selectable in the composer and through /plan, while unsupported conversation modes are rejected before creating history.
+    def test_conversation_mode_rejects_unknown_mode_without_starting_a_turn(self):
+        task_id = self.create_task(title="Conversation mode validation")["id"]
+        response, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Hello", "--mode", "unsupported", expected_status=2
+        )
+        self.assert_failure(response, "invalid_argument")
+        self.assertIn("Valid modes: default, plan", response["error"]["message"])
+        history, _ = self.call_cli("conversation", "history", task_id)
+        self.assertEqual(self.assert_success(history)["messages"], [])
+        self.assertEqual(self.assert_success(history)["activities"], [])
+
     # case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation.
     def test_task_workspace_changes_group_staged_and_unstaged_diffs(self):
         self.prepare_workspace_changes()

@@ -73,9 +73,9 @@ def main():
         )
         return response_from(result, command)
 
-    def stream_turn(task_id, message):
+    def stream_turn(task_id, message, mode="default"):
         process = subprocess.Popen(
-            [str(cli), "conversation", "send", task_id, "--message", message],
+            [str(cli), "conversation", "send", task_id, "--message", message, "--mode", mode],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -106,13 +106,27 @@ def main():
         task_id = created["id"]
         primary_marker = "StationAI primary integration marker 7F34C2"
         secondary_marker = "StationAI secondary integration marker A19D06"
+        primary_file = first / "stationai-primary.txt"
+        secondary_file = second / "stationai-secondary.txt"
+        primary_baseline = primary_file.read_text(encoding="utf-8")
+        secondary_baseline = secondary_file.read_text(encoding="utf-8")
+        plan_history, plan_events = stream_turn(
+            task_id,
+            f"Plan how you would append exactly the line '{primary_marker}' to stationai-primary.txt. Inspect the repository as needed, but do not edit any files. Reply with a concise plan.",
+            mode="plan",
+        )
+        require(primary_file.read_text(encoding="utf-8") == primary_baseline, "Plan mode changed the primary repository file.")
+        require(secondary_file.read_text(encoding="utf-8") == secondary_baseline, "Plan mode changed the secondary repository file.")
+        require(plan_history.get("messages"), "Plan mode did not return conversation messages.")
+        require(any(event.get("type") == "text_delta" for event in plan_events), "Plan mode produced no streamed assistant text.")
+
         first_history, first_events = stream_turn(
             task_id,
             f"Edit the committed baseline files in both selected repositories. In {first.name}, append exactly the line '{primary_marker}' to stationai-primary.txt. In {second.name}, append exactly the line '{secondary_marker}' to stationai-secondary.txt. Then run a shell command that prints STATIONAI_FIRST_TURN_COMMAND_OK. Do not edit other files. Reply with a short summary.",
         )
 
-        first_file = first / "stationai-primary.txt"
-        second_file = second / "stationai-secondary.txt"
+        first_file = primary_file
+        second_file = secondary_file
         require(primary_marker in first_file.read_text(encoding="utf-8"), "First Codex turn did not change the primary repository file.")
         require(secondary_marker in second_file.read_text(encoding="utf-8"), "First Codex turn did not change the secondary repository file.")
         require(any(event.get("type") == "activity" and "STATIONAI_FIRST_TURN_COMMAND_OK" in json.dumps(event) for event in first_events), "First turn did not stream the shell command output.")
@@ -139,7 +153,7 @@ def main():
 
         reopened = run_cli("conversation", "history", task_id)
         require(len(reopened.get("messages", [])) == len(second_history.get("messages", [])), "Fresh CLI/XPC connection did not reload the complete conversation history.")
-        print("Codex integration passed: streamed both turns, changed files in two roots, captured command output and diffs, resumed the thread, and reloaded history.")
+        print("Codex integration passed: Plan mode left both roots unchanged, Code mode streamed turns and changed files in two roots, command output and diffs were captured, the thread resumed, and fresh history reloaded.")
     finally:
         current_marker = root / MARKER_NAME
         if current_marker.is_file() and current_marker.read_text(encoding="utf-8") == MARKER_VALUE:

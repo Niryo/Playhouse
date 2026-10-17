@@ -394,6 +394,7 @@ final class CodexConversationManager {
     func send(
         taskID: UUID,
         text: String,
+        mode: CodexConversationMode = .code,
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in }
     ) async throws -> CodexThreadHistory {
         let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -418,6 +419,7 @@ final class CodexConversationManager {
         onUpdate(ConversationUpdate(type: "started"))
         try await client.sendMessage(
             normalizedText,
+            mode: mode,
             threadID: threadID,
             workspace: workspace,
             onDelta: { delta in onUpdate(ConversationUpdate(type: "text_delta", text: delta)) },
@@ -548,8 +550,15 @@ final class StationAIBridgeRuntime {
             case "conversation.send":
                 let taskID = try request.requiredUUID("taskID")
                 let message = try request.requiredString("message")
+                let modeValue = request.arguments["mode"]?.string ?? CodexConversationMode.code.rawValue
+                guard let mode = CodexConversationMode(rawValue: modeValue) else {
+                    throw BridgeCommandError(
+                        code: "invalid_argument",
+                        message: "Unknown conversation mode '\(modeValue)'. Valid modes: default, plan."
+                    )
+                }
                 let conversations = CodexConversationManager(tasks: taskManager, client: CodexAppServerClient())
-                let history = try await conversations.send(taskID: taskID, text: message) { update in
+                let history = try await conversations.send(taskID: taskID, text: message, mode: mode) { update in
                     if let payload = try? Self.value(update) {
                         eventHandler(BridgeEvent(requestID: request.id, type: update.type, payload: payload))
                     }

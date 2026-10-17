@@ -516,6 +516,40 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Blank composer leaves send disabled")
     }
 
+    // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | Plan mode is selectable in the composer and through /plan, while unsupported conversation modes are rejected before creating history.
+    func test_conversation_mode_rejects_unknown_mode_without_starting_a_turn() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        createTaskThroughUI(title: "Conversation modes", roots: ["primary"])
+        openTask(named: "Conversation modes")
+
+        let modeMenu = element("conversation-mode-menu")
+        XCTAssertTrue(modeMenu.waitForExistence(timeout: 10))
+        modeMenu.click()
+        let planMode = app.menuItems["Plan mode"]
+        XCTAssertTrue(planMode.waitForExistence(timeout: 5))
+        planMode.click()
+        XCTAssertTrue(modeMenu.label.contains("Plan mode"))
+
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText("/plan")
+        XCTAssertEqual(composer.value as? String, "")
+        XCTAssertTrue(modeMenu.label.contains("Plan mode"), "Typing /plan should switch modes without sending a message.")
+
+        let taskID = try taskID(named: "Conversation modes")
+        assertCLIError(
+            try runCLI(
+                ["conversation", "send", taskID, "--message", "Hello", "--mode", "unsupported"],
+                expectedStatus: 2
+            ),
+            code: "invalid_argument"
+        )
+        let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
+        XCTAssertEqual((history?["activities"] as? [Any])?.count, 0)
+        attachScreenshot(named: "Plan mode is visible in the conversation composer")
+    }
+
     // case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation.
     func test_task_workspace_changes_group_staged_and_unstaged_diffs() throws {
         _ = try runCLI([

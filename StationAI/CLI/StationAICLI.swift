@@ -152,9 +152,11 @@ enum StationAICLI {
             switch operation {
             case "history": return BridgeRequest(command: "conversation.history", arguments: ["taskID": .string(id)])
             case "send":
-                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message"])
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode"])
                 return BridgeRequest(command: "conversation.send", arguments: [
-                    "taskID": .string(id), "message": .string(try requiredFlag("--message", flags: flags).first!)
+                    "taskID": .string(id),
+                    "message": .string(try requiredFlag("--message", flags: flags).first!),
+                    "mode": .string(flags["--mode"]?.first ?? "default")
                 ])
             default: throw CLIError.usage("Unknown conversation operation '\(operation)'.")
             }
@@ -240,7 +242,7 @@ enum StationAICLI {
       stationai workspace suggest --parent <path>
       stationai settings get|clear-parent|set-parent <path>
       stationai conversation history <task-id>
-      stationai conversation send <task-id> --message <text>
+      stationai conversation send <task-id> --message <text> [--mode <default|plan>]
 
     Results are JSON. Conversation send emits JSON event lines followed by a final response.
     """

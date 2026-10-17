@@ -17,6 +17,7 @@ struct TaskConversationView: View {
     let onBack: () -> Void
 
     @State private var draft = ""
+    @State private var conversationMode: CodexConversationMode = .code
     @State private var messages: [CodexChatMessage] = []
     @State private var activities: [CodexActivity] = []
     @State private var changeInventory = WorkspaceChangeInventory(staged: [], working: [])
@@ -792,12 +793,47 @@ struct TaskConversationView: View {
             }
 
             HStack(alignment: .bottom, spacing: 12) {
+                Menu {
+                    ForEach(CodexConversationMode.allCases, id: \.self) { mode in
+                        Button {
+                            conversationMode = mode
+                        } label: {
+                            if conversationMode == mode {
+                                Label(mode.title, systemImage: "checkmark")
+                            } else {
+                                Text(mode.title)
+                            }
+                        }
+                        .accessibilityIdentifier("conversation-mode-\(mode.rawValue)")
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 14, weight: .semibold))
+                        if conversationMode == .plan {
+                            Text("Plan")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                    }
+                    .foregroundStyle(conversationMode == .plan ? Color.accentColor : Color.secondary)
+                    .frame(minWidth: 30, minHeight: 31)
+                    .contentShape(Rectangle())
+                }
+                .menuStyle(.borderlessButton)
+                .accessibilityLabel("Conversation mode: \(conversationMode.title)")
+                .accessibilityIdentifier("conversation-mode-menu")
+
                 TextField("Message…", text: $draft, axis: .vertical)
                     .font(.system(size: 14))
                     .lineLimit(1...5)
                     .textFieldStyle(.plain)
                     .focused($isComposerFocused)
                     .onSubmit(sendMessage)
+                    .onChange(of: draft) { _, newValue in
+                        if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/plan" {
+                            activatePlanMode()
+                        }
+                    }
                     .disabled(isResponding || isLoadingHistory)
                     .accessibilityIdentifier("message-composer")
 
@@ -851,6 +887,10 @@ struct TaskConversationView: View {
     private func sendMessage() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isResponding, !isLoadingHistory else { return }
+        if text == "/plan" {
+            activatePlanMode()
+            return
+        }
 
         let userMessageID = UUID().uuidString
         let assistantMessageID = UUID().uuidString
@@ -863,7 +903,7 @@ struct TaskConversationView: View {
 
         Task { @MainActor in
             do {
-                _ = try await conversationManager.send(taskID: task.id, text: text) { update in
+                _ = try await conversationManager.send(taskID: task.id, text: text, mode: conversationMode) { update in
                     switch update.type {
                     case "text_delta":
                         guard let delta = update.text else { return }
@@ -909,6 +949,11 @@ struct TaskConversationView: View {
 
             isResponding = false
         }
+    }
+
+    private func activatePlanMode() {
+        conversationMode = .plan
+        draft = ""
     }
 
     private var workspaceRootURLs: [URL] {
