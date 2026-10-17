@@ -25,6 +25,9 @@ enum StationAICLI {
         configuredRequest.dataDirectory = dataDirectory
         configuredRequest.defaultsSuite = defaultsSuite
         configuredRequest.worktreeDirectory = ProcessInfo.processInfo.environment["STATIONAI_E2E_WORKTREE_DIRECTORY"]
+        if let fixtureExecutable = ProcessInfo.processInfo.environment["STATIONAI_E2E_CODEX_EXECUTABLE"] {
+            configuredRequest.arguments["__codexExecutable"] = .string(fixtureExecutable)
+        }
 
         do {
             let response = try BridgeClient().send(configuredRequest) { event in
@@ -156,12 +159,25 @@ enum StationAICLI {
             case "history": return BridgeRequest(command: "conversation.history", arguments: ["taskID": .string(id)])
             case "models": return BridgeRequest(command: "conversation.models", arguments: ["taskID": .string(id)])
             case "send":
-                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode", "--model"])
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode", "--model", "--answer"])
+                var answers: [String: [String]] = [:]
+                for pair in flags["--answer"] ?? [] {
+                    guard let separator = pair.firstIndex(of: "="), separator != pair.startIndex else {
+                        throw CLIError.usage("Use --answer <question-id>=<answer>.")
+                    }
+                    let questionID = String(pair[..<separator])
+                    let answer = String(pair[pair.index(after: separator)...])
+                    guard !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        throw CLIError.usage("Question answers can't be blank.")
+                    }
+                    answers[questionID, default: []].append(answer)
+                }
                 return BridgeRequest(command: "conversation.send", arguments: [
                     "taskID": .string(id),
                     "message": .string(try requiredFlag("--message", flags: flags).first!),
                     "mode": .string(flags["--mode"]?.first ?? "default"),
-                    "model": .string(flags["--model"]?.first ?? "gpt-6-luna")
+                    "model": .string(flags["--model"]?.first ?? "gpt-6-luna"),
+                    "answers": .object(answers.mapValues { BridgeValue.array($0.map(BridgeValue.string)) })
                 ])
             default: throw CLIError.usage("Unknown conversation operation '\(operation)'.")
             }
@@ -249,7 +265,7 @@ enum StationAICLI {
       stationai settings get|clear-parent|set-parent <path>
       stationai conversation history <task-id>
       stationai conversation models <task-id>
-      stationai conversation send <task-id> --message <text> [--mode <default|plan>] [--model <model-id>]
+      stationai conversation send <task-id> --message <text> [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...]
 
     Results are JSON. Conversation send emits JSON event lines followed by a final response.
     """

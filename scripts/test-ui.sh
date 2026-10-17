@@ -44,6 +44,15 @@ if (( prepare_workspace_changes == 1 )); then
 else
   python3 "${repository_root}/scripts/prepare-e2e-fixture.py"
 fi
+fixture_root="/tmp/stationai-bridge-workspaces"
+fixture_owner="StationAI bridge tests own this deterministic fixture (v1)."
+if [[ "$(cat "${fixture_root}/.stationai-bridge-fixture" 2>/dev/null || true)" != "${fixture_owner}" ]]; then
+  printf 'Refusing to prepare UI Codex fixtures without the owned fixture root marker.\n' >&2
+  exit 1
+fi
+cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-ui"
+cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-empty"
+chmod 755 "${fixture_root}/codex-fixture-ui" "${fixture_root}/codex-fixture-empty"
 python3 "${repository_root}/scripts/check-test-parity.py"
 
 contract_path="${repository_root}/StationAI/BridgeTests/BridgeTestContracts.json"

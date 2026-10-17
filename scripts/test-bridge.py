@@ -408,6 +408,82 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(history)["messages"], [])
         self.assertEqual(self.assert_success(history)["activities"], [])
 
+    # case-contract: test_codex_questions_can_be_answered_over_cli_xpc | A CLI/XPC conversation surfaces structured Codex questions, rejects blank answers, accepts keyed option and secret answers, and completes the same turn.
+    def test_codex_questions_can_be_answered_over_cli_xpc(self):
+        task_id = self.create_task("Codex questions", roots=[self.primary])["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env_overrides = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        invalid, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Please ask your questions.",
+            "--answer", "color= ", expected_status=2,
+        )
+        self.assert_failure(invalid, "invalid_argument")
+        process_env = os.environ.copy()
+        process_env.update({
+            "STATIONAI_DATA_DIRECTORY": str(self.data_directory),
+            "STATIONAI_E2E_WORKTREE_DIRECTORY": str(self.worktree_directory),
+            "STATIONAI_E2E_DEFAULTS_SUITE": self.defaults_suite,
+            "STATIONAI_BRIDGE_SERVICE_NAME": arguments.service_name,
+            **env_overrides,
+        })
+        process = subprocess.Popen(
+            [str(arguments.cli), "conversation", "send", task_id, "--message", "Please ask your questions.",
+             "--answer", "color=Blue", "--answer", "token=fixture-secret"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, env=process_env,
+        )
+        final = None
+        observed_request = None
+        assert process.stdout is not None
+        for line in process.stdout:
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if "type" not in event:
+                final = event
+                continue
+            if event.get("type") == "user_input":
+                observed_request = event.get("payload", {}).get("userInputRequest")
+                self.assertEqual([question["id"] for question in observed_request["questions"]], ["color", "token"])
+        stderr = process.stderr.read() if process.stderr else ""
+        self.assertEqual(process.wait(timeout=30), 0, f"Conversation CLI failed: {final}; {stderr}")
+        self.assertIsNotNone(observed_request, "CLI/XPC did not surface Codex's question request.")
+        self.assertTrue(final and final.get("ok"), final)
+        messages = final["result"]["messages"]
+        self.assertTrue(any("Answers received: Blue / fixture-secret." in message["text"] for message in messages))
+
+    # case-contract: test_codex_empty_question_request_is_rejected | An empty Codex question request returns a protocol error and fails the turn without presenting a prompt.
+    def test_codex_empty_question_request_is_rejected(self):
+        task_id = self.create_task("Empty Codex questions", roots=[self.primary])["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-empty"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = os.environ.copy()
+        env.update({
+            "STATIONAI_DATA_DIRECTORY": str(self.data_directory),
+            "STATIONAI_E2E_WORKTREE_DIRECTORY": str(self.worktree_directory),
+            "STATIONAI_E2E_DEFAULTS_SUITE": self.defaults_suite,
+            "STATIONAI_BRIDGE_SERVICE_NAME": arguments.service_name,
+            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
+        })
+        completed = subprocess.run(
+            [str(arguments.cli), "conversation", "send", task_id, "--message", "Please ask your questions."],
+            check=False, capture_output=True, text=True, env=env, timeout=90,
+        )
+        self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+        lines = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
+        self.assertTrue(lines and not lines[-1].get("ok"), completed.stdout)
+        self.assertIn("question response", lines[-1].get("error", {}).get("message", "").lower())
+
     # case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation.
     def test_task_workspace_changes_group_staged_and_unstaged_diffs(self):
         self.prepare_workspace_changes()

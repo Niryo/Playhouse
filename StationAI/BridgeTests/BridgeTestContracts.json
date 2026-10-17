@@ -76,6 +76,14 @@
     "expectation": "The composer shows a Codex-reported model, while unsupported modes and malformed model IDs are rejected before creating history."
   },
   {
+    "id": "test_codex_questions_can_be_answered_over_cli_xpc",
+    "expectation": "A CLI/XPC conversation surfaces structured Codex questions, rejects blank answers, accepts keyed option and secret answers, and completes the same turn."
+  },
+  {
+    "id": "test_codex_empty_question_request_is_rejected",
+    "expectation": "An empty Codex question request returns a protocol error and fails the turn without presenting a prompt."
+  },
+  {
     "id": "test_task_workspace_changes_group_staged_and_unstaged_diffs",
     "expectation": "The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation."
   },

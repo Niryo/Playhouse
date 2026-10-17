@@ -5,11 +5,14 @@ import SwiftUI
 struct StationAIApp: App {
     private let modelContainer: ModelContainer
     private let appPreferences: UserDefaults
-    @StateObject private var codexClient = CodexAppServerClient()
+    @StateObject private var codexClient: CodexAppServerClient
 
     init() {
-        #if DEBUG
         let environment = ProcessInfo.processInfo.environment
+        _codexClient = StateObject(wrappedValue: CodexAppServerClient(
+            codexExecutableOverride: environment["STATIONAI_E2E_CODEX_EXECUTABLE"]
+        ))
+        #if DEBUG
         if let suiteName = environment["STATIONAI_E2E_DEFAULTS_SUITE"],
            let isolatedPreferences = UserDefaults(suiteName: suiteName) {
             appPreferences = isolatedPreferences

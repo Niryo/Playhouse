@@ -12,6 +12,26 @@ struct CodexChatMessage: Codable, Identifiable, Equatable {
     var text: String
 }
 
+struct CodexUserQuestion: Identifiable, Codable, Equatable {
+    struct Option: Identifiable, Codable, Equatable {
+        let label: String
+        let description: String?
+        var id: String { label }
+    }
+    let id: String
+    let header: String
+    let question: String
+    let options: [Option]
+    let allowsOther: Bool
+    let isSecret: Bool
+}
+
+struct CodexUserInputRequest: Identifiable, Codable, Equatable {
+    let id: String
+    let threadID: String
+    let questions: [CodexUserQuestion]
+}
+
 enum CodexConversationMode: String, CaseIterable, Hashable {
     case code = "default"
     case plan
@@ -86,8 +106,17 @@ final class CodexAppServerClient: ObservableObject {
     private var activeDiffHandler: ((CodexTurnDiff) -> Void)?
     private var activeActivities: [String: CodexActivity] = [:]
     private var actionRequestHandler: (() -> Void)?
+    private var userInputHandler: ((CodexUserInputRequest) -> Void)?
+    private var pendingUserInputRequestID: Any?
+    private var pendingUserInputThreadID: String?
+    private var pendingUserInputQuestions: [String: CodexUserQuestion] = [:]
+    private let codexExecutableOverride: String?
     private var turnWaiters: [String: CheckedContinuation<Void, Error>] = [:]
     private var completedTurns: [String: Result<Void, Error>] = [:]
+
+    init(codexExecutableOverride: String? = nil) {
+        self.codexExecutableOverride = Self.ownedTestFixtureExecutable(codexExecutableOverride)
+    }
 
     func loadThread(
         id threadID: String,
@@ -166,9 +195,11 @@ final class CodexAppServerClient: ObservableObject {
         onActivity: @escaping (CodexActivity) -> Void,
         onDiff: @escaping (CodexTurnDiff) -> Void,
         onHistory: @escaping (CodexThreadHistory) -> Void,
-        onActionRequest: @escaping () -> Void
+        onActionRequest: @escaping () -> Void,
+        onUserInput: @escaping (CodexUserInputRequest) -> Void
     ) async throws {
         actionRequestHandler = onActionRequest
+        userInputHandler = onUserInput
         try await resumeThreadIfNeeded(id: threadID, workspace: workspace, modelID: modelID)
 
         activeThreadID = threadID
@@ -189,6 +220,7 @@ final class CodexAppServerClient: ObservableObject {
             activeActivityHandler = nil
             activeDiffHandler = nil
             activeActivities.removeAll()
+            userInputHandler = nil
         }
 
         let response = try await request(
@@ -234,6 +266,37 @@ final class CodexAppServerClient: ObservableObject {
         }
     }
 
+    func answerUserInput(requestID: String, threadID: String, answers: [String: [String]]) -> Bool {
+        guard let pendingUserInputRequestID,
+              String(describing: pendingUserInputRequestID) == requestID,
+              pendingUserInputThreadID == threadID else { return false }
+        let answersAreValid = Set(answers.keys) == Set(pendingUserInputQuestions.keys) &&
+            answers.allSatisfy { questionID, values in
+                guard !values.isEmpty, let question = pendingUserInputQuestions[questionID] else { return false }
+                guard !question.options.isEmpty else { return values.allSatisfy { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } }
+                let allowedLabels = Set(question.options.map(\.label))
+                return values.allSatisfy { allowedLabels.contains($0) || question.allowsOther }
+            }
+        guard answersAreValid else {
+            self.pendingUserInputRequestID = nil
+            pendingUserInputThreadID = nil
+            pendingUserInputQuestions.removeAll()
+            sendServerError(requestID: pendingUserInputRequestID, code: -32602, message: "Answers must include a non-empty response for every question.")
+            return false
+        }
+        self.pendingUserInputRequestID = nil
+        pendingUserInputThreadID = nil
+        pendingUserInputQuestions.removeAll()
+        do {
+            try sendJSON(["jsonrpc": "2.0", "id": pendingUserInputRequestID,
+                          "result": ["answers": answers.mapValues { ["answers": $0] }]])
+            return true
+        } catch {
+            actionRequestHandler?()
+            return false
+        }
+    }
+
     private func ensureInitialized(workspace: CodexWorkspaceContext) async throws {
         if initialized, process?.isRunning == true {
             return
@@ -262,7 +325,7 @@ final class CodexAppServerClient: ObservableObject {
     }
 
     private func launchProcess(workspaceURL: URL) throws {
-        guard let executablePath = Self.findCodexExecutable() else {
+        guard let executablePath = Self.findCodexExecutable(override: codexExecutableOverride) else {
             throw ClientError.cliNotFound
         }
 
@@ -459,7 +522,7 @@ final class CodexAppServerClient: ObservableObject {
 
         if let method = message["method"] as? String {
             if let requestID = message["id"] {
-                handleServerRequest(method: method, requestID: requestID)
+                handleServerRequest(method: method, params: message["params"] as? [String: Any] ?? [:], requestID: requestID)
             } else {
                 handleNotification(method: method, params: message["params"] as? [String: Any] ?? [:])
             }
@@ -551,15 +614,45 @@ final class CodexAppServerClient: ObservableObject {
         }
     }
 
-    private func handleServerRequest(method: String, requestID: Any) {
+    private func handleServerRequest(method: String, params: [String: Any], requestID: Any) {
         let normalizedMethod = method.lowercased()
         if normalizedMethod.contains("approval") || normalizedMethod.contains("item/tool/") ||
-            normalizedMethod.contains("elicitation") {
+            normalizedMethod.contains("elicitation"), method != "item/tool/requestUserInput" {
             actionRequestHandler?()
         }
 
         let result: [String: Any]
         switch method {
+        case "item/tool/requestUserInput":
+            guard let questionsRaw = params["questions"] as? [[String: Any]],
+                  let threadID = params["threadId"] as? String,
+                  let requestIDString = requestID as? String ?? (requestID as? NSNumber)?.stringValue else {
+                sendServerError(requestID: requestID, code: -32602, message: "Invalid user input request.")
+                return
+            }
+            let questions = questionsRaw.compactMap { raw -> CodexUserQuestion? in
+                guard let id = raw["id"] as? String, let question = raw["question"] as? String else { return nil }
+                let options = (raw["options"] as? [[String: Any]] ?? []).compactMap { option -> CodexUserQuestion.Option? in
+                    guard let label = option["label"] as? String else { return nil }
+                    return CodexUserQuestion.Option(label: label, description: option["description"] as? String)
+                }
+                return CodexUserQuestion(id: id, header: raw["header"] as? String ?? "Question", question: question,
+                                         options: options, allowsOther: raw["isOther"] as? Bool ?? false,
+                                         isSecret: raw["isSecret"] as? Bool ?? false)
+            }
+            guard !questions.isEmpty else {
+                sendServerError(requestID: requestID, code: -32602, message: "The request did not contain any questions.")
+                return
+            }
+            guard Set(questions.map(\.id)).count == questions.count else {
+                sendServerError(requestID: requestID, code: -32602, message: "Question IDs must be unique.")
+                return
+            }
+            pendingUserInputRequestID = requestID
+            pendingUserInputThreadID = threadID
+            pendingUserInputQuestions = Dictionary(uniqueKeysWithValues: questions.map { ($0.id, $0) })
+            userInputHandler?(CodexUserInputRequest(id: requestIDString, threadID: threadID, questions: questions))
+            return
         case "item/commandExecution/requestApproval", "item/fileChange/requestApproval":
             result = ["decision": "decline"]
         case "item/permissions/requestApproval":
@@ -709,7 +802,8 @@ final class CodexAppServerClient: ObservableObject {
         return ClientError.server(message)
     }
 
-    private static func findCodexExecutable() -> String? {
+    private static func findCodexExecutable(override: String?) -> String? {
+        if let override, FileManager.default.isExecutableFile(atPath: override) { return override }
         let home = NSHomeDirectory()
         let commonPaths = [
             "/opt/homebrew/bin/codex",
@@ -727,6 +821,20 @@ final class CodexAppServerClient: ObservableObject {
             if FileManager.default.isExecutableFile(atPath: candidate) {
                 return candidate
             }
+        }
+        return nil
+    }
+
+    private static func ownedTestFixtureExecutable(_ path: String?) -> String? {
+        guard let path, FileManager.default.isExecutableFile(atPath: path) else { return nil }
+        let directory = URL(fileURLWithPath: path).deletingLastPathComponent()
+        let markerValues = [
+            (".stationai-codex-fixture-owner", "StationAI test owns this Codex protocol fixture (v1).\n"),
+            (".stationai-bridge-fixture", "StationAI bridge tests own this deterministic fixture (v1).\n"),
+        ]
+        for (name, value) in markerValues {
+            let marker = directory.appendingPathComponent(name)
+            if (try? String(contentsOf: marker, encoding: .utf8)) == value { return path }
         }
         return nil
     }

@@ -10,11 +10,13 @@ final class StationAIUITests: XCTestCase {
     private var appBundle: URL!
     private var cliURL: URL!
     private var serviceName: String!
+    private var codexFixtureExecutable: String?
     private var selectedRepositoryCount = 0
 
     override func setUpWithError() throws {
         continueAfterFailure = false
         selectedRepositoryCount = 0
+        codexFixtureExecutable = nil
         fixture = try WorkspaceFixture.load()
         runDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("StationAIUITests-\(UUID().uuidString)", isDirectory: true)
@@ -655,6 +657,46 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Plan mode is visible in the conversation composer")
     }
 
+    // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | A CLI/XPC conversation surfaces structured Codex questions, rejects blank answers, accepts keyed option and secret answers, and completes the same turn.
+    func test_codex_questions_can_be_answered_over_cli_xpc() throws {
+        let created = try runCLI(["task", "create", "--title", "Codex questions", "--root", fixture.primary.path])
+        XCTAssertEqual(created["ok"] as? Bool, true)
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Codex questions")
+        element("message-composer").click()
+        element("message-composer").typeText("Please ask your questions.")
+        element("send-message-button").click()
+
+        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Which color should I use?"].exists)
+        XCTAssertFalse(element("submit-ai-answers-button").isEnabled, "Blank answers must not be submitted.")
+        app.buttons["Blue"].click()
+        let secretAnswer = element("ai-question-answer-token")
+        XCTAssertTrue(secretAnswer.exists)
+        secretAnswer.click()
+        secretAnswer.typeText("fixture-secret")
+        attachScreenshot(named: "Codex structured questions with option and private answer fields")
+        element("submit-ai-answers-button").click()
+
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        XCTAssertFalse(element("ai-question-form-title").exists)
+    }
+
+    // case-contract: test_codex_empty_question_request_is_rejected | An empty Codex question request returns a protocol error and fails the turn without presenting a prompt.
+    func test_codex_empty_question_request_is_rejected() throws {
+        _ = try runCLI(["task", "create", "--title", "Empty Codex questions", "--root", fixture.primary.path])
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: true).path
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Empty Codex questions")
+        element("message-composer").click()
+        element("message-composer").typeText("Please ask your questions.")
+        element("send-message-button").click()
+
+        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10))
+        XCTAssertFalse(element("ai-question-form").exists)
+    }
+
     // case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation.
     func test_task_workspace_changes_group_staged_and_unstaged_diffs() throws {
         _ = try runCLI([
@@ -753,9 +795,19 @@ final class StationAIUITests: XCTestCase {
         app.launchEnvironment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         app.launchEnvironment["STATIONAI_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         app.launchEnvironment["STATIONAI_E2E_DEFAULT_PARENT_FOLDER"] = defaultParent ?? "__unset__"
+        if let codexFixtureExecutable {
+            app.launchEnvironment["STATIONAI_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
+        }
         app.launch()
         app.activate()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 15))
+    }
+
+    private func makeCodexFixture(emptyQuestions: Bool) throws -> URL {
+        let executable = URL(fileURLWithPath: "/tmp/stationai-bridge-workspaces", isDirectory: true)
+            .appendingPathComponent(emptyQuestions ? "codex-fixture-empty" : "codex-fixture-ui")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path), "The prepared Codex fixture is missing or not executable.")
+        return executable
     }
 
     private func relaunchApp() {

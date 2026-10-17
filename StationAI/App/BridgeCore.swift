@@ -382,6 +382,7 @@ struct ConversationUpdate: Codable {
     var diff: String?
     var history: CodexThreadHistory?
     var message: String?
+    var userInputRequest: CodexUserInputRequest?
 }
 
 @MainActor
@@ -424,7 +425,9 @@ final class CodexConversationManager {
         text: String,
         mode: CodexConversationMode = .code,
         modelID: String = CodexAppServerClient.modelID,
-        onUpdate: @escaping (ConversationUpdate) -> Void = { _ in }
+        userInputAnswers: [String: [String]] = [:],
+        onUpdate: @escaping (ConversationUpdate) -> Void = { _ in },
+        onUserInput: @escaping (CodexUserInputRequest) -> Void = { _ in }
     ) async throws -> CodexThreadHistory {
         let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedText.isEmpty else { throw StationAIManagerError.invalidMessage }
@@ -463,6 +466,20 @@ final class CodexConversationManager {
             onActionRequest: {
                 let message = "Codex requested an approval. StationAI denied it because approval prompts are disabled."
                 onUpdate(ConversationUpdate(type: "action_notice", message: message))
+            },
+            onUserInput: { request in
+                onUpdate(ConversationUpdate(type: "user_input", userInputRequest: request))
+                if !userInputAnswers.isEmpty {
+                    let answersAccepted = self.client.answerUserInput(
+                        requestID: request.id,
+                        threadID: request.threadID,
+                        answers: userInputAnswers
+                    )
+                    if !answersAccepted {
+                        onUpdate(ConversationUpdate(type: "action_notice", message: "The supplied answers didn't match Codex's questions."))
+                    }
+                }
+                onUserInput(request)
             }
         )
         let finalHistory = try await history(taskID: taskID) {
@@ -590,7 +607,10 @@ final class StationAIBridgeRuntime {
                 try settings.setDefaultParentFolder(nil)
                 result = .object(["defaultParentFolder": .null])
             case "conversation.history":
-                let conversations = CodexConversationManager(tasks: taskManager, client: CodexAppServerClient())
+                let conversations = CodexConversationManager(
+                    tasks: taskManager,
+                    client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
+                )
                 result = try Self.value(await conversations.history(taskID: request.requiredUUID("taskID")))
             case "conversation.models":
                 let conversations = CodexConversationManager(tasks: taskManager, client: CodexAppServerClient())
@@ -606,8 +626,12 @@ final class StationAIBridgeRuntime {
                     )
                 }
                 let modelID = request.arguments["model"]?.string ?? CodexAppServerClient.modelID
-                let conversations = CodexConversationManager(tasks: taskManager, client: CodexAppServerClient())
-                let history = try await conversations.send(taskID: taskID, text: message, mode: mode, modelID: modelID) { update in
+                let answers = try request.optionalStringArrays("answers")
+                let conversations = CodexConversationManager(
+                    tasks: taskManager,
+                    client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
+                )
+                let history = try await conversations.send(taskID: taskID, text: message, mode: mode, modelID: modelID, userInputAnswers: answers) { update in
                     if let payload = try? Self.value(update) {
                         eventHandler(BridgeEvent(requestID: request.id, type: update.type, payload: payload))
                     }
@@ -635,6 +659,7 @@ final class StationAIBridgeRuntime {
         let data = try JSONEncoder.bridge.encode(value)
         return try JSONDecoder().decode(BridgeValue.self, from: data)
     }
+
 }
 
 private extension JSONEncoder {
@@ -658,6 +683,29 @@ private extension BridgeRequest {
             throw BridgeCommandError(code: "invalid_argument", message: "Missing required list argument: \(name).")
         }
         return value
+    }
+
+    func requiredStringArrays(_ name: String) throws -> [String: [String]] {
+        guard let object = arguments[name]?.object else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Missing required answer map: \(name).")
+        }
+        var result: [String: [String]] = [:]
+        for (key, value) in object {
+            guard case .array(let values) = value else {
+                throw BridgeCommandError(code: "invalid_argument", message: "Answers for \(key) must be a list of strings.")
+            }
+            let strings = values.compactMap(\.string)
+            guard strings.count == values.count else {
+                throw BridgeCommandError(code: "invalid_argument", message: "Answers for \(key) must be a list of strings.")
+            }
+            result[key] = strings
+        }
+        return result
+    }
+
+    func optionalStringArrays(_ name: String) throws -> [String: [String]] {
+        guard arguments[name] != nil else { return [:] }
+        return try requiredStringArrays(name)
     }
 
     func repositorySpecs(_ name: String) throws -> [RepositoryWorktreeSpec] {

@@ -40,6 +40,9 @@ struct TaskConversationView: View {
     @State private var isResponding = false
     @State private var hasPausedResponse = false
     @State private var isPausingResponse = false
+    @State private var userInputRequest: CodexUserInputRequest?
+    @State private var userInputAnswers: [String: [String]] = [:]
+    @State private var userInputOther: [String: String] = [:]
     @State private var errorMessage: String?
     @State private var actionNotice: String?
     @State private var isShowingWorkspaceEditor = false
@@ -309,6 +312,8 @@ struct TaskConversationView: View {
                 safetyNotice
 
                 conversation
+
+                if let userInputRequest { userInputForm(userInputRequest) }
 
                 Rectangle()
                     .fill(Color.primary.opacity(0.07))
@@ -941,6 +946,78 @@ struct TaskConversationView: View {
         .frame(maxWidth: .infinity)
     }
 
+    private func userInputForm(_ request: CodexUserInputRequest) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Codex has a few questions")
+                .font(.system(size: 14, weight: .semibold))
+                .accessibilityIdentifier("ai-question-form-title")
+            ForEach(request.questions) { question in
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(question.question).font(.system(size: 12, weight: .medium))
+                    if question.options.isEmpty {
+                        Group {
+                            if question.isSecret {
+                                SecureField("Answer", text: Binding(
+                                    get: { userInputAnswers[question.id]?.first ?? "" },
+                                    set: { userInputAnswers[question.id] = [$0] }
+                                ))
+                            } else {
+                                TextField("Your answer", text: Binding(
+                                    get: { userInputAnswers[question.id]?.first ?? "" },
+                                    set: { userInputAnswers[question.id] = [$0] }
+                                ))
+                            }
+                        }
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("ai-question-answer-\(question.id)")
+                    } else {
+                        ForEach(question.options) { option in
+                            Button {
+                                var selected = userInputAnswers[question.id] ?? []
+                                if selected.contains(option.label) { selected.removeAll { $0 == option.label } }
+                                else { selected.append(option.label) }
+                                userInputAnswers[question.id] = selected
+                            } label: {
+                                Label(option.label, systemImage: (userInputAnswers[question.id] ?? []).contains(option.label) ? "checkmark.circle.fill" : "circle")
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        if question.allowsOther {
+                            TextField("Other answer", text: Binding(
+                                get: { userInputOther[question.id] ?? "" },
+                                set: { userInputOther[question.id] = $0 }
+                            )).textFieldStyle(.roundedBorder)
+                        }
+                    }
+                }
+            }
+            Button("Submit answers") { submitUserInput(request) }
+                .buttonStyle(.borderedProminent)
+                .disabled(request.questions.contains { question in
+                    let selections = userInputAnswers[question.id] ?? []
+                    return selections.isEmpty && (userInputOther[question.id] ?? "").isEmpty
+                })
+                .accessibilityIdentifier("submit-ai-answers-button")
+        }
+        .padding(16)
+        .frame(maxWidth: 720, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+        .accessibilityElement(children: .contain)
+    }
+
+    private func submitUserInput(_ request: CodexUserInputRequest) {
+        var answers: [String: [String]] = [:]
+        for question in request.questions {
+            var values = userInputAnswers[question.id] ?? []
+            if let other = userInputOther[question.id]?.trimmingCharacters(in: .whitespacesAndNewlines), !other.isEmpty { values.append(other) }
+            answers[question.id] = values
+        }
+        _ = codexClient.answerUserInput(requestID: request.id, threadID: request.threadID, answers: answers)
+        userInputRequest = nil
+        userInputAnswers = [:]
+        userInputOther = [:]
+    }
+
     private func loadConversation() async {
         isLoadingHistory = true
         errorMessage = nil
@@ -994,7 +1071,7 @@ struct TaskConversationView: View {
 
         Task { @MainActor in
             do {
-                _ = try await conversationManager.send(taskID: task.id, text: text, mode: conversationMode, modelID: selectedModelID) { update in
+                _ = try await conversationManager.send(taskID: task.id, text: text, mode: conversationMode, modelID: selectedModelID, onUpdate: { update in
                     switch update.type {
                     case "text_delta":
                         guard let delta = update.text else { return }
@@ -1025,7 +1102,11 @@ struct TaskConversationView: View {
                     default:
                         break
                     }
-                }
+                }, onUserInput: { request in
+                    userInputRequest = request
+                    userInputAnswers = [:]
+                    userInputOther = [:]
+                })
 
                 if messages.first(where: { $0.id == assistantMessageID })?.text.isEmpty == true {
                     messages.removeAll { $0.id == assistantMessageID }
