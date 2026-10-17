@@ -267,6 +267,11 @@ enum StationAIWorktreeManager {
             .standardizedFileURL.path
     }
 
+    static func defaultBranchFrom(repositoryPath: String) throws -> String {
+        let repository = try repositoryRoot(repositoryPath)
+        return try resolveBase(repository: repository, requested: nil)
+    }
+
     static func resolve(spec: RepositoryWorktreeSpec, title: String, root: URL) throws -> RepositoryWorktreeRecord {
         let repository = try repositoryRoot(spec.repositoryPath)
         let branch = (spec.branch?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)

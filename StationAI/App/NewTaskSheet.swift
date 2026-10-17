@@ -11,9 +11,16 @@ struct NewTaskSheet: View {
     @State private var contextFolders: [URL] = []
     @State private var suggestedRepositories: [URL] = []
     @State private var repositorySearch = ""
-    @State private var isAdvancedExpanded = false
+    @State private var editingRepositoryField: EditableRepositoryField?
+    @State private var hoveredRepositoryTag: String?
+    @FocusState private var focusedRepositoryField: EditableRepositoryField?
     @State private var isChoosingInitialParent = false
     @State private var createError: String?
+
+    private enum EditableRepositoryField: Hashable {
+        case branch(Int)
+        case branchFrom(Int)
+    }
 
     let onCreate: (String, [RepositoryWorktreeSpec], [URL]) throws -> Void
 
@@ -63,47 +70,35 @@ struct NewTaskSheet: View {
                         .buttonStyle(.link)
                 }
 
-            if !repositories.isEmpty {
-                Button {
-                    isAdvancedExpanded.toggle()
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: isAdvancedExpanded ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
-                        Text("Advanced branch options").font(.system(size: 10, weight: .medium))
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("advanced-branch-options")
-                .accessibilityValue(isAdvancedExpanded ? "1" : "0")
-                if isAdvancedExpanded {
-                    Text("Set branch and starting point separately for each repository.")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
-                }
-            }
             ForEach(repositories.indices, id: \.self) { index in
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "arrow.triangle.branch").foregroundStyle(.tint)
-                            Text(URL(fileURLWithPath: repositories[index].repositoryPath).lastPathComponent)
-                                .font(.system(size: 11, weight: .medium))
-                                .accessibilityIdentifier("selected-repository-\(index)")
-                            Text(repositories[index].branch ?? StationAIWorktreeManager.branchSlug(normalizedTitle.isEmpty ? "task" : normalizedTitle))
-                                .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
-                            Spacer()
-                            Button { repositories.remove(at: index) } label: { Image(systemName: "xmark.circle.fill") }
-                                .buttonStyle(.plain).accessibilityLabel("Remove repository")
-                        }
-                        if isAdvancedExpanded {
-                            HStack(spacing: 8) {
-                                TextField("Branch name", text: branchBinding(at: index))
-                                    .textFieldStyle(.roundedBorder).accessibilityIdentifier("repository-branch-\(index)")
-                                TextField("Branch from (master)", text: branchFromBinding(at: index))
-                                    .textFieldStyle(.roundedBorder).accessibilityIdentifier("repository-branch-from-\(index)")
-                            }
-                        }
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.triangle.branch").foregroundStyle(.tint)
+                        Text(URL(fileURLWithPath: repositories[index].repositoryPath).lastPathComponent)
+                            .font(.system(size: 11, weight: .medium))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .accessibilityIdentifier("selected-repository-\(index)")
+                        Spacer(minLength: 2)
+                        editableRepositoryTag(
+                            label: "branch",
+                            value: repositories[index].branch ?? StationAIWorktreeManager.branchSlug(normalizedTitle.isEmpty ? "task" : normalizedTitle),
+                            identifier: "repository-branch-tag-\(index)",
+                            textFieldIdentifier: "repository-branch-\(index)",
+                            field: .branch(index),
+                            text: branchBinding(at: index),
+                            minimumWidth: 150
+                        )
+                        editableRepositoryTag(
+                            label: "from",
+                            value: repositories[index].branchFrom ?? "default",
+                            identifier: "repository-branch-from-tag-\(index)",
+                            textFieldIdentifier: "repository-branch-from-\(index)",
+                            field: .branchFrom(index),
+                            text: branchFromBinding(at: index),
+                            minimumWidth: 105
+                        )
+                        Button { repositories.remove(at: index) } label: { Image(systemName: "xmark.circle.fill") }
+                            .buttonStyle(.plain).accessibilityLabel("Remove repository")
                     }
                     .padding(.horizontal, 9).padding(.vertical, 7)
                     .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
@@ -133,7 +128,7 @@ struct NewTaskSheet: View {
                             LazyVStack(spacing: 0) {
                                 ForEach(matches, id: \.path) { repository in
                                     Button {
-                                        repositories.append(RepositoryWorktreeSpec(repositoryPath: repository.path))
+                                        repositories.append(repositorySpec(for: repository.path))
                                         repositorySearch = ""
                                     } label: {
                                         VStack(alignment: .leading, spacing: 2) {
@@ -251,6 +246,55 @@ struct NewTaskSheet: View {
         )
     }
 
+    @ViewBuilder
+    private func editableRepositoryTag(
+        label: String,
+        value: String,
+        identifier: String,
+        textFieldIdentifier: String,
+        field: EditableRepositoryField,
+        text: Binding<String>,
+        minimumWidth: CGFloat
+    ) -> some View {
+        if editingRepositoryField == field {
+            TextField(label, text: text)
+                .textFieldStyle(.roundedBorder)
+                .frame(minWidth: minimumWidth, maxWidth: 190)
+                .focused($focusedRepositoryField, equals: field)
+                .accessibilityIdentifier(textFieldIdentifier)
+                .onSubmit {
+                    editingRepositoryField = nil
+                    focusedRepositoryField = nil
+                }
+        } else {
+            Button {
+                editingRepositoryField = field
+                DispatchQueue.main.async { focusedRepositoryField = field }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(label).foregroundStyle(.secondary)
+                    Text(value.isEmpty ? "default" : value)
+                        .font(.system(size: 9, design: .monospaced))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Image(systemName: "pencil")
+                        .font(.system(size: 8, weight: .medium))
+                        .opacity(hoveredRepositoryTag == identifier ? 0.75 : 0.35)
+                }
+                .font(.system(size: 9, weight: .medium))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 5)
+                .background(Color(nsColor: .controlBackgroundColor), in: Capsule())
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .onHover { isHovering in hoveredRepositoryTag = isHovering ? identifier : nil }
+            .help("Edit \(label == "from" ? "branch starting point" : "branch name")")
+            .accessibilityIdentifier(identifier)
+            .accessibilityLabel("Edit \(label == "from" ? "branch starting point" : "branch name"): \(value)")
+        }
+    }
+
     private func browseForFolders() {
         let panel = NSOpenPanel()
         panel.title = "Add repositories or folders"
@@ -268,7 +312,7 @@ struct NewTaskSheet: View {
                     let marker = folder.appendingPathComponent(".git")
                     if FileManager.default.fileExists(atPath: marker.path) {
                         if !repositories.contains(where: { URL(fileURLWithPath: $0.repositoryPath).standardizedFileURL.path == folder.path }) {
-                            repositories.append(RepositoryWorktreeSpec(repositoryPath: folder.path))
+                            repositories.append(repositorySpec(for: folder.path))
                         }
                     } else if !contextFolders.contains(where: { $0.standardizedFileURL.path == folder.path }) {
                         contextFolders.append(folder)
@@ -276,6 +320,11 @@ struct NewTaskSheet: View {
                 }
             }
         }
+    }
+
+    private func repositorySpec(for path: String) -> RepositoryWorktreeSpec {
+        let branchFrom = try? StationAIWorktreeManager.defaultBranchFrom(repositoryPath: path)
+        return RepositoryWorktreeSpec(repositoryPath: path, branchFrom: branchFrom)
     }
 }
 

@@ -114,8 +114,9 @@ final class StationAIUITests: XCTestCase {
         element("task-title-field").typeText("Ordered roots")
         searchAndChooseRepository("secondary")
         searchAndChooseRepository("primary")
-        openAdvancedBranchOptions()
+        openRepositoryTag("repository-branch-from-tag-0", field: "repository-branch-from-0")
         replaceText(element("repository-branch-from-0"), with: "branch-source")
+        openRepositoryTag("repository-branch-from-tag-1", field: "repository-branch-from-1")
         replaceText(element("repository-branch-from-1"), with: "branch-source")
         element("browse-workspace-roots-button").click()
         try chooseFolder(in: openFolderPanel, folder: fixture.custom, confirmationButton: "Add")
@@ -160,7 +161,7 @@ final class StationAIUITests: XCTestCase {
         element("task-title-field").click()
         element("task-title-field").typeText("Reuse existing")
         searchAndChooseRepository("primary")
-        openAdvancedBranchOptions()
+        openRepositoryTag("repository-branch-tag-0", field: "repository-branch-0")
         replaceText(element("repository-branch-0"), with: "ui-existing-worktree")
         clickCreateTaskAndConfirm("Reuse existing")
         let task = try XCTUnwrap(taskRecord(named: "Reuse existing"))
@@ -178,6 +179,8 @@ final class StationAIUITests: XCTestCase {
         element("task-title-field").typeText("Multi repository UI")
         searchAndChooseRepository("secondary")
         searchAndChooseRepository("primary")
+        XCTAssertTrue(element("repository-branch-tag-0").label.contains("multi-repository-ui"))
+        XCTAssertTrue(element("repository-branch-from-tag-0").label.contains("main"))
         clickCreateTaskAndConfirm("Multi repository UI")
         let task = try XCTUnwrap(taskRecord(named: "Multi repository UI"))
         let records = try XCTUnwrap(task["repositoryWorktrees"] as? [[String: Any]])
@@ -218,7 +221,7 @@ final class StationAIUITests: XCTestCase {
         element("task-title-field").click()
         element("task-title-field").typeText("Second owner")
         searchAndChooseRepository("primary")
-        openAdvancedBranchOptions()
+        openRepositoryTag("repository-branch-tag-0", field: "repository-branch-0")
         replaceText(element("repository-branch-0"), with: branch)
         element("create-task-button").click()
         let error = element("task-create-error")
@@ -667,17 +670,11 @@ final class StationAIUITests: XCTestCase {
         selectedRepositoryCount += 1
     }
 
-    private func openAdvancedBranchOptions() {
-        let disclosure = element("advanced-branch-options")
-        XCTAssertTrue(disclosure.waitForExistence(timeout: 5))
-        if (disclosure.value as? NSNumber)?.intValue != 1 {
-            disclosure.click()
-        }
-        let expanded = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "value == 1 OR value == '1'"),
-            object: disclosure
-        )
-        XCTAssertEqual(XCTWaiter.wait(for: [expanded], timeout: 5), .completed, "Advanced branch fields did not expand.")
+    private func openRepositoryTag(_ tagIdentifier: String, field fieldIdentifier: String) {
+        let tag = element(tagIdentifier)
+        XCTAssertTrue(tag.waitForExistence(timeout: 5), "Missing editable repository tag: \(tagIdentifier)")
+        tag.click()
+        XCTAssertTrue(element(fieldIdentifier).waitForExistence(timeout: 5), "Clicking \(tagIdentifier) should show \(fieldIdentifier).")
     }
 
     private func replaceText(_ field: XCUIElement, with value: String) {
