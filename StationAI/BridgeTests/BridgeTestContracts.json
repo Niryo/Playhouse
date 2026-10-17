@@ -68,12 +68,12 @@
     "expectation": "A newly created task shows an empty conversation and has no stored messages or activity."
   },
   {
-    "id": "test_blank_conversation_send_is_rejected_without_starting_a_turn",
-    "expectation": "Blank messages cannot be sent and do not create conversation history."
+    "id": "test_conversation_composer_rejects_blank_and_supports_live_turn_controls",
+    "expectation": "Blank drafts cannot be sent or stored; live responses can be paused, continued, and their task activity expanded."
   },
   {
     "id": "test_conversation_mode_rejects_unknown_mode_without_starting_a_turn",
-    "expectation": "Plan mode is selectable in the composer and through /plan, while unsupported conversation modes are rejected before creating history."
+    "expectation": "The composer shows a Codex-reported model, while unsupported modes and malformed model IDs are rejected before creating history."
   },
   {
     "id": "test_task_workspace_changes_group_staged_and_unstaged_diffs",

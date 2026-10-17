@@ -101,6 +101,16 @@ def main():
         require(any(event.get("requestID") == final.get("id") for event in events), "Stream events did not match the request ID.")
         return final["result"], events
 
+    def fixture_diff(repository, path):
+        result = subprocess.run(
+            ["git", "diff", "--no-ext-diff", "--", str(path)],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout
+
     try:
         created = run_cli("task", "create", "--title", "Two-root Codex integration", "--root", first, "--root", second)
         task_id = created["id"]
@@ -131,7 +141,18 @@ def main():
         require(secondary_marker in second_file.read_text(encoding="utf-8"), "First Codex turn did not change the secondary repository file.")
         require(any(event.get("type") == "activity" and "STATIONAI_FIRST_TURN_COMMAND_OK" in json.dumps(event) for event in first_events), "First turn did not stream the shell command output.")
         require(first_history.get("messages"), "First turn did not return conversation messages.")
-        first_diff = first_history.get("diff", {}).get("unifiedDiff", "")
+        first_activities = first_history.get("activities", [])
+        require(first_activities, "First turn history omitted its activity rows.")
+        require(any(activity.get("status") == "completed" for activity in first_activities), "First turn history omitted completed activity state.")
+        require(
+            any(
+                event.get("type") == "activity"
+                and (event.get("payload", {}).get("activity", {}).get("status") in {"inProgress", "running"})
+                for event in first_events
+            ),
+            "First turn did not stream a running activity state.",
+        )
+        first_diff = fixture_diff(first, primary_file.name) + fixture_diff(second, secondary_file.name)
         require(primary_marker in first_diff and secondary_marker in first_diff, "First turn diff omitted the actual changed lines from both repositories.")
         changed_rows = [
             event for event in first_events
@@ -148,7 +169,8 @@ def main():
         require(followup_marker in second_file.read_text(encoding="utf-8"), "Resumed Codex turn did not update the secondary repository file.")
         require(any(event.get("type") == "activity" and "STATIONAI_RESUMED_COMMAND_OK" in json.dumps(event) for event in second_events), "Resumed turn did not stream its command output.")
         require(len(second_history.get("messages", [])) >= len(first_history.get("messages", [])) + 2, "Resumed history did not retain both turns.")
-        second_diff = second_history.get("diff", {}).get("unifiedDiff", "")
+        require(second_history.get("activities"), "Resumed turn history omitted its activity rows.")
+        second_diff = fixture_diff(second, secondary_file.name)
         require(followup_marker in second_diff, "Resumed turn diff omitted its changed line.")
 
         reopened = run_cli("conversation", "history", task_id)

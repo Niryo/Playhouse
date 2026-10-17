@@ -391,14 +391,32 @@ final class CodexConversationManager {
         return try await client.loadThread(id: threadID, workspace: workspace, onActionRequest: onActionRequest)
     }
 
+    func models(taskID: UUID) async throws -> [CodexModelOption] {
+        let task = try tasks.taskModel(taskID)
+        let workspace = try CodexWorkspaceContext(roots: task.workspaceRootPaths.map {
+            URL(fileURLWithPath: $0, isDirectory: true)
+        })
+        return try await client.availableModels(workspace: workspace)
+    }
+
+    func interrupt(taskID: UUID) async throws -> Bool {
+        let task = try tasks.taskModel(taskID)
+        guard let threadID = task.codexThreadID else { return false }
+        return try await client.interruptActiveTurn(threadID: threadID)
+    }
+
     func send(
         taskID: UUID,
         text: String,
         mode: CodexConversationMode = .code,
+        modelID: String = CodexAppServerClient.modelID,
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in }
     ) async throws -> CodexThreadHistory {
         let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedText.isEmpty else { throw StationAIManagerError.invalidMessage }
+        guard Self.isValidModelID(modelID) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
+        }
         let task = try tasks.taskModel(taskID)
         let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
         let workspace = try CodexWorkspaceContext(roots: roots)
@@ -406,7 +424,7 @@ final class CodexConversationManager {
         if let existing = task.codexThreadID {
             threadID = existing
         } else {
-            threadID = try await client.startThread(workspace: workspace)
+            threadID = try await client.startThread(workspace: workspace, modelID: modelID)
             task.codexThreadID = threadID
             do {
                 try tasks.save()
@@ -420,6 +438,7 @@ final class CodexConversationManager {
         try await client.sendMessage(
             normalizedText,
             mode: mode,
+            modelID: modelID,
             threadID: threadID,
             workspace: workspace,
             onDelta: { delta in onUpdate(ConversationUpdate(type: "text_delta", text: delta)) },
@@ -440,6 +459,12 @@ final class CodexConversationManager {
         }
         onUpdate(ConversationUpdate(type: "completed", history: finalHistory))
         return finalHistory
+    }
+
+    private static func isValidModelID(_ value: String) -> Bool {
+        !value.isEmpty && value.count <= 100 && value.unicodeScalars.allSatisfy {
+            CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-").contains($0)
+        }
     }
 }
 
@@ -547,6 +572,9 @@ final class StationAIBridgeRuntime {
             case "conversation.history":
                 let conversations = CodexConversationManager(tasks: taskManager, client: CodexAppServerClient())
                 result = try Self.value(await conversations.history(taskID: request.requiredUUID("taskID")))
+            case "conversation.models":
+                let conversations = CodexConversationManager(tasks: taskManager, client: CodexAppServerClient())
+                result = .object(["models": .array(try await conversations.models(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })])
             case "conversation.send":
                 let taskID = try request.requiredUUID("taskID")
                 let message = try request.requiredString("message")
@@ -557,8 +585,9 @@ final class StationAIBridgeRuntime {
                         message: "Unknown conversation mode '\(modeValue)'. Valid modes: default, plan."
                     )
                 }
+                let modelID = request.arguments["model"]?.string ?? CodexAppServerClient.modelID
                 let conversations = CodexConversationManager(tasks: taskManager, client: CodexAppServerClient())
-                let history = try await conversations.send(taskID: taskID, text: message, mode: mode) { update in
+                let history = try await conversations.send(taskID: taskID, text: message, mode: mode, modelID: modelID) { update in
                     if let payload = try? Self.value(update) {
                         eventHandler(BridgeEvent(requestID: request.id, type: update.type, payload: payload))
                     }

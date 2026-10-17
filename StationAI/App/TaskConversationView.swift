@@ -18,8 +18,11 @@ struct TaskConversationView: View {
 
     @State private var draft = ""
     @State private var conversationMode: CodexConversationMode = .code
+    @State private var modelOptions = [CodexModelOption(id: CodexAppServerClient.modelID, name: "GPT-6 Luna", isDefault: true)]
+    @State private var selectedModelID = CodexAppServerClient.modelID
     @State private var messages: [CodexChatMessage] = []
     @State private var activities: [CodexActivity] = []
+    @State private var isActivityExpanded = false
     @State private var changeInventory = WorkspaceChangeInventory(staged: [], working: [])
     @State private var isLoadingChanges = false
     @State private var changesNeedRefresh = false
@@ -35,6 +38,8 @@ struct TaskConversationView: View {
     @State private var diffChangeCount: Int?
     @State private var isLoadingHistory = false
     @State private var isResponding = false
+    @State private var hasPausedResponse = false
+    @State private var isPausingResponse = false
     @State private var errorMessage: String?
     @State private var actionNotice: String?
     @State private var isShowingWorkspaceEditor = false
@@ -72,6 +77,7 @@ struct TaskConversationView: View {
         }
         .task {
             await loadConversation()
+            await loadModels()
         }
         .task(id: task.workspaceRootPaths) {
             let watchPaths = await WorkspaceChangeWatcher.watchPaths(workspaceRoots: task.workspaceRootPaths)
@@ -684,33 +690,60 @@ struct TaskConversationView: View {
     }
 
     private var activityList: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Codex activity")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-            ForEach(activities) { activity in
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 7) {
-                        Image(systemName: activity.status == "completed" ? "checkmark.circle.fill" : "gearshape.2.fill")
-                            .foregroundStyle(activity.status == "completed" ? .green : .accentColor)
-                        Text(activity.title)
-                            .font(.system(size: 11, weight: .medium))
-                            .textSelection(.enabled)
-                    }
-                    if !activity.detail.isEmpty {
-                        Text(activity.detail)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                            .lineLimit(4)
+        let runningCount = activities.filter { $0.status == "inProgress" || $0.status == "running" }.count
+        return VStack(alignment: .leading, spacing: 8) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    isActivityExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: isActivityExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                    Image(systemName: runningCount > 0 ? "gearshape.2.fill" : "checkmark.circle.fill")
+                        .foregroundStyle(runningCount > 0 ? Color.accentColor : Color.green)
+                    Text(runningCount > 0 ? "Running \(runningCount) task\(runningCount == 1 ? "" : "s")…" : "Codex activity · \(activities.count) task\(activities.count == 1 ? "" : "s")")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(runningCount > 0 ? "Running \(runningCount) task\(runningCount == 1 ? "" : "s")" : "Codex activity, \(activities.count) task\(activities.count == 1 ? "" : "s")")
+            .accessibilityIdentifier("codex-activity-disclosure")
+
+            if isActivityExpanded {
+                VStack(alignment: .leading, spacing: 7) {
+                    ForEach(activities) { activity in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 7) {
+                                Image(systemName: activity.status == "completed" ? "checkmark.circle.fill" : "gearshape.2.fill")
+                                    .foregroundStyle(activity.status == "completed" ? .green : .accentColor)
+                                Text(activity.title)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .textSelection(.enabled)
+                            }
+                            if !activity.detail.isEmpty {
+                                Text(activity.detail)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                                    .lineLimit(4)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(9)
+                        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel(activity.title)
+                        .accessibilityValue(activity.detail)
+                        .accessibilityIdentifier("codex-activity-row-\(activity.id)")
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(9)
-                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                .padding(.top, 6)
             }
         }
-        .accessibilityIdentifier("codex-activity-list")
     }
 
     @ViewBuilder
@@ -792,43 +825,13 @@ struct TaskConversationView: View {
                     .accessibilityIdentifier("codex-chat-error")
             }
 
-            HStack(alignment: .bottom, spacing: 12) {
-                Menu {
-                    ForEach(CodexConversationMode.allCases, id: \.self) { mode in
-                        Button {
-                            conversationMode = mode
-                        } label: {
-                            if conversationMode == mode {
-                                Label(mode.title, systemImage: "checkmark")
-                            } else {
-                                Text(mode.title)
-                            }
-                        }
-                        .accessibilityIdentifier("conversation-mode-\(mode.rawValue)")
-                    }
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 14, weight: .semibold))
-                        if conversationMode == .plan {
-                            Text("Plan")
-                                .font(.system(size: 11, weight: .semibold))
-                        }
-                    }
-                    .foregroundStyle(conversationMode == .plan ? Color.accentColor : Color.secondary)
-                    .frame(minWidth: 30, minHeight: 31)
-                    .contentShape(Rectangle())
-                }
-                .menuStyle(.borderlessButton)
-                .accessibilityLabel("Conversation mode: \(conversationMode.title)")
-                .accessibilityIdentifier("conversation-mode-menu")
-
+            VStack(alignment: .leading, spacing: 10) {
                 TextField("Message…", text: $draft, axis: .vertical)
                     .font(.system(size: 14))
                     .lineLimit(1...5)
                     .textFieldStyle(.plain)
                     .focused($isComposerFocused)
-                    .onSubmit(sendMessage)
+                    .onSubmit { sendMessage() }
                     .onChange(of: draft) { _, newValue in
                         if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/plan" {
                             activatePlanMode()
@@ -837,27 +840,97 @@ struct TaskConversationView: View {
                     .disabled(isResponding || isLoadingHistory)
                     .accessibilityIdentifier("message-composer")
 
-                Button(action: sendMessage) {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 31, height: 31)
-                        .background(
-                            Color(red: 0.34, green: 0.40, blue: 0.86),
-                            in: Circle()
-                        )
+                HStack(spacing: 12) {
+                    Menu {
+                        ForEach(CodexConversationMode.allCases, id: \.self) { mode in
+                            Button {
+                                conversationMode = mode
+                            } label: {
+                                if conversationMode == mode {
+                                    Label(mode.title, systemImage: "checkmark")
+                                } else {
+                                    Text(mode.title)
+                                }
+                            }
+                            .accessibilityIdentifier("conversation-mode-\(mode.rawValue)")
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "plus")
+                                .font(.system(size: 14, weight: .semibold))
+                            if conversationMode == .plan {
+                                Text("Plan")
+                                    .font(.system(size: 11, weight: .semibold))
+                            }
+                        }
+                        .foregroundStyle(conversationMode == .plan ? Color.accentColor : Color.secondary)
+                        .frame(minWidth: 30, minHeight: 31)
+                        .contentShape(Rectangle())
+                    }
+                    .menuStyle(.borderlessButton)
+                    .accessibilityLabel("Conversation mode: \(conversationMode.title)")
+                    .accessibilityIdentifier("conversation-mode-menu")
+
+                    Spacer(minLength: 0)
+
+                    Picker("Model", selection: $selectedModelID) {
+                        ForEach(modelOptions) { model in
+                            Text(model.name)
+                                .tag(model.id)
+                            .accessibilityIdentifier("model-option-\(model.id)")
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Model: \(selectedModelName)")
+                    .accessibilityIdentifier("model-picker-menu")
+
+                    if isResponding {
+                        Button(action: pauseResponse) {
+                            Image(systemName: "pause.fill")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 31, height: 31)
+                                .background(Color.primary.opacity(0.72), in: RoundedRectangle(cornerRadius: 9))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isPausingResponse || !codexClient.isTurnActive)
+                        .accessibilityLabel("Pause response")
+                        .accessibilityIdentifier("pause-response-button")
+                    } else if hasPausedResponse {
+                        Button(action: continueResponse) {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 31, height: 31)
+                                .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 9))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Continue response")
+                        .accessibilityIdentifier("continue-response-button")
+                    } else {
+                        Button { sendMessage() } label: {
+                            Image(systemName: "arrow.up")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 31, height: 31)
+                                .background(Color.accentColor, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isSendDisabled)
+                        .opacity(isSendDisabled ? 0.45 : 1)
+                        .accessibilityLabel("Send message")
+                        .accessibilityIdentifier("send-message-button")
+                    }
                 }
-                .buttonStyle(.plain)
-                .disabled(isSendDisabled)
-                .opacity(isSendDisabled ? 0.45 : 1)
-                .accessibilityLabel("Send message")
-                .accessibilityIdentifier("send-message-button")
             }
-            .padding(10)
+            .padding(13)
             .background(Color(nsColor: .controlBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 21, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                RoundedRectangle(cornerRadius: 21, style: .continuous)
                     .strokeBorder(Color.primary.opacity(0.1), lineWidth: 1)
             }
         }
@@ -884,8 +957,24 @@ struct TaskConversationView: View {
         }
     }
 
-    private func sendMessage() {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func loadModels() async {
+        do {
+            modelOptions = try await conversationManager.models(taskID: task.id)
+            if !modelOptions.contains(where: { $0.id == selectedModelID }),
+               let defaultModel = modelOptions.first(where: \.isDefault) ?? modelOptions.first {
+                selectedModelID = defaultModel.id
+            }
+        } catch {
+            // Keep the last known model available when an offline or unauthenticated app-server cannot list models.
+        }
+    }
+
+    private var selectedModelName: String {
+        modelOptions.first(where: { $0.id == selectedModelID })?.name ?? selectedModelID
+    }
+
+    private func sendMessage(overrideText: String? = nil) {
+        let text = (overrideText ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isResponding, !isLoadingHistory else { return }
         if text == "/plan" {
             activatePlanMode()
@@ -897,13 +986,15 @@ struct TaskConversationView: View {
         messages.append(CodexChatMessage(id: userMessageID, role: .user, text: text))
         messages.append(CodexChatMessage(id: assistantMessageID, role: .assistant, text: ""))
         isResponding = true
+        hasPausedResponse = false
+        isPausingResponse = false
         errorMessage = nil
         actionNotice = nil
         activities = []
 
         Task { @MainActor in
             do {
-                _ = try await conversationManager.send(taskID: task.id, text: text, mode: conversationMode) { update in
+                _ = try await conversationManager.send(taskID: task.id, text: text, mode: conversationMode, modelID: selectedModelID) { update in
                     switch update.type {
                     case "text_delta":
                         guard let delta = update.text else { return }
@@ -942,13 +1033,39 @@ struct TaskConversationView: View {
                 draft = ""
                 isComposerFocused = true
             } catch {
-                messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
-                errorMessage = error.localizedDescription
+                if codexClient.wasLastTurnInterrupted {
+                    hasPausedResponse = true
+                } else {
+                    messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
+                    errorMessage = error.localizedDescription
+                }
                 isComposerFocused = true
             }
 
             isResponding = false
         }
+    }
+
+    private func pauseResponse() {
+        guard isResponding, !isPausingResponse else { return }
+        isPausingResponse = true
+        Task { @MainActor in
+            do {
+                let interrupted = try await conversationManager.interrupt(taskID: task.id)
+                guard interrupted else {
+                    isPausingResponse = false
+                    return
+                }
+            } catch {
+                isPausingResponse = false
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func continueResponse() {
+        guard hasPausedResponse else { return }
+        sendMessage(overrideText: "Continue with the same request from where you left off.")
     }
 
     private func activatePlanMode() {

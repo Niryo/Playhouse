@@ -67,7 +67,18 @@ PY
 test_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/stationai-ui.XXXXXX")"
 architecture="$(uname -m)"
 result_bundle="${test_output_dir}/StationAI-UI.xcresult"
-trap 'printf "Visible UI test artifacts: %s\n" "${test_output_dir}"' EXIT
+live_ui_marker="/tmp/stationai-codex-live-ui-integration"
+rm -f "${live_ui_marker}"
+if [[ "${STATIONAI_RUN_CODEX_INTEGRATION:-0}" == "1" ]]; then
+  touch "${live_ui_marker}"
+fi
+cleanup() {
+  if [[ "${STATIONAI_RUN_CODEX_INTEGRATION:-0}" == "1" ]]; then
+    rm -f "${live_ui_marker}"
+  fi
+  printf "Visible UI test artifacts: %s\n" "${test_output_dir}"
+}
+trap cleanup EXIT
 
 test_arguments=(
   test

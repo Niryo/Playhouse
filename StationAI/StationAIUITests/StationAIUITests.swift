@@ -484,6 +484,8 @@ final class StationAIUITests: XCTestCase {
         openTask(named: "Empty conversation")
         XCTAssertTrue(element("empty-conversation").waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["Start a conversation"].exists)
+        XCTAssertFalse(element("pause-response-button").exists)
+        XCTAssertFalse(element("continue-response-button").exists)
 
         let history = try runCLI(["conversation", "history", taskID(named: "Empty conversation")])["result"] as? [String: Any]
         XCTAssertEqual((history?["activities"] as? [Any])?.count, 0)
@@ -492,14 +494,23 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "New conversation shows its empty state")
     }
 
-    // case-contract: test_blank_conversation_send_is_rejected_without_starting_a_turn | Blank messages cannot be sent and do not create conversation history.
-    func test_blank_conversation_send_is_rejected_without_starting_a_turn() throws {
+    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Blank drafts cannot be sent or stored; live responses can be paused, continued, and their task activity expanded.
+    func test_conversation_composer_rejects_blank_and_supports_live_turn_controls() throws {
         launchApp(defaultParent: fixture.parent.path)
         createTaskThroughUI(title: "Blank message", roots: ["primary"])
         openTask(named: "Blank message")
         let composer = element("message-composer")
         let sendButton = element("send-message-button")
+        let modelPicker = element("model-picker-menu")
         XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        XCTAssertTrue(modelPicker.waitForExistence(timeout: 10), "The composer should show the selected model next to its send controls.")
+        let modelTaskID = try taskID(named: "Blank message")
+        let modelResult = try runCLI(["conversation", "models", modelTaskID])["result"] as? [String: Any]
+        let availableModels = try XCTUnwrap(modelResult?["models"] as? [[String: Any]])
+        let selectedModelName = String(modelPicker.label.split(separator: ":").last ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let selectedModel = try XCTUnwrap(availableModels.first(where: { ($0["name"] as? String) == selectedModelName || ($0["id"] as? String) == selectedModelName }))
+        XCTAssertTrue(modelPicker.label.localizedCaseInsensitiveContains(selectedModel["name"] as? String ?? selectedModelName))
         XCTAssertFalse(sendButton.isEnabled)
         composer.click()
         composer.typeText("   ")
@@ -513,14 +524,96 @@ final class StationAIUITests: XCTestCase {
         let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
         XCTAssertEqual((history?["activities"] as? [Any])?.count, 0)
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
+        if FileManager.default.fileExists(atPath: "/tmp/stationai-codex-live-ui-integration") {
+            composer.click()
+            composer.typeKey("a", modifierFlags: .command)
+            composer.typeText("In stationai-primary.txt, append exactly the line `StationAI UI pause marker 6A20F1`. Then run a shell command that executes `sleep 90; printf PAUSE_TEST_FINISHED`. Do not modify any other files. Reply with a short summary after the command finishes.")
+            XCTAssertTrue(sendButton.isEnabled, "A nonblank draft in a live Codex session should enable Send.")
+            sendButton.click()
+
+            let pauseButton = element("pause-response-button")
+            XCTAssertTrue(pauseButton.waitForExistence(timeout: 60), "A live turn should replace Send with Pause.")
+            XCTAssertTrue(pauseButton.isEnabled, "Pause should be enabled after Codex reports an active turn.")
+
+            let activityDisclosure = element("codex-activity-disclosure")
+            guard activityDisclosure.waitForExistence(timeout: 60) else {
+                attachScreenshot(named: "Live turn did not surface Codex activity")
+                let liveHistory = try? runCLI(["conversation", "history", taskID])
+                let liveRows = ((liveHistory?["result"] as? [String: Any])?["activities"] as? [[String: Any]] ?? [])
+                    .map { "\($0["status"] ?? "unknown"): \($0["title"] ?? "untitled")" }
+                let task = try taskRecord(named: "Blank message")
+                let roots = task?["workspaceRoots"] as? [String] ?? []
+                let markerPath = roots.first.map { URL(fileURLWithPath: $0).appendingPathComponent("stationai-primary.txt") }
+                let markerPresent = markerPath.flatMap { try? String(contentsOf: $0, encoding: .utf8) }?.contains("StationAI UI pause marker 6A20F1") ?? false
+                XCTFail("The active tool did not appear in the UI. Persisted activity rows: \(liveRows); fixture edit applied: \(markerPresent).")
+                return
+            }
+            let runningTitle = NSPredicate(format: "label CONTAINS %@", "Running 1 task")
+            let runningActivityExpectation = XCTNSPredicateExpectation(predicate: runningTitle, object: activityDisclosure)
+            XCTAssertEqual(
+                XCTWaiter.wait(for: [runningActivityExpectation], timeout: 60),
+                .completed,
+                "The collapsed activity title should report the current running-task count."
+            )
+            attachScreenshot(named: "Running response with collapsed Codex activity")
+            let activityRow = app.descendants(matching: .any)
+                .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "codex-activity-row-", "sleep 90; printf PAUSE_TEST_FINISHED"))
+                .firstMatch
+            XCTAssertFalse(activityRow.exists, "Activity details should stay collapsed until opened.")
+            activityDisclosure.click()
+            XCTAssertTrue(activityRow.waitForExistence(timeout: 30), "Opening activity details should show the running command row.")
+            attachScreenshot(named: "Running chat composer and expanded Codex activity")
+
+            pauseButton.click()
+            let continueButton = element("continue-response-button")
+            XCTAssertTrue(continueButton.waitForExistence(timeout: 30), "An interrupted response should offer Continue.")
+            attachScreenshot(named: "Paused response with Continue control")
+            continueButton.click()
+            XCTAssertTrue(sendButton.waitForExistence(timeout: 120), "The continued response should return the composer to Send.")
+            let pauseEnded = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: pauseButton)
+            let continueEnded = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: continueButton)
+            XCTAssertEqual(
+                XCTWaiter.wait(for: [pauseEnded, continueEnded], timeout: 30),
+                .completed,
+                "A completed response should no longer show Pause or Continue."
+            )
+            let completedAssistantMessage = app.descendants(matching: .any)
+                .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND value != ''", "assistant-message-"))
+                .firstMatch
+            XCTAssertTrue(completedAssistantMessage.waitForExistence(timeout: 30), "Continue should finish the response and show its assistant message in the conversation.")
+            attachScreenshot(named: "Continued response completed in the conversation")
+        }
         attachScreenshot(named: "Blank composer leaves send disabled")
     }
 
-    // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | Plan mode is selectable in the composer and through /plan, while unsupported conversation modes are rejected before creating history.
+    // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer shows a Codex-reported model, while unsupported modes and malformed model IDs are rejected before creating history.
     func test_conversation_mode_rejects_unknown_mode_without_starting_a_turn() throws {
         launchApp(defaultParent: fixture.parent.path)
         createTaskThroughUI(title: "Conversation modes", roots: ["primary"])
         openTask(named: "Conversation modes")
+
+        let taskID = try taskID(named: "Conversation modes")
+        let modelResult = try runCLI(["conversation", "models", taskID])["result"] as? [String: Any]
+        let availableModels = try XCTUnwrap(modelResult?["models"] as? [[String: Any]])
+        XCTAssertFalse(availableModels.isEmpty)
+        let modelMenu = element("model-picker-menu")
+        XCTAssertTrue(modelMenu.waitForExistence(timeout: 10))
+        let selectedModelName = String(modelMenu.label.split(separator: ":").last ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let selectedModel = try XCTUnwrap(availableModels.first(where: { ($0["name"] as? String) == selectedModelName || ($0["id"] as? String) == selectedModelName }))
+        let selectedModelID = try XCTUnwrap(selectedModel["id"] as? String)
+        XCTAssertTrue(modelMenu.label.localizedCaseInsensitiveContains(selectedModelName))
+        if let alternateModel = availableModels.first(where: { $0["id"] as? String != selectedModelID }) {
+            let alternateID = try XCTUnwrap(alternateModel["id"] as? String)
+            modelMenu.click()
+            let optionID = "model-option-\(alternateID)"
+            let modelOption = app.menuItems.matching(identifier: optionID).firstMatch
+            XCTAssertTrue(modelOption.waitForExistence(timeout: 5), "The model picker should list each model returned by Codex.")
+            modelOption.click()
+            let updatedModelPicker = element("model-picker-menu")
+            XCTAssertTrue(updatedModelPicker.waitForExistence(timeout: 5))
+            XCTAssertTrue(updatedModelPicker.label.localizedCaseInsensitiveContains(alternateModel["name"] as? String ?? alternateID), "Choosing a model should update the composer selection.")
+        }
 
         let modeMenu = element("conversation-mode-menu")
         XCTAssertTrue(modeMenu.waitForExistence(timeout: 10))
@@ -536,7 +629,6 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(composer.value as? String, "")
         XCTAssertTrue(modeMenu.label.contains("Plan mode"), "Typing /plan should switch modes without sending a message.")
 
-        let taskID = try taskID(named: "Conversation modes")
         assertCLIError(
             try runCLI(
                 ["conversation", "send", taskID, "--message", "Hello", "--mode", "unsupported"],

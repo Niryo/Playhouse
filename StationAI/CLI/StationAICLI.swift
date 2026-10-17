@@ -151,12 +151,14 @@ enum StationAICLI {
             guard let id = tail.first else { throw CLIError.usage("A task ID is required.") }
             switch operation {
             case "history": return BridgeRequest(command: "conversation.history", arguments: ["taskID": .string(id)])
+            case "models": return BridgeRequest(command: "conversation.models", arguments: ["taskID": .string(id)])
             case "send":
-                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode"])
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode", "--model"])
                 return BridgeRequest(command: "conversation.send", arguments: [
                     "taskID": .string(id),
                     "message": .string(try requiredFlag("--message", flags: flags).first!),
-                    "mode": .string(flags["--mode"]?.first ?? "default")
+                    "mode": .string(flags["--mode"]?.first ?? "default"),
+                    "model": .string(flags["--model"]?.first ?? "gpt-6-luna")
                 ])
             default: throw CLIError.usage("Unknown conversation operation '\(operation)'.")
             }
@@ -242,7 +244,8 @@ enum StationAICLI {
       stationai workspace suggest --parent <path>
       stationai settings get|clear-parent|set-parent <path>
       stationai conversation history <task-id>
-      stationai conversation send <task-id> --message <text> [--mode <default|plan>]
+      stationai conversation models <task-id>
+      stationai conversation send <task-id> --message <text> [--mode <default|plan>] [--model <model-id>]
 
     Results are JSON. Conversation send emits JSON event lines followed by a final response.
     """

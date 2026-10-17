@@ -28,4 +28,5 @@ fi
   test -x "${app_bundle}/Contents/MacOS/stationai-cli"
   python3 "${repository_root}/scripts/prepare-e2e-fixture.py"
   python3 "${repository_root}/scripts/test-codex-integration.py"
+  "${repository_root}/scripts/test-ui.sh" --locked --case test_conversation_composer_rejects_blank_and_supports_live_turn_controls
 ' -- "${repository_root}"

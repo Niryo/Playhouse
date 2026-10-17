@@ -360,9 +360,8 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(history["activities"], [])
         self.assertEqual(history["messages"], [])
         self.assertIsNone(history.get("diff"))
-
-    # case-contract: test_blank_conversation_send_is_rejected_without_starting_a_turn | Blank messages cannot be sent and do not create conversation history.
-    def test_blank_conversation_send_is_rejected_without_starting_a_turn(self):
+    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Blank drafts cannot be sent or stored; live responses can be paused, continued, and their task activity expanded.
+    def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
         task_id = self.create_task(title="Blank conversation send")["id"]
         response, _ = self.call_cli("conversation", "send", task_id, "--message", " ", expected_status=2)
         self.assert_failure(response, "invalid_argument")
@@ -371,14 +370,23 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(history["activities"], [])
         self.assertEqual(history["messages"], [])
 
-    # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | Plan mode is selectable in the composer and through /plan, while unsupported conversation modes are rejected before creating history.
+    # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer shows a Codex-reported model, while unsupported modes and malformed model IDs are rejected before creating history.
     def test_conversation_mode_rejects_unknown_mode_without_starting_a_turn(self):
         task_id = self.create_task(title="Conversation mode validation")["id"]
+        response, _ = self.call_cli("conversation", "models", task_id)
+        models = self.assert_success(response)["models"]
+        self.assertTrue(models)
+        self.assertTrue(all(model.get("id") and model.get("name") for model in models))
         response, _ = self.call_cli(
             "conversation", "send", task_id, "--message", "Hello", "--mode", "unsupported", expected_status=2
         )
         self.assert_failure(response, "invalid_argument")
         self.assertIn("Valid modes: default, plan", response["error"]["message"])
+        response, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Hello", "--model", "invalid model!", expected_status=2
+        )
+        self.assert_failure(response, "invalid_argument")
+        self.assertIn("Model ID must contain only", response["error"]["message"])
         history, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(history)["messages"], [])
         self.assertEqual(self.assert_success(history)["activities"], [])

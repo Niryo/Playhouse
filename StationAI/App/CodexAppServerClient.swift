@@ -24,9 +24,16 @@ enum CodexConversationMode: String, CaseIterable, Hashable {
     }
 }
 
+struct CodexModelOption: Codable, Identifiable, Hashable {
+    let id: String
+    let name: String
+    let isDefault: Bool
+}
+
 @MainActor
 final class CodexAppServerClient: ObservableObject {
     nonisolated static let modelID = "gpt-6-luna"
+    @Published private(set) var isTurnActive = false
 
     private enum ClientError: LocalizedError {
         case cliNotFound
@@ -35,7 +42,7 @@ final class CodexAppServerClient: ObservableObject {
         case protocolFailure(String)
         case server(String)
         case authentication(String)
-        case modelMismatch(String)
+        case modelMismatch(String, String)
         case turnFailed(String)
 
         var errorDescription: String? {
@@ -52,8 +59,8 @@ final class CodexAppServerClient: ObservableObject {
                 detail
             case .authentication(let detail):
                 "Codex CLI needs a valid sign-in. Run `codex login` in Terminal, then try again. \(detail)"
-            case .modelMismatch(let model):
-                "Codex selected \(model) instead of \(CodexAppServerClient.modelID). StationAI stopped without switching models."
+            case .modelMismatch(let model, let expected):
+                "Codex selected \(model) instead of \(expected). StationAI stopped without switching models."
             case .turnFailed(let detail):
                 detail
             }
@@ -71,6 +78,8 @@ final class CodexAppServerClient: ObservableObject {
     private var initialized = false
     private var resumedThreadIDs = Set<String>()
     private var activeThreadID: String?
+    private var activeTurnID: String?
+    private(set) var wasLastTurnInterrupted = false
     private var activeDeltaHandler: ((String) -> Void)?
     private var activeFinalMessageHandler: ((String) -> Void)?
     private var activeActivityHandler: ((CodexActivity) -> Void)?
@@ -90,13 +99,13 @@ final class CodexAppServerClient: ObservableObject {
         return try await readMessages(threadID: threadID)
     }
 
-    func startThread(workspace: CodexWorkspaceContext) async throws -> String {
+    func startThread(workspace: CodexWorkspaceContext, modelID: String = CodexAppServerClient.modelID) async throws -> String {
         try await ensureInitialized(workspace: workspace)
 
         let response = try await request(
             method: "thread/start",
             params: [
-                "model": Self.modelID,
+                "model": modelID,
                 "allowProviderModelFallback": false,
                 "cwd": workspace.cwd.path,
                 "sandbox": "danger-full-access",
@@ -113,14 +122,43 @@ final class CodexAppServerClient: ObservableObject {
               let threadID = thread["id"] as? String else {
             throw ClientError.protocolFailure("Codex did not return a thread ID.")
         }
-        try confirmModel(response["model"] as? String)
+        try confirmModel(response["model"] as? String, expected: modelID)
         resumedThreadIDs.insert(threadID)
         return threadID
+    }
+
+    func availableModels(workspace: CodexWorkspaceContext) async throws -> [CodexModelOption] {
+        try await ensureInitialized(workspace: workspace)
+        let response = try await request(method: "model/list", params: ["includeHidden": false])
+        let models = (response["data"] as? [[String: Any]] ?? []).compactMap { item -> CodexModelOption? in
+            guard let id = item["id"] as? String, !id.isEmpty else { return nil }
+            return CodexModelOption(
+                id: id,
+                name: item["displayName"] as? String ?? item["model"] as? String ?? id,
+                isDefault: item["isDefault"] as? Bool ?? false
+            )
+        }
+        return models.isEmpty ? [CodexModelOption(id: Self.modelID, name: "GPT-6 Luna", isDefault: true)] : models
+    }
+
+    func interruptActiveTurn(threadID expectedThreadID: String) async throws -> Bool {
+        guard let threadID = activeThreadID,
+              threadID == expectedThreadID,
+              let turnID = activeTurnID else { return false }
+        wasLastTurnInterrupted = true
+        do {
+            _ = try await request(method: "turn/interrupt", params: ["threadId": threadID, "turnId": turnID])
+            return true
+        } catch {
+            wasLastTurnInterrupted = false
+            throw error
+        }
     }
 
     func sendMessage(
         _ text: String,
         mode: CodexConversationMode,
+        modelID: String,
         threadID: String,
         workspace: CodexWorkspaceContext,
         onDelta: @escaping (String) -> Void,
@@ -131,9 +169,12 @@ final class CodexAppServerClient: ObservableObject {
         onActionRequest: @escaping () -> Void
     ) async throws {
         actionRequestHandler = onActionRequest
-        try await resumeThreadIfNeeded(id: threadID, workspace: workspace)
+        try await resumeThreadIfNeeded(id: threadID, workspace: workspace, modelID: modelID)
 
         activeThreadID = threadID
+        activeTurnID = nil
+        isTurnActive = false
+        wasLastTurnInterrupted = false
         activeDeltaHandler = onDelta
         activeFinalMessageHandler = onFinalMessage
         activeActivityHandler = onActivity
@@ -141,6 +182,8 @@ final class CodexAppServerClient: ObservableObject {
         activeActivities.removeAll()
         defer {
             activeThreadID = nil
+            activeTurnID = nil
+            isTurnActive = false
             activeDeltaHandler = nil
             activeFinalMessageHandler = nil
             activeActivityHandler = nil
@@ -153,7 +196,7 @@ final class CodexAppServerClient: ObservableObject {
             params: [
                 "threadId": threadID,
                 "input": [["type": "text", "text": text]],
-                "model": Self.modelID,
+                "model": modelID,
                 "cwd": workspace.cwd.path,
                 "runtimeWorkspaceRoots": workspace.roots.map(\.path),
                 "approvalPolicy": "never",
@@ -161,7 +204,7 @@ final class CodexAppServerClient: ObservableObject {
                 "collaborationMode": [
                     "mode": mode.rawValue,
                     "settings": [
-                        "model": Self.modelID,
+                        "model": modelID,
                         "reasoningEffort": NSNull(),
                         "developerInstructions": NSNull()
                     ]
@@ -173,6 +216,8 @@ final class CodexAppServerClient: ObservableObject {
               let turnID = turn["id"] as? String else {
             throw ClientError.protocolFailure("Codex did not return a turn ID.")
         }
+        activeTurnID = turnID
+        isTurnActive = true
 
         let turnKey = Self.turnKey(threadID: threadID, turnID: turnID)
         switch turn["status"] as? String {
@@ -283,7 +328,7 @@ final class CodexAppServerClient: ObservableObject {
         }
     }
 
-    private func resumeThreadIfNeeded(id threadID: String, workspace: CodexWorkspaceContext) async throws {
+    private func resumeThreadIfNeeded(id threadID: String, workspace: CodexWorkspaceContext, modelID: String = CodexAppServerClient.modelID) async throws {
         if resumedThreadIDs.contains(threadID), process?.isRunning == true, initialized {
             return
         }
@@ -293,7 +338,7 @@ final class CodexAppServerClient: ObservableObject {
             method: "thread/resume",
             params: [
                 "threadId": threadID,
-                "model": Self.modelID,
+                "model": modelID,
                 "cwd": workspace.cwd.path,
                 "sandbox": "danger-full-access",
                 "approvalPolicy": "never",
@@ -301,7 +346,7 @@ final class CodexAppServerClient: ObservableObject {
                 "runtimeWorkspaceRoots": workspace.roots.map(\.path)
             ]
         )
-        try confirmModel(response["model"] as? String)
+        try confirmModel(response["model"] as? String, expected: modelID)
         resumedThreadIDs.insert(threadID)
     }
 
@@ -438,6 +483,12 @@ final class CodexAppServerClient: ObservableObject {
 
     private func handleNotification(method: String, params: [String: Any]) {
         switch method {
+        case "turn/started":
+            guard params["threadId"] as? String == activeThreadID,
+                  let turn = params["turn"] as? [String: Any],
+                  let turnID = turn["id"] as? String else { return }
+            activeTurnID = turnID
+            isTurnActive = true
         case "item/agentMessage/delta":
             guard params["threadId"] as? String == activeThreadID,
                   let delta = params["delta"] as? String else { return }
@@ -582,12 +633,12 @@ final class CodexAppServerClient: ObservableObject {
         completedTurns.removeAll()
     }
 
-    private func confirmModel(_ model: String?) throws {
+    private func confirmModel(_ model: String?, expected: String) throws {
         guard let model else {
             throw ClientError.protocolFailure("Codex did not report which model it selected.")
         }
-        guard model == Self.modelID else {
-            throw ClientError.modelMismatch(model)
+        guard model == expected else {
+            throw ClientError.modelMismatch(model, expected)
         }
     }
 
