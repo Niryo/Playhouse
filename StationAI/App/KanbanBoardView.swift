@@ -206,15 +206,12 @@ struct KanbanBoardView: View {
         }
     }
 
-    private func createTask(title: String, roots: [URL]) {
-        do {
-            _ = try BoardTaskManager(modelContext: modelContext).create(
-                title: title,
-                workspaceRoots: roots.map { $0.standardizedFileURL.path }
-            )
-        } catch {
-            saveError = error.localizedDescription
-        }
+    private func createTask(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [URL]) throws {
+        _ = try BoardTaskManager(modelContext: modelContext).create(
+            title: title,
+            repositories: repositories,
+            contextFolders: contextFolders.map { $0.standardizedFileURL.path }
+        )
     }
 
     private func moveTask(id: UUID, to status: TaskStatus) {

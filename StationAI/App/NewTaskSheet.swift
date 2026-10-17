@@ -7,10 +7,15 @@ struct NewTaskSheet: View {
     @FocusState private var isTitleFocused: Bool
     @State private var title = ""
     @State private var parentFolderURL: URL?
-    @State private var roots: [URL] = []
+    @State private var repositories: [RepositoryWorktreeSpec] = []
+    @State private var contextFolders: [URL] = []
+    @State private var suggestedRepositories: [URL] = []
+    @State private var repositorySearch = ""
+    @State private var isAdvancedExpanded = false
     @State private var isChoosingInitialParent = false
+    @State private var createError: String?
 
-    let onCreate: (String, [URL]) -> Void
+    let onCreate: (String, [RepositoryWorktreeSpec], [URL]) throws -> Void
 
     private var normalizedTitle: String {
         title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -32,37 +37,130 @@ struct NewTaskSheet: View {
                 .focused($isTitleFocused)
                 .accessibilityIdentifier("task-title-field")
 
-            if let parentFolderURL {
-                HStack(spacing: 7) {
-                    Image(systemName: "folder.badge.gearshape")
-                        .foregroundStyle(.secondary)
-                    Text("Repository suggestions from \(parentFolderURL.path)")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .help(parentFolderURL.path)
-                    Spacer(minLength: 0)
-                    Button("Change parent…", action: chooseInitialParent)
-                        .font(.system(size: 10))
+            VStack(alignment: .leading, spacing: 9) {
+                HStack {
+                    Text("Repositories and folders")
+                        .font(.system(size: 13, weight: .semibold))
+                    Spacer()
+                    Button(action: browseForFolders) {
+                        Label("Browse…", systemImage: "folder")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("browse-workspace-roots-button")
+                }
+                if let parentFolderURL {
+                    HStack(spacing: 5) {
+                        Image(systemName: "folder.badge.gearshape").foregroundStyle(.secondary)
+                        Text("Suggestions from \(parentFolderURL.path)")
+                            .lineLimit(1).help(parentFolderURL.path)
+                        Spacer(minLength: 0)
+                        Button("Change…", action: chooseInitialParent).buttonStyle(.link)
+                    }
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                } else {
+                    Button("Choose a suggestion folder…", action: chooseInitialParent)
                         .buttonStyle(.link)
                 }
-                WorkspaceRootSelector(parentFolderURL: parentFolderURL, roots: $roots)
-            } else {
-                VStack(alignment: .leading, spacing: 12) {
-                    if isChoosingInitialParent {
-                        ProgressView()
-                            .controlSize(.small)
+
+            if !repositories.isEmpty {
+                Button {
+                    isAdvancedExpanded.toggle()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: isAdvancedExpanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                        Text("Advanced branch options").font(.system(size: 10, weight: .medium))
                     }
-                    Text(isChoosingInitialParent
-                        ? "Choosing a default parent folder…"
-                        : "Choose a default parent folder to find repository suggestions.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                    Button("Choose parent folder…", action: chooseInitialParent)
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isChoosingInitialParent)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
-                .frame(maxWidth: .infinity, minHeight: 180, alignment: .center)
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("advanced-branch-options")
+                .accessibilityValue(isAdvancedExpanded ? "1" : "0")
+                if isAdvancedExpanded {
+                    Text("Set branch and starting point separately for each repository.")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+            }
+            ForEach(repositories.indices, id: \.self) { index in
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.triangle.branch").foregroundStyle(.tint)
+                            Text(URL(fileURLWithPath: repositories[index].repositoryPath).lastPathComponent)
+                                .font(.system(size: 11, weight: .medium))
+                                .accessibilityIdentifier("selected-repository-\(index)")
+                            Text(repositories[index].branch ?? StationAIWorktreeManager.branchSlug(normalizedTitle.isEmpty ? "task" : normalizedTitle))
+                                .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                            Spacer()
+                            Button { repositories.remove(at: index) } label: { Image(systemName: "xmark.circle.fill") }
+                                .buttonStyle(.plain).accessibilityLabel("Remove repository")
+                        }
+                        if isAdvancedExpanded {
+                            HStack(spacing: 8) {
+                                TextField("Branch name", text: branchBinding(at: index))
+                                    .textFieldStyle(.roundedBorder).accessibilityIdentifier("repository-branch-\(index)")
+                                TextField("Branch from (master)", text: branchFromBinding(at: index))
+                                    .textFieldStyle(.roundedBorder).accessibilityIdentifier("repository-branch-from-\(index)")
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 9).padding(.vertical, 7)
+                    .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+                }
+                ForEach(contextFolders, id: \.standardizedFileURL.path) { folder in
+                    HStack(spacing: 6) {
+                        Image(systemName: "folder.fill").foregroundStyle(.secondary)
+                        Text(folder.lastPathComponent).font(.system(size: 11, weight: .medium)).lineLimit(1)
+                        Text(folder.path).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+                        Spacer()
+                        Button { contextFolders.removeAll { $0.standardizedFileURL.path == folder.standardizedFileURL.path } } label: { Image(systemName: "xmark.circle.fill") }
+                            .buttonStyle(.plain).accessibilityLabel("Remove \(folder.lastPathComponent)")
+                    }
+                }
+
+                TextField("Type to find a repository…", text: $repositorySearch)
+                    .textFieldStyle(.roundedBorder).accessibilityIdentifier("workspace-repository-search")
+                if !repositorySearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let matches = suggestedRepositories.filter { candidate in
+                        !repositories.contains(where: { URL(fileURLWithPath: $0.repositoryPath).standardizedFileURL.path == candidate.standardizedFileURL.path }) &&
+                        (candidate.lastPathComponent.localizedCaseInsensitiveContains(repositorySearch) || candidate.path.localizedCaseInsensitiveContains(repositorySearch))
+                    }
+                    if matches.isEmpty {
+                        Text("No matching repositories. Use Browse to add a folder.").font(.system(size: 10)).foregroundStyle(.secondary)
+                    } else {
+                        ScrollView {
+                            LazyVStack(spacing: 0) {
+                                ForEach(matches, id: \.path) { repository in
+                                    Button {
+                                        repositories.append(RepositoryWorktreeSpec(repositoryPath: repository.path))
+                                        repositorySearch = ""
+                                    } label: {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(repository.lastPathComponent).font(.system(size: 11, weight: .medium))
+                                            Text(repository.path).font(.system(size: 9)).foregroundStyle(.secondary)
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(7)
+                                        .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityIdentifier("repository-suggestion-\(repository.lastPathComponent)")
+                                }
+                            }
+                        }.frame(maxHeight: 92).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+                    }
+                }
+                if let createError {
+                    Label(createError, systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10, weight: .medium)).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("task-create-error")
+                }
+                if repositories.isEmpty && contextFolders.isEmpty {
+                    Text("Select a repository for an isolated worktree, or browse to add a folder.")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                }
             }
 
             HStack(spacing: 10) {
@@ -74,18 +172,22 @@ struct NewTaskSheet: View {
                 .accessibilityIdentifier("cancel-task-button")
 
                 Button("Done") {
-                    onCreate(normalizedTitle, roots)
-                    dismiss()
+                    do {
+                        try onCreate(normalizedTitle, repositories, contextFolders)
+                        dismiss()
+                    } catch {
+                        createError = error.localizedDescription
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Color(red: 0.34, green: 0.40, blue: 0.86))
                 .keyboardShortcut(.defaultAction)
-                .disabled(normalizedTitle.isEmpty || roots.isEmpty)
+                .disabled(normalizedTitle.isEmpty || (repositories.isEmpty && contextFolders.isEmpty))
                 .accessibilityIdentifier("create-task-button")
             }
         }
         .padding(24)
-        .frame(width: 560, height: parentFolderURL == nil ? 430 : 660)
+        .frame(width: 560, height: 570)
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear {
             parentFolderURL = WorkspaceSettingsManager().defaultParentFolderURL
@@ -94,6 +196,12 @@ struct NewTaskSheet: View {
             } else {
                 isTitleFocused = true
             }
+        }
+        .task(id: parentFolderURL?.path) {
+            guard let parentFolderURL else { suggestedRepositories = []; return }
+            suggestedRepositories = (try? await WorkspaceManager().suggestedRepositories(parentPath: parentFolderURL.path).map {
+                URL(fileURLWithPath: $0, isDirectory: true)
+            }) ?? []
         }
     }
 
@@ -128,18 +236,61 @@ struct NewTaskSheet: View {
             }
         }
     }
+
+    private func branchBinding(at index: Int) -> Binding<String> {
+        Binding(
+            get: { repositories.indices.contains(index) ? (repositories[index].branch ?? StationAIWorktreeManager.branchSlug(normalizedTitle.isEmpty ? "task" : normalizedTitle)) : "" },
+            set: { if repositories.indices.contains(index) { repositories[index].branch = $0 } }
+        )
+    }
+
+    private func branchFromBinding(at index: Int) -> Binding<String> {
+        Binding(
+            get: { repositories.indices.contains(index) ? (repositories[index].branchFrom ?? "") : "" },
+            set: { if repositories.indices.contains(index) { repositories[index].branchFrom = $0.isEmpty ? nil : $0 } }
+        )
+    }
+
+    private func browseForFolders() {
+        let panel = NSOpenPanel()
+        panel.title = "Add repositories or folders"
+        panel.message = "Git repositories are added as worktrees; other folders are added as context."
+        panel.prompt = "Add"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.directoryURL = parentFolderURL
+        panel.begin { response in
+            guard response == .OK else { return }
+            DispatchQueue.main.async {
+                for selected in panel.urls {
+                    let folder = selected.standardizedFileURL
+                    let marker = folder.appendingPathComponent(".git")
+                    if FileManager.default.fileExists(atPath: marker.path) {
+                        if !repositories.contains(where: { URL(fileURLWithPath: $0.repositoryPath).standardizedFileURL.path == folder.path }) {
+                            repositories.append(RepositoryWorktreeSpec(repositoryPath: folder.path))
+                        }
+                    } else if !contextFolders.contains(where: { $0.standardizedFileURL.path == folder.path }) {
+                        contextFolders.append(folder)
+                    }
+                }
+            }
+        }
+    }
 }
 
 struct WorkspaceRootsEditor: View {
     @Environment(\.dismiss) private var dismiss
     let parentFolderURL: URL?
     let initialRoots: [URL]
+    let repositoryWorktrees: [RepositoryWorktreeRecord]
     let onSave: ([URL]) -> Void
     @State private var roots: [URL]
 
-    init(parentFolderURL: URL?, initialRoots: [URL], onSave: @escaping ([URL]) -> Void) {
+    init(parentFolderURL: URL?, initialRoots: [URL], repositoryWorktrees: [RepositoryWorktreeRecord] = [], onSave: @escaping ([URL]) -> Void) {
         self.parentFolderURL = parentFolderURL
         self.initialRoots = initialRoots
+        self.repositoryWorktrees = repositoryWorktrees
         self.onSave = onSave
         _roots = State(initialValue: initialRoots)
     }
@@ -151,7 +302,13 @@ struct WorkspaceRootsEditor: View {
             Text("Changes apply to the next Codex turn. The first folder is used as the working directory.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
-            WorkspaceRootSelector(parentFolderURL: parentFolderURL, roots: $roots)
+            WorkspaceRootSelector(
+                parentFolderURL: parentFolderURL,
+                roots: $roots,
+                displayNames: Dictionary(uniqueKeysWithValues: repositoryWorktrees.map {
+                    ($0.worktreePath, "\(URL(fileURLWithPath: $0.repositoryPath).lastPathComponent) · \($0.branch)")
+                })
+            )
             Label("Codex has full machine and network access; this list sets task context only.", systemImage: "exclamationmark.triangle.fill")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.orange)

@@ -34,6 +34,8 @@ final class BoardTask {
     var createdAt: Date
     var codexThreadID: String?
     var workspaceRootPathsData: Data?
+    var repositoryWorktreesData: Data?
+    var contextFolderPathsData: Data?
 
     var workspaceRootPaths: [String] {
         get {
@@ -43,6 +45,16 @@ final class BoardTask {
         set {
             workspaceRootPathsData = try? JSONEncoder().encode(newValue)
         }
+    }
+
+    var repositoryWorktrees: [RepositoryWorktreeRecord] {
+        get { guard let repositoryWorktreesData else { return [] }; return (try? JSONDecoder().decode([RepositoryWorktreeRecord].self, from: repositoryWorktreesData)) ?? [] }
+        set { repositoryWorktreesData = try? JSONEncoder().encode(newValue) }
+    }
+
+    var contextFolderPaths: [String] {
+        get { guard let contextFolderPathsData else { return workspaceRootPaths }; return (try? JSONDecoder().decode([String].self, from: contextFolderPathsData)) ?? [] }
+        set { contextFolderPathsData = try? JSONEncoder().encode(newValue) }
     }
 
     var status: TaskStatus {
@@ -57,5 +69,21 @@ final class BoardTask {
         createdAt = .now
         codexThreadID = nil
         workspaceRootPathsData = try? JSONEncoder().encode(workspaceRootPaths)
+        repositoryWorktreesData = nil
+        contextFolderPathsData = nil
     }
+}
+
+struct RepositoryWorktreeSpec: Codable, Equatable {
+    var repositoryPath: String
+    var branch: String?
+    var branchFrom: String?
+}
+
+struct RepositoryWorktreeRecord: Codable, Equatable {
+    var repositoryPath: String
+    var branch: String
+    var worktreePath: String
+    var branchFrom: String
+    var createdByStationAI: Bool
 }

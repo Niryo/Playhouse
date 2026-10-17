@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import unittest
 import uuid
@@ -41,11 +42,24 @@ class StationAIBridgeTests(unittest.TestCase):
         self.test_id = f"{self._testMethodName}-{uuid.uuid4()}"
         self.data_directory = arguments.data_root / self.test_id
         self.data_directory.mkdir(parents=True)
+        self.worktree_directory = self.data_directory / "worktrees"
+        self.worktree_directory.mkdir()
+        (self.worktree_directory / ".stationai-test-owner").write_text("StationAI bridge test owns this worktree root.\n", encoding="utf-8")
         self.defaults_suite = f"com.stationai.bridge-tests.{uuid.uuid4()}"
+
+    def tearDown(self):
+        marker = self.worktree_directory / ".stationai-test-owner"
+        if marker.is_file() and marker.read_text(encoding="utf-8") == "StationAI bridge test owns this worktree root.\n":
+            shutil.rmtree(self.worktree_directory)
+            for repository in [self.primary, self.secondary, self.alternate, self.changes]:
+                subprocess.run(["git", "-C", str(repository), "worktree", "prune"], check=False, capture_output=True)
+        else:
+            self.fail(f"Refusing to remove worktree fixture without its ownership marker: {self.worktree_directory}")
 
     def call_cli(self, *command, expected_status=0, timeout=90):
         environment = os.environ.copy()
         environment["STATIONAI_DATA_DIRECTORY"] = str(self.data_directory)
+        environment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = str(self.worktree_directory)
         environment["STATIONAI_E2E_DEFAULTS_SUITE"] = self.defaults_suite
         environment["STATIONAI_BRIDGE_SERVICE_NAME"] = arguments.service_name
         completed = subprocess.run(
@@ -84,6 +98,19 @@ class StationAIBridgeTests(unittest.TestCase):
             roots = [self.primary]
         command = ["task", "create", "--title", title]
         for root in roots:
+            command.extend(["--root", root])
+        response, _ = self.call_cli(*command)
+        return self.assert_success(response)
+
+    def create_repo_task(self, title, repositories, branches=None, branch_from=None, roots=None):
+        command = ["task", "create", "--title", title]
+        for repository in repositories:
+            command.extend(["--repo", repository])
+        for repository, branch in (branches or {}).items():
+            command.extend(["--branch", f"{repository}={branch}"])
+        for repository, branch in (branch_from or {}).items():
+            command.extend(["--branch-from", f"{repository}={branch}"])
+        for root in roots or []:
             command.extend(["--root", root])
         response, _ = self.call_cli(*command)
         return self.assert_success(response)
@@ -148,24 +175,98 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assert_failure(response, "invalid_argument")
 
-    # case-contract: test_task_creation_persists_ordered_roots_across_fresh_connections | A task retains its title, Backlog state, and ordered roots after reopening.
+    # case-contract: test_task_creation_persists_ordered_roots_across_fresh_connections | A repository task creates a title-derived worktree and persists its repository, branch, path, and task state across fresh connections.
     def test_task_creation_persists_ordered_roots_across_fresh_connections(self):
-        response, _ = self.call_cli(
-            "task", "create", "--title", "Bridge task",
-            "--root", self.secondary, "--root", self.primary, "--root", self.custom,
+        created = self.create_repo_task(
+            "Bridge task", [self.primary], branch_from={str(self.primary): "branch-source"}, roots=[self.custom]
         )
-        created = self.assert_success(response)
         task_id = created["id"]
         self.assertEqual(created["status"], "Backlog")
-        self.assertEqual(created["workspaceRoots"], [str(self.secondary), str(self.primary), str(self.custom)])
+        self.assertEqual(created["repositoryWorktrees"][0]["repositoryPath"], str(self.primary))
+        self.assertEqual(created["repositoryWorktrees"][0]["branch"], "bridge-task")
+        self.assertEqual(created["repositoryWorktrees"][0]["branchFrom"], "branch-source")
+        self.assertEqual(
+            self.run_git(self.primary, "rev-parse", "bridge-task"),
+            self.run_git(self.primary, "rev-parse", "branch-source"),
+        )
+        self.assertNotEqual(
+            self.run_git(self.primary, "rev-parse", "bridge-task"),
+            self.run_git(self.primary, "rev-parse", "main"),
+        )
+        self.assertTrue(created["repositoryWorktrees"][0]["worktreePath"].startswith(str(self.worktree_directory)))
+        self.assertEqual(created["contextFolders"], [str(self.custom)])
+        self.assertEqual(created["workspaceRoots"], [created["repositoryWorktrees"][0]["worktreePath"], str(self.custom)])
 
         # Each CLI call starts a new process and XPC connection over the same real store.
         response, _ = self.call_cli("task", "get", task_id)
         task = self.assert_success(response)
         self.assertEqual(task["title"], "Bridge task")
-        self.assertEqual(task["workspaceRoots"], [str(self.secondary), str(self.primary), str(self.custom)])
+        self.assertEqual(task["repositoryWorktrees"], created["repositoryWorktrees"])
+        self.assertEqual(task["workspaceRoots"], created["workspaceRoots"])
         response, _ = self.call_cli("board", "list")
         self.assertEqual([task["id"] for task in self.assert_success(response)["tasks"]], [task_id])
+
+    # case-contract: test_task_creation_reuses_existing_branch_worktree | Creating a task for a branch with an existing worktree reuses that exact path.
+    def test_task_creation_reuses_existing_branch_worktree(self):
+        existing = self.worktree_directory / "external-existing"
+        branch = f"already-here-{uuid.uuid4().hex[:8]}"
+        self.run_git(self.primary, "worktree", "add", "-b", branch, str(existing), "main")
+        task = self.create_repo_task("Reuse branch", [self.primary], branches={str(self.primary): branch})
+        self.assertEqual(task["repositoryWorktrees"][0]["worktreePath"], str(existing))
+        self.assertFalse(task["repositoryWorktrees"][0]["createdByStationAI"])
+
+    # case-contract: test_task_creation_creates_worktrees_in_multiple_repositories | A task selecting multiple repositories gets one correctly persisted worktree per repository.
+    def test_task_creation_creates_worktrees_in_multiple_repositories(self):
+        task = self.create_repo_task("Multi repository", [self.secondary, self.primary])
+        self.assertEqual([item["repositoryPath"] for item in task["repositoryWorktrees"]], [str(self.secondary), str(self.primary)])
+        self.assertEqual([item["branch"] for item in task["repositoryWorktrees"]], ["multi-repository", "multi-repository"])
+        self.assertEqual([item["branchFrom"] for item in task["repositoryWorktrees"]], ["main", "main"])
+        for repository in [self.secondary, self.primary]:
+            self.assertEqual(
+                self.run_git(repository, "rev-parse", "multi-repository"),
+                self.run_git(repository, "rev-parse", "main"),
+            )
+        self.assertEqual(task["workspaceRoots"], [item["worktreePath"] for item in task["repositoryWorktrees"]])
+
+    # case-contract: test_task_creation_supports_non_git_folder_only_context | A folder-only task remains usable and persists its context folder without repository worktrees.
+    def test_task_creation_supports_non_git_folder_only_context(self):
+        task = self.create_task("Folder only", roots=[self.custom])
+        self.assertEqual(task["repositoryWorktrees"], [])
+        self.assertEqual(task["contextFolders"], [str(self.custom)])
+        self.assertEqual(task["workspaceRoots"], [str(self.custom)])
+
+    # case-contract: test_task_creation_rejects_worktree_assigned_to_active_task | A worktree already assigned to another active task is rejected without creating another task.
+    def test_task_creation_rejects_worktree_assigned_to_active_task(self):
+        first = self.create_repo_task("First owner", [self.primary], branches={str(self.primary): "active-shared"})
+        response, _ = self.call_cli(
+            "task", "create", "--title", "Second owner", "--repo", self.primary,
+            "--branch", f"{self.primary}=active-shared", expected_status=2,
+        )
+        self.assert_failure(response, "invalid_argument")
+        self.assertIn("already assigned", response["error"]["message"])
+        self.assertEqual(len(self.assert_success(self.call_cli("task", "list")[0])["tasks"]), 1)
+        self.assertTrue(Path(first["repositoryWorktrees"][0]["worktreePath"]).is_dir())
+
+    # case-contract: test_task_done_removes_worktree_and_preserves_branch | Moving a clean task to Done removes its worktree directory and keeps the Git branch.
+    def test_task_done_removes_worktree_and_preserves_branch(self):
+        task = self.create_repo_task("Done cleanup", [self.primary])
+        worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
+        response, _ = self.call_cli("task", "move", task["id"], "Done")
+        self.assertEqual(self.assert_success(response)["status"], "Done")
+        self.assertFalse(worktree.exists())
+        self.assertEqual(self.run_git(self.primary, "show-ref", "--verify", "--quiet", "refs/heads/done-cleanup"), "")
+
+    # case-contract: test_task_done_rejects_dirty_worktree | A task with uncommitted work cannot move to Done and retains its active worktree.
+    def test_task_done_rejects_dirty_worktree(self):
+        task = self.create_repo_task("Dirty cleanup", [self.primary])
+        worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
+        (worktree / "unsaved.txt").write_text("keep me\n", encoding="utf-8")
+        response, _ = self.call_cli("task", "move", task["id"], "Done", expected_status=1)
+        self.assert_failure(response, "operation_failed")
+        self.assertIn("uncommitted changes", response["error"]["message"])
+        reread, _ = self.call_cli("task", "get", task["id"])
+        self.assertEqual(self.assert_success(reread)["status"], "Backlog")
+        self.assertTrue((worktree / "unsaved.txt").is_file())
 
     # case-contract: test_task_status_transitions_and_rejects_unknown_status | Tasks move through each supported status; invalid status leaves the task unchanged.
     def test_task_status_transitions_and_rejects_unknown_status(self):

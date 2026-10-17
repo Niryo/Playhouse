@@ -9,7 +9,31 @@
   },
   {
     "id": "test_task_creation_persists_ordered_roots_across_fresh_connections",
-    "expectation": "A task retains its title, Backlog state, and ordered roots after reopening."
+    "expectation": "A repository task creates a title-derived worktree and persists its repository, branch, path, and task state across fresh connections."
+  },
+  {
+    "id": "test_task_creation_reuses_existing_branch_worktree",
+    "expectation": "Creating a task for a branch with an existing worktree reuses that exact path."
+  },
+  {
+    "id": "test_task_creation_creates_worktrees_in_multiple_repositories",
+    "expectation": "A task selecting multiple repositories gets one correctly persisted worktree per repository."
+  },
+  {
+    "id": "test_task_creation_supports_non_git_folder_only_context",
+    "expectation": "A folder-only task remains usable and persists its context folder without repository worktrees."
+  },
+  {
+    "id": "test_task_creation_rejects_worktree_assigned_to_active_task",
+    "expectation": "A worktree already assigned to another active task is rejected without creating another task."
+  },
+  {
+    "id": "test_task_done_removes_worktree_and_preserves_branch",
+    "expectation": "Moving a clean task to Done removes its worktree directory and keeps the Git branch."
+  },
+  {
+    "id": "test_task_done_rejects_dirty_worktree",
+    "expectation": "A task with uncommitted work cannot move to Done and retains its active worktree."
   },
   {
     "id": "test_task_status_transitions_and_rejects_unknown_status",

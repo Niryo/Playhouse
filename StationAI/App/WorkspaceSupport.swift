@@ -233,9 +233,162 @@ enum RepositoryScanner {
     }
 }
 
+enum StationAIWorktreeManager {
+    static func defaultRoot() -> URL {
+        #if DEBUG
+        if let override = ProcessInfo.processInfo.environment["STATIONAI_E2E_WORKTREE_DIRECTORY"], !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true).standardizedFileURL
+        }
+        #endif
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".stationAI/worktrees", isDirectory: true)
+            .standardizedFileURL
+    }
+
+    static func branchSlug(_ title: String) -> String {
+        let lower = title.lowercased()
+        var result = ""
+        var needsSeparator = false
+        for scalar in lower.unicodeScalars {
+            if CharacterSet.alphanumerics.contains(scalar) {
+                if needsSeparator, !result.isEmpty { result.append("-") }
+                result.unicodeScalars.append(scalar)
+                needsSeparator = false
+            } else {
+                needsSeparator = true
+            }
+        }
+        return result.isEmpty ? "task" : result
+    }
+
+    static func repositoryRoot(_ path: String) throws -> String {
+        let result = try git(path, ["rev-parse", "--show-toplevel"]).output
+        return URL(fileURLWithPath: result.trimmingCharacters(in: .whitespacesAndNewlines), isDirectory: true)
+            .standardizedFileURL.path
+    }
+
+    static func resolve(spec: RepositoryWorktreeSpec, title: String, root: URL) throws -> RepositoryWorktreeRecord {
+        let repository = try repositoryRoot(spec.repositoryPath)
+        let branch = (spec.branch?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            ? spec.branch!.trimmingCharacters(in: .whitespacesAndNewlines)
+            : branchSlug(title)
+        guard !branch.hasPrefix("-") else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Branch names can't begin with a hyphen.")
+        }
+        let branchCheck = try git(repository, ["check-ref-format", "--branch", branch], allowFailure: true)
+        guard branchCheck.status == 0 else {
+            throw BridgeCommandError(code: "invalid_argument", message: "'(branch)' isn't a valid Git branch name.")
+        }
+        let branchFrom = try resolveBase(repository: repository, requested: spec.branchFrom)
+        let existing = try worktrees(repository: repository)
+        if let path = existing.first(where: { $0.branch == branch })?.path {
+            return RepositoryWorktreeRecord(repositoryPath: repository, branch: branch, worktreePath: path, branchFrom: branchFrom, createdByStationAI: false)
+        }
+        let branchExists = try git(repository, ["show-ref", "--verify", "--quiet", "refs/heads/\(branch)"], allowFailure: true).status == 0
+        let destination = managedPath(root: root, repository: repository, branch: branch)
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard !FileManager.default.fileExists(atPath: destination.path) else {
+            throw BridgeCommandError(code: "operation_failed", message: "The worktree destination already exists: \(destination.path)")
+        }
+        if branchExists {
+            _ = try git(repository, ["worktree", "add", destination.path, branch])
+        } else {
+            _ = try git(repository, ["worktree", "add", "-b", branch, destination.path, branchFrom])
+        }
+        return RepositoryWorktreeRecord(repositoryPath: repository, branch: branch, worktreePath: destination.path, branchFrom: branchFrom, createdByStationAI: true)
+    }
+
+    static func preflightRemoval(_ record: RepositoryWorktreeRecord) throws {
+        let status = try git(record.worktreePath, ["status", "--porcelain", "--untracked-files=all"]).output
+        guard status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw BridgeCommandError(code: "operation_failed", message: "Can't mark this task Done because its worktree has uncommitted changes: \(record.worktreePath)")
+        }
+    }
+
+    static func remove(_ record: RepositoryWorktreeRecord) throws {
+        try preflightRemoval(record)
+        _ = try git(record.repositoryPath, ["worktree", "remove", record.worktreePath])
+    }
+
+    private struct ExistingWorktree { let path: String; let branch: String? }
+
+    private static func worktrees(repository: String) throws -> [ExistingWorktree] {
+        let output = try git(repository, ["worktree", "list", "--porcelain"]).output
+        var result: [ExistingWorktree] = []
+        var path: String?
+        var branch: String?
+        func flush() {
+            if let path { result.append(ExistingWorktree(path: URL(fileURLWithPath: path).standardizedFileURL.path, branch: branch?.replacingOccurrences(of: "refs/heads/", with: ""))) }
+            path = nil
+            branch = nil
+        }
+        for line in output.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            if line.isEmpty { flush() }
+            else if line.hasPrefix("worktree ") { path = String(line.dropFirst(9)) }
+            else if line.hasPrefix("branch ") { branch = String(line.dropFirst(7)) }
+        }
+        flush()
+        return result
+    }
+
+    private static func resolveBase(repository: String, requested: String?) throws -> String {
+        if let requested, !requested.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let base = requested.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard try git(repository, ["rev-parse", "--verify", "--quiet", "\(base)^{commit}"], allowFailure: true).status == 0 else {
+                throw BridgeCommandError(code: "invalid_argument", message: "Branch-from '(base)' doesn't exist in \(repository).")
+            }
+            return base
+        }
+        if try git(repository, ["show-ref", "--verify", "--quiet", "refs/heads/master"], allowFailure: true).status == 0 { return "master" }
+        if let remoteHead = try? git(repository, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]).output
+            .trimmingCharacters(in: .whitespacesAndNewlines), !remoteHead.isEmpty {
+            return remoteHead.replacingOccurrences(of: "refs/remotes/origin/", with: "")
+        }
+        return try git(repository, ["branch", "--show-current"]).output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func managedPath(root: URL, repository: String, branch: String) -> URL {
+        let name = URL(fileURLWithPath: repository).lastPathComponent
+        var hash: UInt64 = 14695981039346656037
+        for byte in repository.utf8 { hash = (hash ^ UInt64(byte)) &* 1099511628211 }
+        let branchToken = branch.utf8.map { String(format: "%02x", $0) }.joined()
+        return root.appendingPathComponent("\(name)-\(String(hash, radix: 16))", isDirectory: true)
+            .appendingPathComponent(branchToken, isDirectory: true)
+    }
+
+    private struct GitResult { let status: Int32; let output: String }
+
+    private static func git(_ path: String, _ arguments: [String], allowFailure: Bool = false) throws -> GitResult {
+        let candidates = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map {
+            URL(fileURLWithPath: String($0)).appendingPathComponent("git").path
+        } + ["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"]
+        guard let executable = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            throw BridgeCommandError(code: "operation_failed", message: "Git couldn't be found. Install Git and try again.")
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = ["-C", path] + arguments
+        let output = Pipe()
+        let error = Pipe()
+        process.standardOutput = output
+        process.standardError = error
+        try process.run()
+        let out = output.fileHandleForReading.readDataToEndOfFile()
+        let err = error.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let text = String(data: out, encoding: .utf8) ?? ""
+        guard process.terminationStatus == 0 || allowFailure else {
+            let detail = String(data: err, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            throw BridgeCommandError(code: "operation_failed", message: detail.isEmpty ? "Git command failed." : detail)
+        }
+        return GitResult(status: process.terminationStatus, output: text)
+    }
+}
+
 struct WorkspaceRootSelector: View {
     let parentFolderURL: URL?
     @Binding var roots: [URL]
+    var displayNames: [String: String] = [:]
     @State private var repositories: [URL] = []
     @State private var searchText = ""
     @State private var isScanning = false
@@ -276,7 +429,7 @@ struct WorkspaceRootSelector: View {
                         HStack(spacing: 5) {
                             Image(systemName: "folder.fill")
                                 .font(.system(size: 10))
-                            Text(root.lastPathComponent.isEmpty ? root.path : root.lastPathComponent)
+                            Text(displayNames[root.standardizedFileURL.path] ?? (root.lastPathComponent.isEmpty ? root.path : root.lastPathComponent))
                                 .font(.system(size: 11, weight: .medium))
                                 .lineLimit(1)
                             Button {
@@ -286,8 +439,8 @@ struct WorkspaceRootSelector: View {
                                     .font(.system(size: 11))
                             }
                             .buttonStyle(.plain)
-                            .help("Remove \(root.path)")
-                            .accessibilityLabel("Remove \(root.lastPathComponent)")
+                            .help("Remove \(displayNames[root.standardizedFileURL.path] ?? root.path)")
+                            .accessibilityLabel("Remove \(displayNames[root.standardizedFileURL.path] ?? root.lastPathComponent)")
                         }
                         .padding(.horizontal, 8)
                         .padding(.vertical, 5)

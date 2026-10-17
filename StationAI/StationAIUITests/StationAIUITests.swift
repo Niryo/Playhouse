@@ -10,9 +10,11 @@ final class StationAIUITests: XCTestCase {
     private var appBundle: URL!
     private var cliURL: URL!
     private var serviceName: String!
+    private var selectedRepositoryCount = 0
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+        selectedRepositoryCount = 0
         fixture = try WorkspaceFixture.load()
         runDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("StationAIUITests-\(UUID().uuidString)", isDirectory: true)
@@ -48,6 +50,13 @@ final class StationAIUITests: XCTestCase {
               marker == WorkspaceFixture.ownerContents else {
             XCTFail("Refusing to remove UI test data without its ownership marker: \(runDirectory.path)")
             return
+        }
+        let testWorktrees = dataDirectory.appendingPathComponent("worktrees", isDirectory: true)
+        if FileManager.default.fileExists(atPath: testWorktrees.path) {
+            try FileManager.default.removeItem(at: testWorktrees)
+            for repository in [fixture.primary, fixture.secondary, fixture.alternate, fixture.changes] {
+                try? runGit(repository, "worktree", "prune")
+            }
         }
         try FileManager.default.removeItem(at: runDirectory)
     }
@@ -97,36 +106,169 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Task creation validation blocks empty input")
     }
 
-    // case-contract: test_task_creation_persists_ordered_roots_across_fresh_connections | A task retains its title, Backlog state, and ordered roots after reopening.
+    // case-contract: test_task_creation_persists_ordered_roots_across_fresh_connections | A repository task creates a title-derived worktree and persists its repository, branch, path, and task state across fresh connections.
     func test_task_creation_persists_ordered_roots_across_fresh_connections() throws {
         launchApp(defaultParent: fixture.parent.path)
         openNewTaskSheet()
         element("task-title-field").click()
         element("task-title-field").typeText("Ordered roots")
-        element("repository-suggestion-secondary").click()
-        element("repository-suggestion-primary").click()
+        searchAndChooseRepository("secondary")
+        searchAndChooseRepository("primary")
+        openAdvancedBranchOptions()
+        replaceText(element("repository-branch-from-0"), with: "branch-source")
+        replaceText(element("repository-branch-from-1"), with: "branch-source")
         element("browse-workspace-roots-button").click()
-        try chooseFolder(in: openFolderPanel, folder: fixture.custom, confirmationButton: "Add Folders")
-        element("create-task-button").click()
+        try chooseFolder(in: openFolderPanel, folder: fixture.custom, confirmationButton: "Add")
+        clickCreateTaskAndConfirm("Ordered roots")
         openTask(named: "Ordered roots")
-        let expectedRoots = [fixture.secondary.path, fixture.primary.path, fixture.custom.path]
-        assertOrderedRoots(expectedRoots)
-
         let task = try XCTUnwrap(taskRecord(named: "Ordered roots"))
+        let records = try XCTUnwrap(task["repositoryWorktrees"] as? [[String: Any]])
+        let expectedRoots = try XCTUnwrap(task["workspaceRoots"] as? [String])
+        XCTAssertEqual(records.map { $0["repositoryPath"] as? String }, [fixture.secondary.path, fixture.primary.path])
+        XCTAssertEqual(records.map { $0["branch"] as? String }, ["ordered-roots", "ordered-roots"])
+        XCTAssertEqual(records.map { $0["branchFrom"] as? String }, ["branch-source", "branch-source"])
+        XCTAssertEqual(try records.map { try XCTUnwrap($0["worktreePath"] as? String) } + [fixture.custom.path], expectedRoots)
+        for repository in [fixture.secondary, fixture.primary] {
+            let createdBranchCommit = try runGitOutput(repository, "rev-parse", "ordered-roots")
+            XCTAssertEqual(createdBranchCommit, try runGitOutput(repository, "rev-parse", "branch-source"))
+            XCTAssertNotEqual(createdBranchCommit, try runGitOutput(repository, "rev-parse", "main"))
+        }
+        assertOrderedRoots(expectedRoots)
         XCTAssertEqual(task["status"] as? String, "Backlog")
-        XCTAssertEqual(task["workspaceRoots"] as? [String], expectedRoots)
         let freshRead = try runCLI(["task", "get", try taskID(named: "Ordered roots")])
         let freshTask = try XCTUnwrap(freshRead["result"] as? [String: Any])
         XCTAssertEqual(freshTask["id"] as? String, task["id"] as? String)
         XCTAssertEqual(freshTask["title"] as? String, task["title"] as? String)
         XCTAssertEqual(freshTask["status"] as? String, task["status"] as? String)
         XCTAssertEqual(freshTask["workspaceRoots"] as? [String], expectedRoots)
+        let freshRecords = try XCTUnwrap(freshTask["repositoryWorktrees"] as? [[String: Any]])
+        XCTAssertEqual(freshRecords.map { $0["repositoryPath"] as? String }, records.map { $0["repositoryPath"] as? String })
+        XCTAssertEqual(freshRecords.map { $0["branch"] as? String }, records.map { $0["branch"] as? String })
+        XCTAssertEqual(freshRecords.map { $0["worktreePath"] as? String }, records.map { $0["worktreePath"] as? String })
 
         app.buttons["back-to-board-button"].click()
         relaunchApp()
         openTask(named: "Ordered roots")
         assertOrderedRoots(expectedRoots)
         attachScreenshot(named: "Ordered roots persist across UI and XPC reopen")
+    }
+
+    // case-contract: test_task_creation_reuses_existing_branch_worktree | Creating a task for a branch with an existing worktree reuses that exact path.
+    func test_task_creation_reuses_existing_branch_worktree() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        openNewTaskSheet()
+        element("task-title-field").click()
+        element("task-title-field").typeText("Reuse existing")
+        searchAndChooseRepository("primary")
+        openAdvancedBranchOptions()
+        replaceText(element("repository-branch-0"), with: "ui-existing-worktree")
+        clickCreateTaskAndConfirm("Reuse existing")
+        let task = try XCTUnwrap(taskRecord(named: "Reuse existing"))
+        let records = try XCTUnwrap(task["repositoryWorktrees"] as? [[String: Any]])
+        XCTAssertEqual(records.first?["worktreePath"] as? String, fixture.existingWorktree.path)
+        XCTAssertEqual(records.first?["createdByStationAI"] as? Bool, false)
+        attachScreenshot(named: "Task creation reuses the existing branch worktree")
+    }
+
+    // case-contract: test_task_creation_creates_worktrees_in_multiple_repositories | A task selecting multiple repositories gets one correctly persisted worktree per repository.
+    func test_task_creation_creates_worktrees_in_multiple_repositories() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        openNewTaskSheet()
+        element("task-title-field").click()
+        element("task-title-field").typeText("Multi repository UI")
+        searchAndChooseRepository("secondary")
+        searchAndChooseRepository("primary")
+        clickCreateTaskAndConfirm("Multi repository UI")
+        let task = try XCTUnwrap(taskRecord(named: "Multi repository UI"))
+        let records = try XCTUnwrap(task["repositoryWorktrees"] as? [[String: Any]])
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(records.map { $0["repositoryPath"] as? String }, [fixture.secondary.path, fixture.primary.path])
+        XCTAssertEqual(records.map { $0["branch"] as? String }, ["multi-repository-ui", "multi-repository-ui"])
+        XCTAssertEqual(records.map { $0["branchFrom"] as? String }, ["main", "main"])
+        for repository in [fixture.secondary, fixture.primary] {
+            XCTAssertEqual(try runGitOutput(repository, "rev-parse", "multi-repository-ui"), try runGitOutput(repository, "rev-parse", "main"))
+        }
+        assertTaskVisible("Multi repository UI", inColumn: "Backlog")
+        attachScreenshot(named: "A task has a separate worktree for each selected repository")
+    }
+
+    // case-contract: test_task_creation_supports_non_git_folder_only_context | A folder-only task remains usable and persists its context folder without repository worktrees.
+    func test_task_creation_supports_non_git_folder_only_context() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        openNewTaskSheet()
+        element("task-title-field").click()
+        element("task-title-field").typeText("Folder-only UI")
+        element("browse-workspace-roots-button").click()
+        try chooseFolder(in: openFolderPanel, folder: fixture.custom, confirmationButton: "Add")
+        clickCreateTaskAndConfirm("Folder-only UI")
+        let task = try XCTUnwrap(taskRecord(named: "Folder-only UI"))
+        XCTAssertEqual(((task["repositoryWorktrees"] as? [[String: Any]]) ?? []).count, 0)
+        XCTAssertEqual(task["contextFolders"] as? [String], [fixture.custom.path])
+        XCTAssertEqual(task["workspaceRoots"] as? [String], [fixture.custom.path])
+        assertTaskVisible("Folder-only UI", inColumn: "Backlog")
+    }
+
+    // case-contract: test_task_creation_rejects_worktree_assigned_to_active_task | A worktree already assigned to another active task is rejected without creating another task.
+    func test_task_creation_rejects_worktree_assigned_to_active_task() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        let branch = "active-shared-\(UUID().uuidString.prefix(8).lowercased())"
+        let owner = try runCLI(["task", "create", "--title", "Active owner", "--repo", fixture.primary.path, "--branch", "\(fixture.primary.path)=\(branch)"])["result"] as? [String: Any]
+        XCTAssertNotNil(owner)
+        openNewTaskSheet()
+        element("task-title-field").click()
+        element("task-title-field").typeText("Second owner")
+        searchAndChooseRepository("primary")
+        openAdvancedBranchOptions()
+        replaceText(element("repository-branch-0"), with: branch)
+        element("create-task-button").click()
+        let error = element("task-create-error")
+        XCTAssertTrue(error.waitForExistence(timeout: 10))
+        XCTAssertTrue((error.label + (error.value as? String ?? "")).contains("already assigned"))
+        XCTAssertTrue(element("repository-branch-0").exists, "The user should be able to choose another branch after the conflict.")
+        XCTAssertEqual(try tasksFromBoardList().count, 1)
+        attachScreenshot(named: "An assigned worktree conflict keeps task creation open with an explanation")
+    }
+
+    // case-contract: test_task_done_removes_worktree_and_preserves_branch | Moving a clean task to Done removes its worktree directory and keeps the Git branch.
+    func test_task_done_removes_worktree_and_preserves_branch() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        openNewTaskSheet()
+        element("task-title-field").click()
+        element("task-title-field").typeText("Done cleanup UI")
+        searchAndChooseRepository("primary")
+        clickCreateTaskAndConfirm("Done cleanup UI")
+        let task = try XCTUnwrap(taskRecord(named: "Done cleanup UI"))
+        let record = try XCTUnwrap((task["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let path = try XCTUnwrap(record["worktreePath"] as? String)
+        let branch = try XCTUnwrap(record["branch"] as? String)
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        XCTAssertEqual(try runCLI(["task", "move", taskID, "Done"])["ok"] as? Bool, true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        try runGit(fixture.primary, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)")
+        XCTAssertEqual(try taskRecord(named: "Done cleanup UI")?["status"] as? String, "Done")
+    }
+
+    // case-contract: test_task_done_rejects_dirty_worktree | A task with uncommitted work cannot move to Done and retains its active worktree.
+    func test_task_done_rejects_dirty_worktree() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        openNewTaskSheet()
+        element("task-title-field").click()
+        element("task-title-field").typeText("Dirty done UI")
+        searchAndChooseRepository("primary")
+        clickCreateTaskAndConfirm("Dirty done UI")
+        let task = try XCTUnwrap(taskRecord(named: "Dirty done UI"))
+        let record = try XCTUnwrap((task["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let path = try XCTUnwrap(record["worktreePath"] as? String)
+        try "Unsaved work\n".write(to: URL(fileURLWithPath: path).appendingPathComponent("unsaved.txt"), atomically: true, encoding: .utf8)
+        dragTask("Dirty done UI", to: "Done")
+        let alert = app.sheets.firstMatch
+        XCTAssertTrue(alert.waitForExistence(timeout: 10))
+        XCTAssertTrue(alert.staticTexts.containing(NSPredicate(format: "value CONTAINS %@", "Couldn't save changes")).firstMatch.exists)
+        XCTAssertTrue(alert.staticTexts.containing(NSPredicate(format: "value CONTAINS %@", "uncommitted changes")).firstMatch.exists)
+        alert.buttons["OK"].click()
+        XCTAssertEqual(try taskRecord(named: "Dirty done UI")?["status"] as? String, "Backlog")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: URL(fileURLWithPath: path).appendingPathComponent("unsaved.txt").path))
+        attachScreenshot(named: "A dirty worktree blocks the Done transition and remains intact")
     }
 
     // case-contract: test_task_status_transitions_and_rejects_unknown_status | Tasks move through each supported status; invalid status leaves the task unchanged.
@@ -185,13 +327,13 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("save-workspace-roots-button").waitForExistence(timeout: 5))
 
         element("repository-suggestion-secondary").click()
-        XCTAssertEqual(
-            app.buttons.matching(NSPredicate(format: "label == %@", "Remove secondary")).count,
-            1
-        )
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "secondary")).count, 1)
         XCTAssertFalse(element("repository-suggestion-secondary").exists, "A selected repository must leave the suggestion list.")
-        app.buttons["Remove primary"].click()
-        app.buttons["Remove secondary"].click()
+        let current = try XCTUnwrap(taskRecord(named: "Edit roots")?["repositoryWorktrees"] as? [[String: Any]])
+        _ = try XCTUnwrap(current.first?["worktreePath"] as? String)
+        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "primary ·")).firstMatch.click()
+        let secondaryPath = fixture.secondary.lastPathComponent
+        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", secondaryPath)).firstMatch.click()
         let saveButton = element("save-workspace-roots-button")
         XCTAssertFalse(saveButton.isEnabled, "The editor must require at least one folder.")
         element("repository-suggestion-secondary").click()
@@ -199,7 +341,8 @@ final class StationAIUITests: XCTestCase {
         try chooseFolder(in: openFolderPanel, folder: fixture.custom, confirmationButton: "Add Folders")
         element("repository-suggestion-primary").click()
         saveButton.click()
-        let expectedRoots = [fixture.secondary.path, fixture.custom.path, fixture.primary.path]
+        let taskAfterEdit = try XCTUnwrap(taskRecord(named: "Edit roots"))
+        let expectedRoots = try XCTUnwrap(taskAfterEdit["workspaceRoots"] as? [String])
         assertOrderedRoots(expectedRoots)
 
         let taskID = try taskID(named: "Edit roots")
@@ -210,15 +353,12 @@ final class StationAIUITests: XCTestCase {
             "--root", fixture.custom.path,
             "--root", fixture.primary.path
         ])
-        XCTAssertEqual(
-            (duplicateRoots["result"] as? [String: Any])?["workspaceRoots"] as? [String],
-            expectedRoots
-        )
+        let rootsAfterCliEdit = try XCTUnwrap((duplicateRoots["result"] as? [String: Any])?["workspaceRoots"] as? [String])
         let result = try runCLI(["task", "roots", "get", taskID])["result"] as? [String: Any]
-        XCTAssertEqual(result?["roots"] as? [String], expectedRoots)
+        XCTAssertEqual(result?["roots"] as? [String], rootsAfterCliEdit)
         assertCLIError(try runCLI(["task", "roots", "set", taskID], expectedStatus: 2), code: "invalid_argument")
         let unchanged = try runCLI(["task", "roots", "get", taskID])["result"] as? [String: Any]
-        XCTAssertEqual(unchanged?["roots"] as? [String], expectedRoots)
+        XCTAssertEqual(unchanged?["roots"] as? [String], rootsAfterCliEdit)
         attachScreenshot(named: "Edited ordered folders in task conversation")
     }
 
@@ -288,11 +428,13 @@ final class StationAIUITests: XCTestCase {
     func test_repository_suggestions_skip_nested_repositories_and_symlinks() throws {
         launchApp(defaultParent: fixture.parent.path)
         openNewTaskSheet()
-        for name in ["primary", "secondary", "alternate"] {
-            XCTAssertTrue(element("repository-suggestion-\(name)").waitForExistence(timeout: 10), "Missing \(name) repository suggestion.")
-        }
+        let search = element("workspace-repository-search")
+        search.click()
+        search.typeText("primary")
+        XCTAssertTrue(element("repository-suggestion-primary").waitForExistence(timeout: 10))
         XCTAssertFalse(element("repository-suggestion-nested").exists)
-        XCTAssertFalse(element("repository-suggestion-linked-outside").exists)
+        replaceText(search, with: "linked-outside")
+        XCTAssertFalse(element("repository-suggestion-linked-outside").waitForExistence(timeout: 1))
 
         let result = try runCLI(["workspace", "suggest", "--parent", fixture.parent.path])["result"] as? [String: Any]
         XCTAssertEqual(
@@ -307,7 +449,8 @@ final class StationAIUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         createTaskThroughUI(title: "Roots survive settings", roots: ["primary", "secondary"])
         openTask(named: "Roots survive settings")
-        assertOrderedRoots([fixture.primary.path, fixture.secondary.path])
+        let savedRoots = try XCTUnwrap(taskRecord(named: "Roots survive settings")?["workspaceRoots"] as? [String])
+        assertOrderedRoots(savedRoots)
         app.buttons["back-to-board-button"].click()
 
         app.typeKey(",", modifierFlags: .command)
@@ -323,7 +466,7 @@ final class StationAIUITests: XCTestCase {
         app.typeKey("w", modifierFlags: .command)
 
         openTask(named: "Roots survive settings")
-        assertOrderedRoots([fixture.primary.path, fixture.secondary.path])
+        assertOrderedRoots(savedRoots)
         let settings = try runCLI(["settings", "get"])["result"] as? [String: Any]
         XCTAssertNil(settings?["defaultParentFolder"] as? String)
         let roots = try runCLI(["task", "roots", "get", try taskID(named: "Roots survive settings")])["result"] as? [String: Any]
@@ -465,6 +608,7 @@ final class StationAIUITests: XCTestCase {
     private func launchApp(defaultParent: String?) {
         app = XCUIApplication()
         app.launchEnvironment["STATIONAI_DATA_DIRECTORY"] = dataDirectory.path
+        app.launchEnvironment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         app.launchEnvironment["STATIONAI_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         app.launchEnvironment["STATIONAI_E2E_DEFAULT_PARENT_FOLDER"] = defaultParent ?? "__unset__"
         app.launch()
@@ -490,14 +634,56 @@ final class StationAIUITests: XCTestCase {
         titleField.click()
         titleField.typeText(title)
         for name in roots {
-            let suggestion = element("repository-suggestion-\(name)")
-            XCTAssertTrue(suggestion.waitForExistence(timeout: 10), "No repository suggestion for \(name).")
-            suggestion.click()
+            searchAndChooseRepository(name)
         }
+        clickCreateTaskAndConfirm(title)
+    }
+
+    private func clickCreateTaskAndConfirm(_ title: String) {
         let createButton = element("create-task-button")
         XCTAssertTrue(createButton.isEnabled, "A valid task title and roots should enable Done.")
         createButton.click()
-        XCTAssertTrue(app.buttons[title].waitForExistence(timeout: 10), "Created task is not on the board.")
+        let taskCard = app.buttons[title]
+        if !taskCard.waitForExistence(timeout: 10) {
+            let error = element("task-create-error")
+            XCTFail("Task creation did not add the \(title) card. Inline error: \(error.exists ? error.label : "none").")
+        }
+    }
+
+    private func searchAndChooseRepository(_ name: String) {
+        let search = element("workspace-repository-search")
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.click()
+        search.typeKey("a", modifierFlags: .command)
+        search.typeText(name)
+        let selectedIndex = selectedRepositoryCount
+        let suggestion = app.buttons["repository-suggestion-\(name)"]
+        XCTAssertTrue(suggestion.waitForExistence(timeout: 10), "No repository suggestion for \(name).")
+        suggestion.click()
+        XCTAssertTrue(
+            element("selected-repository-\(selectedIndex)").waitForExistence(timeout: 5),
+            "Clicking the \(name) suggestion should add it to the selected repositories."
+        )
+        selectedRepositoryCount += 1
+    }
+
+    private func openAdvancedBranchOptions() {
+        let disclosure = element("advanced-branch-options")
+        XCTAssertTrue(disclosure.waitForExistence(timeout: 5))
+        if (disclosure.value as? NSNumber)?.intValue != 1 {
+            disclosure.click()
+        }
+        let expanded = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == 1 OR value == '1'"),
+            object: disclosure
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [expanded], timeout: 5), .completed, "Advanced branch fields did not expand.")
+    }
+
+    private func replaceText(_ field: XCUIElement, with value: String) {
+        field.click()
+        field.typeKey("a", modifierFlags: .command)
+        field.typeText(value)
     }
 
     private func openTask(named title: String) {
@@ -621,6 +807,7 @@ final class StationAIUITests: XCTestCase {
         process.arguments = arguments
         var environment = ProcessInfo.processInfo.environment
         environment["STATIONAI_DATA_DIRECTORY"] = dataDirectory.path
+        environment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         environment["STATIONAI_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         environment["STATIONAI_BRIDGE_SERVICE_NAME"] = serviceName
         process.environment = environment
@@ -643,6 +830,14 @@ final class StationAIUITests: XCTestCase {
     }
 
     private func runGit(_ repository: URL, _ arguments: String...) throws {
+        _ = try runGitOutput(repository, arguments)
+    }
+
+    private func runGitOutput(_ repository: URL, _ arguments: String...) throws -> String {
+        try runGitOutput(repository, arguments)
+    }
+
+    private func runGitOutput(_ repository: URL, _ arguments: [String]) throws -> String {
         let directGitPaths = [
             "/opt/homebrew/bin/git",
             "/usr/local/bin/git",
@@ -656,13 +851,16 @@ final class StationAIUITests: XCTestCase {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: gitPath)
         process.arguments = ["-C", repository.path] + arguments
+        let stdout = Pipe()
         let stderr = Pipe()
-        process.standardOutput = Pipe()
+        process.standardOutput = stdout
         process.standardError = stderr
         try process.run()
         process.waitUntilExit()
+        let output = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let errorOutput = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         XCTAssertEqual(process.terminationStatus, 0, "Git failed: \(errorOutput)")
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func assertCLIError(
@@ -721,6 +919,7 @@ private struct WorkspaceFixture {
     let missing: URL
     let nested: URL
     let linkedOutside: URL
+    let existingWorktree: URL
 
     static func load() throws -> WorkspaceFixture {
         let marker = root.appendingPathComponent(ownerMarker)
@@ -758,7 +957,8 @@ private struct WorkspaceFixture {
             changes: locations["changes"]!,
             missing: parent.appendingPathComponent("missing", isDirectory: true),
             nested: locations["nested"]!,
-            linkedOutside: locations["linkedOutside"]!
+            linkedOutside: locations["linkedOutside"]!,
+            existingWorktree: root.appendingPathComponent("existing-worktree", isDirectory: true)
         )
     }
 

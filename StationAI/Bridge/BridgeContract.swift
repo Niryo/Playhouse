@@ -54,6 +54,7 @@ struct BridgeRequest: Codable {
     var arguments: [String: BridgeValue] = [:]
     var dataDirectory: String?
     var defaultsSuite: String?
+    var worktreeDirectory: String?
 }
 
 struct BridgeFailure: Codable, Equatable {

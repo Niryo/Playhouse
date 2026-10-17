@@ -37,6 +37,8 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let createdAt: Date
     let codexThreadID: String?
     let workspaceRoots: [String]
+    let repositoryWorktrees: [RepositoryWorktreeRecord]
+    let contextFolders: [String]
 
     init(task: BoardTask) {
         id = task.id
@@ -45,6 +47,8 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         createdAt = task.createdAt
         codexThreadID = task.codexThreadID
         workspaceRoots = task.workspaceRootPaths
+        repositoryWorktrees = task.repositoryWorktrees
+        contextFolders = task.contextFolderPaths
     }
 }
 
@@ -56,6 +60,7 @@ enum StationAIManagerError: LocalizedError {
     case unavailableWorkspaceRoot(String)
     case invalidParentFolder(String)
     case invalidMessage
+    case repositoryAssigned(String)
 
     var errorDescription: String? {
         switch self {
@@ -73,6 +78,8 @@ enum StationAIManagerError: LocalizedError {
             "The parent folder isn't an available directory: \(path)"
         case .invalidMessage:
             "Message can't be empty."
+        case .repositoryAssigned(let path):
+            "This branch worktree is already assigned to another active task: \(path). Choose another branch or finish that task first."
         }
     }
 }
@@ -80,9 +87,11 @@ enum StationAIManagerError: LocalizedError {
 @MainActor
 final class BoardTaskManager {
     private let modelContext: ModelContext
+    private let worktreeRoot: URL
 
-    init(modelContext: ModelContext) {
+    init(modelContext: ModelContext, worktreeRoot: URL = StationAIWorktreeManager.defaultRoot()) {
         self.modelContext = modelContext
+        self.worktreeRoot = worktreeRoot
     }
 
     func list() throws -> [BoardTaskRecord] {
@@ -106,11 +115,62 @@ final class BoardTaskManager {
     }
 
     @discardableResult
+    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String]) throws -> BoardTaskRecord {
+        let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTitle.isEmpty else { throw StationAIManagerError.invalidTitle }
+        let folders = try Self.normalizeOptionalRoots(contextFolders)
+        guard !repositories.isEmpty || !folders.isEmpty else { throw StationAIManagerError.noWorkspaceRoots }
+        var worktrees: [RepositoryWorktreeRecord] = []
+        do {
+            for spec in repositories {
+                let record = try StationAIWorktreeManager.resolve(spec: spec, title: normalizedTitle, root: worktreeRoot)
+                let normalizedWorktree = URL(fileURLWithPath: record.worktreePath).standardizedFileURL.path
+                guard !worktrees.contains(where: { $0.repositoryPath == record.repositoryPath }) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "A repository can be selected only once per task: \(record.repositoryPath)")
+                }
+                for other in try listModels() where other.status != .done {
+                    if other.repositoryWorktrees.contains(where: { URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == normalizedWorktree }) {
+                        throw StationAIManagerError.repositoryAssigned(normalizedWorktree)
+                    }
+                }
+                worktrees.append(record)
+            }
+        } catch {
+            for record in worktrees where record.createdByStationAI && FileManager.default.fileExists(atPath: record.worktreePath) {
+                try? StationAIWorktreeManager.remove(record)
+            }
+            throw error
+        }
+        let roots = try Self.normalizeOptionalRoots(worktrees.map(\.worktreePath) + folders)
+        let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: roots)
+        task.repositoryWorktrees = worktrees
+        task.contextFolderPaths = folders
+        modelContext.insert(task)
+        try modelContext.save()
+        return BoardTaskRecord(task: task)
+    }
+
+    @discardableResult
     func move(_ id: UUID, to statusName: String) throws -> BoardTaskRecord {
         guard let status = TaskStatus(rawValue: statusName) else {
             throw StationAIManagerError.invalidStatus(statusName)
         }
         let task = try requireTask(id)
+        if status == .done, task.status != .done {
+            for worktree in task.repositoryWorktrees { try StationAIWorktreeManager.preflightRemoval(worktree) }
+            for worktree in task.repositoryWorktrees { try StationAIWorktreeManager.remove(worktree) }
+            task.workspaceRootPaths = task.contextFolderPaths
+        } else if task.status == .done, status != .done {
+            let worktrees = try task.repositoryWorktrees.map { record in
+                try StationAIWorktreeManager.resolve(
+                    spec: RepositoryWorktreeSpec(repositoryPath: record.repositoryPath, branch: record.branch, branchFrom: record.branchFrom),
+                    title: task.title,
+                    root: worktreeRoot
+                )
+            }
+            task.repositoryWorktrees = worktrees
+            task.workspaceRootPaths = try Self.normalizeOptionalRoots(worktrees.map(\.worktreePath) + task.contextFolderPaths)
+        }
         task.status = status
         try modelContext.save()
         return BoardTaskRecord(task: task)
@@ -128,9 +188,41 @@ final class BoardTaskManager {
 
     @discardableResult
     func setWorkspaceRoots(_ id: UUID, roots: [String]) throws -> BoardTaskRecord {
-        let normalizedRoots = try Self.normalizeRoots(roots)
         let task = try requireTask(id)
-        task.workspaceRootPaths = normalizedRoots
+        if task.repositoryWorktrees.isEmpty {
+            task.workspaceRootPaths = try Self.normalizeRoots(roots)
+            task.contextFolderPaths = task.workspaceRootPaths
+        } else {
+            let paths = try Self.normalizeOptionalRoots(roots)
+            let existingPaths = Set(task.repositoryWorktrees.map { URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path })
+            let retained = task.repositoryWorktrees.filter { existingPaths.contains(URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path) && paths.contains(URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path) }
+            var worktrees = retained
+            var folders: [String] = []
+            for path in paths where !existingPaths.contains(path) {
+                if FileManager.default.fileExists(atPath: URL(fileURLWithPath: path).appendingPathComponent(".git").path) {
+                    let record = try StationAIWorktreeManager.resolve(
+                        spec: RepositoryWorktreeSpec(repositoryPath: path, branch: nil, branchFrom: nil),
+                        title: task.title,
+                        root: worktreeRoot
+                    )
+                    let worktreePath = URL(fileURLWithPath: record.worktreePath).standardizedFileURL.path
+                    for other in try listModels() where other.id != id && other.status != .done {
+                        if other.repositoryWorktrees.contains(where: { URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == worktreePath }) {
+                            if record.createdByStationAI { try? StationAIWorktreeManager.remove(record) }
+                            throw StationAIManagerError.repositoryAssigned(worktreePath)
+                        }
+                    }
+                    worktrees.append(record)
+                } else {
+                    folders.append(path)
+                }
+            }
+            task.repositoryWorktrees = worktrees
+            task.contextFolderPaths = folders
+            let resolvedRoots = try Self.normalizeOptionalRoots(worktrees.map(\.worktreePath) + folders)
+            guard !resolvedRoots.isEmpty else { throw StationAIManagerError.noWorkspaceRoots }
+            task.workspaceRootPaths = resolvedRoots
+        }
         try modelContext.save()
         return BoardTaskRecord(task: task)
     }
@@ -168,6 +260,22 @@ final class BoardTaskManager {
             unique.append(path)
         }
         return unique
+    }
+
+    private static func normalizeOptionalRoots(_ roots: [String]) throws -> [String] {
+        let paths = roots.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL.path }
+        var unique: [String] = []
+        for path in paths where !unique.contains(path) {
+            guard WorkspaceSettings.validDirectoryURL(for: path) != nil else {
+                throw StationAIManagerError.unavailableWorkspaceRoot(path)
+            }
+            unique.append(path)
+        }
+        return unique
+    }
+
+    private func listModels() throws -> [BoardTask] {
+        try modelContext.fetch(FetchDescriptor<BoardTask>())
     }
 }
 
@@ -358,7 +466,13 @@ final class StationAIBridgeRuntime {
             #endif
             let container = try StationAIStore.makeContainer(dataDirectory: dataDirectory)
             let context = ModelContext(container)
-            let taskManager = BoardTaskManager(modelContext: context)
+            let worktreeRoot: URL
+            #if DEBUG
+            worktreeRoot = request.worktreeDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) } ?? StationAIWorktreeManager.defaultRoot()
+            #else
+            worktreeRoot = StationAIWorktreeManager.defaultRoot()
+            #endif
+            let taskManager = BoardTaskManager(modelContext: context, worktreeRoot: worktreeRoot)
             let preferences: UserDefaults
             #if DEBUG
             if let suite = request.defaultsSuite, let isolated = UserDefaults(suiteName: suite) {
@@ -385,7 +499,8 @@ final class StationAIBridgeRuntime {
             case "task.create":
                 let title = try request.requiredString("title")
                 let roots = try request.requiredStrings("roots")
-                result = try Self.value(taskManager.create(title: title, workspaceRoots: roots))
+                let repositories = try request.repositorySpecs("repositories")
+                result = try Self.value(taskManager.create(title: title, repositories: repositories, contextFolders: roots))
             case "task.get", "task.show":
                 result = try Self.value(taskManager.get(request.requiredUUID("taskID")))
             case "task.move":
@@ -450,7 +565,7 @@ final class StationAIBridgeRuntime {
             let code: String
             switch error {
             case .taskNotFound: code = "not_found"
-            case .invalidTitle, .invalidStatus, .noWorkspaceRoots, .unavailableWorkspaceRoot, .invalidParentFolder, .invalidMessage: code = "invalid_argument"
+            case .invalidTitle, .invalidStatus, .noWorkspaceRoots, .unavailableWorkspaceRoot, .invalidParentFolder, .invalidMessage, .repositoryAssigned: code = "invalid_argument"
             }
             return .failure(request, code: code, message: error.localizedDescription)
         } catch {
@@ -485,6 +600,22 @@ private extension BridgeRequest {
             throw BridgeCommandError(code: "invalid_argument", message: "Missing required list argument: \(name).")
         }
         return value
+    }
+
+    func repositorySpecs(_ name: String) throws -> [RepositoryWorktreeSpec] {
+        guard case .array(let values)? = arguments[name] else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Missing repository list argument: \(name).")
+        }
+        return try values.map { value in
+            guard let object = value.object, let path = object["repositoryPath"]?.string else {
+                throw BridgeCommandError(code: "invalid_argument", message: "Each repository must include a repositoryPath.")
+            }
+            return RepositoryWorktreeSpec(
+                repositoryPath: path,
+                branch: object["branch"]?.string,
+                branchFrom: object["branchFrom"]?.string
+            )
+        }
     }
 
     func requiredUUID(_ name: String) throws -> UUID {

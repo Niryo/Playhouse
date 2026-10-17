@@ -24,6 +24,7 @@ enum StationAICLI {
         var configuredRequest = request
         configuredRequest.dataDirectory = dataDirectory
         configuredRequest.defaultsSuite = defaultsSuite
+        configuredRequest.worktreeDirectory = ProcessInfo.processInfo.environment["STATIONAI_E2E_WORKTREE_DIRECTORY"]
 
         do {
             let response = try BridgeClient().send(configuredRequest) { event in
@@ -58,11 +59,22 @@ enum StationAICLI {
             case "list":
                 return BridgeRequest(command: "task.list")
             case "create":
-                let flags = try parseFlags(tail, valueFlags: ["--title", "--root"])
+                let flags = try parseFlags(tail, valueFlags: ["--title", "--root", "--repo", "--branch", "--branch-from"])
                 let title = try requiredFlag("--title", flags: flags).first!
                 let roots = flags["--root"] ?? []
+                let repositories = flags["--repo"] ?? []
+                let branches = try keyedOptions(flags["--branch"] ?? [])
+                let branchFrom = try keyedOptions(flags["--branch-from"] ?? [])
                 return BridgeRequest(command: "task.create", arguments: [
-                    "title": .string(title), "roots": .array(roots.map(BridgeValue.string))
+                    "title": .string(title),
+                    "roots": .array(roots.map(BridgeValue.string)),
+                    "repositories": .array(repositories.map { path in
+                        .object([
+                            "repositoryPath": .string(path),
+                            "branch": branches[path].map(BridgeValue.string) ?? .null,
+                            "branchFrom": branchFrom[path].map(BridgeValue.string) ?? .null,
+                        ])
+                    })
                 ])
             case "get", "show":
                 let id = try firstPositional(tail)
@@ -170,6 +182,20 @@ enum StationAICLI {
         return values
     }
 
+    private static func keyedOptions(_ values: [String]) throws -> [String: String] {
+        var result: [String: String] = [:]
+        for value in values {
+            guard let separator = value.firstIndex(of: "="), separator != value.startIndex else {
+                throw CLIError.usage("Use <repository-path>=<value> for branch options.")
+            }
+            let path = String(value[..<separator])
+            let option = String(value[value.index(after: separator)...])
+            guard !option.isEmpty else { throw CLIError.usage("Branch options can't be empty.") }
+            result[path] = option
+        }
+        return result
+    }
+
     private static func firstPositional(_ args: [String]) throws -> String {
         guard let value = args.first, args.count == 1 else { throw CLIError.usage("Expected exactly one task ID.") }
         return value
@@ -203,6 +229,7 @@ enum StationAICLI {
       stationai board list
       stationai task list|get <task-id>
       stationai task create --title <title> --root <path> [--root <path>...]
+      stationai task create --title <title> --repo <path> [--repo <path>...] [--branch <repo-path>=<name>] [--branch-from <repo-path>=<ref>]
       stationai task move <task-id> <Backlog|Ready|In Progress|Done>
       stationai task rename <task-id> --title <title>
       stationai task roots get <task-id>

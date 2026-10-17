@@ -10,7 +10,8 @@ The service accepts a versioned JSON request, returns a versioned JSON response,
 | --- | --- |
 | `status` | Service and API version |
 | `board list` / `task list` | List persisted tasks |
-| `task create --title <title> --root <path> [--root <path>...]` | Create a task with ordered working roots |
+| `task create --title <title> --repo <path> [--repo <path>...] [--branch <repo-path>=<name>] [--branch-from <repo-path>=<ref>] [--root <folder>...]` | Create one worktree per Git repository, with optional extra context folders |
+| `task create --title <title> --root <folder> [--root <folder>...]` | Create a folder-only task without Git worktrees |
 | `task get <task-id>` | Read a task and its thread/root state |
 | `task move <task-id> <Backlog\|Ready\|In Progress\|Done>` | Change task status |
 | `task rename <task-id> --title <title>` | Rename a task |
@@ -26,12 +27,14 @@ The service accepts a versioned JSON request, returns a versioned JSON response,
 For example:
 
 ```sh
-./scripts/stationai.sh task create --title "Update parser" --root /work/parser --root /work/fixtures
+./scripts/stationai.sh task create --title "Update parser" --repo /work/parser --root /work/fixtures
 ./scripts/stationai.sh task move 33F746B9-3E5E-4D84-890A-257BDB01B66A "In Progress"
 ./scripts/stationai.sh conversation send 33F746B9-3E5E-4D84-890A-257BDB01B66A --message "Inspect the parser and summarize its error handling."
 ```
 
-The selected roots define task context and the initial working directory; they do not restrict Codex's full-access sandbox configuration.
+Repository worktrees are created under `~/.stationAI/worktrees`; if the requested branch already has a worktree, StationAI reuses its current path. By default, the branch name is derived from the task title. `--branch` and `--branch-from` values are keyed to the repository path as `<repo-path>=<value>`. Branch creation uses `master`, or the detected default branch if `master` is absent. Moving a task to Done removes clean worktree directories while leaving their branches; a dirty worktree blocks the status change. Folder-only tasks store their roots directly.
+
+The selected worktrees and context folders define task context and the initial working directory; they do not restrict Codex's full-access sandbox configuration.
 
 ## Shared implementation
 

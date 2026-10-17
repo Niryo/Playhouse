@@ -65,6 +65,7 @@ struct TaskConversationView: View {
             WorkspaceRootsEditor(
                 parentFolderURL: WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath),
                 initialRoots: workspaceRootURLs,
+                repositoryWorktrees: task.repositoryWorktrees,
                 onSave: updateWorkspaceRoots
             )
         }
@@ -604,13 +605,19 @@ struct TaskConversationView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             } else {
-                let folderSummary = "Working in: " + workspaceRootURLs.map(\.path).joined(separator: " · ")
+                let folderLabels = workspaceRootURLs.map { url in
+                    task.repositoryWorktrees.first(where: { URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == url.path })
+                        .map { "\(URL(fileURLWithPath: $0.repositoryPath).lastPathComponent) · \($0.branch)" } ?? url.lastPathComponent
+                }
+                let folderSummary = "Working in: " + folderLabels.joined(separator: " · ")
+                let fullFolderSummary = "Working in: " + workspaceRootURLs.map(\.path).joined(separator: " · ")
                 Text(folderSummary)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .textSelection(.enabled)
                     .accessibilityLabel(folderSummary)
+                    .accessibilityValue(fullFolderSummary)
                     .accessibilityIdentifier("working-folders-summary")
             }
         }

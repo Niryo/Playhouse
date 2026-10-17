@@ -35,6 +35,16 @@ def create_repository(repository: Path, files: dict[str, str]) -> None:
     run_git(repository, "config", "user.email", "stationai-bridge-test@example.invalid")
     run_git(repository, "add", ".")
     run_git(repository, "commit", "-m", "Create clean StationAI bridge test fixture")
+    branch_source = run_git(
+        repository,
+        "commit-tree",
+        "main^{tree}",
+        "-p",
+        "main",
+        "-m",
+        "Create distinct branch-from fixture commit",
+    ).strip()
+    run_git(repository, "update-ref", "refs/heads/branch-source", branch_source)
     status = run_git(repository, "status", "--porcelain")
     if status:
         raise RuntimeError(f"Fixture repository {repository} is not clean after commit: {status}")
@@ -88,6 +98,8 @@ def prepare(workspace_changes: bool = False) -> None:
             "stationai-primary.txt": "Primary baseline.\n",
         },
     )
+    existing_worktree = FIXTURE_ROOT / "existing-worktree"
+    run_git(primary, "worktree", "add", "-b", "ui-existing-worktree", str(existing_worktree), "main")
     create_repository(nested, {"nested-note.txt": "Nested baseline.\n"})
     create_repository(secondary, {"stationai-secondary.txt": "Secondary baseline.\n"})
     create_repository(external, {"external-note.txt": "Outside baseline.\n"})
