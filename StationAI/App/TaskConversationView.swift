@@ -31,6 +31,11 @@ struct CodexTaskTitleGenerator: TaskTitleGenerating {
 }
 
 struct TaskConversationView: View {
+    private struct RepositoryBadgeEditID: Identifiable, Equatable {
+        let path: String
+        var id: String { path }
+    }
+
     private struct ChangeRepositoryGroup: Identifiable {
         let repository: String
         let entries: [WorkspaceChangeEntry]
@@ -81,6 +86,10 @@ struct TaskConversationView: View {
     @State private var repositorySearch = ""
     @State private var suggestedRepositories: [URL] = []
     @State private var expandedRepositoryPath: String?
+    @State private var repositoryBeingEdited: RepositoryWorktreeRecord?
+    @State private var editedBranch = ""
+    @State private var editedBranchFrom = ""
+    @State private var editedMergeTarget = ""
     @State private var isShowingDiscardConfirmation = false
     @FocusState private var isComposerFocused: Bool
 
@@ -682,24 +691,35 @@ struct TaskConversationView: View {
                 ForEach(task.repositoryWorktrees, id: \.repositoryPath) { repository in
                     let name = URL(fileURLWithPath: repository.repositoryPath).lastPathComponent
                     Button {
-                        expandedRepositoryPath = expandedRepositoryPath == repository.repositoryPath ? nil : repository.repositoryPath
+                        repositoryBeingEdited = repository
+                        editedBranch = repository.branch
+                        editedBranchFrom = repository.branchFrom
+                        editedMergeTarget = repository.mergeTarget ?? ""
                     } label: {
                         Text(name).font(.system(size: 10, weight: .medium)).lineLimit(1)
                             .padding(.horizontal, 8).padding(.vertical, 5)
                             .background(Color.accentColor.opacity(0.1), in: Capsule())
                     }
                     .buttonStyle(.plain)
-                    .popover(isPresented: Binding(
-                        get: { expandedRepositoryPath == repository.repositoryPath },
-                        set: { if !$0 { expandedRepositoryPath = nil } }
-                    )) {
+                    .popover(item: Binding(
+                        get: { repositoryBeingEdited?.repositoryPath == repository.repositoryPath ? RepositoryBadgeEditID(path: repository.repositoryPath) : nil },
+                        set: { if $0 == nil { repositoryBeingEdited = nil } }
+                    )) { _ in
                         VStack(alignment: .leading, spacing: 8) {
                             Text(name).font(.system(size: 12, weight: .semibold))
-                            Text("Branch: \(repository.branch)")
-                            Text("Merge from: \(repository.branchFrom)")
-                            Text("Merge to: \(repository.mergeTarget ?? "default")")
+                            TextField("Branch", text: $editedBranch).accessibilityIdentifier("conversation-repository-branch")
+                            TextField("Merge from", text: $editedBranchFrom).accessibilityIdentifier("conversation-repository-branch-from")
+                            TextField("Merge to", text: $editedMergeTarget).accessibilityIdentifier("conversation-repository-merge-target")
+                            HStack {
+                                Button("Remove Repository", role: .destructive) { removeConversationRepository(repository) }
+                                    .accessibilityIdentifier("remove-conversation-repository-button")
+                                Spacer()
+                                Button("Save") { saveConversationRepository(repository) }
+                                    .buttonStyle(.borderedProminent)
+                                    .accessibilityIdentifier("save-conversation-repository-button")
+                            }
                         }
-                        .font(.system(size: 11)).padding(12).frame(minWidth: 220, alignment: .leading)
+                        .font(.system(size: 11)).padding(12).frame(minWidth: 270, alignment: .leading)
                     }
                     .accessibilityIdentifier("conversation-repository-badge-\(name)")
                 }
@@ -1426,6 +1446,40 @@ struct TaskConversationView: View {
             Task { await refreshWorkspaceChanges() }
         } catch {
             errorMessage = "Couldn't save working folders: \(error.localizedDescription)"
+        }
+    }
+
+    private func saveConversationRepository(_ original: RepositoryWorktreeRecord) {
+        let branch = editedBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+        let branchFrom = editedBranchFrom.trimmingCharacters(in: .whitespacesAndNewlines)
+        let mergeTarget = editedMergeTarget.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !branch.isEmpty, !branchFrom.isEmpty else {
+            errorMessage = "Branch and merge-from values can't be empty."
+            return
+        }
+        var repositories = task.repositoryWorktrees
+        guard let index = repositories.firstIndex(where: { $0.repositoryPath == original.repositoryPath }) else { return }
+        repositories[index].branch = branch
+        repositories[index].branchFrom = branchFrom
+        repositories[index].mergeTarget = mergeTarget.isEmpty ? nil : mergeTarget
+        task.repositoryWorktrees = repositories
+        try? modelContext.save()
+        repositoryBeingEdited = nil
+    }
+
+    private func removeConversationRepository(_ repository: RepositoryWorktreeRecord) {
+        do {
+            if repository.createdByStationAI,
+               FileManager.default.fileExists(atPath: repository.worktreePath) {
+                try StationAIWorktreeManager.remove(repository)
+            }
+            task.repositoryWorktrees.removeAll { $0.repositoryPath == repository.repositoryPath }
+            task.workspaceRootPaths.removeAll { URL(fileURLWithPath: $0).standardizedFileURL.path == URL(fileURLWithPath: repository.worktreePath).standardizedFileURL.path }
+            try modelContext.save()
+            repositoryBeingEdited = nil
+            Task { await refreshWorkspaceChanges() }
+        } catch {
+            errorMessage = "Couldn't remove repository: \(error.localizedDescription)"
         }
     }
 
