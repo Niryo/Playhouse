@@ -283,7 +283,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(len(self.assert_success(self.call_cli("task", "list")[0])["tasks"]), 1)
         self.assertTrue(Path(first["repositoryWorktrees"][0]["worktreePath"]).is_dir())
 
-    # case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task in Review, moving it to Done merges the task branch into its explicit target, removes the clean managed worktree, retains the source branch, and preserves the saved conversation prompt.
+    # case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task in Review, moving it to Done squash-merges the task branch into its explicit target as a single-parent commit, removes the clean managed worktree, retains the source branch, and preserves the saved conversation prompt.
     def test_task_done_removes_worktree_and_preserves_branch(self):
         task = self.create_repo_task("Done cleanup", [self.primary])
         draft = "Complete the task and preserve its conversation."
@@ -312,11 +312,14 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertFalse(worktree.exists())
         self.assertEqual(self.run_git(self.primary, "show-ref", "--verify", "--quiet", "refs/heads/done-cleanup"), "")
         self.assertEqual((self.primary / "task-result.txt").read_text(encoding="utf-8"), "Task branch change\n")
+        target_parents = self.run_git(self.primary, "rev-list", "--parents", "-n", "1", "main").split()
+        self.assertEqual(len(target_parents), 2, "A squash merge should create a single-parent target commit.")
+        self.assertIn("Squash merge task branch", self.run_git(self.primary, "log", "main", "-1", "--format=%s"))
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["repositoryWorktrees"][0]["mergeTarget"], "main")
         completed, _ = self.call_cli("task", "get", task["id"])
         self.assertEqual(self.assert_success(completed)["savedPrompt"], draft)
 
-    # case-contract: test_task_done_commits_dirty_worktree_changes | Moving a reviewed task to Done stages and commits tracked and untracked worktree changes, merges them into the target, and removes the managed worktree.
+    # case-contract: test_task_done_commits_dirty_worktree_changes | Moving a reviewed task to Done stages and commits tracked and untracked worktree changes, squash-merges them into the target as a single-parent commit, and removes the managed worktree.
     def test_task_done_commits_dirty_worktree_changes(self):
         task = self.create_repo_task("Dirty cleanup", [self.primary])
         worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
@@ -345,6 +348,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual((self.primary / "unsaved.txt").read_text(encoding="utf-8"), "keep me\n")
         branch = task["repositoryWorktrees"][0]["branch"]
         self.assertEqual(self.run_git(self.primary, "log", branch, "-1", "--format=%s").strip(), "Complete task: Dirty cleanup")
+        self.assertEqual(len(self.run_git(self.primary, "rev-list", "--parents", "-n", "1", "main").split()), 2)
 
     # case-contract: test_task_done_rejects_dirty_merge_target | A dirty local merge target is detected before the merge, leaves the target unchanged, and moves the reviewed task to Blocked with the reason.
     def test_task_done_rejects_dirty_merge_target(self):
@@ -378,7 +382,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(self.primary, "branch", "--show-current").strip(), "main")
         self.run_git(self.primary, "branch", "branch-source", branch_source_commit)
 
-    # case-contract: test_task_done_retries_partial_multi_repository_merge | A later repository merge failure preserves the earlier completed merge; after retry, StationAI skips it and finishes the remaining repository.
+    # case-contract: test_task_done_retries_partial_multi_repository_merge | A later repository squash-commit failure preserves the earlier completed merge and leaves the failed target unchanged and clean; after retry, StationAI skips the completed merge and finishes the remaining repository.
     def test_task_done_retries_partial_multi_repository_merge(self):
         task = self.create_repo_task("Partial multi merge", [self.primary, self.secondary])
         worktrees = task["repositoryWorktrees"]
@@ -389,7 +393,7 @@ class StationAIBridgeTests(unittest.TestCase):
             (worktree / filename).write_text(f"Change from {repository.name}.\n", encoding="utf-8")
             self.run_git(worktree, "add", filename)
             self.run_git(worktree, "commit", "-m", f"Add {filename}")
-        hook = self.secondary / ".git" / "hooks" / "pre-merge-commit"
+        hook = self.secondary / ".git" / "hooks" / "pre-commit"
         hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
         hook.chmod(0o755)
         secondary_target_before = self.run_git(self.secondary, "rev-parse", "main").strip()
@@ -399,7 +403,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assert_failure(failed, "operation_failed")
         current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(current["status"], "Blocked")
-        self.assertIn("merge", current["statusMessage"].lower())
+        self.assertIn("squash merge", current["statusMessage"].lower())
         progress = current["repositoryWorktrees"]
         self.assertEqual([item["mergeCompleted"] for item in progress], [True, False])
         self.assertEqual(self.run_git(self.secondary, "rev-parse", "main").strip(), secondary_target_before)
