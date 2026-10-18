@@ -1,0 +1,6 @@
+interface:
+  display_name: "Full UI Verification"
+  short_description: "Run and repair StationAI's full UI test suite"
+  default_prompt: "Use $full-ui-verification to run the full StationAI UI suite, fix failures, and commit and push the scoped changes."
+policy:
+  allow_implicit_invocation: false
