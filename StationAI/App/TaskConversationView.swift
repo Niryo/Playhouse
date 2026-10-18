@@ -655,10 +655,12 @@ struct TaskConversationView: View {
             .accessibilityIdentifier("back-to-board-button")
 
             VStack(alignment: .leading, spacing: 4) {
-                if isGeneratingTitle {
+                if isGeneratingTitle || task.title == "Generating title…" {
                     HStack(spacing: 7) {
-                        ProgressView().controlSize(.small)
-                        Text("Creating task title…")
+                        ProgressView()
+                            .controlSize(.small)
+                            .accessibilityIdentifier("task-title-generating-loader")
+                        Text("Generating title…")
                     }
                     .accessibilityIdentifier("task-title-generating")
                 } else {

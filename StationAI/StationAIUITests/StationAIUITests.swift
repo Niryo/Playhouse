@@ -806,13 +806,15 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Existing task roots survive clearing the default parent")
     }
 
-    // case-contract: test_new_task_has_empty_conversation_history | A newly created task shows an empty conversation with no stored messages or activity; confirming discard deletes the empty task, while canceling keeps it.
+    // case-contract: test_new_task_has_empty_conversation_history | A newly created task shows an empty conversation and a loading title while title generation is pending; no messages or activity are stored, and confirming discard deletes the task while canceling keeps it.
     func test_new_task_has_empty_conversation_history() throws {
         launchApp(defaultParent: fixture.parent.path)
         openNewTaskSheet()
         chooseRepositorySuggestion("primary")
         element("create-task-button").click()
         XCTAssertTrue(element("empty-conversation").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("task-title-generating-loader").waitForExistence(timeout: 5), "The conversation header should show a loader while the persisted title is still generating.")
+        XCTAssertTrue(app.staticTexts["Generating title…"].exists, "The conversation header should name the title-generation state instead of showing an untitled task.")
         XCTAssertTrue(app.staticTexts["Start a conversation"].exists)
         XCTAssertFalse(element("pause-response-button").exists)
         XCTAssertFalse(element("continue-response-button").exists)

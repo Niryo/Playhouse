@@ -625,9 +625,11 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "roots", "get", task_id)
         self.assertEqual(self.assert_success(response)["roots"], [str(self.primary)])
 
-    # case-contract: test_new_task_has_empty_conversation_history | A newly created task shows an empty conversation with no stored messages or activity; confirming discard deletes the empty task, while canceling keeps it.
+    # case-contract: test_new_task_has_empty_conversation_history | A newly created task shows an empty conversation and a loading title while title generation is pending; no messages or activity are stored, and confirming discard deletes the task while canceling keeps it.
     def test_new_task_has_empty_conversation_history(self):
-        task_id = self.create_task(title="Conversation history")["id"]
+        task_id = self.create_task(title="Generating title…")["id"]
+        response, _ = self.call_cli("task", "get", task_id)
+        self.assertEqual(self.assert_success(response)["title"], "Generating title…")
         response, _ = self.call_cli("conversation", "history", task_id)
         history = self.assert_success(response)
         self.assertEqual(history["activities"], [])
