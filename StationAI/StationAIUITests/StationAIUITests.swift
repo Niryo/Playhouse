@@ -716,9 +716,19 @@ final class StationAIUITests: XCTestCase {
     func test_repository_suggestions_skip_nested_repositories_and_symlinks() throws {
         launchApp(defaultParent: fixture.parent.path)
         openNewTaskSheet()
+        let repositorySearch = element("workspace-repository-search")
+        XCTAssertTrue(repositorySearch.waitForExistence(timeout: 5), "The create task sheet should let the user search by repository name.")
+        XCTAssertFalse(element("repository-suggestion-primary").exists, "Repository suggestions should stay hidden until the user types a query.")
+        replaceText(repositorySearch, with: "primary")
         XCTAssertTrue(element("repository-suggestion-primary").waitForExistence(timeout: 10))
+        XCTAssertFalse(element("repository-suggestion-secondary").exists, "Autocomplete should show only repositories matching the query.")
         XCTAssertFalse(element("repository-suggestion-nested").exists)
-        XCTAssertFalse(element("repository-suggestion-linked-outside").waitForExistence(timeout: 1))
+        replaceText(repositorySearch, with: "linked-outside")
+        XCTAssertTrue(app.staticTexts["No matching repositories. Use Browse to add a folder."].waitForExistence(timeout: 5))
+        replaceText(repositorySearch, with: "group")
+        XCTAssertTrue(element("repository-suggestion-secondary").waitForExistence(timeout: 5), "A path-only query should find a repository inside a matching parent folder.")
+        XCTAssertFalse(element("repository-suggestion-primary").exists)
+        replaceText(repositorySearch, with: "changes")
 
         let result = try runCLI(["workspace", "suggest", "--parent", fixture.parent.path])["result"] as? [String: Any]
         let expectedRepositories = [fixture.primary.path, fixture.secondary.path, fixture.alternate.path, fixture.changes.path].sorted()
@@ -1356,6 +1366,10 @@ final class StationAIUITests: XCTestCase {
 
     private func chooseRepositorySuggestion(_ name: String) {
         let selectedIndex = selectedRepositoryCount
+        let searchField = element("workspace-repository-search")
+        if searchField.exists {
+            replaceText(searchField, with: name)
+        }
         let suggestion = app.buttons["repository-suggestion-\(name)"]
         XCTAssertTrue(suggestion.waitForExistence(timeout: 10), "No repository suggestion for \(name).")
         XCTAssertTrue(suggestion.isHittable, "Repository suggestion \(name) should be reachable in the scrolling picker.")

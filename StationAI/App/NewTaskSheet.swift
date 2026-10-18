@@ -8,6 +8,7 @@ struct NewTaskSheet: View {
     @State private var repositories: [RepositoryWorktreeSpec] = []
     @State private var contextFolders: [URL] = []
     @State private var suggestedRepositories: [URL] = []
+    @State private var repositorySearch = ""
     @State private var editingRepositoryField: EditableRepositoryField?
     @State private var hoveredRepositoryTag: String?
     @FocusState private var focusedRepositoryField: EditableRepositoryField?
@@ -113,46 +114,46 @@ struct NewTaskSheet: View {
                     }
                 }
 
-                let availableRepositories = suggestedRepositories.filter { candidate in
-                    !repositories.contains(where: { URL(fileURLWithPath: $0.repositoryPath).standardizedFileURL.path == candidate.standardizedFileURL.path })
-                }
-                let parentDepth = parentFolderURL?.pathComponents.count ?? 0
-                let orderedRepositories = availableRepositories.sorted { left, right in
-                    let leftDepth = left.pathComponents.count - parentDepth
-                    let rightDepth = right.pathComponents.count - parentDepth
-                    if leftDepth != rightDepth { return leftDepth < rightDepth }
-                    return left.path.localizedStandardCompare(right.path) == .orderedAscending
-                }
-                if suggestedRepositories.isEmpty {
-                    ProgressView("Finding repositories…")
-                        .font(.system(size: 10))
-                        .controlSize(.small)
-                } else if availableRepositories.isEmpty {
-                    Text("All suggested repositories are selected.").font(.system(size: 10)).foregroundStyle(.secondary)
-                } else {
-                    ScrollView {
-                        LazyVStack(spacing: 0) {
-                            ForEach(orderedRepositories, id: \.path) { repository in
-                                Button {
-                                    repositories.append(repositorySpec(for: repository.path))
-                                } label: {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(repository.lastPathComponent).font(.system(size: 11, weight: .medium))
-                                        Text(repository.path).font(.system(size: 9)).foregroundStyle(.secondary)
+                TextField("Enter a repository name to search…", text: $repositorySearch)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("workspace-repository-search")
+                if !repositorySearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let availableRepositories = suggestedRepositories.filter { candidate in
+                        !repositories.contains(where: { URL(fileURLWithPath: $0.repositoryPath).standardizedFileURL.path == candidate.standardizedFileURL.path }) &&
+                        (candidate.lastPathComponent.localizedCaseInsensitiveContains(repositorySearch) || candidate.path.localizedCaseInsensitiveContains(repositorySearch))
+                    }
+                    if suggestedRepositories.isEmpty {
+                        ProgressView("Finding repositories…")
+                            .font(.system(size: 10))
+                            .controlSize(.small)
+                    } else if availableRepositories.isEmpty {
+                        Text("No matching repositories. Use Browse to add a folder.").font(.system(size: 10)).foregroundStyle(.secondary)
+                    } else {
+                        ScrollView {
+                            LazyVStack(spacing: 0) {
+                                ForEach(availableRepositories, id: \.path) { repository in
+                                    Button {
+                                        repositories.append(repositorySpec(for: repository.path))
+                                        repositorySearch = ""
+                                    } label: {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(repository.lastPathComponent).font(.system(size: 11, weight: .medium))
+                                            Text(repository.path).font(.system(size: 9)).foregroundStyle(.secondary)
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(7)
+                                        .contentShape(Rectangle())
                                     }
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(7)
-                                    .contentShape(Rectangle())
+                                    .buttonStyle(.plain)
+                                    .accessibilityIdentifier("repository-suggestion-\(repository.lastPathComponent)")
                                 }
-                                .buttonStyle(.plain)
-                                .accessibilityIdentifier("repository-suggestion-\(repository.lastPathComponent)")
                             }
                         }
+                        .frame(maxHeight: 92)
+                        .clipped()
+                        .accessibilityIdentifier("repository-suggestions-list")
+                        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
                     }
-                    .frame(height: 110)
-                    .clipped()
-                    .accessibilityIdentifier("repository-suggestions-list")
-                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
                 }
                 if let createError {
                     Label(createError, systemImage: "exclamationmark.triangle.fill")
