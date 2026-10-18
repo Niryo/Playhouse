@@ -692,9 +692,6 @@ struct TaskConversationView: View {
 
     private var safetyNotice: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Label("Full machine and network access · working folders provide context only", systemImage: "exclamationmark.triangle.fill")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.orange)
             if workspaceRootURLs.isEmpty {
                 Text("No working folders are set. Add one or more folders before sending a message.")
                     .font(.system(size: 11))
