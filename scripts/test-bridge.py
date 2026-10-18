@@ -549,6 +549,21 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "roots", "get", task_id)
         self.assertEqual(self.assert_success(response)["roots"], expected_roots)
 
+    # case-contract: test_conversation_repository_picker_adds_repository_worktree | Typing in the conversation repository picker filters suggestions; adding one persists a worktree badge whose popover shows the exact stored branch, merge-from, and merge-to values.
+    def test_conversation_repository_picker_adds_repository_worktree(self):
+        task = self.create_repo_task("Add repository in conversation", [self.primary])
+        task_id = task["id"]
+        roots = task["workspaceRoots"]
+        response, _ = self.call_cli("task", "roots", "set", task_id, "--root", roots[0], "--root", self.secondary)
+        updated = self.assert_success(response)
+        self.assertEqual(len(updated["repositoryWorktrees"]), 2)
+        added = next(item for item in updated["repositoryWorktrees"] if item["repositoryPath"] == str(self.secondary))
+        self.assertTrue(Path(added["worktreePath"]).is_dir())
+        self.assertTrue(added["branch"])
+        self.assertTrue(added["branchFrom"])
+        self.assertTrue(added["mergeTarget"])
+        fresh, _ = self.call_cli("task", "get", task_id)
+        self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"], updated["repositoryWorktrees"])
     # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | Empty tasks and clean worktrees delete without confirmation, dirty worktrees require confirmation, and confirmed deletion removes the managed worktree and task.
     def test_task_delete_removes_task_and_later_lookup_is_not_found(self):
         task = self.create_repo_task("Delete me", [self.primary])
