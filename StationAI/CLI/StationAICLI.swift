@@ -154,6 +154,9 @@ enum StationAICLI {
             switch operation {
             case "get": return BridgeRequest(command: "settings.get")
             case "clear-parent": return BridgeRequest(command: "settings.clear-parent")
+            case "set-appearance":
+                guard rest.count == 2 else { throw CLIError.usage("Use: stationai settings set-appearance <dark|light>") }
+                return BridgeRequest(command: "settings.set-appearance", arguments: ["appearance": .string(rest[1])])
             case "set-parent":
                 guard rest.count == 2 else { throw CLIError.usage("Use: stationai settings set-parent <path>") }
                 return BridgeRequest(command: "settings.set-parent", arguments: ["path": .string(rest[1])])
@@ -270,7 +273,7 @@ enum StationAICLI {
       stationai task delete <task-id>
       stationai task delete-check <task-id>
       stationai workspace suggest --parent <path>
-      stationai settings get|clear-parent|set-parent <path>
+      stationai settings get|clear-parent|set-parent <path>|set-appearance <dark|light>
       stationai conversation history <task-id>
       stationai conversation models <task-id>
       stationai conversation send <task-id> --message <text> [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...]

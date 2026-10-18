@@ -38,7 +38,7 @@ struct StationAIApp: App {
 
     var body: some Scene {
         WindowGroup {
-            KanbanBoardView()
+            MainWindowView()
                 .modelContainer(modelContainer)
                 .environmentObject(codexClient)
                 .defaultAppStorage(appPreferences)
@@ -50,5 +50,14 @@ struct StationAIApp: App {
             WorkspaceSettingsView()
                 .defaultAppStorage(appPreferences)
         }
+    }
+}
+
+private struct MainWindowView: View {
+    @AppStorage(WorkspaceSettings.appearanceKey, store: WorkspaceSettings.preferencesStore) private var appearance = "dark"
+
+    var body: some View {
+        KanbanBoardView()
+            .preferredColorScheme(appearance == "light" ? .light : .dark)
     }
 }

@@ -469,6 +469,18 @@ final class WorkspaceSettingsManager {
         defaults.string(forKey: WorkspaceSettings.defaultParentFolderKey) ?? ""
     }
 
+    var appearance: String {
+        let value = defaults.string(forKey: WorkspaceSettings.appearanceKey) ?? "dark"
+        return value == "light" ? "light" : "dark"
+    }
+
+    func setAppearance(_ value: String) throws {
+        guard value == "dark" || value == "light" else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Appearance must be 'dark' or 'light'.")
+        }
+        defaults.set(value, forKey: WorkspaceSettings.appearanceKey)
+    }
+
     var defaultParentFolderURL: URL? {
         WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath)
     }
@@ -809,8 +821,12 @@ final class StationAIBridgeRuntime {
             case "settings.get":
                 result = .object([
                     "defaultParentFolder": settings.defaultParentFolderPath.isEmpty ? .null : .string(settings.defaultParentFolderPath),
-                    "defaultParentAvailable": .boolean(settings.defaultParentFolderURL != nil)
+                    "defaultParentAvailable": .boolean(settings.defaultParentFolderURL != nil),
+                    "appearance": .string(settings.appearance)
                 ])
+            case "settings.set-appearance":
+                try settings.setAppearance(request.requiredString("appearance"))
+                result = .object(["appearance": .string(settings.appearance)])
             case "settings.set-parent":
                 try settings.setDefaultParentFolder(request.requiredString("path"))
                 result = .object(["defaultParentFolder": .string(settings.defaultParentFolderPath)])

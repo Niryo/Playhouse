@@ -4,6 +4,7 @@ import SwiftUI
 
 enum WorkspaceSettings {
     static let defaultParentFolderKey = "defaultWorkspaceParentFolderPath"
+    static let appearanceKey = "appearance"
 
     static var preferencesStore: UserDefaults {
         #if DEBUG
@@ -757,6 +758,7 @@ struct FlowLayout: Layout {
 
 struct WorkspaceSettingsView: View {
     @AppStorage(WorkspaceSettings.defaultParentFolderKey, store: WorkspaceSettings.preferencesStore) private var defaultParentFolderPath = ""
+    @AppStorage(WorkspaceSettings.appearanceKey, store: WorkspaceSettings.preferencesStore) private var appearance = "dark"
     @State private var pickerError: String?
 
     private var parentFolderURL: URL? {
@@ -765,6 +767,13 @@ struct WorkspaceSettingsView: View {
 
     var body: some View {
         Form {
+            Section("Appearance") {
+                Picker("Theme", selection: $appearance) {
+                    Text("Dark").tag("dark")
+                    Text("Light").tag("light")
+                }
+                .accessibilityIdentifier("appearance-picker")
+            }
             Section("Workspace suggestions") {
                 Text("Choose a parent folder. New tasks will search below it for Git repositories to suggest as working folders.")
                     .fixedSize(horizontal: false, vertical: true)
@@ -803,7 +812,8 @@ struct WorkspaceSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 560, height: 260)
+        .frame(width: 560, height: 320)
+        .preferredColorScheme(appearance == "light" ? .light : .dark)
         .alert("Couldn't choose folder", isPresented: Binding(
             get: { pickerError != nil },
             set: { if !$0 { pickerError = nil } }
