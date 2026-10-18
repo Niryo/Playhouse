@@ -615,6 +615,34 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(history["activities"], [])
         self.assertEqual(history["messages"], [])
 
+    # case-contract: test_conversation_shows_subagent_delegation | When Codex delegates a task to a subagent, the conversation activity shows the delegated task and its completion status during the turn and after history reload.
+    def test_conversation_shows_subagent_delegation(self):
+        task_id = self.create_task(title="Subagent delegation")["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-subagent"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        sent, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Delegate this task.",
+            extra_environment=env,
+        )
+        result = self.assert_success(sent)
+        activities = result["activities"]
+        self.assertEqual(len(activities), 1)
+        self.assertEqual(activities[0]["title"], "Task delegated to subagent")
+        self.assertEqual(activities[0]["status"], "completed")
+        self.assertIn("Inspect the project structure", activities[0]["detail"])
+        self.assertIn("Inspected the project structure", activities[0]["detail"])
+
+        reloaded, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        history = self.assert_success(reloaded)
+        self.assertEqual(history["activities"], activities)
+        self.assertTrue(any("subagent inspected" in message["text"].lower() for message in history["messages"]))
+
     # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer shows a Codex-reported model, while unsupported modes and malformed model IDs are rejected before creating history.
     def test_conversation_mode_rejects_unknown_mode_without_starting_a_turn(self):
         task_id = self.create_task(title="Conversation mode validation")["id"]

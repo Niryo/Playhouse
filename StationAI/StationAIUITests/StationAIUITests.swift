@@ -864,6 +864,51 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Blank composer leaves send disabled")
     }
 
+    // case-contract: test_conversation_shows_subagent_delegation | When Codex delegates a task to a subagent, the conversation activity shows the delegated task and its completion status during the turn and after history reload.
+    func test_conversation_shows_subagent_delegation() throws {
+        let fixtureRoot = URL(fileURLWithPath: "/tmp/stationai-bridge-workspaces", isDirectory: true)
+        let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
+        XCTAssertEqual(
+            try String(contentsOf: fixtureOwnerMarker, encoding: .utf8),
+            "StationAI bridge tests own this deterministic fixture (v1).\n",
+            "Refusing to place the Codex fixture in a directory StationAI does not own."
+        )
+        let fixtureCopy = fixtureRoot.appendingPathComponent("codex-fixture-subagent")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureCopy.path), "The UI runner must prepare the subagent fixture before launch.")
+        codexFixtureExecutable = fixtureCopy.path
+        _ = try runCLI(["task", "create", "--title", "Subagent delegation", "--root", fixture.primary.path])
+        let taskID = try taskID(named: "Subagent delegation")
+        let sent = try runCLI(
+            ["conversation", "send", taskID, "--message", "Delegate this task."],
+            extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": fixtureCopy.path]
+        )
+        let sentResult = try XCTUnwrap(sent["result"] as? [String: Any])
+        let sentActivities = try XCTUnwrap(sentResult["activities"] as? [[String: Any]])
+        XCTAssertEqual(sentActivities.first?["title"] as? String, "Task delegated to subagent")
+        let previousApp = XCUIApplication()
+        if previousApp.state != .notRunning {
+            previousApp.terminate()
+        }
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Subagent delegation")
+
+        app.activate()
+        XCTAssertEqual(app.state, .runningForeground, "StationAI must be foreground before inspecting the conversation.")
+
+        let activityDisclosure = element("codex-activity-disclosure")
+        XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 20), "A delegated task should appear in conversation activity.")
+        activityDisclosure.click()
+        let activityRow = element("codex-activity-row-item_stationai_subagent")
+        XCTAssertTrue(activityRow.waitForExistence(timeout: 10))
+        XCTAssertTrue(activityRow.label.contains("Task delegated to subagent"))
+        XCTAssertTrue(activityRow.label.contains("Completed"))
+        let activityDetail = element("codex-activity-detail-item_stationai_subagent")
+        XCTAssertTrue(activityDetail.waitForExistence(timeout: 5))
+        let detailDescription = "\(activityDetail.label) \(activityDetail.value as? String ?? "")"
+        XCTAssertTrue(detailDescription.contains("Inspect the project structure and report relevant files."))
+        attachScreenshot(named: "Conversation shows a completed subagent delegation")
+    }
+
     // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer shows a Codex-reported model, while unsupported modes and malformed model IDs are rejected before creating history.
     func test_conversation_mode_rejects_unknown_mode_without_starting_a_turn() throws {
         launchApp(defaultParent: fixture.parent.path)
@@ -1389,7 +1434,11 @@ final class StationAIUITests: XCTestCase {
         return try XCTUnwrap(record["id"] as? String)
     }
 
-    private func runCLI(_ arguments: [String], expectedStatus: Int32 = 0) throws -> [String: Any] {
+    private func runCLI(
+        _ arguments: [String],
+        expectedStatus: Int32 = 0,
+        extraEnvironment: [String: String] = [:]
+    ) throws -> [String: Any] {
         let process = Process()
         process.executableURL = cliURL
         process.arguments = arguments
@@ -1398,6 +1447,7 @@ final class StationAIUITests: XCTestCase {
         environment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         environment["STATIONAI_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         environment["STATIONAI_BRIDGE_SERVICE_NAME"] = serviceName
+        environment.merge(extraEnvironment) { _, new in new }
         process.environment = environment
         let stdout = Pipe()
         let stderr = Pipe()

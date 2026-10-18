@@ -65,6 +65,16 @@ struct CodexActivity: Codable, Identifiable, Equatable {
     let detail: String
     let status: String
 
+    var statusLabel: String {
+        switch status.lowercased() {
+        case "completed": "Completed"
+        case "failed": "Failed"
+        case "interrupted": "Interrupted"
+        case "inprogress", "running": "In progress"
+        default: status
+        }
+    }
+
     static func from(item: [String: Any]) -> CodexActivity? {
         guard let id = item["id"] as? String, let type = item["type"] as? String else { return nil }
         let status = item["status"] as? String ?? "inProgress"
@@ -96,6 +106,17 @@ struct CodexActivity: Codable, Identifiable, Equatable {
             return CodexActivity(id: id, title: "Searching the web", detail: item["query"] as? String ?? "", status: status)
         case "imageView":
             return CodexActivity(id: id, title: "Viewing image", detail: item["path"] as? String ?? "", status: status)
+        case "collabAgentToolCall":
+            guard item["tool"] as? String == "spawnAgent" else { return nil }
+            let prompt = item["prompt"] as? String ?? ""
+            let agentStates = item["agentsStates"] as? [String: [String: Any]] ?? [:]
+            let stateDetails = agentStates.values.compactMap { state -> String? in
+                guard let agentStatus = state["status"] as? String else { return nil }
+                let message = state["message"] as? String
+                return [agentStatus, message].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ": ")
+            }
+            let detail = ([prompt] + stateDetails).filter { !$0.isEmpty }.joined(separator: "\n")
+            return CodexActivity(id: id, title: "Task delegated to subagent", detail: detail, status: status)
         default:
             return nil
         }

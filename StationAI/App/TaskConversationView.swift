@@ -749,6 +749,10 @@ struct TaskConversationView: View {
                                 Text(activity.title)
                                     .font(.system(size: 11, weight: .medium))
                                     .textSelection(.enabled)
+                                Spacer(minLength: 4)
+                                Text(activity.statusLabel)
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.secondary)
                             }
                             if !activity.detail.isEmpty {
                                 Text(activity.detail)
@@ -756,13 +760,15 @@ struct TaskConversationView: View {
                                     .foregroundStyle(.secondary)
                                     .textSelection(.enabled)
                                     .lineLimit(4)
+                                    .accessibilityIdentifier("codex-activity-detail-\(activity.id)")
+                                    .accessibilityLabel(activity.detail)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(9)
                         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                        .accessibilityElement(children: .combine)
-                        .accessibilityLabel(activity.title)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityLabel("\(activity.title), \(activity.statusLabel)")
                         .accessibilityValue(activity.detail)
                         .accessibilityIdentifier("codex-activity-row-\(activity.id)")
                     }

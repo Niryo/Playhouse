@@ -365,7 +365,6 @@ final class CodexAppServerClient: ObservableObject {
             "app-server",
             "--listen", "stdio://",
             "--disable", "apps",
-            "--disable", "multi_agent",
             "--disable", "remote_plugin",
             "--disable", "hooks",
             "-c", "mcp_servers={}"

@@ -51,6 +51,24 @@ def question_request(request_id):
     })
 
 
+def subagent_item(status):
+    return {
+        "id": "item_stationai_subagent",
+        "type": "collabAgentToolCall",
+        "tool": "spawnAgent",
+        "senderThreadId": "thr_stationai_fixture",
+        "receiverThreadIds": ["thr_stationai_subagent"],
+        "prompt": "Inspect the project structure and report relevant files.",
+        "agentsStates": {
+            "thr_stationai_subagent": {
+                "status": "running" if status == "inProgress" else "completed",
+                "message": "Inspected the project structure." if status == "completed" else None,
+            },
+        },
+        "status": status,
+    }
+
+
 def main():
     mode = os.path.basename(sys.argv[0])
     answers = None
@@ -100,6 +118,17 @@ def main():
                     "threadId": "thr_stationai_fixture",
                     "turn": {"id": "turn_stationai_fixture", "status": "completed"},
                 }})
+            elif mode.endswith("-subagent"):
+                write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                    "threadId": "thr_stationai_fixture", "item": subagent_item("inProgress"),
+                }})
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": "thr_stationai_fixture", "item": subagent_item("completed"),
+                }})
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": "thr_stationai_fixture",
+                    "turn": {"id": "turn_stationai_fixture", "status": "completed"},
+                }})
             elif mode.endswith("-hold"):
                 time.sleep(30)
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
@@ -129,6 +158,12 @@ def main():
                 {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": "Please ask your questions."}]},
                 {"id": "item_assistant_fixture", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."},
             ] if answers and not mode.endswith("-empty") else []
+            if mode.endswith("-subagent"):
+                contents = [
+                    {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": "Delegate this task."}]},
+                    {"id": "item_assistant_fixture", "type": "agentMessage", "text": "The subagent inspected the project structure."},
+                    subagent_item("completed"),
+                ]
             write({"jsonrpc": "2.0", "id": message["id"], "result": {
                 "data": [{"item": item, "turnId": "turn_stationai_fixture"} for item in contents],
                 "nextCursor": None,
