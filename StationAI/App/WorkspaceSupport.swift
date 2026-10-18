@@ -282,6 +282,13 @@ enum StationAIWorktreeManager {
         return result.isEmpty ? "task" : result
     }
 
+    static func branchTitle(_ branch: String) -> String {
+        branch
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+            .joined(separator: " ")
+    }
+
     static func repositoryRoot(_ path: String) throws -> String {
         let result = try git(path, ["rev-parse", "--show-toplevel"]).output
         return URL(fileURLWithPath: result.trimmingCharacters(in: .whitespacesAndNewlines), isDirectory: true)
@@ -437,7 +444,7 @@ enum StationAIWorktreeManager {
         let targetHead = try git(targetWorktree, ["rev-parse", "HEAD"]).output.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             _ = try git(targetWorktree, ["merge", "--squash", record.branch])
-            _ = try git(targetWorktree, ["commit", "-m", "Squash merge task branch '\(record.branch)' into '\(target)'"])
+            _ = try git(targetWorktree, ["commit", "-m", branchTitle(record.branch)])
         } catch {
             let currentHead = try? git(targetWorktree, ["rev-parse", "HEAD"]).output.trimmingCharacters(in: .whitespacesAndNewlines)
             if currentHead == targetHead {

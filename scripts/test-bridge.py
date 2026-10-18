@@ -314,7 +314,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual((self.primary / "task-result.txt").read_text(encoding="utf-8"), "Task branch change\n")
         target_parents = self.run_git(self.primary, "rev-list", "--parents", "-n", "1", "main").split()
         self.assertEqual(len(target_parents), 2, "A squash merge should create a single-parent target commit.")
-        self.assertIn("Squash merge task branch", self.run_git(self.primary, "log", "main", "-1", "--format=%s"))
+        self.assertEqual(self.run_git(self.primary, "log", "main", "-1", "--format=%s").strip(), "Done Cleanup")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["repositoryWorktrees"][0]["mergeTarget"], "main")
         completed, _ = self.call_cli("task", "get", task["id"])
         self.assertEqual(self.assert_success(completed)["savedPrompt"], draft)

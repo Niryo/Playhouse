@@ -300,7 +300,7 @@ final class StationAIUITests: XCTestCase {
         try runGit(fixture.primary, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)")
         XCTAssertEqual(try String(contentsOf: fixture.primary.appendingPathComponent("task-result.txt"), encoding: .utf8), "Task branch change\n")
         XCTAssertEqual(try runGitOutput(fixture.primary, "rev-list", "--parents", "-n", "1", "main").split(separator: " ").count, 2)
-        XCTAssertTrue(try runGitOutput(fixture.primary, "log", "main", "-1", "--format=%s").contains("Squash merge task branch"))
+        XCTAssertEqual(try runGitOutput(fixture.primary, "log", "main", "-1", "--format=%s"), branch.split(separator: "-").map { $0.capitalized }.joined(separator: " "))
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
         attachScreenshot(named: "Completed task remains on the board with its conversation prompt retained")
     }
