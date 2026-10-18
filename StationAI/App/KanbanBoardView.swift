@@ -106,17 +106,29 @@ struct KanbanBoardView: View {
 
             ScrollView(.horizontal) {
                 HStack(alignment: .top, spacing: 16) {
-                    ForEach(TaskStatus.allCases.filter { $0 != .blocked }) { status in
+                    ForEach(TaskStatus.allCases.filter { $0 != .blocked && $0 != .waitingResponse }) { status in
                         if status == .backlog {
+                            let hasBlockedTasks = tasks.contains(where: { $0.status == .blocked })
                             VStack(spacing: 12) {
-                                if tasks.contains(where: { $0.status == .blocked }) {
-                                    kanbanColumn(.blocked)
+                                if hasBlockedTasks {
+                                    kanbanColumn(.blocked, minHeight: 220)
                                         .transition(.opacity.combined(with: .move(edge: .top)))
                                 }
-                                kanbanColumn(.backlog)
+                                kanbanColumn(.backlog, minHeight: hasBlockedTasks ? 220 : 480)
                             }
                             .frame(width: 264)
-                            .animation(.easeInOut(duration: 0.2), value: tasks.contains(where: { $0.status == .blocked }))
+                            .animation(.easeInOut(duration: 0.2), value: hasBlockedTasks)
+                        } else if status == .inProgress {
+                            let hasWaitingResponseTasks = tasks.contains(where: { $0.status == .waitingResponse })
+                            VStack(spacing: 12) {
+                                if hasWaitingResponseTasks {
+                                    kanbanColumn(.waitingResponse, minHeight: 220)
+                                        .transition(.opacity.combined(with: .move(edge: .top)))
+                                }
+                                kanbanColumn(.inProgress, minHeight: hasWaitingResponseTasks ? 220 : 480)
+                            }
+                            .frame(width: 264)
+                            .animation(.easeInOut(duration: 0.2), value: hasWaitingResponseTasks)
                         } else {
                             kanbanColumn(status)
                                 .frame(width: 264)
@@ -134,11 +146,12 @@ struct KanbanBoardView: View {
                 .padding(.bottom, 28)
             }
             .scrollIndicators(.visible)
+            .accessibilityIdentifier("board-columns-scroll-view")
         }
     }
 
     @ViewBuilder
-    private func kanbanColumn(_ status: TaskStatus) -> some View {
+    private func kanbanColumn(_ status: TaskStatus, minHeight: CGFloat = 480) -> some View {
         KanbanColumnView(
             status: status,
             tasks: tasks.filter { $0.status == status },
@@ -150,9 +163,11 @@ struct KanbanBoardView: View {
                 taskBeingDeleted = $0
                 isShowingDeleteConfirmation = true
             },
-            draggedTaskID: $draggedTaskID
+            draggedTaskID: $draggedTaskID,
+            minHeight: minHeight
         )
         .frame(width: 264)
+        .frame(minHeight: minHeight)
     }
 
     private var boardHeader: some View {
@@ -358,6 +373,7 @@ private struct KanbanColumnView: View {
     let onRenameTask: (BoardTask) -> Void
     let onDeleteTask: (BoardTask) -> Void
     @Binding var draggedTaskID: UUID?
+    let minHeight: CGFloat
 
     var body: some View {
         dropTarget
@@ -416,7 +432,7 @@ private struct KanbanColumnView: View {
             Spacer(minLength: 0)
         }
         .padding(14)
-        .frame(maxWidth: .infinity, minHeight: 480, alignment: .topLeading)
+        .frame(maxWidth: .infinity, minHeight: minHeight, alignment: .topLeading)
         .background {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(Color(nsColor: .controlBackgroundColor).opacity(0.78))

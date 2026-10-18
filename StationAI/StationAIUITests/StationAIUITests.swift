@@ -536,12 +536,19 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Lifecycle rollout clears tasks and reports a retained dirty worktree")
     }
 
-    // case-contract: test_task_status_transitions_and_rejects_unknown_status | The board shows lifecycle columns in order without Ready, hides the blocked section when empty, and user attempts to set Codex-owned statuses are rejected.
+    // case-contract: test_task_status_transitions_and_rejects_unknown_status | The board keeps stacked Blocked/Backlog and conditional Waiting Response/In Progress sections fully visible, leaves Review as its own column, hides empty status sections, and preserves Codex-owned task status behavior.
     func test_task_status_transitions_and_rejects_unknown_status() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Status transitions", roots: [fixture.primary.path])
-        let columns = ["backlog", "in-progress", "waiting-response", "review", "done"]
+        let columns = ["backlog", "in-progress", "review", "done"]
         for column in columns { XCTAssertTrue(element("column-heading-\(column)").exists, "Missing \(column) board column.") }
+        XCTAssertFalse(element("column-heading-waiting-response").exists, "Waiting Response should be hidden when no tasks are waiting.")
+        let inProgressColumn = element("column-in-progress")
+        let reviewColumn = element("column-review")
+        let boardViewport = element("board-columns-scroll-view")
+        XCTAssertLessThan(inProgressColumn.frame.maxX, reviewColumn.frame.minX, "Review should remain a separate column after the stacked pair.")
+        XCTAssertLessThanOrEqual(inProgressColumn.frame.maxY, boardViewport.frame.maxY, "In Progress should fit inside the visible board area.")
+        XCTAssertLessThanOrEqual(reviewColumn.frame.maxY, boardViewport.frame.maxY, "Review should fit inside the visible board area.")
         XCTAssertFalse(element("column-heading-blocked").exists, "The blocked section should be hidden when no tasks are blocked.")
         XCTAssertFalse(element("blocked-waiting-indicator").exists)
         XCTAssertFalse(element("column-heading-ready").exists)
@@ -554,7 +561,7 @@ final class StationAIUITests: XCTestCase {
         }
         XCTAssertEqual(try taskRecord(named: "Status transitions")?["status"] as? String, "Backlog")
         assertTaskVisible("Status transitions", inColumn: "Backlog")
-        attachScreenshot(named: "Live lifecycle board columns with Ready removed")
+        attachScreenshot(named: "Waiting Response above In Progress with Review kept separate")
     }
 
     // case-contract: test_task_rename_persists_and_rejects_blank_title | A rename persists; rejecting a blank rename preserves the last valid title.
@@ -997,10 +1004,11 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Plan mode is visible in the conversation composer")
     }
 
-    // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | A blocking structured question moves the task to Waiting Response; submitting keyed option and secret answers resumes In Progress and successful turn completion moves it to Review.
+    // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | A blocking question moves the task into the conditional Waiting Response board section; saving a draft preserves its status, keyed answers resume In Progress, and successful completion moves it to Review.
     func test_codex_questions_can_be_answered_over_cli_xpc() throws {
         let created = try runCLI(["task", "create", "--title", "Codex questions", "--root", fixture.primary.path])
         XCTAssertEqual(created["ok"] as? Bool, true)
+        let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
         codexFixtureExecutable = "/tmp/stationai-bridge-workspaces/codex-fixture-slow"
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Codex questions")
@@ -1010,7 +1018,22 @@ final class StationAIUITests: XCTestCase {
 
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["Which color should I use?"].exists)
-        XCTAssertEqual(try taskRecord(named: "Codex questions")?["status"] as? String, "Waiting Response")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+        XCTAssertTrue(element("column-heading-waiting-response").waitForExistence(timeout: 5))
+        let waitingResponseColumn = element("column-waiting-response")
+        let waitingTaskCard = waitingResponseColumn.buttons["task-card-\(taskID.uppercased())"]
+        XCTAssertTrue(waitingTaskCard.waitForExistence(timeout: 8), "The created task is not in Waiting Response.")
+        let inProgressColumn = element("column-in-progress")
+        let boardViewport = element("board-columns-scroll-view")
+        XCTAssertTrue(waitingResponseColumn.frame.maxY < inProgressColumn.frame.minY)
+        XCTAssertGreaterThanOrEqual(waitingResponseColumn.frame.minY, boardViewport.frame.minY)
+        XCTAssertLessThanOrEqual(inProgressColumn.frame.maxY, boardViewport.frame.maxY)
+        attachScreenshot(named: "Waiting Response appears above In Progress while a task awaits an answer")
+        waitingTaskCard.click()
+        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 5), "Reopening the task should restore the pending question.")
         XCTAssertFalse(element("submit-ai-answers-button").isEnabled, "Blank answers must not be submitted.")
         app.buttons["Blue"].click()
         let secretAnswer = element("ai-question-answer-token")
@@ -1023,18 +1046,24 @@ final class StationAIUITests: XCTestCase {
         let resumeDeadline = Date().addingTimeInterval(5)
         var resumedStatus: String?
         while Date() < resumeDeadline {
-            resumedStatus = try taskRecord(named: "Codex questions")?["status"] as? String
+            resumedStatus = try taskRecord(id: taskID)?["status"] as? String
             if resumedStatus == "In Progress" { break }
             Thread.sleep(forTimeInterval: 0.05)
         }
         XCTAssertEqual(resumedStatus, "In Progress", "Submitting the blocking answer should resume the task before the turn completes.")
 
-        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
-        XCTAssertEqual(try taskRecord(named: "Codex questions")?["status"] as? String, "Review")
+        let completionDeadline = Date().addingTimeInterval(10)
+        var completedStatus: String?
+        while Date() < completionDeadline {
+            completedStatus = try taskRecord(id: taskID)?["status"] as? String
+            if completedStatus == "Review" { break }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        XCTAssertEqual(completedStatus, "Review", "The submitted answer should complete the task into Review.")
         XCTAssertFalse(element("ai-question-form-title").exists)
     }
 
-    // case-contract: test_codex_empty_question_request_is_rejected | A failed turn preserves its blocked reason and appears in the conditional Blocked section above Backlog with a user-intervention indication; retrying clears that section and completes the task into Review.
+    // case-contract: test_codex_empty_question_request_is_rejected | A failed turn preserves its blocked reason and appears in the compact Blocked section above Backlog with a user-intervention indication; retrying clears that section and completes the task into Review.
     func test_codex_empty_question_request_is_rejected() throws {
         let created = try runCLI(["task", "create", "--title", "Empty Codex questions", "--root", fixture.primary.path])
         let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
@@ -1050,7 +1079,12 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("column-heading-blocked").waitForExistence(timeout: 5))
         XCTAssertTrue(element("blocked-waiting-indicator").exists)
         assertTaskVisible("Empty Codex questions", inColumn: "Blocked")
-        XCTAssertTrue(element("column-heading-blocked").frame.maxY < element("column-heading-backlog").frame.minY)
+        let boardViewport = element("board-columns-scroll-view")
+        let blockedColumn = element("column-blocked")
+        let backlogColumn = element("column-backlog")
+        XCTAssertLessThan(blockedColumn.frame.maxY, backlogColumn.frame.minY)
+        XCTAssertGreaterThanOrEqual(blockedColumn.frame.minY, boardViewport.frame.minY)
+        XCTAssertLessThanOrEqual(backlogColumn.frame.maxY, boardViewport.frame.maxY)
         attachScreenshot(named: "Blocked task appears above Backlog while waiting for user intervention")
         let retryFixture = try makeCodexFixture(emptyQuestions: false).path
         _ = try runCLI(

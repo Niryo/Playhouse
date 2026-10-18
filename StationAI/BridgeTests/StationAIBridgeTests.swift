@@ -38,6 +38,14 @@ final class StationAIBridgeTests: XCTestCase {
         let serviceIdentifier = try XCTUnwrap(plist["CFBundleIdentifier"] as? String)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        let selectionFileName = "stationai-bridge-test-selection-\(repositoryRoot.path.replacingOccurrences(of: "/", with: "_"))"
+        let selectionFile = URL(fileURLWithPath: "/tmp", isDirectory: true)
+            .appendingPathComponent(selectionFileName)
+        let selectionLines = (try? String(contentsOf: selectionFile, encoding: .utf8))?
+            .components(separatedBy: .newlines) ?? []
+        let selectedCases = selectionLines.first == "StationAI bridge test selection (v1)." && selectionLines.count > 1
+            ? selectionLines[1].split(separator: ",").map(String.init)
+            : []
         process.arguments = [
             bridgeTestScript.path,
             "--cli", cli.path,
@@ -45,6 +53,9 @@ final class StationAIBridgeTests: XCTestCase {
             "--data-root", dataRoot.appendingPathComponent("data", isDirectory: true).path,
             "--service-name", serviceIdentifier,
         ]
+        for selectedCase in selectedCases {
+            process.arguments?.append(contentsOf: ["--case", selectedCase])
+        }
         process.environment = ProcessInfo.processInfo.environment
         let stdout = Pipe()
         let stderr = Pipe()
@@ -74,7 +85,7 @@ final class StationAIBridgeTests: XCTestCase {
         }
 
         let total = summaryCount("total")
-        XCTAssertEqual(total, contracts.count, combinedOutput)
+        XCTAssertEqual(total, selectedCases.isEmpty ? contracts.count : selectedCases.count, combinedOutput)
         XCTAssertEqual(summaryCount("passed"), total, combinedOutput)
         XCTAssertEqual(summaryCount("skipped"), 0, combinedOutput)
     }

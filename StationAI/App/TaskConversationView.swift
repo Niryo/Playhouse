@@ -112,11 +112,11 @@ struct TaskConversationView: View {
             draft = task.savedPrompt ?? ""
             _ = try? BoardTaskManager(modelContext: modelContext)
                 .reconcileLifecycleStatusOnOpen(task.id, client: codexClient)
-            await loadConversation()
-            await loadModels()
             if let request = codexClient.pendingUserInputRequest, request.threadID == task.codexThreadID {
                 userInputRequest = request
             }
+            await loadConversation()
+            await loadModels()
         }
         .onChange(of: codexClient.pendingUserInputRequest) { _, request in
             guard let request, request.threadID == task.codexThreadID else { return }
@@ -124,7 +124,7 @@ struct TaskConversationView: View {
             userInputAnswers = [:]
             userInputOther = [:]
             if request.isBlocking {
-                _ = try? BoardTaskManager(modelContext: modelContext).setLifecycleStatus(task.id, to: .waitingResponse)
+                _ = try? BoardTaskManager(modelContext: modelContext).setLifecycleStatus(task, to: .waitingResponse)
             }
         }
         .task(id: task.workspaceRootPaths) {
@@ -982,7 +982,7 @@ struct TaskConversationView: View {
                         .accessibilityLabel("Continue response")
                         .accessibilityIdentifier("continue-response-button")
                     } else {
-                        Button("Save") { saveDraftAndGenerateTitle(status: .backlog, then: onBack) }
+                        Button("Save") { saveDraftAndGenerateTitle(status: nil, then: onBack) }
                             .disabled(isResponding || isLoadingHistory || draft.isEmpty)
                             .accessibilityIdentifier("save-task-prompt-button")
                         Button { sendMessage() } label: {
@@ -1182,6 +1182,10 @@ struct TaskConversationView: View {
                     userInputRequest = request
                     userInputAnswers = [:]
                     userInputOther = [:]
+                    if request.isBlocking {
+                        _ = try? BoardTaskManager(modelContext: modelContext)
+                            .setLifecycleStatus(task, to: .waitingResponse)
+                    }
                 })
 
                 if messages.first(where: { $0.id == assistantMessageID })?.text.isEmpty == true {
@@ -1204,10 +1208,10 @@ struct TaskConversationView: View {
     }
 
     private func saveAndBack() {
-        saveDraftAndGenerateTitle(status: .backlog, then: onBack)
+        saveDraftAndGenerateTitle(status: nil, then: onBack)
     }
 
-    private func saveDraftAndGenerateTitle(status: TaskStatus, then completion: (() -> Void)? = nil) {
+    private func saveDraftAndGenerateTitle(status: TaskStatus?, then completion: (() -> Void)? = nil) {
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else {
             if task.title == "Generating title…" {

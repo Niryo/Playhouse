@@ -5,14 +5,51 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 script_path="${repository_root}/scripts/test-e2e.sh"
 
 if [[ "${1:-}" != "--locked" ]]; then
-  exec "${repository_root}/scripts/with-e2e-lock.sh" -- bash "${script_path}" --locked
+  exec "${repository_root}/scripts/with-e2e-lock.sh" -- bash "${script_path}" --locked "$@"
 fi
 shift
+
+selected_cases=()
+while (( $# > 0 )); do
+  case "$1" in
+    --case)
+      if (( $# < 2 )) || [[ "$2" == --* ]]; then
+        printf 'Expected a bridge test case ID after --case.\n' >&2
+        exit 2
+      fi
+      selected_cases+=("$2")
+      shift 2
+      ;;
+    *)
+      printf 'Unknown argument: %s\nUsage: %s [--case test_case_id]...\n' "$1" "$0" >&2
+      exit 2
+      ;;
+  esac
+done
+
+selected_cases_csv="$(IFS=,; printf '%s' "${selected_cases[*]}")"
+selection_file="/tmp/stationai-bridge-test-selection-${repository_root//\//_}"
+selection_owner="StationAI bridge test selection (v1)."
+if [[ -e "${selection_file}" ]] && [[ "$(head -n 1 "${selection_file}" 2>/dev/null || true)" != "${selection_owner}" ]]; then
+  printf 'Refusing to overwrite an unowned bridge test selection file: %s\n' "${selection_file}" >&2
+  exit 1
+fi
+if (( ${#selected_cases[@]} > 0 )); then
+  printf '%s\n%s\n' "${selection_owner}" "${selected_cases_csv}" > "${selection_file}"
+else
+  rm -f "${selection_file}"
+fi
 
 test_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/stationai-bridge.XXXXXX")"
 architecture="$(uname -m)"
 result_bundle="${test_output_dir}/StationAI.xcresult"
-trap 'printf "Bridge test artifacts: %s\n" "${test_output_dir}"' EXIT
+cleanup() {
+  if [[ "$(head -n 1 "${selection_file}" 2>/dev/null || true)" == "${selection_owner}" ]]; then
+    rm -f "${selection_file}"
+  fi
+  printf 'Bridge test artifacts: %s\n' "${test_output_dir}"
+}
+trap cleanup EXIT
 
 python3 "${repository_root}/scripts/prepare-e2e-fixture.py"
 python3 "${repository_root}/scripts/check-test-parity.py"

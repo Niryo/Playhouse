@@ -57,7 +57,7 @@
   },
   {
     "id": "test_task_status_transitions_and_rejects_unknown_status",
-    "expectation": "The board shows lifecycle columns in order without Ready, hides the blocked section when empty, and user attempts to set Codex-owned statuses are rejected."
+    "expectation": "The board keeps stacked Blocked/Backlog and conditional Waiting Response/In Progress sections fully visible, leaves Review as its own column, hides empty status sections, and preserves Codex-owned task status behavior."
   },
   {
     "id": "test_task_rename_persists_and_rejects_blank_title",
@@ -105,7 +105,7 @@
   },
   {
     "id": "test_codex_questions_can_be_answered_over_cli_xpc",
-    "expectation": "A blocking structured question moves the task to Waiting Response; submitting keyed option and secret answers resumes In Progress and successful turn completion moves it to Review."
+    "expectation": "A blocking question moves the task into the conditional Waiting Response board section; saving a draft preserves its status, keyed answers resume In Progress, and successful completion moves it to Review."
   },
   {
     "id": "test_codex_nonblocking_question_keeps_task_in_progress",
@@ -117,7 +117,7 @@
   },
   {
     "id": "test_codex_empty_question_request_is_rejected",
-    "expectation": "A failed turn preserves its blocked reason and appears in the conditional Blocked section above Backlog with a user-intervention indication; retrying clears that section and completes the task into Review."
+    "expectation": "A failed turn preserves its blocked reason and appears in the compact Blocked section above Backlog with a user-intervention indication; retrying clears that section and completes the task into Review."
   },
   {
     "id": "test_task_workspace_changes_group_staged_and_unstaged_diffs",

@@ -280,6 +280,10 @@ final class BoardTaskManager {
 
     func setLifecycleStatus(_ id: UUID, to status: TaskStatus, message: String? = nil) throws -> BoardTaskRecord {
         let task = try requireTask(id)
+        return try setLifecycleStatus(task, to: status, message: message)
+    }
+
+    func setLifecycleStatus(_ task: BoardTask, to status: TaskStatus, message: String? = nil) throws -> BoardTaskRecord {
         guard task.status != .done else { return BoardTaskRecord(task: task) }
         task.status = status
         task.statusMessage = message

@@ -16,6 +16,7 @@ parser.add_argument("--cli", required=True, type=Path)
 parser.add_argument("--fixture-root", required=True, type=Path)
 parser.add_argument("--data-root", required=True, type=Path)
 parser.add_argument("--service-name", required=True)
+parser.add_argument("--case", action="append", default=[], dest="selected_cases")
 arguments = parser.parse_args()
 CONTRACT_PATH = Path(__file__).resolve().parent.parent / "StationAI/BridgeTests/BridgeTestContracts.json"
 
@@ -496,7 +497,7 @@ class StationAIBridgeTests(unittest.TestCase):
         notice = json.loads((self.data_directory / "task-lifecycle-v2-notice.json").read_text(encoding="utf-8"))
         self.assertEqual(notice, [str(dirty_path)])
 
-    # case-contract: test_task_status_transitions_and_rejects_unknown_status | The board shows lifecycle columns in order without Ready, hides the blocked section when empty, and user attempts to set Codex-owned statuses are rejected.
+    # case-contract: test_task_status_transitions_and_rejects_unknown_status | The board keeps stacked Blocked/Backlog and conditional Waiting Response/In Progress sections fully visible, leaves Review as its own column, hides empty status sections, and preserves Codex-owned task status behavior.
     def test_task_status_transitions_and_rejects_unknown_status(self):
         task_id = self.create_task()["id"]
         response, _ = self.call_cli("task", "move", task_id, "Unknown", expected_status=2)
@@ -689,7 +690,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(history)["messages"], [])
         self.assertEqual(self.assert_success(history)["activities"], [])
 
-    # case-contract: test_codex_questions_can_be_answered_over_cli_xpc | A blocking structured question moves the task to Waiting Response; submitting keyed option and secret answers resumes In Progress and successful turn completion moves it to Review.
+    # case-contract: test_codex_questions_can_be_answered_over_cli_xpc | A blocking question moves the task into the conditional Waiting Response board section; saving a draft preserves its status, keyed answers resume In Progress, and successful completion moves it to Review.
     def test_codex_questions_can_be_answered_over_cli_xpc(self):
         task_id = self.create_task("Codex questions", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -745,8 +746,12 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(any("Answers received: Blue / fixture-secret." in message["text"] for message in messages))
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Review")
+        saved_draft, _ = self.call_cli("task", "prompt", task_id, "--text", "A follow-up draft.")
+        saved_task = self.assert_success(saved_draft)
+        self.assertEqual(saved_task["status"], "Review")
+        self.assertEqual(saved_task["savedPrompt"], "A follow-up draft.")
 
-    # case-contract: test_codex_empty_question_request_is_rejected | A failed turn preserves its blocked reason and appears in the conditional Blocked section above Backlog with a user-intervention indication; retrying clears that section and completes the task into Review.
+    # case-contract: test_codex_empty_question_request_is_rejected | A failed turn preserves its blocked reason and appears in the compact Blocked section above Backlog with a user-intervention indication; retrying clears that section and completes the task into Review.
     def test_codex_empty_question_request_is_rejected(self):
         task_id = self.create_task("Empty Codex questions", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -954,8 +959,24 @@ if __name__ == "__main__":
         if extra:
             details.append(f"unpaired: {', '.join(extra)}")
         raise SystemExit("Runtime CLI cases do not match the shared contract: " + "; ".join(details))
-    test_count = len(discovered_cases)
+    selected_cases = arguments.selected_cases
+    if len(selected_cases) != len(set(selected_cases)):
+        raise SystemExit("Focused bridge test case IDs must be unique.")
+    unknown_cases = sorted(set(selected_cases) - set(contract_cases))
+    if unknown_cases:
+        raise SystemExit("Unknown bridge test case IDs: " + ", ".join(unknown_cases))
+    if selected_cases:
+        selected = set(selected_cases)
+        suite = unittest.TestSuite(
+            test for test in suite if test._testMethodName in selected
+        )
+    test_count = len(selected_cases) if selected_cases else len(contract_cases)
+    if test_count == 0:
+        raise SystemExit("The bridge suite must execute at least one case.")
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     if not result.wasSuccessful() or result.testsRun != test_count or result.skipped:
         raise SystemExit("Every discovered bridge test must pass without skips.")
-    print(f"Bridge suite: total={result.testsRun}, passed={result.testsRun - len(result.failures) - len(result.errors)}, skipped={len(result.skipped)}")
+    print(
+        f"Bridge suite: total={result.testsRun}, passed={result.testsRun - len(result.failures) - len(result.errors)}, "
+        f"skipped={len(result.skipped)}, selected={','.join(selected_cases) if selected_cases else 'all'}"
+    )
