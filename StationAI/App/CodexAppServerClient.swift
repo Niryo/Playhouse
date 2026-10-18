@@ -57,6 +57,7 @@ final class CodexAppServerClient: ObservableObject {
     private static var processActiveThreadIDs = Set<String>()
     private var startingThreadIDs = Set<String>()
     @Published private(set) var isTurnActive = false
+    @Published private(set) var activeThreadID: String?
     @Published private(set) var pendingUserInputRequest: CodexUserInputRequest?
 
     private enum ClientError: LocalizedError {
@@ -101,7 +102,6 @@ final class CodexAppServerClient: ObservableObject {
     private var nextRequestID = 1
     private var initialized = false
     private var resumedThreadIDs = Set<String>()
-    private var activeThreadID: String?
     private var activeTurnID: String?
     private(set) var wasLastTurnInterrupted = false
     private var activeDeltaHandler: ((String) -> Void)?
@@ -313,10 +313,14 @@ final class CodexAppServerClient: ObservableObject {
 
     func markTurnStarting(threadID: String) {
         startingThreadIDs.insert(threadID)
+        activeThreadID = threadID
     }
 
     func clearTurnStarting(threadID: String) {
         startingThreadIDs.remove(threadID)
+        if activeThreadID == threadID, activeTurnID == nil {
+            activeThreadID = nil
+        }
     }
 
     static func isTurnActiveInProcess(threadID: String) -> Bool {

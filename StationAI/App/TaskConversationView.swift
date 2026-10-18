@@ -109,7 +109,6 @@ struct TaskConversationView: View {
             )
         }
         .task {
-            draft = task.savedPrompt ?? ""
             _ = try? BoardTaskManager(modelContext: modelContext)
                 .reconcileLifecycleStatusOnOpen(task.id, client: codexClient)
             if let request = codexClient.pendingUserInputRequest, request.threadID == task.codexThreadID {
@@ -117,6 +116,13 @@ struct TaskConversationView: View {
             }
             await loadConversation()
             await loadModels()
+        }
+        .onChange(of: codexClient.isTurnActive) { _, isTurnActive in
+            guard let taskThreadID = task.codexThreadID else {
+                isResponding = false
+                return
+            }
+            isResponding = isTurnActive && codexClient.isTurnActive(threadID: taskThreadID)
         }
         .onChange(of: codexClient.pendingUserInputRequest) { _, request in
             guard let request, request.threadID == task.codexThreadID else { return }
@@ -731,7 +737,7 @@ struct TaskConversationView: View {
                         }
                     }
 
-                    if !activities.isEmpty {
+                    if !activities.isEmpty || isResponding {
                         activityList
                     }
                 }
@@ -765,17 +771,28 @@ struct TaskConversationView: View {
                 HStack(spacing: 7) {
                     Image(systemName: isActivityExpanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 9, weight: .semibold))
-                    Image(systemName: runningCount > 0 ? "gearshape.2.fill" : "checkmark.circle.fill")
-                        .foregroundStyle(runningCount > 0 ? Color.accentColor : Color.green)
-                    Text(runningCount > 0 ? "Running \(runningCount) task\(runningCount == 1 ? "" : "s")…" : "Codex activity · \(activities.count) task\(activities.count == 1 ? "" : "s")")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.secondary)
+                    Image(systemName: runningCount > 0 || isResponding ? "gearshape.2.fill" : "checkmark.circle.fill")
+                        .foregroundStyle(runningCount > 0 || isResponding ? Color.accentColor : Color.green)
+                    if isResponding && runningCount == 0 {
+                        TimelineView(.periodic(from: .now, by: 0.45)) { timeline in
+                            let phase = Int(timeline.date.timeIntervalSinceReferenceDate / 0.45) % 4
+                            Text("Thinking" + String(repeating: ".", count: phase))
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Color.accentColor)
+                                .accessibilityLabel("Thinking")
+                                .accessibilityIdentifier("codex-thinking-indicator")
+                        }
+                    } else {
+                        Text(runningCount > 0 ? "Running \(runningCount) task\(runningCount == 1 ? "" : "s")…" : "Codex activity · \(activities.count) task\(activities.count == 1 ? "" : "s")")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .contentShape(Rectangle())
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(runningCount > 0 ? "Running \(runningCount) task\(runningCount == 1 ? "" : "s")" : "Codex activity, \(activities.count) task\(activities.count == 1 ? "" : "s")")
+            .accessibilityLabel(isResponding && runningCount == 0 ? "Thinking" : runningCount > 0 ? "Running \(runningCount) task\(runningCount == 1 ? "" : "s")" : "Codex activity, \(activities.count) task\(activities.count == 1 ? "" : "s")")
             .accessibilityIdentifier("codex-activity-disclosure")
 
             if isActivityExpanded {
@@ -1104,6 +1121,13 @@ struct TaskConversationView: View {
             }
             messages = history.messages
             activities = history.activities
+            let promptWasSent = task.savedPrompt.map { prompt in
+                history.messages.contains { $0.role == .user && $0.text == prompt }
+            } ?? false
+            draft = promptWasSent ? "" : (task.savedPrompt ?? "")
+            if let threadID = task.codexThreadID {
+                isResponding = codexClient.isTurnActive(threadID: threadID)
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -1139,6 +1163,7 @@ struct TaskConversationView: View {
         messages.append(CodexChatMessage(id: userMessageID, role: .user, text: text))
         messages.append(CodexChatMessage(id: assistantMessageID, role: .assistant, text: ""))
         isResponding = true
+        draft = ""
         hasPausedResponse = false
         isPausingResponse = false
         errorMessage = nil
@@ -1147,7 +1172,9 @@ struct TaskConversationView: View {
 
         Task { @MainActor in
             do {
-                _ = try await conversationManager.send(taskID: task.id, text: text, mode: conversationMode, modelID: selectedModelID, onUpdate: { update in
+                _ = try await conversationManager.send(taskID: task.id, text: text, mode: conversationMode, modelID: selectedModelID, onTurnStarting: {
+                    isResponding = true
+                }, onUpdate: { update in
                     switch update.type {
                     case "text_delta":
                         guard let delta = update.text else { return }
@@ -1191,13 +1218,13 @@ struct TaskConversationView: View {
                 if messages.first(where: { $0.id == assistantMessageID })?.text.isEmpty == true {
                     messages.removeAll { $0.id == assistantMessageID }
                 }
-                draft = ""
                 isComposerFocused = true
             } catch {
                 if codexClient.wasLastTurnInterrupted {
                     hasPausedResponse = true
                 } else {
                     messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
+                    draft = text
                     errorMessage = error.localizedDescription
                 }
                 isComposerFocused = true
@@ -1220,15 +1247,19 @@ struct TaskConversationView: View {
             completion?()
             return
         }
+        let shouldGenerateTitle = task.title == "Generating title…" || task.title == "Untitled task"
         do {
             _ = try BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: prompt, status: status)
-            _ = try BoardTaskManager(modelContext: modelContext).rename(task.id, title: "Generating title…")
+            if shouldGenerateTitle {
+                _ = try BoardTaskManager(modelContext: modelContext).rename(task.id, title: "Generating title…")
+            }
         } catch {
             errorMessage = error.localizedDescription
             return
         }
-        isGeneratingTitle = true
         completion?()
+        guard shouldGenerateTitle else { return }
+        isGeneratingTitle = true
         Task { @MainActor in
             let title = await generateTaskTitle(from: prompt)
             let fallback = prompt.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")

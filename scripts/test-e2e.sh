@@ -27,7 +27,10 @@ while (( $# > 0 )); do
   esac
 done
 
-selected_cases_csv="$(IFS=,; printf '%s' "${selected_cases[*]}")"
+selected_cases_csv=""
+if (( ${#selected_cases[@]} > 0 )); then
+  selected_cases_csv="$(IFS=,; printf '%s' "${selected_cases[*]}")"
+fi
 selection_file="/tmp/stationai-bridge-test-selection-${repository_root//\//_}"
 selection_owner="StationAI bridge test selection (v1)."
 if [[ -e "${selection_file}" ]] && [[ "$(head -n 1 "${selection_file}" 2>/dev/null || true)" != "${selection_owner}" ]]; then

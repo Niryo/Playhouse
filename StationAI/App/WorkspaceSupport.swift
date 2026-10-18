@@ -449,6 +449,13 @@ enum StationAIWorktreeManager {
         }
     }
 
+    static func commitChanges(_ record: RepositoryWorktreeRecord, message: String) throws {
+        let status = try git(record.worktreePath, ["status", "--porcelain", "--untracked-files=all"]).output
+        guard !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        _ = try git(record.worktreePath, ["add", "-A"])
+        _ = try git(record.worktreePath, ["commit", "-m", message])
+    }
+
     static func hasChanges(_ record: RepositoryWorktreeRecord) throws -> Bool {
         let status = try git(record.worktreePath, ["status", "--porcelain", "--untracked-files=all"]).output
         return !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

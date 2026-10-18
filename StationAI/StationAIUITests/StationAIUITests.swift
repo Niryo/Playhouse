@@ -303,8 +303,8 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Completed task remains on the board with its conversation prompt retained")
     }
 
-    // case-contract: test_task_done_rejects_dirty_worktree | A dirty task worktree cannot merge from Review, moves to Blocked with the reason, and remains intact.
-    func test_task_done_rejects_dirty_worktree() throws {
+    // case-contract: test_task_done_commits_dirty_worktree_changes | Moving a reviewed task to Done stages and commits tracked and untracked worktree changes, merges them into the target, and removes the managed worktree.
+    func test_task_done_commits_dirty_worktree_changes() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Dirty done UI", roots: [fixture.primary.path])
@@ -323,16 +323,17 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
         XCTAssertEqual(try taskRecord(named: "Dirty done UI")?["status"] as? String, "Review")
         element("back-to-board-button").click()
-        try "Unsaved work\n".write(to: URL(fileURLWithPath: path).appendingPathComponent("unsaved.txt"), atomically: true, encoding: .utf8)
+        try "Edited after review\n".write(to: URL(fileURLWithPath: path).appendingPathComponent("stationai-primary.txt"), atomically: true, encoding: .utf8)
+        try "New unsaved work\n".write(to: URL(fileURLWithPath: path).appendingPathComponent("unsaved.txt"), atomically: true, encoding: .utf8)
         mergeTaskToDone("Dirty done UI")
-        let alert = app.sheets.firstMatch
-        XCTAssertTrue(alert.waitForExistence(timeout: 10))
-        XCTAssertTrue(alert.staticTexts.containing(NSPredicate(format: "value CONTAINS %@", "Couldn't save changes")).firstMatch.exists)
-        XCTAssertTrue(alert.staticTexts.containing(NSPredicate(format: "value CONTAINS %@", "uncommitted changes")).firstMatch.exists)
-        alert.buttons["OK"].click()
-        XCTAssertEqual(try taskRecord(named: "Dirty done UI")?["status"] as? String, "Blocked")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: URL(fileURLWithPath: path).appendingPathComponent("unsaved.txt").path))
-        attachScreenshot(named: "A dirty worktree blocks the Done transition and remains intact")
+        assertTaskVisible("Dirty done UI", inColumn: "Done")
+        XCTAssertEqual(try taskRecord(named: "Dirty done UI")?["status"] as? String, "Done")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        XCTAssertEqual(try String(contentsOf: fixture.primary.appendingPathComponent("stationai-primary.txt"), encoding: .utf8), "Edited after review\n")
+        XCTAssertEqual(try String(contentsOf: fixture.primary.appendingPathComponent("unsaved.txt"), encoding: .utf8), "New unsaved work\n")
+        let branch = try XCTUnwrap(record["branch"] as? String)
+        XCTAssertEqual(try runGitOutput(fixture.primary, "log", branch, "-1", "--format=%s"), "Complete task: Dirty done UI")
+        attachScreenshot(named: "Done commits, merges, and cleans up tracked and untracked task changes")
     }
 
     // case-contract: test_task_done_rejects_dirty_merge_target | A dirty local merge target is detected before the merge, leaves the target unchanged, and moves the reviewed task to Blocked with the reason.
@@ -787,7 +788,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "New conversation shows its empty state")
     }
 
-    // case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task opens its conversation directly with a unique title-independent branch; backing out saves the unsent prompt in Backlog, and invalid status changes are rejected without mutating it.
+    // case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task opens its conversation directly with a unique title-independent branch; backing out saves the unsent prompt in Backlog, reopening restores it, and returning again preserves the resolved title. Invalid status changes are rejected without mutation.
     func test_task_prompt_draft_persists_after_back() throws {
         launchApp(defaultParent: fixture.parent.path)
         openNewTaskSheet()
@@ -818,10 +819,17 @@ final class StationAIUITests: XCTestCase {
         let unchanged = try runCLI(["task", "get", taskID])["result"] as? [String: Any]
         XCTAssertEqual(unchanged?["savedPrompt"] as? String, prompt)
         XCTAssertEqual(unchanged?["status"] as? String, "Backlog")
+
+        _ = try runCLI(["task", "rename", taskID, "--title", "Stable draft title"])
+        openTask(named: "Stable draft title")
+        XCTAssertEqual(composer.value as? String, prompt, "Reopening should restore an unsent draft.")
+        element("back-to-board-button").click()
+        let stableTitle = try runCLI(["task", "get", taskID])["result"] as? [String: Any]
+        XCTAssertEqual(stableTitle?["title"] as? String, "Stable draft title", "Returning with the saved draft should not restart title generation.")
         attachScreenshot(named: "Unsent task prompt is saved after returning to backlog")
     }
 
-    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Blank drafts cannot be sent or stored; live responses can be paused, continued, and their task activity expanded.
+    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Blank drafts cannot be sent or stored; a sent saved prompt remains in conversation history without returning to the composer, and reopening during a live response keeps active thinking visible while responses can be paused, continued, and their task activity expanded.
     func test_conversation_composer_rejects_blank_and_supports_live_turn_controls() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Blank message", roots: [fixture.primary.path])
@@ -852,15 +860,27 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual((history?["activities"] as? [Any])?.count, 0)
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
         if FileManager.default.fileExists(atPath: "/tmp/stationai-codex-live-ui-integration") {
+            let livePrompt = "In stationai-primary.txt, append exactly the line `StationAI UI pause marker 6A20F1`. Then run a shell command that executes `sleep 90; printf PAUSE_TEST_FINISHED`. Do not modify any other files. Reply with a short summary after the command finishes."
+            let savedPrompt = try runCLI(["task", "prompt", taskID, "--text", livePrompt])["result"] as? [String: Any]
+            XCTAssertEqual(savedPrompt?["savedPrompt"] as? String, livePrompt)
             composer.click()
             composer.typeKey("a", modifierFlags: .command)
-            composer.typeText("In stationai-primary.txt, append exactly the line `StationAI UI pause marker 6A20F1`. Then run a shell command that executes `sleep 90; printf PAUSE_TEST_FINISHED`. Do not modify any other files. Reply with a short summary after the command finishes.")
+            composer.typeText(livePrompt)
             XCTAssertTrue(sendButton.isEnabled, "A nonblank draft in a live Codex session should enable Send.")
             sendButton.click()
 
             let pauseButton = element("pause-response-button")
             XCTAssertTrue(pauseButton.waitForExistence(timeout: 60), "A live turn should replace Send with Pause.")
             XCTAssertTrue(pauseButton.isEnabled, "Pause should be enabled after Codex reports an active turn.")
+
+            element("back-to-board-button").click()
+            openTask(named: "Blank message")
+            XCTAssertTrue(element("pause-response-button").waitForExistence(timeout: 30), "Reopening the task should retain the active-turn controls.")
+            XCTAssertEqual(composer.value as? String, "", "A prompt already sent to Codex must not reappear as a composer draft.")
+            let reopenedActivity = element("codex-activity-disclosure")
+            let visibleThinking = NSPredicate(format: "label CONTAINS %@ OR label CONTAINS %@", "Thinking", "Running")
+            let thinkingExpectation = XCTNSPredicateExpectation(predicate: visibleThinking, object: reopenedActivity)
+            XCTAssertEqual(XCTWaiter.wait(for: [thinkingExpectation], timeout: 30), .completed, "An active turn should remain visibly active after leaving and reopening the task.")
 
             let activityDisclosure = element("codex-activity-disclosure")
             guard activityDisclosure.waitForExistence(timeout: 60) else {

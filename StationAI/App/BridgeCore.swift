@@ -211,6 +211,9 @@ final class BoardTaskManager {
 
         do {
             let mergeCandidates = task.repositoryWorktrees.enumerated().filter { !$0.element.mergeCompleted }
+            for (_, record) in mergeCandidates {
+                try StationAIWorktreeManager.commitChanges(record, message: "Complete task: \(task.title)")
+            }
             var conflicts: [(offset: Int, element: RepositoryWorktreeRecord)] = []
             for candidate in mergeCandidates {
                 if try StationAIWorktreeManager.preflightMerge(candidate.element) {

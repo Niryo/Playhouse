@@ -32,8 +32,8 @@
     "expectation": "After a successful Codex turn puts a task in Review, moving it to Done merges the task branch into its explicit target, removes the clean managed worktree, retains the source branch, and preserves the saved conversation prompt."
   },
   {
-    "id": "test_task_done_rejects_dirty_worktree",
-    "expectation": "A dirty task worktree cannot merge from Review, moves to Blocked with the reason, and remains intact."
+    "id": "test_task_done_commits_dirty_worktree_changes",
+    "expectation": "Moving a reviewed task to Done stages and commits tracked and untracked worktree changes, merges them into the target, and removes the managed worktree."
   },
   {
     "id": "test_task_done_rejects_dirty_merge_target",
@@ -89,11 +89,11 @@
   },
   {
     "id": "test_task_prompt_draft_persists_after_back",
-    "expectation": "Creating a repository task opens its conversation directly with a unique title-independent branch; backing out saves the unsent prompt in Backlog, and invalid status changes are rejected without mutating it."
+    "expectation": "Creating a repository task opens its conversation directly with a unique title-independent branch; backing out saves the unsent prompt in Backlog, reopening restores it, and returning again preserves the resolved title. Invalid status changes are rejected without mutation."
   },
   {
     "id": "test_conversation_composer_rejects_blank_and_supports_live_turn_controls",
-    "expectation": "Blank drafts cannot be sent or stored; live responses can be paused, continued, and their task activity expanded."
+    "expectation": "Blank drafts cannot be sent or stored; a sent saved prompt remains in conversation history without returning to the composer, and reopening during a live response keeps active thinking visible while responses can be paused, continued, and their task activity expanded."
   },
   {
     "id": "test_conversation_shows_subagent_delegation",
