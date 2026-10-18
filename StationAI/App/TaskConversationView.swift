@@ -92,6 +92,7 @@ struct TaskConversationView: View {
     @State private var editedMergeTarget = ""
     @State private var isShowingDiscardConfirmation = false
     @FocusState private var isComposerFocused: Bool
+    @FocusState private var isRepositorySearchFocused: Bool
 
     private var isSendDisabled: Bool {
         draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || workspaceRootURLs.isEmpty || isResponding || isLoadingHistory
@@ -115,6 +116,11 @@ struct TaskConversationView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .onAppear {
+            guard isNewTask else { return }
+            isShowingRepositoryPicker = true
+            loadSuggestedRepositories()
+        }
         .sheet(isPresented: $isShowingWorkspaceEditor) {
             WorkspaceRootsEditor(
                 parentFolderURL: WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath),
@@ -755,6 +761,7 @@ struct TaskConversationView: View {
         VStack(alignment: .leading, spacing: 8) {
             TextField("Search repositories…", text: $repositorySearch)
                 .textFieldStyle(.roundedBorder)
+                .focused($isRepositorySearchFocused)
                 .accessibilityIdentifier("conversation-repository-search")
             let available = suggestedRepositories.filter { candidate in
                 !workspaceRootURLs.contains(where: { $0.path == candidate.standardizedFileURL.path }) &&
@@ -783,7 +790,14 @@ struct TaskConversationView: View {
                     }
                 }.frame(width: 280, height: min(CGFloat(available.count * 42), 180))
             }
-        }.padding(12).frame(width: 304)
+        }
+        .padding(12)
+        .frame(width: 304)
+        .onAppear {
+            if isNewTask {
+                DispatchQueue.main.async { isRepositorySearchFocused = true }
+            }
+        }
     }
 
     private func loadSuggestedRepositories() {

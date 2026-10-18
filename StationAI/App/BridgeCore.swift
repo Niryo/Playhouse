@@ -159,7 +159,6 @@ final class BoardTaskManager {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty else { throw StationAIManagerError.invalidTitle }
         let folders = try Self.normalizeOptionalRoots(contextFolders)
-        guard !repositories.isEmpty || !folders.isEmpty else { throw StationAIManagerError.noWorkspaceRoots }
         var worktrees: [RepositoryWorktreeRecord] = []
         do {
             for spec in repositories {

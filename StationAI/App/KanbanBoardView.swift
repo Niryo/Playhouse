@@ -237,33 +237,16 @@ struct KanbanBoardView: View {
 
     private func openNewTask() {
         guard !isChoosingDefaultParent else { return }
-        let settings = WorkspaceSettingsManager()
-        guard settings.defaultParentFolderURL == nil else {
-            isShowingNewTask = true
-            return
-        }
-
-        let panel = NSOpenPanel()
-        panel.title = "Choose default parent folder"
-        panel.message = "StationAI will suggest Git repositories found below this folder."
-        panel.prompt = "Use This Folder"
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
-        isChoosingDefaultParent = true
-        panel.begin { response in
-            DispatchQueue.main.async {
-                isChoosingDefaultParent = false
-                guard response == .OK, let selected = panel.url else { return }
-                do {
-                    try settings.setDefaultParentFolder(selected.standardizedFileURL.path)
-                } catch {
-                    saveError = error.localizedDescription
-                    return
-                }
-                isShowingNewTask = true
-            }
+        do {
+            let created = try BoardTaskManager(modelContext: modelContext).create(
+                title: "Generating title…",
+                repositories: [],
+                contextFolders: []
+            )
+            selectedTask = try BoardTaskManager(modelContext: modelContext).taskModel(created.id)
+            isSelectedTaskNew = true
+        } catch {
+            saveError = error.localizedDescription
         }
     }
 

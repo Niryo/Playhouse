@@ -194,10 +194,10 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assert_failure(response, "invalid_argument")
         self.assertIn("must name an existing local branch", response["error"]["message"])
 
-        response, _ = self.call_cli(
-            "task", "create", "--title", "No roots", expected_status=2
-        )
-        self.assert_failure(response, "invalid_argument")
+        response, _ = self.call_cli("task", "create", "--title", "No roots")
+        empty_task = self.assert_success(response)
+        self.assertEqual(empty_task["workspaceRoots"], [])
+        self.assertEqual(empty_task["repositoryWorktrees"], [])
 
         response, _ = self.call_cli(
             "task", "create", "--title", "Missing folder", "--root", self.fixture / "missing",
@@ -625,9 +625,10 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "roots", "get", task_id)
         self.assertEqual(self.assert_success(response)["roots"], [str(self.primary)])
 
-    # case-contract: test_new_task_has_empty_conversation_history | A newly created task shows an empty conversation with no stored messages or activity; confirming discard deletes the empty task, while canceling keeps it.
+    # case-contract: test_new_task_has_empty_conversation_history | Creating a task opens its empty conversation with the repository picker search focused; the task has no stored messages or activity, and confirming discard deletes it while canceling keeps it.
     def test_new_task_has_empty_conversation_history(self):
-        task_id = self.create_task(title="Conversation history")["id"]
+        response, _ = self.call_cli("task", "create", "--title", "Conversation history")
+        task_id = self.assert_success(response)["id"]
         response, _ = self.call_cli("conversation", "history", task_id)
         history = self.assert_success(response)
         self.assertEqual(history["activities"], [])
