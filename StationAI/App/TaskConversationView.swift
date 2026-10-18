@@ -1038,6 +1038,11 @@ struct TaskConversationView: View {
                     .lineLimit(1...5)
                     .textFieldStyle(.plain)
                     .focused($isComposerFocused)
+                    .onKeyPress(.return, phases: .down) { press in
+                        guard press.modifiers.contains(.shift) else { return .ignored }
+                        draft += "\n"
+                        return .handled
+                    }
                     .onSubmit { sendMessage() }
                     .onChange(of: draft) { _, newValue in
                         if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/plan" {

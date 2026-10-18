@@ -661,7 +661,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(reopened_task["savedPrompt"], prompt)
         self.assertEqual(reopened_task["status"], "Backlog")
         self.assertEqual(reopened_task["title"], "Stable draft title")
-    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Blank drafts cannot be sent or stored; a sent saved prompt remains in conversation history without returning to the composer, and reopening during a live response keeps active thinking visible while responses can be paused, continued, and their task activity expanded.
+    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, and a sent saved prompt remains in conversation history through live-turn controls and history reload.
     def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
         task_id = self.create_task(title="Blank conversation send", roots=[self.primary])["id"]
         response, _ = self.call_cli("conversation", "send", task_id, "--message", " ", expected_status=2)
@@ -671,6 +671,11 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(history["activities"], [])
         self.assertEqual(history["messages"], [])
         prompt = "Work on the persisted prompt while I reopen this task."
+        saved, _ = self.call_cli("task", "prompt", task_id, "--text", prompt)
+        self.assertEqual(self.assert_success(saved)["savedPrompt"], prompt)
+        multiline_prompt = "First line\nSecond line"
+        saved, _ = self.call_cli("task", "prompt", task_id, "--text", multiline_prompt)
+        self.assertEqual(self.assert_success(saved)["savedPrompt"], multiline_prompt)
         saved, _ = self.call_cli("task", "prompt", task_id, "--text", prompt)
         self.assertEqual(self.assert_success(saved)["savedPrompt"], prompt)
         persisted = self.complete_fixture_turn(task_id, message=prompt)
