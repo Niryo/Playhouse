@@ -77,6 +77,10 @@ struct TaskConversationView: View {
     @State private var errorMessage: String?
     @State private var actionNotice: String?
     @State private var isShowingWorkspaceEditor = false
+    @State private var isShowingRepositoryPicker = false
+    @State private var repositorySearch = ""
+    @State private var suggestedRepositories: [URL] = []
+    @State private var expandedRepositoryPath: String?
     @State private var isShowingDiscardConfirmation = false
     @FocusState private var isComposerFocused: Bool
 
@@ -674,6 +678,43 @@ struct TaskConversationView: View {
 
             Spacer(minLength: 0)
 
+            HStack(spacing: 5) {
+                ForEach(task.repositoryWorktrees, id: \.repositoryPath) { repository in
+                    let name = URL(fileURLWithPath: repository.repositoryPath).lastPathComponent
+                    Button {
+                        expandedRepositoryPath = expandedRepositoryPath == repository.repositoryPath ? nil : repository.repositoryPath
+                    } label: {
+                        Text(name).font(.system(size: 10, weight: .medium)).lineLimit(1)
+                            .padding(.horizontal, 8).padding(.vertical, 5)
+                            .background(Color.accentColor.opacity(0.1), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .popover(isPresented: Binding(
+                        get: { expandedRepositoryPath == repository.repositoryPath },
+                        set: { if !$0 { expandedRepositoryPath = nil } }
+                    )) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(name).font(.system(size: 12, weight: .semibold))
+                            Text("Branch: \(repository.branch)")
+                            Text("Merge from: \(repository.branchFrom)")
+                            Text("Merge to: \(repository.mergeTarget ?? "default")")
+                        }
+                        .font(.system(size: 11)).padding(12).frame(minWidth: 220, alignment: .leading)
+                    }
+                    .accessibilityIdentifier("conversation-repository-badge-\(name)")
+                }
+                Button {
+                    isShowingRepositoryPicker.toggle()
+                    if suggestedRepositories.isEmpty { loadSuggestedRepositories() }
+                } label: {
+                    Image(systemName: "plus").font(.system(size: 10, weight: .semibold))
+                        .frame(width: 22, height: 22).background(Color.primary.opacity(0.07), in: Circle())
+                }
+                .buttonStyle(.plain).help("Add a repository").accessibilityLabel("Add repository")
+                .accessibilityIdentifier("add-conversation-repository-button")
+                .popover(isPresented: $isShowingRepositoryPicker, arrowEdge: .bottom) { repositoryPicker }
+            }
+
             Button {
                 isShowingWorkspaceEditor = true
             } label: {
@@ -688,6 +729,50 @@ struct TaskConversationView: View {
         .padding(.vertical, 15)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .windowBackgroundColor).opacity(0.96))
+    }
+
+    private var repositoryPicker: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Search repositories…", text: $repositorySearch)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("conversation-repository-search")
+            let available = suggestedRepositories.filter { candidate in
+                !workspaceRootURLs.contains(where: { $0.path == candidate.standardizedFileURL.path }) &&
+                !task.repositoryWorktrees.contains(where: { URL(fileURLWithPath: $0.repositoryPath).standardizedFileURL.path == candidate.standardizedFileURL.path }) &&
+                (repositorySearch.isEmpty || candidate.lastPathComponent.localizedCaseInsensitiveContains(repositorySearch) || candidate.path.localizedCaseInsensitiveContains(repositorySearch))
+            }
+            if available.isEmpty {
+                Text("No matching repositories.").font(.system(size: 10)).foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(available, id: \.path) { repository in
+                            Button {
+                                updateWorkspaceRoots(workspaceRootURLs + [repository])
+                                repositorySearch = ""
+                                isShowingRepositoryPicker = false
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(repository.lastPathComponent).font(.system(size: 11, weight: .medium))
+                                    Text(repository.path).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+                                }.frame(maxWidth: .infinity, alignment: .leading).padding(7).contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("conversation-repository-suggestion-\(repository.lastPathComponent)")
+                        }
+                    }
+                }.frame(width: 280, height: min(CGFloat(available.count * 42), 180))
+            }
+        }.padding(12).frame(width: 304)
+    }
+
+    private func loadSuggestedRepositories() {
+        guard let parent = WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) else { return }
+        Task {
+            suggestedRepositories = (try? await WorkspaceManager().suggestedRepositories(parentPath: parent.path).map {
+                URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL
+            }) ?? []
+        }
     }
 
     private var safetyNotice: some View {

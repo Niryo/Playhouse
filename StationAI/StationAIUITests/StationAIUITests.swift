@@ -638,6 +638,35 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Edited ordered folders in task conversation")
     }
 
+    // case-contract: test_conversation_repository_picker_adds_repository_worktree | Typing in the conversation repository picker filters suggestions; adding one persists a worktree badge whose popover shows the exact stored branch, merge-from, and merge-to values.
+    func test_conversation_repository_picker_adds_repository_worktree() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        let created = try runCLI(["task", "create", "--title", "Header repository picker", "--repo", fixture.primary.path])["result"] as? [String: Any]
+        XCTAssertNotNil(created)
+        openTask(named: "Header repository picker")
+        element("add-conversation-repository-button").click()
+        let search = element("conversation-repository-search")
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.click()
+        search.typeText("secondary")
+        let suggestion = element("conversation-repository-suggestion-secondary")
+        XCTAssertTrue(suggestion.waitForExistence(timeout: 10))
+        XCTAssertFalse(element("conversation-repository-suggestion-primary").exists, "Typing a repository name should filter unrelated suggestions.")
+        suggestion.click()
+        let badge = element("conversation-repository-badge-secondary")
+        XCTAssertTrue(badge.waitForExistence(timeout: 10))
+        let record = try XCTUnwrap(taskRecord(named: "Header repository picker"))
+        let repositories = try XCTUnwrap(record["repositoryWorktrees"] as? [[String: Any]])
+        let secondary = try XCTUnwrap(repositories.first { ($0["repositoryPath"] as? String) == fixture.secondary.path })
+        let branch = try XCTUnwrap(secondary["branch"] as? String)
+        let mergeFrom = try XCTUnwrap(secondary["branchFrom"] as? String)
+        let mergeTo = try XCTUnwrap(secondary["mergeTarget"] as? String)
+        badge.click()
+        XCTAssertTrue(app.staticTexts["Branch: \(branch)"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Merge from: \(mergeFrom)"].exists)
+        XCTAssertTrue(app.staticTexts["Merge to: \(mergeTo)"].exists)
+    }
+
     // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | Empty tasks and clean worktrees delete without confirmation, dirty worktrees require confirmation, and confirmed deletion removes the managed worktree and task.
     func test_task_delete_removes_task_and_later_lookup_is_not_found() throws {
         launchApp(defaultParent: fixture.parent.path)
