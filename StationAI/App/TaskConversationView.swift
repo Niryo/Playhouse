@@ -43,6 +43,7 @@ struct TaskConversationView: View {
     @AppStorage(WorkspaceSettings.defaultParentFolderKey, store: WorkspaceSettings.preferencesStore) private var defaultParentFolderPath = ""
 
     let task: BoardTask
+    var isNewTask = false
     let onBack: () -> Void
 
     @State private var draft = ""
@@ -76,6 +77,7 @@ struct TaskConversationView: View {
     @State private var errorMessage: String?
     @State private var actionNotice: String?
     @State private var isShowingWorkspaceEditor = false
+    @State private var isShowingDiscardConfirmation = false
     @FocusState private var isComposerFocused: Bool
 
     private var isSendDisabled: Bool {
@@ -107,6 +109,21 @@ struct TaskConversationView: View {
                 repositoryWorktrees: task.repositoryWorktrees,
                 onSave: updateWorkspaceRoots
             )
+        }
+        .alert("Discard this task?", isPresented: $isShowingDiscardConfirmation) {
+            Button("Discard Task", role: .destructive) {
+                do {
+                    try BoardTaskManager(modelContext: modelContext).delete(task.id)
+                    onBack()
+                } catch {
+                    errorMessage = error.localizedDescription
+                }
+            }
+            .accessibilityIdentifier("confirm-discard-empty-task-button")
+            Button("Cancel", role: .cancel) {}
+                .accessibilityIdentifier("cancel-discard-empty-task-button")
+        } message: {
+            Text("This empty task will be permanently deleted.")
         }
         .task {
             _ = try? BoardTaskManager(modelContext: modelContext)
@@ -1235,6 +1252,11 @@ struct TaskConversationView: View {
     }
 
     private func saveAndBack() {
+        if isNewTask, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           messages.isEmpty, activities.isEmpty, !isLoadingHistory {
+            isShowingDiscardConfirmation = true
+            return
+        }
         saveDraftAndGenerateTitle(status: nil, then: onBack)
     }
 

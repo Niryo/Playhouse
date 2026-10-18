@@ -606,7 +606,7 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "roots", "get", task_id)
         self.assertEqual(self.assert_success(response)["roots"], [str(self.primary)])
 
-    # case-contract: test_new_task_has_empty_conversation_history | A newly created task shows an empty conversation and has no stored messages or activity.
+    # case-contract: test_new_task_has_empty_conversation_history | A newly created task shows an empty conversation with no stored messages or activity; confirming discard deletes the empty task, while canceling keeps it.
     def test_new_task_has_empty_conversation_history(self):
         task_id = self.create_task(title="Conversation history")["id"]
         response, _ = self.call_cli("conversation", "history", task_id)
@@ -614,6 +614,10 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(history["activities"], [])
         self.assertEqual(history["messages"], [])
         self.assertIsNone(history.get("diff"))
+        response, _ = self.call_cli("task", "delete", task_id)
+        self.assertTrue(self.assert_success(response)["deleted"])
+        response, _ = self.call_cli("task", "get", task_id, expected_status=3)
+        self.assert_failure(response, "not_found")
 
     # case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task opens its conversation directly with a unique title-independent branch; backing out saves the unsent prompt in Backlog, reopening restores it, and returning again preserves the resolved title. Invalid status changes are rejected without mutation.
     def test_task_prompt_draft_persists_after_back(self):
