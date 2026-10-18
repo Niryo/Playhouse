@@ -105,21 +105,21 @@ struct KanbanBoardView: View {
 
             ScrollView(.horizontal) {
                 HStack(alignment: .top, spacing: 16) {
-                    ForEach(TaskStatus.allCases) { status in
-                        KanbanColumnView(
-                            status: status,
-                            tasks: tasks.filter { $0.status == status },
-                            onMoveTask: moveTask,
-                            onAddTask: openNewTask,
-                            onOpenTask: { selectedTask = $0 },
-                            onRenameTask: { taskBeingRenamed = $0 },
-                            onDeleteTask: {
-                                taskBeingDeleted = $0
-                                isShowingDeleteConfirmation = true
-                            },
-                            draggedTaskID: $draggedTaskID
-                        )
-                        .frame(width: 264)
+                    ForEach(TaskStatus.allCases.filter { $0 != .blocked }) { status in
+                        if status == .backlog {
+                            VStack(spacing: 12) {
+                                if tasks.contains(where: { $0.status == .blocked }) {
+                                    kanbanColumn(.blocked)
+                                        .transition(.opacity.combined(with: .move(edge: .top)))
+                                }
+                                kanbanColumn(.backlog)
+                            }
+                            .frame(width: 264)
+                            .animation(.easeInOut(duration: 0.2), value: tasks.contains(where: { $0.status == .blocked }))
+                        } else {
+                            kanbanColumn(status)
+                                .frame(width: 264)
+                        }
                     }
                     if draggedTaskID != nil {
                         TrashDropTarget(isActive: $isTrashTargetActive, onDrop: deleteTaskFromTrash)
@@ -134,6 +134,24 @@ struct KanbanBoardView: View {
             }
             .scrollIndicators(.visible)
         }
+    }
+
+    @ViewBuilder
+    private func kanbanColumn(_ status: TaskStatus) -> some View {
+        KanbanColumnView(
+            status: status,
+            tasks: tasks.filter { $0.status == status },
+            onMoveTask: moveTask,
+            onAddTask: openNewTask,
+            onOpenTask: { selectedTask = $0 },
+            onRenameTask: { taskBeingRenamed = $0 },
+            onDeleteTask: {
+                taskBeingDeleted = $0
+                isShowingDeleteConfirmation = true
+            },
+            draggedTaskID: $draggedTaskID
+        )
+        .frame(width: 264)
     }
 
     private var boardHeader: some View {
@@ -361,6 +379,14 @@ private struct KanbanColumnView: View {
                 }
             }
             .padding(.horizontal, 3)
+
+            if status == .blocked {
+                Label("Waiting for user intervention", systemImage: "hand.raised.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.red)
+                    .padding(.horizontal, 3)
+                    .accessibilityIdentifier("blocked-waiting-indicator")
+            }
 
             if tasks.isEmpty {
                 emptyState

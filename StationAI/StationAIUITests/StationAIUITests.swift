@@ -538,12 +538,14 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Lifecycle rollout clears tasks and reports a retained dirty worktree")
     }
 
-    // case-contract: test_task_status_transitions_and_rejects_unknown_status | The board shows the lifecycle columns in order without Ready, and user attempts to set Codex-owned statuses are rejected.
+    // case-contract: test_task_status_transitions_and_rejects_unknown_status | The board shows lifecycle columns in order without Ready, hides the blocked section when empty, and user attempts to set Codex-owned statuses are rejected.
     func test_task_status_transitions_and_rejects_unknown_status() throws {
         launchApp(defaultParent: fixture.parent.path)
         createTaskThroughUI(title: "Status transitions", roots: ["primary"])
-        let columns = ["backlog", "in-progress", "blocked", "waiting-response", "review", "done"]
+        let columns = ["backlog", "in-progress", "waiting-response", "review", "done"]
         for column in columns { XCTAssertTrue(element("column-heading-\(column)").exists, "Missing \(column) board column.") }
+        XCTAssertFalse(element("column-heading-blocked").exists, "The blocked section should be hidden when no tasks are blocked.")
+        XCTAssertFalse(element("blocked-waiting-indicator").exists)
         XCTAssertFalse(element("column-heading-ready").exists)
         assertTaskVisible("Status transitions", inColumn: "Backlog")
 
@@ -1002,33 +1004,32 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(element("ai-question-form-title").exists)
     }
 
-    // case-contract: test_codex_empty_question_request_is_rejected | A failed structured-question turn moves the task to Blocked, and sending a retry completes into Review.
+    // case-contract: test_codex_empty_question_request_is_rejected | A failed turn preserves its blocked reason and appears in the conditional Blocked section above Backlog with a user-intervention indication; retrying clears that section and completes the task into Review.
     func test_codex_empty_question_request_is_rejected() throws {
-        _ = try runCLI(["task", "create", "--title", "Empty Codex questions", "--root", fixture.primary.path])
-        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: true).path
-        launchApp(defaultParent: fixture.parent.path)
-        openTask(named: "Empty Codex questions")
-        element("message-composer").click()
-        element("message-composer").typeText("Please ask your questions.")
-        element("send-message-button").click()
-
-        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10))
-        XCTAssertFalse(element("ai-question-form").exists)
+        let created = try runCLI(["task", "create", "--title", "Empty Codex questions", "--root", fixture.primary.path])
+        let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
+        let emptyFixture = try makeCodexFixture(emptyQuestions: true).path
+        let failedTurn = try runCLI(
+            ["conversation", "send", taskID, "--message", "Please ask your questions."],
+            expectedStatus: 1,
+            extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": emptyFixture]
+        )
+        XCTAssertFalse(failedTurn["ok"] as? Bool ?? true)
         XCTAssertEqual(try taskRecord(named: "Empty Codex questions")?["status"] as? String, "Blocked")
-        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
-        app.launchEnvironment["STATIONAI_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
-        relaunchApp()
-        openTask(named: "Empty Codex questions")
-        element("message-composer").click()
-        element("message-composer").typeText("Retry this task.")
-        element("send-message-button").click()
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
-        app.buttons["Blue"].click()
-        element("ai-question-answer-token").click()
-        element("ai-question-answer-token").typeText("fixture-secret")
-        element("submit-ai-answers-button").click()
-        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        launchApp(defaultParent: fixture.parent.path)
+        XCTAssertTrue(element("column-heading-blocked").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("blocked-waiting-indicator").exists)
+        assertTaskVisible("Empty Codex questions", inColumn: "Blocked")
+        XCTAssertTrue(element("column-heading-blocked").frame.maxY < element("column-heading-backlog").frame.minY)
+        attachScreenshot(named: "Blocked task appears above Backlog while waiting for user intervention")
+        let retryFixture = try makeCodexFixture(emptyQuestions: false).path
+        _ = try runCLI(
+            ["conversation", "send", taskID, "--message", "Retry this task.", "--answer", "color=Blue", "--answer", "token=fixture-secret"],
+            extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": retryFixture]
+        )
         XCTAssertEqual(try taskRecord(named: "Empty Codex questions")?["status"] as? String, "Review")
+        XCTAssertTrue(waitForDisappearance(element("column-heading-blocked")), "The blocked section should disappear after the task is unblocked.")
+        XCTAssertFalse(element("blocked-waiting-indicator").exists)
     }
 
     // case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions remain visible without moving the task out of In Progress, then successful completion moves it to Review.
@@ -1447,7 +1448,7 @@ final class StationAIUITests: XCTestCase {
         environment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         environment["STATIONAI_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         environment["STATIONAI_BRIDGE_SERVICE_NAME"] = serviceName
-        environment.merge(extraEnvironment) { _, new in new }
+        environment.merge(extraEnvironment) { _, override in override }
         process.environment = environment
         let stdout = Pipe()
         let stderr = Pipe()
@@ -1514,6 +1515,15 @@ final class StationAIUITests: XCTestCase {
 
     private func element(_ identifier: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    private func waitForDisappearance(_ element: XCUIElement, timeout: TimeInterval = 5) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if !element.exists { return true }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return !element.exists
     }
 
     private func attachScreenshot(named name: String) {

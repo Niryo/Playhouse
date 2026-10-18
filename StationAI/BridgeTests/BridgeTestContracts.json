@@ -57,7 +57,7 @@
   },
   {
     "id": "test_task_status_transitions_and_rejects_unknown_status",
-    "expectation": "The board shows the lifecycle columns in order without Ready, and user attempts to set Codex-owned statuses are rejected."
+    "expectation": "The board shows lifecycle columns in order without Ready, hides the blocked section when empty, and user attempts to set Codex-owned statuses are rejected."
   },
   {
     "id": "test_task_rename_persists_and_rejects_blank_title",
@@ -113,7 +113,7 @@
   },
   {
     "id": "test_codex_empty_question_request_is_rejected",
-    "expectation": "A failed structured-question turn moves the task to Blocked, and sending a retry completes into Review."
+    "expectation": "A failed turn preserves its blocked reason and appears in the conditional Blocked section above Backlog with a user-intervention indication; retrying clears that section and completes the task into Review."
   },
   {
     "id": "test_task_workspace_changes_group_staged_and_unstaged_diffs",

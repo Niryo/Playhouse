@@ -492,7 +492,7 @@ class StationAIBridgeTests(unittest.TestCase):
         notice = json.loads((self.data_directory / "task-lifecycle-v2-notice.json").read_text(encoding="utf-8"))
         self.assertEqual(notice, [str(dirty_path)])
 
-    # case-contract: test_task_status_transitions_and_rejects_unknown_status | The board shows the lifecycle columns in order without Ready, and user attempts to set Codex-owned statuses are rejected.
+    # case-contract: test_task_status_transitions_and_rejects_unknown_status | The board shows lifecycle columns in order without Ready, hides the blocked section when empty, and user attempts to set Codex-owned statuses are rejected.
     def test_task_status_transitions_and_rejects_unknown_status(self):
         task_id = self.create_task()["id"]
         response, _ = self.call_cli("task", "move", task_id, "Unknown", expected_status=2)
@@ -721,7 +721,7 @@ class StationAIBridgeTests(unittest.TestCase):
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Review")
 
-    # case-contract: test_codex_empty_question_request_is_rejected | A failed structured-question turn moves the task to Blocked, and sending a retry completes into Review.
+    # case-contract: test_codex_empty_question_request_is_rejected | A failed turn preserves its blocked reason and appears in the conditional Blocked section above Backlog with a user-intervention indication; retrying clears that section and completes the task into Review.
     def test_codex_empty_question_request_is_rejected(self):
         task_id = self.create_task("Empty Codex questions", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -748,7 +748,9 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(lines and not lines[-1].get("ok"), completed.stdout)
         self.assertIn("question response", lines[-1].get("error", {}).get("message", "").lower())
         task, _ = self.call_cli("task", "get", task_id)
-        self.assertEqual(self.assert_success(task)["status"], "Blocked")
+        blocked = self.assert_success(task)
+        self.assertEqual(blocked["status"], "Blocked")
+        self.assertIn("question response", (blocked.get("statusMessage") or "").lower())
         retry_executable = self.data_directory / "codex-fixture-retry"
         shutil.copyfile(fixture, retry_executable)
         retry_executable.chmod(0o755)
