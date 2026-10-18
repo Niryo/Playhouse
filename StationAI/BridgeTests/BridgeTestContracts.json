@@ -29,7 +29,7 @@
   },
   {
     "id": "test_task_done_removes_worktree_and_preserves_branch",
-    "expectation": "After a successful Codex turn puts a task in Review, moving it to Done merges the task branch into its explicit target, removes the clean managed worktree, and retains the source branch."
+    "expectation": "After a successful Codex turn puts a task in Review, moving it to Done merges the task branch into its explicit target, removes the clean managed worktree, retains the source branch, and preserves the saved conversation prompt."
   },
   {
     "id": "test_task_done_rejects_dirty_worktree",
@@ -86,6 +86,10 @@
   {
     "id": "test_new_task_has_empty_conversation_history",
     "expectation": "A newly created task shows an empty conversation and has no stored messages or activity."
+  },
+  {
+    "id": "test_task_prompt_draft_persists_after_back",
+    "expectation": "Creating a repository task opens its conversation directly with a unique title-independent branch; backing out saves the unsent prompt in Backlog, and invalid status changes are rejected without mutating it."
   },
   {
     "id": "test_conversation_composer_rejects_blank_and_supports_live_turn_controls",

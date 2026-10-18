@@ -92,6 +92,12 @@ enum StationAICLI {
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--title"])
                 let title = try requiredFlag("--title", flags: flags).first!
                 return BridgeRequest(command: "task.rename", arguments: ["taskID": .string(id), "title": .string(title)])
+            case "prompt":
+                guard let id = tail.first else { throw CLIError.usage("Use: stationai task prompt <task-id> --text <prompt> [--status <status>]") }
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--text", "--status"])
+                var arguments: [String: BridgeValue] = ["taskID": .string(id), "prompt": .string(try requiredFlag("--text", flags: flags).first!)]
+                if let status = flags["--status"]?.first { arguments["status"] = .string(status) }
+                return BridgeRequest(command: "task.prompt.save", arguments: arguments)
             case "delete":
                 let id = try firstPositional(tail)
                 return BridgeRequest(command: "task.delete", arguments: ["taskID": .string(id)])

@@ -1,6 +1,35 @@
 import SwiftData
 import SwiftUI
 
+@MainActor
+protocol TaskTitleGenerating {
+    func generateTitle(from prompt: String, workspace: CodexWorkspaceContext) async -> String?
+}
+
+@MainActor
+struct CodexTaskTitleGenerator: TaskTitleGenerating {
+    let client: CodexAppServerClient
+
+    func generateTitle(from prompt: String, workspace: CodexWorkspaceContext) async -> String? {
+        do {
+            let threadID = try await client.startThread(workspace: workspace, modelID: CodexAppServerClient.modelID)
+            var generated: String?
+            try await client.sendMessage(
+                "Write a concise task title of at most 8 words for this request. Return only the title:\n\n\(prompt)",
+                mode: .plan,
+                modelID: CodexAppServerClient.modelID,
+                threadID: threadID,
+                workspace: workspace,
+                onDelta: { _ in },
+                onFinalMessage: { generated = $0.trimmingCharacters(in: .whitespacesAndNewlines) },
+                onActivity: { _ in }, onDiff: { _ in }, onHistory: { _ in },
+                onActionRequest: {}, onUserInput: { _ in }
+            )
+            return generated?.components(separatedBy: .newlines).first
+        } catch { return nil }
+    }
+}
+
 struct TaskConversationView: View {
     private struct ChangeRepositoryGroup: Identifiable {
         let repository: String
@@ -17,6 +46,7 @@ struct TaskConversationView: View {
     let onBack: () -> Void
 
     @State private var draft = ""
+    @State private var isGeneratingTitle = false
     @State private var conversationMode: CodexConversationMode = .code
     @State private var modelOptions = [CodexModelOption(id: CodexAppServerClient.modelID, name: "GPT-6 Luna", isDefault: true)]
     @State private var selectedModelID = CodexAppServerClient.modelID
@@ -79,6 +109,7 @@ struct TaskConversationView: View {
             )
         }
         .task {
+            draft = task.savedPrompt ?? ""
             _ = try? BoardTaskManager(modelContext: modelContext)
                 .reconcileLifecycleStatusOnOpen(task.id, client: codexClient)
             await loadConversation()
@@ -576,7 +607,7 @@ struct TaskConversationView: View {
 
     private var conversationHeader: some View {
         HStack(spacing: 12) {
-            Button(action: onBack) {
+            Button(action: saveAndBack) {
                 Image(systemName: "chevron.backward")
                     .font(.system(size: 13, weight: .semibold))
                     .frame(width: 28, height: 28)
@@ -588,10 +619,18 @@ struct TaskConversationView: View {
             .accessibilityIdentifier("back-to-board-button")
 
             VStack(alignment: .leading, spacing: 4) {
+                if isGeneratingTitle {
+                    HStack(spacing: 7) {
+                        ProgressView().controlSize(.small)
+                        Text("Creating task title…")
+                    }
+                    .accessibilityIdentifier("task-title-generating")
+                } else {
                 Text(task.title)
                     .font(.system(size: 14, weight: .semibold))
                     .lineLimit(1)
                     .accessibilityIdentifier("task-view-title")
+                }
 
                 HStack(spacing: 6) {
                     Circle()
@@ -943,6 +982,9 @@ struct TaskConversationView: View {
                         .accessibilityLabel("Continue response")
                         .accessibilityIdentifier("continue-response-button")
                     } else {
+                        Button("Save") { saveDraftAndGenerateTitle(status: .backlog, then: onBack) }
+                            .disabled(isResponding || isLoadingHistory || draft.isEmpty)
+                            .accessibilityIdentifier("save-task-prompt-button")
                         Button { sendMessage() } label: {
                             Image(systemName: "arrow.up")
                                 .font(.system(size: 13, weight: .bold))
@@ -1090,6 +1132,7 @@ struct TaskConversationView: View {
             activatePlanMode()
             return
         }
+        saveDraftAndGenerateTitle(status: .inProgress)
 
         let userMessageID = UUID().uuidString
         let assistantMessageID = UUID().uuidString
@@ -1158,6 +1201,41 @@ struct TaskConversationView: View {
 
             isResponding = false
         }
+    }
+
+    private func saveAndBack() {
+        saveDraftAndGenerateTitle(status: .backlog, then: onBack)
+    }
+
+    private func saveDraftAndGenerateTitle(status: TaskStatus, then completion: (() -> Void)? = nil) {
+        let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else {
+            if task.title == "Generating title…" {
+                _ = try? BoardTaskManager(modelContext: modelContext).rename(task.id, title: "Untitled task")
+            }
+            completion?()
+            return
+        }
+        do {
+            _ = try BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: prompt, status: status)
+            _ = try BoardTaskManager(modelContext: modelContext).rename(task.id, title: "Generating title…")
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
+        isGeneratingTitle = true
+        completion?()
+        Task { @MainActor in
+            let title = await generateTaskTitle(from: prompt)
+            let fallback = prompt.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
+            _ = try? BoardTaskManager(modelContext: modelContext).rename(task.id, title: title.flatMap { $0.isEmpty ? nil : $0 } ?? fallback)
+            isGeneratingTitle = false
+        }
+    }
+
+    private func generateTaskTitle(from prompt: String) async -> String? {
+        guard let workspace = try? CodexWorkspaceContext(roots: workspaceRootURLs) else { return nil }
+        return await CodexTaskTitleGenerator(client: CodexAppServerClient()).generateTitle(from: prompt, workspace: workspace)
     }
 
     private func pauseResponse() {

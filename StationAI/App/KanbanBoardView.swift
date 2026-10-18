@@ -7,6 +7,7 @@ struct KanbanBoardView: View {
     @EnvironmentObject private var codexClient: CodexAppServerClient
     @Query(sort: \BoardTask.createdAt, order: .reverse) private var tasks: [BoardTask]
     @State private var isShowingNewTask = false
+    @State private var pendingConversationTaskID: UUID?
     @State private var isChoosingDefaultParent = false
     @State private var saveError: String?
     @State private var lifecycleResetNotice: String?
@@ -38,7 +39,7 @@ struct KanbanBoardView: View {
                 lifecycleResetNotice = "Existing tasks were cleared. These dirty managed worktrees were kept:\n\n" + retained.joined(separator: "\n")
             }
         }
-        .sheet(isPresented: $isShowingNewTask) {
+        .sheet(isPresented: $isShowingNewTask, onDismiss: openPendingCreatedTask) {
             NewTaskSheet(onCreate: createTask)
         }
         .sheet(isPresented: Binding(
@@ -249,12 +250,28 @@ struct KanbanBoardView: View {
         }
     }
 
-    private func createTask(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [URL]) throws {
-        _ = try BoardTaskManager(modelContext: modelContext).create(
-            title: title,
-            repositories: repositories,
+    private func createTask(repositories: [RepositoryWorktreeSpec], contextFolders: [URL]) throws {
+        let branchName = "task-\(UUID().uuidString.prefix(8).lowercased())"
+        let branchSpecs = repositories.map { spec -> RepositoryWorktreeSpec in
+            var spec = spec
+            if spec.branch == nil { spec.branch = branchName }
+            return spec
+        }
+        let created = try BoardTaskManager(modelContext: modelContext).create(
+            title: "Generating title…",
+            repositories: branchSpecs,
             contextFolders: contextFolders.map { $0.standardizedFileURL.path }
         )
+        pendingConversationTaskID = created.id
+    }
+
+    private func openPendingCreatedTask() {
+        guard let taskID = pendingConversationTaskID else { return }
+        pendingConversationTaskID = nil
+        selectedTask = tasks.first(where: { $0.id == taskID })
+        if selectedTask == nil {
+            selectedTask = try? BoardTaskManager(modelContext: modelContext).taskModel(taskID)
+        }
     }
 
     private func moveTask(id: UUID, to status: TaskStatus) {
@@ -623,7 +640,10 @@ private struct TaskCardView: View {
                         .accessibilityIdentifier("task-status-message-\(task.id.uuidString)")
                 }
 
-                Text(task.title)
+        HStack(spacing: 6) {
+            if task.title == "Generating title…" { ProgressView().controlSize(.small) }
+            Text(task.title)
+        }
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.primary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -70,6 +70,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let statusMessage: String?
     let createdAt: Date
     let codexThreadID: String?
+    let savedPrompt: String?
     let workspaceRoots: [String]
     let repositoryWorktrees: [RepositoryWorktreeRecord]
     let contextFolders: [String]
@@ -81,6 +82,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         statusMessage = task.statusMessage
         createdAt = task.createdAt
         codexThreadID = task.codexThreadID
+        savedPrompt = task.savedPrompt
         workspaceRoots = task.workspaceRootPaths
         repositoryWorktrees = task.repositoryWorktrees
         contextFolders = task.contextFolderPaths
@@ -326,6 +328,18 @@ final class BoardTaskManager {
         guard !normalizedTitle.isEmpty else { throw StationAIManagerError.invalidTitle }
         let task = try requireTask(id)
         task.title = normalizedTitle
+        try modelContext.save()
+        return BoardTaskRecord(task: task)
+    }
+
+    @discardableResult
+    func savePrompt(_ id: UUID, prompt: String, status: TaskStatus? = nil) throws -> BoardTaskRecord {
+        let task = try requireTask(id)
+        if let status, status != .backlog && status != .inProgress {
+            throw StationAIManagerError.invalidTransition("Saving a task prompt can only place it in Backlog or Progress.")
+        }
+        task.savedPrompt = prompt
+        if let status { task.status = status }
         try modelContext.save()
         return BoardTaskRecord(task: task)
     }
@@ -752,6 +766,14 @@ final class StationAIBridgeRuntime {
                 let taskID = try request.requiredUUID("taskID")
                 let title = try request.requiredString("title")
                 result = try Self.value(taskManager.rename(taskID, title: title))
+            case "task.prompt.save":
+                let status = try request.arguments["status"]?.string.map { value -> TaskStatus in
+                    guard let status = TaskStatus(rawValue: value) else { throw StationAIManagerError.invalidStatus(value) }
+                    return status
+                }
+                result = try Self.value(taskManager.savePrompt(
+                    request.requiredUUID("taskID"), prompt: request.requiredString("prompt"), status: status
+                ))
             case "task.delete":
                 try taskManager.delete(request.requiredUUID("taskID"))
                 result = .object(["deleted": .boolean(true)])

@@ -38,6 +38,7 @@ final class BoardTask {
     var statusMessage: String?
     var createdAt: Date
     var codexThreadID: String?
+    var savedPrompt: String?
     var workspaceRootPathsData: Data?
     var repositoryWorktreesData: Data?
     var contextFolderPathsData: Data?
@@ -74,6 +75,7 @@ final class BoardTask {
         statusMessage = nil
         createdAt = .now
         codexThreadID = nil
+        savedPrompt = nil
         workspaceRootPathsData = try? JSONEncoder().encode(workspaceRootPaths)
         repositoryWorktreesData = nil
         contextFolderPathsData = nil

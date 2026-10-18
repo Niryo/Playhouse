@@ -4,18 +4,16 @@ import SwiftUI
 struct NewTaskSheet: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(WorkspaceSettings.defaultParentFolderKey, store: WorkspaceSettings.preferencesStore) private var defaultParentFolderPath = ""
-    @FocusState private var isTitleFocused: Bool
-    @State private var title = ""
     @State private var parentFolderURL: URL?
     @State private var repositories: [RepositoryWorktreeSpec] = []
     @State private var contextFolders: [URL] = []
     @State private var suggestedRepositories: [URL] = []
-    @State private var repositorySearch = ""
     @State private var editingRepositoryField: EditableRepositoryField?
     @State private var hoveredRepositoryTag: String?
     @FocusState private var focusedRepositoryField: EditableRepositoryField?
     @State private var isChoosingInitialParent = false
     @State private var createError: String?
+    @State private var generatedTaskBranch = "task-\(UUID().uuidString.prefix(8).lowercased())"
 
     private enum EditableRepositoryField: Hashable {
         case branch(Int)
@@ -23,11 +21,7 @@ struct NewTaskSheet: View {
         case mergeTarget(Int)
     }
 
-    let onCreate: (String, [RepositoryWorktreeSpec], [URL]) throws -> Void
-
-    private var normalizedTitle: String {
-        title.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
+    let onCreate: ([RepositoryWorktreeSpec], [URL]) throws -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -39,11 +33,6 @@ struct NewTaskSheet: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-
-            TextField("What needs to get done?", text: $title)
-                .textFieldStyle(.roundedBorder)
-                .focused($isTitleFocused)
-                .accessibilityIdentifier("task-title-field")
 
             VStack(alignment: .leading, spacing: 9) {
                 HStack {
@@ -82,7 +71,7 @@ struct NewTaskSheet: View {
                         Spacer(minLength: 2)
                         editableRepositoryTag(
                             label: "branch",
-                            value: repositories[index].branch ?? StationAIWorktreeManager.branchSlug(normalizedTitle.isEmpty ? "task" : normalizedTitle),
+                            value: repositories[index].branch ?? generatedTaskBranch,
                             identifier: "repository-branch-tag-\(index)",
                             textFieldIdentifier: "repository-branch-\(index)",
                             field: .branch(index),
@@ -124,37 +113,46 @@ struct NewTaskSheet: View {
                     }
                 }
 
-                TextField("Type to find a repository…", text: $repositorySearch)
-                    .textFieldStyle(.roundedBorder).accessibilityIdentifier("workspace-repository-search")
-                if !repositorySearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    let matches = suggestedRepositories.filter { candidate in
-                        !repositories.contains(where: { URL(fileURLWithPath: $0.repositoryPath).standardizedFileURL.path == candidate.standardizedFileURL.path }) &&
-                        (candidate.lastPathComponent.localizedCaseInsensitiveContains(repositorySearch) || candidate.path.localizedCaseInsensitiveContains(repositorySearch))
-                    }
-                    if matches.isEmpty {
-                        Text("No matching repositories. Use Browse to add a folder.").font(.system(size: 10)).foregroundStyle(.secondary)
-                    } else {
-                        ScrollView {
-                            LazyVStack(spacing: 0) {
-                                ForEach(matches, id: \.path) { repository in
-                                    Button {
-                                        repositories.append(repositorySpec(for: repository.path))
-                                        repositorySearch = ""
-                                    } label: {
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(repository.lastPathComponent).font(.system(size: 11, weight: .medium))
-                                            Text(repository.path).font(.system(size: 9)).foregroundStyle(.secondary)
-                                        }
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .padding(7)
-                                        .contentShape(Rectangle())
+                let availableRepositories = suggestedRepositories.filter { candidate in
+                    !repositories.contains(where: { URL(fileURLWithPath: $0.repositoryPath).standardizedFileURL.path == candidate.standardizedFileURL.path })
+                }
+                let parentDepth = parentFolderURL?.pathComponents.count ?? 0
+                let orderedRepositories = availableRepositories.sorted { left, right in
+                    let leftDepth = left.pathComponents.count - parentDepth
+                    let rightDepth = right.pathComponents.count - parentDepth
+                    if leftDepth != rightDepth { return leftDepth < rightDepth }
+                    return left.path.localizedStandardCompare(right.path) == .orderedAscending
+                }
+                if suggestedRepositories.isEmpty {
+                    ProgressView("Finding repositories…")
+                        .font(.system(size: 10))
+                        .controlSize(.small)
+                } else if availableRepositories.isEmpty {
+                    Text("All suggested repositories are selected.").font(.system(size: 10)).foregroundStyle(.secondary)
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(orderedRepositories, id: \.path) { repository in
+                                Button {
+                                    repositories.append(repositorySpec(for: repository.path))
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(repository.lastPathComponent).font(.system(size: 11, weight: .medium))
+                                        Text(repository.path).font(.system(size: 9)).foregroundStyle(.secondary)
                                     }
-                                    .buttonStyle(.plain)
-                                    .accessibilityIdentifier("repository-suggestion-\(repository.lastPathComponent)")
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(7)
+                                    .contentShape(Rectangle())
                                 }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("repository-suggestion-\(repository.lastPathComponent)")
                             }
-                        }.frame(maxHeight: 92).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+                        }
                     }
+                    .frame(height: 110)
+                    .clipped()
+                    .accessibilityIdentifier("repository-suggestions-list")
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
                 }
                 if let createError {
                     Label(createError, systemImage: "exclamationmark.triangle.fill")
@@ -178,7 +176,7 @@ struct NewTaskSheet: View {
 
                 Button("Done") {
                     do {
-                        try onCreate(normalizedTitle, repositories, contextFolders)
+                        try onCreate(repositories, contextFolders)
                         dismiss()
                     } catch {
                         createError = error.localizedDescription
@@ -187,7 +185,7 @@ struct NewTaskSheet: View {
                 .buttonStyle(.borderedProminent)
                 .tint(Color(red: 0.34, green: 0.40, blue: 0.86))
                 .keyboardShortcut(.defaultAction)
-                .disabled(normalizedTitle.isEmpty || (repositories.isEmpty && contextFolders.isEmpty))
+                .disabled(repositories.isEmpty && contextFolders.isEmpty)
                 .accessibilityIdentifier("create-task-button")
             }
         }
@@ -199,7 +197,6 @@ struct NewTaskSheet: View {
             if parentFolderURL == nil {
                 chooseInitialParent()
             } else {
-                isTitleFocused = true
             }
         }
         .task(id: parentFolderURL?.path) {
@@ -237,14 +234,13 @@ struct NewTaskSheet: View {
                     return
                 }
                 parentFolderURL = normalized
-                isTitleFocused = true
             }
         }
     }
 
     private func branchBinding(at index: Int) -> Binding<String> {
         Binding(
-            get: { repositories.indices.contains(index) ? (repositories[index].branch ?? StationAIWorktreeManager.branchSlug(normalizedTitle.isEmpty ? "task" : normalizedTitle)) : "" },
+            get: { repositories.indices.contains(index) ? (repositories[index].branch ?? generatedTaskBranch) : "" },
             set: { if repositories.indices.contains(index) { repositories[index].branch = $0 } }
         )
     }
@@ -342,7 +338,7 @@ struct NewTaskSheet: View {
     private func repositorySpec(for path: String) -> RepositoryWorktreeSpec {
         let branchFrom = try? StationAIWorktreeManager.defaultBranchFrom(repositoryPath: path)
         let mergeTarget = try? StationAIWorktreeManager.defaultLocalBranch(repositoryPath: path)
-        return RepositoryWorktreeSpec(repositoryPath: path, branchFrom: branchFrom, mergeTarget: mergeTarget)
+        return RepositoryWorktreeSpec(repositoryPath: path, branch: generatedTaskBranch, branchFrom: branchFrom, mergeTarget: mergeTarget)
     }
 }
 

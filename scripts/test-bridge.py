@@ -281,9 +281,11 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(len(self.assert_success(self.call_cli("task", "list")[0])["tasks"]), 1)
         self.assertTrue(Path(first["repositoryWorktrees"][0]["worktreePath"]).is_dir())
 
-    # case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task in Review, moving it to Done merges the task branch into its explicit target, removes the clean managed worktree, and retains the source branch.
+    # case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task in Review, moving it to Done merges the task branch into its explicit target, removes the clean managed worktree, retains the source branch, and preserves the saved conversation prompt.
     def test_task_done_removes_worktree_and_preserves_branch(self):
         task = self.create_repo_task("Done cleanup", [self.primary])
+        draft = "Complete the task and preserve its conversation."
+        self.assertEqual(self.assert_success(self.call_cli("task", "prompt", task["id"], "--text", draft)[0])["savedPrompt"], draft)
         worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
         (worktree / "task-result.txt").write_text("Task branch change\n", encoding="utf-8")
         self.run_git(worktree, "add", "task-result.txt")
@@ -309,6 +311,8 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(self.primary, "show-ref", "--verify", "--quiet", "refs/heads/done-cleanup"), "")
         self.assertEqual((self.primary / "task-result.txt").read_text(encoding="utf-8"), "Task branch change\n")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["repositoryWorktrees"][0]["mergeTarget"], "main")
+        completed, _ = self.call_cli("task", "get", task["id"])
+        self.assertEqual(self.assert_success(completed)["savedPrompt"], draft)
 
     # case-contract: test_task_done_rejects_dirty_worktree | A dirty task worktree cannot merge from Review, moves to Blocked with the reason, and remains intact.
     def test_task_done_rejects_dirty_worktree(self):
@@ -605,6 +609,27 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(history["activities"], [])
         self.assertEqual(history["messages"], [])
         self.assertIsNone(history.get("diff"))
+
+    # case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task opens its conversation directly with a unique title-independent branch; backing out saves the unsent prompt in Backlog, and invalid status changes are rejected without mutating it.
+    def test_task_prompt_draft_persists_after_back(self):
+        suggestions, _ = self.call_cli("workspace", "suggest", "--parent", self.fixture / "suggested-parent")
+        self.assertIn(str(self.primary), self.assert_success(suggestions)["repositories"])
+        task = self.create_repo_task("Draft persistence", [self.primary], branches={str(self.primary): "draft-persistence"})
+        self.assertEqual(task["repositoryWorktrees"][0]["branch"], "draft-persistence")
+        task_id = task["id"]
+        prompt = "Please update the README and explain the change."
+        response, _ = self.call_cli("task", "prompt", task_id, "--text", prompt, "--status", "Backlog")
+        saved = self.assert_success(response)
+        self.assertEqual(saved["savedPrompt"], prompt)
+        self.assertEqual(saved["status"], "Backlog")
+        invalid, _ = self.call_cli("task", "prompt", task_id, "--text", "Changed", "--status", "Not a status", expected_status=2)
+        self.assert_failure(invalid, "invalid_argument")
+        invalid_transition, _ = self.call_cli("task", "prompt", task_id, "--text", "Changed", "--status", "Done", expected_status=2)
+        self.assert_failure(invalid_transition, "invalid_argument")
+        reopened, _ = self.call_cli("task", "get", task_id)
+        reopened_task = self.assert_success(reopened)
+        self.assertEqual(reopened_task["savedPrompt"], prompt)
+        self.assertEqual(reopened_task["status"], "Backlog")
     # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Blank drafts cannot be sent or stored; live responses can be paused, continued, and their task activity expanded.
     def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
         task_id = self.create_task(title="Blank conversation send")["id"]
