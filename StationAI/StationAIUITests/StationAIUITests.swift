@@ -771,20 +771,34 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Existing task roots survive clearing the default parent")
     }
 
-    // case-contract: test_new_task_has_empty_conversation_history | A newly created task shows an empty conversation and has no stored messages or activity.
+    // case-contract: test_new_task_has_empty_conversation_history | A newly created task shows an empty conversation with no stored messages or activity; confirming discard deletes the empty task, while canceling keeps it.
     func test_new_task_has_empty_conversation_history() throws {
         launchApp(defaultParent: fixture.parent.path)
-        try createTaskFixture(title: "Empty conversation", roots: [fixture.primary.path])
-        openTask(named: "Empty conversation")
+        openNewTaskSheet()
+        chooseRepositorySuggestion("primary")
+        element("create-task-button").click()
         XCTAssertTrue(element("empty-conversation").waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["Start a conversation"].exists)
         XCTAssertFalse(element("pause-response-button").exists)
         XCTAssertFalse(element("continue-response-button").exists)
 
-        let history = try runCLI(["conversation", "history", taskID(named: "Empty conversation")])["result"] as? [String: Any]
+        let createdTask = try XCTUnwrap(tasksFromBoardList().first)
+        let createdTaskID = try XCTUnwrap(createdTask["id"] as? String)
+        let history = try runCLI(["conversation", "history", createdTaskID])["result"] as? [String: Any]
         XCTAssertEqual((history?["activities"] as? [Any])?.count, 0)
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
         XCTAssertNil(history?["diff"])
+
+        element("back-to-board-button").click()
+        XCTAssertTrue(app.alerts["Discard this task?"].waitForExistence(timeout: 5))
+        element("cancel-discard-empty-task-button").click()
+        XCTAssertTrue(element("empty-conversation").exists, "Canceling discard should keep the new task open.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(app.alerts["Discard this task?"].waitForExistence(timeout: 5))
+        element("confirm-discard-empty-task-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        let deleted = try runCLI(["task", "get", createdTaskID], expectedStatus: 3)
+        XCTAssertEqual((deleted["error"] as? [String: Any])?["code"] as? String, "not_found")
         attachScreenshot(named: "New conversation shows its empty state")
     }
 

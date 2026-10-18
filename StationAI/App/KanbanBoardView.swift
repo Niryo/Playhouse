@@ -13,6 +13,7 @@ struct KanbanBoardView: View {
     @State private var lifecycleResetNotice: String?
     @State private var draggedTaskID: UUID?
     @State private var selectedTask: BoardTask?
+    @State private var isSelectedTaskNew = false
     @State private var taskBeingRenamed: BoardTask?
     @State private var taskBeingDeleted: BoardTask?
     @State private var isShowingDeleteConfirmation = false
@@ -21,8 +22,9 @@ struct KanbanBoardView: View {
     var body: some View {
         Group {
             if let selectedTask {
-                TaskConversationView(task: selectedTask) {
+                TaskConversationView(task: selectedTask, isNewTask: isSelectedTaskNew) {
                     self.selectedTask = nil
+                    self.isSelectedTaskNew = false
                 }
                 .id(selectedTask.id)
             } else {
@@ -287,6 +289,7 @@ struct KanbanBoardView: View {
         if selectedTask == nil {
             selectedTask = try? BoardTaskManager(modelContext: modelContext).taskModel(taskID)
         }
+        isSelectedTaskNew = selectedTask != nil
     }
 
     private func moveTask(id: UUID, to status: TaskStatus) {

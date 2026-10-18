@@ -85,7 +85,7 @@
   },
   {
     "id": "test_new_task_has_empty_conversation_history",
-    "expectation": "A newly created task shows an empty conversation and has no stored messages or activity."
+    "expectation": "A newly created task shows an empty conversation with no stored messages or activity; confirming discard deletes the empty task, while canceling keeps it."
   },
   {
     "id": "test_task_prompt_draft_persists_after_back",
