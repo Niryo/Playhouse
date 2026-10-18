@@ -434,11 +434,16 @@ enum StationAIWorktreeManager {
         guard status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw BridgeCommandError(code: "operation_failed", message: "The merge target '\(target)' has uncommitted changes in \(targetWorktree).")
         }
+        let targetHead = try git(targetWorktree, ["rev-parse", "HEAD"]).output.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
-            _ = try git(targetWorktree, ["merge", "--no-ff", "--no-edit", record.branch])
+            _ = try git(targetWorktree, ["merge", "--squash", record.branch])
+            _ = try git(targetWorktree, ["commit", "-m", "Squash merge task branch '\(record.branch)' into '\(target)'"])
         } catch {
-            _ = try? git(targetWorktree, ["merge", "--abort"])
-            throw error
+            let currentHead = try? git(targetWorktree, ["rev-parse", "HEAD"]).output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if currentHead == targetHead {
+                _ = try? git(targetWorktree, ["reset", "--hard", targetHead])
+            }
+            throw BridgeCommandError(code: "operation_failed", message: "Squash merge failed: \(error.localizedDescription)")
         }
     }
 

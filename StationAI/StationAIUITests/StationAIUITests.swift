@@ -252,7 +252,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "An assigned worktree conflict keeps task creation open with an explanation")
     }
 
-    // case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task in Review, moving it to Done merges the task branch into its explicit target, removes the clean managed worktree, retains the source branch, and preserves the saved conversation prompt.
+    // case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task in Review, moving it to Done squash-merges the task branch into its explicit target as a single-parent commit, removes the clean managed worktree, retains the source branch, and preserves the saved conversation prompt.
     func test_task_done_removes_worktree_and_preserves_branch() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -299,11 +299,13 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: path))
         try runGit(fixture.primary, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)")
         XCTAssertEqual(try String(contentsOf: fixture.primary.appendingPathComponent("task-result.txt"), encoding: .utf8), "Task branch change\n")
+        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-list", "--parents", "-n", "1", "main").split(separator: " ").count, 2)
+        XCTAssertTrue(try runGitOutput(fixture.primary, "log", "main", "-1", "--format=%s").contains("Squash merge task branch"))
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
         attachScreenshot(named: "Completed task remains on the board with its conversation prompt retained")
     }
 
-    // case-contract: test_task_done_commits_dirty_worktree_changes | Moving a reviewed task to Done stages and commits tracked and untracked worktree changes, merges them into the target, and removes the managed worktree.
+    // case-contract: test_task_done_commits_dirty_worktree_changes | Moving a reviewed task to Done stages and commits tracked and untracked worktree changes, squash-merges them into the target as a single-parent commit, and removes the managed worktree.
     func test_task_done_commits_dirty_worktree_changes() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -333,6 +335,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: fixture.primary.appendingPathComponent("unsaved.txt"), encoding: .utf8), "New unsaved work\n")
         let branch = try XCTUnwrap(record["branch"] as? String)
         XCTAssertEqual(try runGitOutput(fixture.primary, "log", branch, "-1", "--format=%s"), "Complete task: Dirty done UI")
+        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-list", "--parents", "-n", "1", "main").split(separator: " ").count, 2)
         attachScreenshot(named: "Done commits, merges, and cleans up tracked and untracked task changes")
     }
 
@@ -380,7 +383,7 @@ final class StationAIUITests: XCTestCase {
         try runGit(fixture.primary, "branch", "branch-source", targetCommit)
     }
 
-    // case-contract: test_task_done_retries_partial_multi_repository_merge | A later repository merge failure preserves the earlier completed merge; after retry, StationAI skips it and finishes the remaining repository.
+    // case-contract: test_task_done_retries_partial_multi_repository_merge | A later repository squash-commit failure preserves the earlier completed merge and leaves the failed target unchanged and clean; after retry, StationAI skips the completed merge and finishes the remaining repository.
     func test_task_done_retries_partial_multi_repository_merge() throws {
         let created = try runCLI([
             "task", "create", "--title", "Partial multi merge", "--repo", fixture.primary.path,
@@ -400,9 +403,10 @@ final class StationAIUITests: XCTestCase {
             try runGit(path, "add", filename)
             try runGit(path, "commit", "-m", "Add \(filename)")
         }
-        let hook = fixture.secondary.appendingPathComponent(".git/hooks/pre-merge-commit")
+        let hook = fixture.secondary.appendingPathComponent(".git/hooks/pre-commit")
         try "#!/bin/sh\nexit 1\n".write(to: hook, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+        let secondaryTargetBefore = try runGitOutput(fixture.secondary, "rev-parse", "main").trimmingCharacters(in: .whitespacesAndNewlines)
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Partial multi merge")
@@ -412,7 +416,7 @@ final class StationAIUITests: XCTestCase {
         mergeTaskToDone("Partial multi merge")
         let alert = app.sheets.firstMatch
         XCTAssertTrue(alert.waitForExistence(timeout: 10))
-        XCTAssertTrue(alert.staticTexts.containing(NSPredicate(format: "value CONTAINS[c] %@", "merge")).firstMatch.exists)
+        XCTAssertTrue(alert.staticTexts.containing(NSPredicate(format: "value CONTAINS[c] %@", "squash merge")).firstMatch.exists)
         alert.buttons["OK"].click()
         var partial = try XCTUnwrap(taskRecord(named: "Partial multi merge"))
         XCTAssertEqual(partial["status"] as? String, "Blocked")
@@ -420,6 +424,8 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(progress.compactMap { $0["mergeCompleted"] as? Bool }, [true, false])
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.primary.appendingPathComponent("partial-primary.txt").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.secondary.appendingPathComponent("partial-secondary.txt").path))
+        XCTAssertEqual(try runGitOutput(fixture.secondary, "rev-parse", "main").trimmingCharacters(in: .whitespacesAndNewlines), secondaryTargetBefore)
+        XCTAssertEqual(try runGitOutput(fixture.secondary, "status", "--porcelain").trimmingCharacters(in: .whitespacesAndNewlines), "")
         attachScreenshot(named: "Partial multi-repository merge records the first successful merge")
 
         try FileManager.default.removeItem(at: hook)
