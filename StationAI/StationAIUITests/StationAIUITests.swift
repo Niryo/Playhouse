@@ -709,7 +709,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Edited ordered folders in task conversation")
     }
 
-    // case-contract: test_conversation_repository_picker_adds_repository_worktree | Adding a repository persists a pending auto branch; the repository details show labeled read-only branch, merge-from, and merge-to values with pencil controls, and no worktree exists before the first send.
+    // case-contract: test_conversation_repository_picker_adds_repository_worktree | Repository suggestions can be filtered and navigated with Up/Down, and Enter selects the highlighted repository; adding it persists a pending auto branch with labeled read-only branch, merge-from, and merge-to values, and no worktree exists before the first send.
     func test_conversation_repository_picker_adds_repository_worktree() throws {
         launchApp(defaultParent: fixture.parent.path)
         let created = try runCLI(["task", "create", "--title", "Header repository picker", "--root", fixture.primary.path])["result"] as? [String: Any]
@@ -719,11 +719,17 @@ final class StationAIUITests: XCTestCase {
         let search = element("conversation-repository-search")
         XCTAssertTrue(search.waitForExistence(timeout: 5))
         search.click()
-        search.typeText("primary")
+        search.typeText("suggested-parent")
+        XCTAssertTrue(element("conversation-repository-suggestion-alternate").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-repository-suggestion-changes").exists)
+        XCTAssertTrue(element("conversation-repository-suggestion-secondary").exists)
+        search.typeKey(XCUIKeyboardKey.downArrow.rawValue, modifierFlags: [])
+        search.typeKey(XCUIKeyboardKey.downArrow.rawValue, modifierFlags: [])
+        search.typeKey(XCUIKeyboardKey.downArrow.rawValue, modifierFlags: [])
+        search.typeKey(XCUIKeyboardKey.upArrow.rawValue, modifierFlags: [])
         let suggestion = element("conversation-repository-suggestion-primary")
         XCTAssertTrue(suggestion.waitForExistence(timeout: 10))
-        XCTAssertFalse(element("conversation-repository-suggestion-secondary").exists, "Typing a repository name should filter unrelated suggestions.")
-        suggestion.click()
+        search.typeKey(XCUIKeyboardKey.return.rawValue, modifierFlags: [])
         let badge = element("conversation-repository-badge-primary")
         XCTAssertTrue(badge.waitForExistence(timeout: 10))
         let title = element("task-view-title")

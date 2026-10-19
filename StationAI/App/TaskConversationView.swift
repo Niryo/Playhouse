@@ -94,6 +94,7 @@ struct TaskConversationView: View {
     @State private var isShowingWorkspaceEditor = false
     @State private var isShowingRepositoryPicker = false
     @State private var repositorySearch = ""
+    @State private var repositorySuggestionIndex = 0
     @State private var suggestedRepositories: [URL] = []
     @State private var expandedRepositoryPath: String?
     @State private var repositoryBeingEdited: RepositoryWorktreeRecord?
@@ -790,21 +791,34 @@ struct TaskConversationView: View {
             TextField("Search repositories…", text: $repositorySearch)
                 .textFieldStyle(.roundedBorder)
                 .focused($isRepositorySearchFocused)
+                .onChange(of: repositorySearch) { _, _ in repositorySuggestionIndex = 0 }
+                .onKeyPress { press in
+                    let available = availableRepositorySuggestions
+                    guard !available.isEmpty else { return .ignored }
+                    switch press.key {
+                    case .downArrow:
+                        repositorySuggestionIndex = min(repositorySuggestionIndex + 1, available.count - 1)
+                        return .handled
+                    case .upArrow:
+                        repositorySuggestionIndex = max(repositorySuggestionIndex - 1, 0)
+                        return .handled
+                    case .return:
+                        selectRepositorySuggestion(available[repositorySuggestionIndex])
+                        return .handled
+                    default:
+                        return .ignored
+                    }
+                }
                 .accessibilityIdentifier("conversation-repository-search")
-            let available = suggestedRepositories.filter { candidate in
-                !task.repositoryWorktrees.contains(where: { URL(fileURLWithPath: $0.repositoryPath).standardizedFileURL.path == candidate.standardizedFileURL.path }) &&
-                (repositorySearch.isEmpty || candidate.lastPathComponent.localizedCaseInsensitiveContains(repositorySearch) || candidate.path.localizedCaseInsensitiveContains(repositorySearch))
-            }
+            let available = availableRepositorySuggestions
             if available.isEmpty {
                 Text("No matching repositories.").font(.system(size: 10)).foregroundStyle(.secondary)
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(available, id: \.path) { repository in
+                        ForEach(Array(available.enumerated()), id: \.element.path) { index, repository in
                             Button {
-                                addConversationRepository(repository)
-                                repositorySearch = ""
-                                isShowingRepositoryPicker = false
+                                selectRepositorySuggestion(repository)
                             } label: {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(repository.lastPathComponent).font(.system(size: 11, weight: .medium))
@@ -812,6 +826,7 @@ struct TaskConversationView: View {
                                 }.frame(maxWidth: .infinity, alignment: .leading).padding(7).contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+                            .background(index == repositorySuggestionIndex ? Color.accentColor.opacity(0.16) : Color.clear, in: RoundedRectangle(cornerRadius: 5))
                             .accessibilityIdentifier("conversation-repository-suggestion-\(repository.lastPathComponent)")
                         }
                     }
@@ -825,6 +840,19 @@ struct TaskConversationView: View {
                 DispatchQueue.main.async { isRepositorySearchFocused = true }
             }
         }
+    }
+
+    private var availableRepositorySuggestions: [URL] {
+        suggestedRepositories.filter { candidate in
+            !task.repositoryWorktrees.contains(where: { URL(fileURLWithPath: $0.repositoryPath).standardizedFileURL.path == candidate.standardizedFileURL.path }) &&
+            (repositorySearch.isEmpty || candidate.lastPathComponent.localizedCaseInsensitiveContains(repositorySearch) || candidate.path.localizedCaseInsensitiveContains(repositorySearch))
+        }
+    }
+
+    private func selectRepositorySuggestion(_ repository: URL) {
+        addConversationRepository(repository)
+        repositorySearch = ""
+        isShowingRepositoryPicker = false
     }
 
     private func loadSuggestedRepositories() {

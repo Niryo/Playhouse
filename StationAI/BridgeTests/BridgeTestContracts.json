@@ -69,7 +69,7 @@
   },
   {
     "id": "test_conversation_repository_picker_adds_repository_worktree",
-    "expectation": "Adding a repository persists a pending auto branch; the repository details show labeled read-only branch, merge-from, and merge-to values with pencil controls, and no worktree exists before the first send."
+    "expectation": "Repository suggestions can be filtered and navigated with Up/Down, and Enter selects the highlighted repository; adding it persists a pending auto branch with labeled read-only branch, merge-from, and merge-to values, and no worktree exists before the first send."
   },
   {
     "id": "test_task_delete_removes_task_and_later_lookup_is_not_found",
