@@ -957,7 +957,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("conversation-repository-merge-target").exists, "The merge-to value becomes editable only after selecting its pencil control.")
     }
 
-    // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives confirmation from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Diagnostics identify conversation failure phase and capture real deletion errors without task titles or conversation text, and failed deletion leaves the task and worktree available for retry.
+    // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Diagnostics identify the conversation failure phase and the persistent log captures a real deletion failure's task, thread, process, phase, and underlying error details without task titles or conversation text; the failed task and worktree remain available for retry.
     func test_task_delete_removes_task_and_later_lookup_is_not_found() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -1203,7 +1203,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Workspace settings can be changed and cleared")
     }
 
-    // case-contract: test_repository_suggestions_skip_nested_repositories_and_symlinks | Suggestions include top-level Git roots and skip nested repositories and symlink targets; blank Return reuses the saved repositories in order, while typing and arrow-key selection overrides that default, which persists after task creation.
+    // case-contract: test_repository_suggestions_skip_nested_repositories_and_symlinks | Suggestions include top-level Git roots and skip nested repositories and symlink targets; the picker placeholder shows saved repositories with a Return arrow, and blank Return reuses them in order, while typing and arrow-key selection overrides that default, which persists after task creation.
     func test_repository_suggestions_skip_nested_repositories_and_symlinks() throws {
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["settings", "set-last-repositories", "--repo", fixture.secondary.path, "--repo", fixture.primary.path])
@@ -1211,6 +1211,7 @@ final class StationAIUITests: XCTestCase {
         let repositorySearch = element("workspace-repository-search")
         XCTAssertTrue(repositorySearch.waitForExistence(timeout: 5), "The create task sheet should let the user search by repository name.")
         XCTAssertTrue((repositorySearch.placeholderValue ?? "").contains("secondary, primary"), "The picker should show the saved two-repository default.")
+        XCTAssertTrue((repositorySearch.placeholderValue ?? "").contains("↵"), "The placeholder should show a Return arrow to signal that Return applies the saved repositories.")
         repositorySearch.click()
         repositorySearch.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(element("selected-repository-0").waitForExistence(timeout: 5), "Return on an empty search should restore the first saved repository.")

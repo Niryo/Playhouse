@@ -81,7 +81,7 @@
   },
   {
     "id": "test_task_delete_removes_task_and_later_lookup_is_not_found",
-    "expectation": "The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives confirmation from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Diagnostics identify conversation failure phase and capture real deletion errors without task titles or conversation text, and failed deletion leaves the task and worktree available for retry."
+    "expectation": "The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Diagnostics identify the conversation failure phase and the persistent log captures a real deletion failure's task, thread, process, phase, and underlying error details without task titles or conversation text; the failed task and worktree remain available for retry."
   },
   {
     "id": "test_default_parent_settings_read_write_clear_and_validation",
@@ -89,7 +89,7 @@
   },
   {
     "id": "test_repository_suggestions_skip_nested_repositories_and_symlinks",
-    "expectation": "Suggestions include top-level Git roots and skip nested repositories and symlink targets; blank Return reuses the saved repositories in order, while typing and arrow-key selection overrides that default, which persists after task creation."
+    "expectation": "Suggestions include top-level Git roots and skip nested repositories and symlink targets; the picker placeholder shows saved repositories with a Return arrow, and blank Return reuses them in order, while typing and arrow-key selection overrides that default, which persists after task creation."
   },
   {
     "id": "test_task_roots_remain_after_default_parent_is_cleared",

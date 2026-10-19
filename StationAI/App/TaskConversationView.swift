@@ -14,7 +14,6 @@ private struct AssistantMarkdownBlock: Identifiable {
     let kind: Kind
     let text: String
 }
-
 struct TaskConversationView: View {
     private struct PendingImage: Identifiable {
         let id = UUID()
