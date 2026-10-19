@@ -844,7 +844,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Deleted task removed from the board")
     }
 
-    // case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected.
+    // case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; Dark and Light appearance choices persist, and Dark renders the workspace canvas as #1E1E1E in the VS Code Dark+ palette.
     func test_default_parent_settings_read_write_clear_and_validation() throws {
         launchApp(defaultParent: nil)
         let initialSettings = try runCLI(["settings", "get"])["result"] as? [String: Any]
@@ -864,7 +864,35 @@ final class StationAIUITests: XCTestCase {
         app.typeKey(",", modifierFlags: .command)
         let preferencesWindow = settingsWindow
         XCTAssertTrue(preferencesWindow.waitForExistence(timeout: 10), "Workspace Settings did not open.")
-        let chooseParent = preferencesWindow.descendants(matching: .any)
+        let appearancePicker = preferencesWindow.descendants(matching: .any)
+            .matching(identifier: "appearance-picker").firstMatch
+        XCTAssertTrue(appearancePicker.waitForExistence(timeout: 5), "Workspace Settings should expose the Dark and Light theme choices.")
+        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["appearance"] as? String, "dark")
+        appearancePicker.click()
+        let lightChoice = preferencesWindow.menuItems["Light"]
+        if lightChoice.waitForExistence(timeout: 2) {
+            lightChoice.click()
+        } else {
+            preferencesWindow.buttons["Light"].click()
+        }
+        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["appearance"] as? String, "light")
+        appearancePicker.click()
+        let darkChoice = preferencesWindow.menuItems["Dark"]
+        if darkChoice.waitForExistence(timeout: 2) {
+            darkChoice.click()
+        } else {
+            preferencesWindow.buttons["Dark"].click()
+        }
+        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["appearance"] as? String, "dark")
+        app.typeKey("w", modifierFlags: .command)
+        XCTAssertTrue(waitUntil({ !preferencesWindow.exists }, timeout: 5), "Settings should close before checking the workspace canvas.")
+        let workspaceCanvas = element("board-columns-scroll-view")
+        XCTAssertTrue(workspaceCanvas.waitForExistence(timeout: 5), "The board workspace should be visible.")
+        assertPixel(workspaceCanvas.screenshot().image, normalizedX: 0.02, normalizedY: 0.5, rgb: (30, 30, 30))
+        app.typeKey(",", modifierFlags: .command)
+        let reopenedPreferences = settingsWindow
+        XCTAssertTrue(reopenedPreferences.waitForExistence(timeout: 10), "Workspace Settings did not reopen.")
+        let chooseParent = reopenedPreferences.descendants(matching: .any)
             .matching(identifier: "choose-default-parent-folder-button").firstMatch
         XCTAssertTrue(chooseParent.waitForExistence(timeout: 10))
         chooseParent.click()
@@ -878,7 +906,7 @@ final class StationAIUITests: XCTestCase {
             code: "invalid_argument"
         )
         assertText("default-parent-folder-path", equals: fixture.alternateParent.path)
-        preferencesWindow.descendants(matching: .any)
+        reopenedPreferences.descendants(matching: .any)
             .matching(identifier: "clear-default-parent-folder-button").firstMatch.click()
         let cleared = try runCLI(["settings", "get"])["result"] as? [String: Any]
         XCTAssertNil(cleared?["defaultParentFolder"] as? String)
@@ -1772,6 +1800,45 @@ final class StationAIUITests: XCTestCase {
         postMouseEvent(.leftMouseDragged, at: targetPoint)
         postMouseEvent(.leftMouseUp, at: targetPoint)
         XCTAssertTrue(waitUntil({ !doneTarget.exists }, timeout: 5), "The Done drop target should disappear after completion starts.")
+    }
+
+    private func assertPixel(_ image: NSImage, normalizedX: CGFloat, normalizedY: CGFloat, rgb expected: (Int, Int, Int), accuracy: Int = 8, file: StaticString = #filePath, line: UInt = #line) {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            XCTFail("Could not read workspace screenshot pixels.", file: file, line: line)
+            return
+        }
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        let x = min(cgImage.width - 1, max(0, Int(CGFloat(cgImage.width) * normalizedX)))
+        let y = min(cgImage.height - 1, max(0, Int(CGFloat(cgImage.height) * normalizedY)))
+        guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else {
+            XCTFail("Could not sample workspace background color.", file: file, line: line)
+            return
+        }
+        XCTAssertEqual(Int((color.redComponent * 255).rounded()), expected.0, accuracy: accuracy, file: file, line: line)
+        XCTAssertEqual(Int((color.greenComponent * 255).rounded()), expected.1, accuracy: accuracy, file: file, line: line)
+        XCTAssertEqual(Int((color.blueComponent * 255).rounded()), expected.2, accuracy: accuracy, file: file, line: line)
+    }
+
+    private func postMouseEvent(_ type: NSEvent.EventType, at point: CGPoint) {
+        let mouseType: CGEventType
+        switch type {
+        case .leftMouseDown: mouseType = .leftMouseDown
+        case .leftMouseDragged: mouseType = .leftMouseDragged
+        case .leftMouseUp: mouseType = .leftMouseUp
+        default:
+            XCTFail("Unsupported mouse event type: \(type)")
+            return
+        }
+        guard let event = CGEvent(
+            mouseEventSource: nil,
+            mouseType: mouseType,
+            mouseCursorPosition: point,
+            mouseButton: .left
+        ) else {
+            XCTFail("Could not create mouse event.")
+            return
+        }
+        event.post(tap: .cghidEventTap)
     }
 
     private func deleteTaskFromContextMenu(_ title: String) {

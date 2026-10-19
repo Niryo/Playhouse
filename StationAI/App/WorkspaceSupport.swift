@@ -27,6 +27,25 @@ enum WorkspaceSettings {
     }
 }
 
+enum WorkspaceTheme {
+    static let windowBackground = adaptive(dark: (0x1E, 0x1E, 0x1E), light: .windowBackgroundColor)
+    static let panelBackground = adaptive(dark: (0x25, 0x25, 0x26), light: .controlBackgroundColor)
+    static let inputBackground = adaptive(dark: (0x3C, 0x3C, 0x3C), light: .textBackgroundColor)
+    static let accent = Color(nsColor: NSColor(srgbRed: 0, green: 122.0 / 255.0, blue: 204.0 / 255.0, alpha: 1))
+
+    private static func adaptive(dark: (UInt8, UInt8, UInt8), light: NSColor) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            guard appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua else { return light }
+            return NSColor(
+                srgbRed: CGFloat(dark.0) / 255,
+                green: CGFloat(dark.1) / 255,
+                blue: CGFloat(dark.2) / 255,
+                alpha: 1
+            )
+        })
+    }
+}
+
 struct CodexWorkspaceContext {
     let roots: [URL]
 
@@ -701,7 +720,7 @@ struct WorkspaceRootSelector: View {
                     }
                 }
                 .frame(maxHeight: 142)
-                .background(Color(nsColor: .controlBackgroundColor).opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+                .background(WorkspaceTheme.panelBackground.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
             }
         }
         .task(id: parentFolderURL?.path) {

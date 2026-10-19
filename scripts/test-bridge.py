@@ -307,6 +307,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(task["repositoryWorktrees"][0]["branch"], "auto")
         self.assertEqual(task["repositoryWorktrees"][0]["worktreePath"], str(self.primary))
         self.assertFalse(self.branch_exists(self.primary, "please-update-the-readme-and-add-concise-setup"))
+        executable = self.data_directory / "codex-fixture"
         self.complete_fixture_turn(task["id"])
         started = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         record = started["repositoryWorktrees"][0]
@@ -638,10 +639,16 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("board", "list")
         self.assertEqual(self.assert_success(response)["tasks"], [])
 
-    # case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected.
+    # case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; Dark and Light appearance choices persist, and Dark renders the workspace canvas as #1E1E1E in the VS Code Dark+ palette.
     def test_default_parent_settings_read_write_clear_and_validation(self):
         response, _ = self.call_cli("settings", "get")
         self.assertIsNone(self.assert_success(response)["defaultParentFolder"])
+        self.assertEqual(self.assert_success(response)["appearance"], "dark")
+
+        response, _ = self.call_cli("settings", "set-appearance", "light")
+        self.assertEqual(self.assert_success(response)["appearance"], "light")
+        response, _ = self.call_cli("settings", "set-appearance", "dark")
+        self.assertEqual(self.assert_success(response)["appearance"], "dark")
 
         response, _ = self.call_cli("settings", "set-parent", self.fixture / "suggested-parent")
         self.assertEqual(self.assert_success(response)["defaultParentFolder"], str(self.fixture / "suggested-parent"))

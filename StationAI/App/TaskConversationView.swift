@@ -126,7 +126,7 @@ struct TaskConversationView: View {
             conversationPanel
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(WorkspaceTheme.windowBackground)
         .onAppear {
             guard isNewTask else { return }
             isShowingRepositoryPicker = true
@@ -269,7 +269,7 @@ struct TaskConversationView: View {
         }
         .frame(width: 232)
         .frame(maxHeight: .infinity)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.62))
+        .background(WorkspaceTheme.panelBackground.opacity(0.62))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("task-sidebar")
     }
@@ -493,7 +493,7 @@ struct TaskConversationView: View {
             .padding(.horizontal, 18)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background(WorkspaceTheme.windowBackground)
 
             Rectangle()
                 .fill(Color.primary.opacity(0.09))
@@ -567,10 +567,10 @@ struct TaskConversationView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(nsColor: .textBackgroundColor))
+            .background(WorkspaceTheme.inputBackground)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(WorkspaceTheme.windowBackground)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("workspace-diff-overlay")
         .background(EscapeKeyMonitor(onEscape: closeDiff).frame(width: 0, height: 0))
@@ -729,7 +729,7 @@ struct TaskConversationView: View {
         .padding(.horizontal, 26)
         .padding(.vertical, 15)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.96))
+        .background(WorkspaceTheme.windowBackground.opacity(0.96))
     }
 
     private var repositoryBadges: some View {
@@ -982,7 +982,7 @@ struct TaskConversationView: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(9)
-                        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                        .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 8))
                         .accessibilityElement(children: .contain)
                         .accessibilityLabel("\(activity.title), \(activity.statusLabel)")
                         .accessibilityValue(activity.detail)
@@ -1029,7 +1029,7 @@ struct TaskConversationView: View {
             .padding(.horizontal, 15)
             .padding(.vertical, 11)
             .background(
-                Color(nsColor: .controlBackgroundColor),
+                WorkspaceTheme.panelBackground,
                 in: RoundedRectangle(cornerRadius: 17, style: .continuous)
             )
             .accessibilityLabel(message.text.isEmpty ? "Waiting for Codex response" : message.text)
@@ -1052,7 +1052,7 @@ struct TaskConversationView: View {
                     .font(.system(size: 14)).foregroundStyle(.white)
                     .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                     .padding(.horizontal, 16).padding(.vertical, 11)
-                    .background(Color(red: 0.34, green: 0.40, blue: 0.86), in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+                    .background(WorkspaceTheme.accent, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
             }
         }
             .frame(maxWidth: 620, alignment: .trailing)
@@ -1225,7 +1225,7 @@ struct TaskConversationView: View {
                 }
             }
             .padding(13)
-            .background(Color(nsColor: .controlBackgroundColor))
+            .background(WorkspaceTheme.panelBackground)
             .clipShape(RoundedRectangle(cornerRadius: 21, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 21, style: .continuous)
@@ -1294,7 +1294,7 @@ struct TaskConversationView: View {
         }
         .padding(16)
         .frame(maxWidth: 720, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+        .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 14))
         .accessibilityElement(children: .contain)
     }
 

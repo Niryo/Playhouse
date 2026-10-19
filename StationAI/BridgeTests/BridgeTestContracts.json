@@ -77,7 +77,7 @@
   },
   {
     "id": "test_default_parent_settings_read_write_clear_and_validation",
-    "expectation": "The default parent can be read, changed, cleared, and an unavailable path is rejected."
+    "expectation": "The default parent can be read, changed, cleared, and an unavailable path is rejected; Dark and Light appearance choices persist, and Dark renders the workspace canvas as #1E1E1E in the VS Code Dark+ palette."
   },
   {
     "id": "test_repository_suggestions_skip_nested_repositories_and_symlinks",

@@ -58,6 +58,7 @@ private struct MainWindowView: View {
 
     var body: some View {
         KanbanBoardView()
+            .tint(WorkspaceTheme.accent)
             .preferredColorScheme(appearance == "light" ? .light : .dark)
     }
 }

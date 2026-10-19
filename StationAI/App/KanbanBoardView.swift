@@ -35,7 +35,7 @@ struct KanbanBoardView: View {
                 boardContent
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(WorkspaceTheme.windowBackground)
         .frame(minWidth: 980, minHeight: 640)
         .onAppear {
             let retained = StationAIStore.takeLifecycleResetNotice(
@@ -156,7 +156,7 @@ struct KanbanBoardView: View {
                             .transition(.opacity.combined(with: .move(edge: .trailing)))
                     }
                     .padding(.trailing, 12)
-                    .background(LinearGradient(colors: [Color(nsColor: .windowBackgroundColor).opacity(0), Color(nsColor: .windowBackgroundColor).opacity(0.96)], startPoint: .leading, endPoint: .trailing))
+                    .background(LinearGradient(colors: [WorkspaceTheme.windowBackground.opacity(0), WorkspaceTheme.windowBackground.opacity(0.96)], startPoint: .leading, endPoint: .trailing))
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
                 }
             }
@@ -167,7 +167,7 @@ struct KanbanBoardView: View {
                 doneArchivePanel
                     .frame(width: 340)
                     .frame(maxHeight: .infinity)
-                    .background(Color(nsColor: .windowBackgroundColor))
+                    .background(WorkspaceTheme.windowBackground)
                     .overlay(alignment: .leading) { Rectangle().fill(Color.primary.opacity(0.10)).frame(width: 1) }
                     .shadow(color: .black.opacity(0.16), radius: 18, x: -6, y: 0)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
@@ -205,7 +205,7 @@ struct KanbanBoardView: View {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .fill(
                             LinearGradient(
-                                colors: [Color(red: 0.37, green: 0.43, blue: 0.92), Color(red: 0.54, green: 0.39, blue: 0.86)],
+                                colors: [WorkspaceTheme.accent, Color(red: 0.22, green: 0.58, blue: 0.94)],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
@@ -258,7 +258,7 @@ struct KanbanBoardView: View {
                         .padding(.vertical, 3)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(Color(red: 0.34, green: 0.40, blue: 0.86))
+                .tint(WorkspaceTheme.accent)
                 .accessibilityIdentifier("new-task-button")
             }
         }
@@ -569,7 +569,7 @@ private struct KanbanColumnView: View {
         .frame(maxWidth: .infinity, minHeight: minHeight, alignment: .topLeading)
         .background {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.78))
+                .fill(WorkspaceTheme.panelBackground.opacity(0.78))
         }
         .overlay {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -811,7 +811,7 @@ private struct TaskCardView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color(nsColor: .windowBackgroundColor))
+                    .fill(WorkspaceTheme.windowBackground)
                     .shadow(color: .black.opacity(0.035), radius: 5, x: 0, y: 2)
             }
             .overlay {

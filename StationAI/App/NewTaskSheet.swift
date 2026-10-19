@@ -151,7 +151,7 @@ struct NewTaskSheet: View {
                         .frame(maxHeight: 92)
                         .clipped()
                         .accessibilityIdentifier("repository-suggestions-list")
-                        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+                        .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 7))
                     }
                 }
                 if let createError {
@@ -183,7 +183,7 @@ struct NewTaskSheet: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(Color(red: 0.34, green: 0.40, blue: 0.86))
+                .tint(WorkspaceTheme.accent)
                 .keyboardShortcut(.defaultAction)
                 .disabled(repositories.isEmpty && contextFolders.isEmpty)
                 .accessibilityIdentifier("create-task-button")
@@ -191,7 +191,7 @@ struct NewTaskSheet: View {
         }
         .padding(24)
         .frame(width: 560, height: 570)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(WorkspaceTheme.windowBackground)
         .onAppear {
             parentFolderURL = WorkspaceSettingsManager().defaultParentFolderURL
             if parentFolderURL == nil {
@@ -297,7 +297,7 @@ struct NewTaskSheet: View {
                 .font(.system(size: 9, weight: .medium))
                 .padding(.horizontal, 6)
                 .padding(.vertical, 5)
-                .background(Color(nsColor: .controlBackgroundColor), in: Capsule())
+                .background(WorkspaceTheme.panelBackground, in: Capsule())
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
