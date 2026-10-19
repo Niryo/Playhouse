@@ -795,11 +795,11 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(history)["messages"], [])
         self.assertEqual(self.assert_success(history)["activities"], [])
 
-    # case-contract: test_codex_questions_can_be_answered_over_cli_xpc | A blocking question moves the task into the conditional Waiting Response board section; saving a draft preserves its status, keyed answers resume In Progress, and successful completion moves it to Review.
+    # case-contract: test_codex_questions_can_be_answered_over_cli_xpc | Structured questions raised in Plan mode move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and successful completion moves it to Review.
     def test_codex_questions_can_be_answered_over_cli_xpc(self):
         task_id = self.create_task("Codex questions", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
-        executable = self.data_directory / "codex-fixture-slow"
+        executable = self.data_directory / "codex-fixture-plan-slow"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
         (self.data_directory / ".stationai-codex-fixture-owner").write_text(
@@ -820,7 +820,7 @@ class StationAIBridgeTests(unittest.TestCase):
             **env_overrides,
         })
         process = subprocess.Popen(
-            [str(arguments.cli), "conversation", "send", task_id, "--message", "Please ask your questions.",
+            [str(arguments.cli), "conversation", "send", task_id, "--message", "Please ask your questions.", "--mode", "plan",
              "--answer", "color=Blue", "--answer", "token=fixture-secret"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, env=process_env,
         )

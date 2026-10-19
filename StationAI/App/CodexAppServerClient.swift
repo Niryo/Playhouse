@@ -76,6 +76,7 @@ final class CodexAppServerClient: ObservableObject {
     @Published private(set) var isTurnActive = false
     @Published private(set) var activeThreadID: String?
     @Published private(set) var pendingUserInputRequest: CodexUserInputRequest?
+    private var activeConversationMode: CodexConversationMode = .code
 
     private enum ClientError: LocalizedError {
         case cliNotFound
@@ -226,6 +227,7 @@ final class CodexAppServerClient: ObservableObject {
 
         activeThreadID = threadID
         activeTurnID = nil
+        activeConversationMode = mode
         isTurnActive = false
         wasLastTurnInterrupted = false
         activeDeltaHandler = onDelta
@@ -237,6 +239,7 @@ final class CodexAppServerClient: ObservableObject {
             Self.processActiveThreadIDs.remove(threadID)
             activeThreadID = nil
             activeTurnID = nil
+            activeConversationMode = .code
             isTurnActive = false
             activeDeltaHandler = nil
             activeFinalMessageHandler = nil
@@ -704,7 +707,7 @@ final class CodexAppServerClient: ObservableObject {
                 id: requestIDString,
                 threadID: threadID,
                 questions: questions,
-                isBlocking: params["isBlocking"] as? Bool ?? true
+                isBlocking: activeConversationMode == .plan || (params["isBlocking"] as? Bool ?? true)
             )
             pendingUserInputRequest = request
             userInputHandler?(request)

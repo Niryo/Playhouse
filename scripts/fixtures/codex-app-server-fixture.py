@@ -46,7 +46,7 @@ def question_request(request_id):
             "turnId": "turn_stationai_fixture",
             "itemId": "item_stationai_question",
             "questions": questions,
-            "isBlocking": "-nonblocking" not in mode,
+            "isBlocking": "-nonblocking" not in mode and "-plan" not in mode,
         },
     })
 

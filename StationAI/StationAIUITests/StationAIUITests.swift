@@ -1222,14 +1222,19 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Plan mode is visible in the conversation composer")
     }
 
-    // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | A blocking question moves the task into the conditional Waiting Response board section; saving a draft preserves its status, keyed answers resume In Progress, and successful completion moves it to Review.
+    // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | Structured questions raised in Plan mode move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and successful completion moves it to Review.
     func test_codex_questions_can_be_answered_over_cli_xpc() throws {
         let created = try runCLI(["task", "create", "--title", "Codex questions", "--root", fixture.primary.path])
         XCTAssertEqual(created["ok"] as? Bool, true)
         let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
-        codexFixtureExecutable = "/tmp/stationai-bridge-workspaces/codex-fixture-slow"
+        codexFixtureExecutable = "/tmp/stationai-bridge-workspaces/codex-fixture-plan-slow"
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Codex questions")
+        let modeMenu = element("conversation-mode-menu")
+        XCTAssertTrue(modeMenu.waitForExistence(timeout: 5))
+        modeMenu.click()
+        app.menuItems["Plan mode"].click()
+        XCTAssertTrue(modeMenu.label.contains("Plan mode"))
         element("message-composer").click()
         element("message-composer").typeText("Please ask your questions.")
         element("send-message-button").click()
@@ -1252,6 +1257,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Waiting Response appears above In Progress while a task awaits an answer")
         waitingTaskCard.click()
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 5), "Reopening the task should restore the pending question.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response", "Reopening a pending Plan-mode question must preserve Waiting Response.")
         XCTAssertFalse(element("submit-ai-answers-button").isEnabled, "Blank answers must not be submitted.")
         app.buttons["Blue"].click()
         let secretAnswer = element("ai-question-answer-token")
