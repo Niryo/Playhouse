@@ -89,7 +89,7 @@
   },
   {
     "id": "test_new_task_has_empty_conversation_history",
-    "expectation": "Creating a task opens its empty conversation with the repository picker search focused and shows Untitled task until a first prompt starts title generation; the task has no stored messages or activity, and confirming discard deletes it while canceling keeps it."
+    "expectation": "Creating a task opens its empty conversation with the repository picker search focused and shows Untitled task until a first prompt starts title generation; the task has no stored messages or activity, and backing out immediately deletes it without a confirmation."
   },
   {
     "id": "test_task_prompt_draft_persists_after_back",

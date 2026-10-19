@@ -838,7 +838,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Existing task roots survive clearing the default parent")
     }
 
-    // case-contract: test_new_task_has_empty_conversation_history | Creating a task opens its empty conversation with the repository picker search focused and shows Untitled task until a first prompt starts title generation; the task has no stored messages or activity, and confirming discard deletes it while canceling keeps it.
+    // case-contract: test_new_task_has_empty_conversation_history | Creating a task opens its empty conversation with the repository picker search focused and shows Untitled task until a first prompt starts title generation; the task has no stored messages or activity, and backing out immediately deletes it without a confirmation.
     func test_new_task_has_empty_conversation_history() throws {
         launchApp(defaultParent: fixture.parent.path)
         element("new-task-button").click()
@@ -861,15 +861,8 @@ final class StationAIUITests: XCTestCase {
         XCTAssertNil(history?["diff"])
 
         element("back-to-board-button").click()
-        let cancelDiscard = element("cancel-discard-empty-task-button")
-        XCTAssertTrue(cancelDiscard.waitForExistence(timeout: 5))
-        cancelDiscard.click()
-        XCTAssertTrue(element("empty-conversation").exists, "Canceling discard should keep the new task open.")
-        element("back-to-board-button").click()
-        let confirmDiscard = element("confirm-discard-empty-task-button")
-        XCTAssertTrue(confirmDiscard.waitForExistence(timeout: 5))
-        confirmDiscard.click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertFalse(element("confirm-discard-empty-task-button").exists, "An empty new conversation should return to the board without a discard confirmation.")
         let deleted = try runCLI(["task", "get", createdTaskID], expectedStatus: 3)
         XCTAssertEqual((deleted["error"] as? [String: Any])?["code"] as? String, "not_found")
         attachScreenshot(named: "New conversation shows its empty state")

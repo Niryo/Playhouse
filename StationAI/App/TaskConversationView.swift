@@ -99,7 +99,6 @@ struct TaskConversationView: View {
     @State private var editedBranch = ""
     @State private var editedBranchFrom = ""
     @State private var editedMergeTarget = ""
-    @State private var isShowingDiscardConfirmation = false
     @FocusState private var isComposerFocused: Bool
     @FocusState private var isRepositorySearchFocused: Bool
 
@@ -142,21 +141,6 @@ struct TaskConversationView: View {
             do {
                 for url in try result.get() { try addImageData(Data(contentsOf: url)) }
             } catch { errorMessage = "Couldn't load image: \(error.localizedDescription)" }
-        }
-        .alert("Discard this task?", isPresented: $isShowingDiscardConfirmation) {
-            Button("Discard Task", role: .destructive) {
-                do {
-                    try BoardTaskManager(modelContext: modelContext).delete(task.id)
-                    onBack()
-                } catch {
-                    errorMessage = error.localizedDescription
-                }
-            }
-            .accessibilityIdentifier("confirm-discard-empty-task-button")
-            Button("Cancel", role: .cancel) {}
-                .accessibilityIdentifier("cancel-discard-empty-task-button")
-        } message: {
-            Text("This empty task will be permanently deleted.")
         }
         .task {
             _ = try? BoardTaskManager(modelContext: modelContext)
@@ -1463,7 +1447,12 @@ struct TaskConversationView: View {
     private func saveAndBack() {
         if isNewTask, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            messages.isEmpty, activities.isEmpty, !isLoadingHistory {
-            isShowingDiscardConfirmation = true
+            do {
+                try BoardTaskManager(modelContext: modelContext).delete(task.id)
+                onBack()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
             return
         }
         saveDraftAndGenerateTitle(status: nil, then: onBack)
