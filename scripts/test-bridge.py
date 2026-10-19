@@ -283,7 +283,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(len(self.assert_success(self.call_cli("task", "list")[0])["tasks"]), 1)
         self.assertTrue(Path(first["repositoryWorktrees"][0]["worktreePath"]).is_dir())
 
-    # case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task in Review, moving it to Done squash-merges the task branch into its explicit target as a single-parent commit, removes the clean managed worktree, retains the source branch, and preserves the saved conversation prompt.
+    # case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task in Review, dropping it on Done squash-merges the task branch, removes the clean managed worktree, retains the source branch and conversation history, reduces the active task count, and exposes the task in the searchable archive with case-insensitive search and a read-only conversation.
     def test_task_done_removes_worktree_and_preserves_branch(self):
         task = self.create_repo_task("Done cleanup", [self.primary])
         draft = "Complete the task and preserve its conversation."
@@ -318,6 +318,15 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["repositoryWorktrees"][0]["mergeTarget"], "main")
         completed, _ = self.call_cli("task", "get", task["id"])
         self.assertEqual(self.assert_success(completed)["savedPrompt"], draft)
+        board, _ = self.call_cli("board", "list")
+        archived = next(item for item in self.assert_success(board)["tasks"] if item["id"] == task["id"])
+        self.assertEqual(archived["status"], "Done")
+        history, _ = self.call_cli(
+            "conversation", "history", task["id"],
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        messages = self.assert_success(history)["messages"]
+        self.assertTrue(any(message["role"] == "assistant" and "Answers received: Blue / fixture-secret." in message["text"] for message in messages))
 
     # case-contract: test_task_done_commits_dirty_worktree_changes | Moving a reviewed task to Done stages and commits tracked and untracked worktree changes, squash-merges them into the target as a single-parent commit, and removes the managed worktree.
     def test_task_done_commits_dirty_worktree_changes(self):
@@ -350,7 +359,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(self.primary, "log", branch, "-1", "--format=%s").strip(), "Complete task: Dirty cleanup")
         self.assertEqual(len(self.run_git(self.primary, "rev-list", "--parents", "-n", "1", "main").split()), 2)
 
-    # case-contract: test_task_done_rejects_dirty_merge_target | A dirty local merge target is detected before the merge, leaves the target unchanged, and moves the reviewed task to Blocked with the reason.
+    # case-contract: test_task_done_rejects_dirty_merge_target | A dirty local merge target is detected before the merge, leaves the target unchanged, moves the reviewed task to Blocked with the reason, and keeps it out of the Done archive.
     def test_task_done_rejects_dirty_merge_target(self):
         task = self.create_repo_task("Dirty target", [self.primary])
         self.complete_fixture_turn(task["id"])
@@ -364,6 +373,9 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(target_file.is_file())
         current, _ = self.call_cli("task", "get", task["id"])
         self.assertEqual(self.assert_success(current)["status"], "Blocked")
+        board, _ = self.call_cli("board", "list")
+        archived_task = next(item for item in self.assert_success(board)["tasks"] if item["id"] == task["id"])
+        self.assertEqual(archived_task["status"], "Blocked", "A failed completion must remain outside the Done archive.")
         target_file.unlink()
 
     # case-contract: test_task_done_rejects_inaccessible_merge_target | A missing explicit local merge target leaves the branch unmerged and moves the reviewed task to Blocked with the reason.
@@ -505,7 +517,7 @@ class StationAIBridgeTests(unittest.TestCase):
         notice = json.loads((self.data_directory / "task-lifecycle-v2-notice.json").read_text(encoding="utf-8"))
         self.assertEqual(notice, [str(dirty_path)])
 
-    # case-contract: test_task_status_transitions_and_rejects_unknown_status | The board keeps stacked Blocked/Backlog and conditional Waiting Response/In Progress sections fully visible, leaves Review as its own column, hides empty status sections, and preserves Codex-owned task status behavior.
+    # case-contract: test_task_status_transitions_and_rejects_unknown_status | The board keeps stacked Blocked/Backlog and conditional Waiting Response/In Progress sections fully visible, leaves Review as its own column, removes Done from the columns, hides empty status sections, and preserves Codex-owned task status behavior.
     def test_task_status_transitions_and_rejects_unknown_status(self):
         task_id = self.create_task()["id"]
         response, _ = self.call_cli("task", "move", task_id, "Unknown", expected_status=2)

@@ -17,11 +17,16 @@ struct KanbanBoardView: View {
     @State private var taskBeingRenamed: BoardTask?
     @State private var taskBeingDeleted: BoardTask?
     @State private var isShowingDeleteConfirmation = false
+    @State private var isDoneTargetActive = false
+    @State private var isShowingDoneArchive = false
+    @State private var archiveSearchText = ""
+    @State private var archivedConversationText: [UUID: String] = [:]
+    @State private var isIndexingArchive = false
 
     var body: some View {
         Group {
             if let selectedTask {
-                TaskConversationView(task: selectedTask, isNewTask: isSelectedTaskNew) {
+                TaskConversationView(task: selectedTask, isNewTask: isSelectedTaskNew, isReadOnly: selectedTask.status == .done) {
                     self.selectedTask = nil
                     self.isSelectedTaskNew = false
                 }
@@ -107,7 +112,7 @@ struct KanbanBoardView: View {
 
             ScrollView(.horizontal) {
                 HStack(alignment: .top, spacing: 16) {
-                    ForEach(TaskStatus.allCases.filter { $0 != .blocked && $0 != .waitingResponse }) { status in
+                    ForEach(TaskStatus.allCases.filter { $0 != .blocked && $0 != .waitingResponse && $0 != .done }) { status in
                         if status == .backlog {
                             let hasBlockedTasks = tasks.contains(where: { $0.status == .blocked })
                             VStack(spacing: 12) {
@@ -142,7 +147,35 @@ struct KanbanBoardView: View {
             }
             .scrollIndicators(.visible)
             .accessibilityIdentifier("board-columns-scroll-view")
+            .overlay(alignment: .trailing) {
+                if draggedTaskID != nil {
+                    HStack(spacing: 10) {
+                        DoneDropTarget(isActive: $isDoneTargetActive, onDrop: { moveTask(id: $0, to: .done) })
+                            .frame(width: 104, height: 480)
+                            .accessibilityIdentifier("task-done-drop-target")
+                            .transition(.opacity.combined(with: .move(edge: .trailing)))
+                    }
+                    .padding(.trailing, 12)
+                    .background(LinearGradient(colors: [Color(nsColor: .windowBackgroundColor).opacity(0), Color(nsColor: .windowBackgroundColor).opacity(0.96)], startPoint: .leading, endPoint: .trailing))
+                    .transition(.opacity.combined(with: .move(edge: .trailing)))
+                }
+            }
         }
+        .background(DragEndEventMonitor(draggedTaskID: $draggedTaskID))
+        .overlay(alignment: .trailing) {
+            if isShowingDoneArchive {
+                doneArchivePanel
+                    .frame(width: 340)
+                    .frame(maxHeight: .infinity)
+                    .background(Color(nsColor: .windowBackgroundColor))
+                    .overlay(alignment: .leading) { Rectangle().fill(Color.primary.opacity(0.10)).frame(width: 1) }
+                    .shadow(color: .black.opacity(0.16), radius: 18, x: -6, y: 0)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .accessibilityIdentifier("done-archive-panel")
+            }
+        }
+        .animation(.easeInOut(duration: 0.24), value: isShowingDoneArchive)
+        .task(id: "\(isShowingDoneArchive)-\(tasks.filter { $0.status == .done }.count)") { await indexDoneConversationsIfNeeded() }
     }
 
     @ViewBuilder
@@ -196,12 +229,25 @@ struct KanbanBoardView: View {
             Spacer(minLength: 20)
 
             HStack(spacing: 14) {
-                Text("\(tasks.count) \(tasks.count == 1 ? "task" : "tasks")")
+                let activeTaskCount = tasks.filter { $0.status != .done }.count
+                Text("\(activeTaskCount) \(activeTaskCount == 1 ? "task" : "tasks")")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
                     .accessibilityLabel("Task count")
-                    .accessibilityValue("\(tasks.count)")
+                    .accessibilityValue("\(activeTaskCount)")
                     .accessibilityIdentifier("task-count")
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.24)) { isShowingDoneArchive.toggle() }
+                } label: {
+                    Image(systemName: "archivebox")
+                        .font(.system(size: 14, weight: .semibold))
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(.bordered)
+                .help("Browse completed tasks")
+                .accessibilityLabel("Done tasks")
+                .accessibilityIdentifier("done-archive-button")
 
                 Button {
                     openNewTask()
@@ -219,6 +265,97 @@ struct KanbanBoardView: View {
         .padding(.horizontal, 30)
         .padding(.top, 24)
         .padding(.bottom, 21)
+    }
+
+    private var doneArchivePanel: some View {
+        let query = archiveSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let completed = tasks.filter { $0.status == .done }
+        let titleMatches = completed.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) }
+        let conversationMatches = completed.filter { task in
+            !query.isEmpty && !titleMatches.contains(where: { $0.id == task.id }) &&
+                (archivedConversationText[task.id]?.localizedCaseInsensitiveContains(query) ?? false)
+        }
+        let results = (titleMatches + conversationMatches).sorted { lhs, rhs in
+            let lhsTitle = query.isEmpty || lhs.title.localizedCaseInsensitiveContains(query)
+            let rhsTitle = query.isEmpty || rhs.title.localizedCaseInsensitiveContains(query)
+            if lhsTitle != rhsTitle { return lhsTitle }
+            return lhs.createdAt > rhs.createdAt
+        }
+        return VStack(spacing: 0) {
+            HStack {
+                Text("Done tasks").font(.system(size: 14, weight: .semibold))
+                Spacer()
+                Button { withAnimation { isShowingDoneArchive = false } } label: { Image(systemName: "xmark") }
+                    .buttonStyle(.plain).accessibilityLabel("Close done tasks")
+                    .accessibilityIdentifier("close-done-archive-button")
+            }
+            .padding(16)
+            Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 1)
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Search tasks and conversations", text: $archiveSearchText)
+                    .textFieldStyle(.plain).accessibilityIdentifier("done-archive-search")
+                if !archiveSearchText.isEmpty {
+                    Button { archiveSearchText = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                        .buttonStyle(.plain).accessibilityLabel("Clear archive search")
+                        .accessibilityIdentifier("clear-archive-search-button")
+                }
+            }
+            .padding(10).background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 9)).padding(12)
+            if isIndexingArchive {
+                ProgressView("Searching conversations…").controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityIdentifier("done-archive-indexing")
+            } else if results.isEmpty {
+                Text(query.isEmpty ? "No completed tasks" : "No matching tasks")
+                    .font(.system(size: 12)).foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityIdentifier("done-archive-empty-state")
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 5) {
+                        ForEach(results) { task in
+                            Button {
+                                isShowingDoneArchive = false
+                                selectedTask = task
+                                isSelectedTaskNew = false
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: "checkmark.circle.fill").foregroundStyle(TaskStatus.done.accent)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(task.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                                        Text(task.createdAt, style: .date).font(.system(size: 10)).foregroundStyle(.secondary)
+                                    }
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(10).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("done-archive-task-\(task.id.uuidString)")
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                }
+                .scrollIndicators(.visible)
+                .accessibilityIdentifier("done-archive-list")
+            }
+        }
+    }
+
+    @MainActor
+    private func indexDoneConversationsIfNeeded() async {
+        guard isShowingDoneArchive,
+              tasks.contains(where: { $0.status == .done && archivedConversationText[$0.id] == nil }) else { return }
+        isIndexingArchive = true
+        defer { isIndexingArchive = false }
+        let manager = CodexConversationManager(tasks: BoardTaskManager(modelContext: modelContext), client: codexClient)
+        for task in tasks where task.status == .done && archivedConversationText[task.id] == nil {
+            guard !Task.isCancelled else { return }
+            do {
+                let history = try await manager.history(taskID: task.id)
+                archivedConversationText[task.id] = history.messages.map(\.text).joined(separator: "\n")
+            } catch {
+                archivedConversationText[task.id] = ""
+            }
+        }
     }
 
     private var isShowingSaveError: Binding<Bool> {
@@ -285,6 +422,80 @@ struct KanbanBoardView: View {
         }
     }
 
+}
+
+private struct DragEndEventMonitor: NSViewRepresentable {
+    @Binding var draggedTaskID: UUID?
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(draggedTaskID: $draggedTaskID)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        context.coordinator.install()
+        return NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.draggedTaskID = $draggedTaskID
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.uninstall()
+    }
+
+    final class Coordinator {
+        var draggedTaskID: Binding<UUID?>
+        private var mouseUpMonitor: Any?
+
+        init(draggedTaskID: Binding<UUID?>) {
+            self.draggedTaskID = draggedTaskID
+        }
+
+        func install() {
+            guard mouseUpMonitor == nil else { return }
+            mouseUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+                guard let self, self.draggedTaskID.wrappedValue != nil else { return event }
+                self.draggedTaskID.wrappedValue = nil
+                return event
+            }
+        }
+
+        func uninstall() {
+            guard let mouseUpMonitor else { return }
+            NSEvent.removeMonitor(mouseUpMonitor)
+            self.mouseUpMonitor = nil
+        }
+    }
+}
+
+private struct DoneDropTarget: View {
+    @Binding var isActive: Bool
+    let onDrop: (UUID) -> Void
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "checkmark.circle")
+                .font(.system(size: 24, weight: .medium))
+            Text("Done")
+                .font(.system(size: 12, weight: .semibold))
+            Text("Merge and archive")
+                .font(.system(size: 10))
+                .multilineTextAlignment(.center)
+        }
+        .foregroundStyle(isActive ? Color.white : TaskStatus.done.accent)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(isActive ? TaskStatus.done.accent : TaskStatus.done.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(TaskStatus.done.accent.opacity(0.35), lineWidth: 1))
+        .onDrop(of: [.plainText], isTargeted: $isActive) { providers in
+            guard let provider = providers.first else { return false }
+            _ = provider.loadObject(ofClass: NSString.self) { value, _ in
+                guard let value = value as? String, let id = UUID(uuidString: value) else { return }
+                DispatchQueue.main.async { onDrop(id) }
+            }
+            return true
+        }
+    }
 }
 
 private struct KanbanColumnView: View {

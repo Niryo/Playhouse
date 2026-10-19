@@ -230,7 +230,7 @@ final class StationAIUITests: XCTestCase {
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Folder-only UI")
         element("back-to-board-button").click()
         mergeTaskToDone("Folder-only UI")
-        assertTaskVisible("Folder-only UI", inColumn: "Done")
+        try assertTaskArchived("Folder-only UI")
         XCTAssertEqual(try taskRecord(named: "Folder-only UI")?["status"] as? String, "Done")
         XCTAssertEqual((try taskRecord(named: "Folder-only UI")?["repositoryWorktrees"] as? [[String: Any]])?.count, 0)
     }
@@ -254,7 +254,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "An assigned worktree conflict keeps task creation open with an explanation")
     }
 
-    // case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task in Review, moving it to Done squash-merges the task branch into its explicit target as a single-parent commit, removes the clean managed worktree, retains the source branch, and preserves the saved conversation prompt.
+    // case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task in Review, dropping it on Done squash-merges the task branch, removes the clean managed worktree, retains the source branch and conversation history, reduces the active task count, and exposes the task in the searchable archive with case-insensitive search and a read-only conversation.
     func test_task_done_removes_worktree_and_preserves_branch() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -294,8 +294,8 @@ final class StationAIUITests: XCTestCase {
         }
         XCTAssertNotEqual(currentTitle, "Generating title…", "The title placeholder should eventually resolve.")
         mergeTaskToDone(taskID: taskID)
-        let doneColumn = element("column-done")
-        XCTAssertTrue(doneColumn.buttons.matching(identifier: "task-card-\(taskID)").firstMatch.waitForExistence(timeout: 8), "The completed task should remain visible in Done even if title generation resolves during the move.")
+        XCTAssertTrue(waitUntil({ !element("task-card-\(taskID)").exists }, timeout: 15), "The completed task should disappear from the active board.")
+        XCTAssertEqual(element("task-count").value as? String, "0", "The active task count should decrease when a task is archived.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
         XCTAssertEqual(try taskRecord(id: taskID)?["savedPrompt"] as? String, "Complete this task.")
         XCTAssertEqual(try runCLI(["task", "move", taskID, "Done"])["ok"] as? Bool, true)
@@ -305,7 +305,37 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try runGitOutput(fixture.primary, "rev-list", "--parents", "-n", "1", "main").split(separator: " ").count, 2)
         XCTAssertEqual(try runGitOutput(fixture.primary, "log", "main", "-1", "--format=%s"), branch.split(separator: "-").map { $0.capitalized }.joined(separator: " "))
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
-        attachScreenshot(named: "Completed task remains on the board with its conversation prompt retained")
+
+        let titleMatch = try XCTUnwrap(try runCLI(["task", "create", "--title", "fixture-secret title match", "--root", fixture.custom.path])["result"] as? [String: Any])
+        let titleMatchID = try XCTUnwrap(titleMatch["id"] as? String)
+        let fixtureExecutable = try XCTUnwrap(codexFixtureExecutable)
+        _ = try runCLI(
+            ["conversation", "send", titleMatchID, "--message", "Another completed conversation.", "--answer", "color=Blue", "--answer", "token=fixture-secret"],
+            extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": fixtureExecutable]
+        )
+        XCTAssertEqual(try XCTUnwrap((try runCLI(["task", "move", titleMatchID, "Done"])["result"] as? [String: Any])?["status"] as? String), "Done")
+
+        element("done-archive-button").click()
+        let archiveResult = element("done-archive-task-\(taskID)")
+        XCTAssertTrue(archiveResult.waitForExistence(timeout: 10), "The completed task should appear in the archive.")
+        let archiveSearch = element("done-archive-search")
+        archiveSearch.click()
+        archiveSearch.typeText("no-such-archive-task")
+        XCTAssertTrue(element("done-archive-empty-state").waitForExistence(timeout: 10), "A search with no matches should show an empty state.")
+        element("clear-archive-search-button").click()
+        archiveSearch.typeText("FiXtUrE-SeCrEt")
+        let titleMatchResult = element("done-archive-task-\(titleMatchID)")
+        XCTAssertTrue(titleMatchResult.waitForExistence(timeout: 10), "A title match should appear in the archive search results.")
+        XCTAssertTrue(archiveResult.waitForExistence(timeout: 10), "Searching saved conversation text should find the completed task.")
+        XCTAssertLessThan(titleMatchResult.frame.minY, archiveResult.frame.minY, "Title matches should precede conversation-only matches.")
+        archiveResult.click()
+        XCTAssertTrue(element("archived-conversation-read-only").waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        XCTAssertFalse(element("message-composer").exists, "Archived conversations must not expose the composer.")
+        XCTAssertFalse(element("edit-workspace-roots-button").isEnabled, "Archived conversations must not allow workspace edits.")
+        element("back-to-board-button").click()
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done", "Leaving the read-only conversation must not alter the archived task.")
+        attachScreenshot(named: "Completed task opens from the searchable read-only archive")
     }
 
     // case-contract: test_task_done_commits_dirty_worktree_changes | Moving a reviewed task to Done stages and commits tracked and untracked worktree changes, squash-merges them into the target as a single-parent commit, and removes the managed worktree.
@@ -331,7 +361,7 @@ final class StationAIUITests: XCTestCase {
         try "Edited after review\n".write(to: URL(fileURLWithPath: path).appendingPathComponent("stationai-primary.txt"), atomically: true, encoding: .utf8)
         try "New unsaved work\n".write(to: URL(fileURLWithPath: path).appendingPathComponent("unsaved.txt"), atomically: true, encoding: .utf8)
         mergeTaskToDone("Dirty done UI")
-        assertTaskVisible("Dirty done UI", inColumn: "Done")
+        try assertTaskArchived("Dirty done UI")
         XCTAssertEqual(try taskRecord(named: "Dirty done UI")?["status"] as? String, "Done")
         XCTAssertFalse(FileManager.default.fileExists(atPath: path))
         XCTAssertEqual(try String(contentsOf: fixture.primary.appendingPathComponent("stationai-primary.txt"), encoding: .utf8), "Edited after review\n")
@@ -342,11 +372,12 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Done commits, merges, and cleans up tracked and untracked task changes")
     }
 
-    // case-contract: test_task_done_rejects_dirty_merge_target | A dirty local merge target is detected before the merge, leaves the target unchanged, and moves the reviewed task to Blocked with the reason.
+    // case-contract: test_task_done_rejects_dirty_merge_target | A dirty local merge target is detected before the merge, leaves the target unchanged, moves the reviewed task to Blocked with the reason, and keeps it out of the Done archive.
     func test_task_done_rejects_dirty_merge_target() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
-        _ = try runCLI(["task", "create", "--title", "Dirty target", "--repo", fixture.primary.path])
+        let created = try XCTUnwrap(try runCLI(["task", "create", "--title", "Dirty target", "--repo", fixture.primary.path])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
         let targetBefore = try runGitOutput(fixture.primary, "rev-parse", "main")
         openTask(named: "Dirty target")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Dirty target")
@@ -360,6 +391,10 @@ final class StationAIUITests: XCTestCase {
         alert.buttons["OK"].click()
         XCTAssertEqual(try taskRecord(named: "Dirty target")?["status"] as? String, "Blocked")
         XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetBefore)
+        XCTAssertTrue(element("task-card-\(taskID)").exists, "A failed completion should remain visible as Blocked.")
+        element("done-archive-button").click()
+        XCTAssertFalse(element("done-archive-task-\(taskID)").exists, "A failed completion must not appear in the Done archive.")
+        element("close-done-archive-button").click()
         try FileManager.default.removeItem(at: targetFile)
     }
 
@@ -445,7 +480,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(named: "Partial multi merge")?["status"] as? String, "Review")
         element("back-to-board-button").click()
         mergeTaskToDone("Partial multi merge")
-        assertTaskVisible("Partial multi merge", inColumn: "Done")
+        try assertTaskArchived("Partial multi merge")
         partial = try XCTUnwrap(taskRecord(named: "Partial multi merge"))
         XCTAssertEqual(partial["status"] as? String, "Done")
         progress = try XCTUnwrap(partial["repositoryWorktrees"] as? [[String: Any]])
@@ -509,7 +544,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try runGitOutput(worktree, "ls-files", "-u").trimmingCharacters(in: .whitespacesAndNewlines), "")
         element("back-to-board-button").click()
         mergeTaskToDone("Conflict resolution")
-        assertTaskVisible("Conflict resolution", inColumn: "Done")
+        try assertTaskArchived("Conflict resolution")
         XCTAssertEqual(try taskRecord(named: "Conflict resolution")?["status"] as? String, "Done")
         XCTAssertEqual(try String(contentsOf: fixture.primary.appendingPathComponent(conflictFile), encoding: .utf8), "Resolved task and target changes.\n")
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktree.path))
@@ -546,12 +581,13 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Lifecycle rollout clears tasks and reports a retained dirty worktree")
     }
 
-    // case-contract: test_task_status_transitions_and_rejects_unknown_status | The board keeps stacked Blocked/Backlog and conditional Waiting Response/In Progress sections fully visible, leaves Review as its own column, hides empty status sections, and preserves Codex-owned task status behavior.
+    // case-contract: test_task_status_transitions_and_rejects_unknown_status | The board keeps stacked Blocked/Backlog and conditional Waiting Response/In Progress sections fully visible, leaves Review as its own column, removes Done from the columns, hides empty status sections, and preserves Codex-owned task status behavior.
     func test_task_status_transitions_and_rejects_unknown_status() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Status transitions", roots: [fixture.primary.path])
-        let columns = ["backlog", "in-progress", "review", "done"]
+        let columns = ["backlog", "in-progress", "review"]
         for column in columns { XCTAssertTrue(element("column-heading-\(column)").exists, "Missing \(column) board column.") }
+        XCTAssertFalse(element("column-heading-done").exists, "Done tasks should live in the archive, not a board column.")
         XCTAssertFalse(element("column-heading-waiting-response").exists, "Waiting Response should be hidden when no tasks are waiting.")
         let inProgressColumn = element("column-in-progress")
         let reviewColumn = element("column-review")
@@ -1631,22 +1667,35 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(column.buttons[title].waitForExistence(timeout: 8), "\(title) is not in \(status).")
     }
 
+    private func assertTaskArchived(_ title: String) throws {
+        let taskID = try taskID(named: title)
+        element("done-archive-button").click()
+        XCTAssertTrue(element("done-archive-task-\(taskID)").waitForExistence(timeout: 10), "\(title) should appear in the completed task archive.")
+        element("close-done-archive-button").click()
+    }
+
     private func mergeTaskToDone(_ title: String) {
         let card = app.buttons[title]
         XCTAssertTrue(card.waitForExistence(timeout: 5))
-        card.rightClick()
-        let mergeMenuItem = app.menuItems["move-task-to-done-menu-item"]
-        XCTAssertTrue(mergeMenuItem.waitForExistence(timeout: 5), "A reviewed task should offer a direct Merge and move to Done action.")
-        mergeMenuItem.click()
+        dragTaskToDone(card)
     }
 
     private func mergeTaskToDone(taskID: String) {
         let card = element("task-card-\(taskID)")
         XCTAssertTrue(card.waitForExistence(timeout: 5), "The reviewed task card should remain available by its stable task identifier.")
-        card.rightClick()
-        let mergeMenuItem = app.menuItems["move-task-to-done-menu-item"]
-        XCTAssertTrue(mergeMenuItem.waitForExistence(timeout: 5), "A reviewed task should offer a direct Merge and move to Done action.")
-        mergeMenuItem.click()
+        dragTaskToDone(card)
+    }
+
+    private func dragTaskToDone(_ card: XCUIElement) {
+        let cardPoint = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).screenPoint
+        postMouseEvent(.leftMouseDown, at: cardPoint)
+        postMouseEvent(.leftMouseDragged, at: CGPoint(x: cardPoint.x + 24, y: cardPoint.y + 8))
+        let doneTarget = element("task-done-drop-target")
+        XCTAssertTrue(doneTarget.waitForExistence(timeout: 5), "The Done drop target should appear during a task drag.")
+        let targetPoint = doneTarget.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).screenPoint
+        postMouseEvent(.leftMouseDragged, at: targetPoint)
+        postMouseEvent(.leftMouseUp, at: targetPoint)
+        XCTAssertTrue(waitUntil({ !doneTarget.exists }, timeout: 5), "The Done drop target should disappear after completion starts.")
     }
 
     private func deleteTaskFromContextMenu(_ title: String) {

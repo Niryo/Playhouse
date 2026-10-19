@@ -628,7 +628,10 @@ final class CodexConversationManager {
         guard let threadID = task.codexThreadID else {
             return CodexThreadHistory(messages: [], activities: [], diff: nil)
         }
-        let workspace = try CodexWorkspaceContext(roots: task.workspaceRootPaths.map {
+        let historyRoots = task.workspaceRootPaths.isEmpty && task.status == .done
+            ? task.repositoryWorktrees.map { $0.repositoryPath }
+            : task.workspaceRootPaths
+        let workspace = try CodexWorkspaceContext(roots: historyRoots.map {
             URL(fileURLWithPath: $0, isDirectory: true)
         })
         return try await client.loadThread(id: threadID, workspace: workspace, onActionRequest: onActionRequest)

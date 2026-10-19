@@ -56,6 +56,7 @@ struct TaskConversationView: View {
 
     let task: BoardTask
     var isNewTask = false
+    var isReadOnly = false
     let onBack: () -> Void
 
     @State private var draft = ""
@@ -143,13 +144,15 @@ struct TaskConversationView: View {
             } catch { errorMessage = "Couldn't load image: \(error.localizedDescription)" }
         }
         .task {
-            _ = try? BoardTaskManager(modelContext: modelContext)
-                .reconcileLifecycleStatusOnOpen(task.id, client: codexClient)
-            if let request = codexClient.pendingUserInputRequest, request.threadID == task.codexThreadID {
+            if !isReadOnly {
+                _ = try? BoardTaskManager(modelContext: modelContext)
+                    .reconcileLifecycleStatusOnOpen(task.id, client: codexClient)
+            }
+            if !isReadOnly, let request = codexClient.pendingUserInputRequest, request.threadID == task.codexThreadID {
                 userInputRequest = request
             }
             await loadConversation()
-            await loadModels()
+            if !isReadOnly { await loadModels() }
         }
         .onChange(of: codexClient.isTurnActive) { _, isTurnActive in
             guard let taskThreadID = task.codexThreadID else {
@@ -159,6 +162,7 @@ struct TaskConversationView: View {
             isResponding = isTurnActive && codexClient.isTurnActive(threadID: taskThreadID)
         }
         .onChange(of: codexClient.pendingUserInputRequest) { _, request in
+            guard !isReadOnly else { return }
             guard let request, request.threadID == task.codexThreadID else { return }
             userInputRequest = request
             userInputAnswers = [:]
@@ -398,13 +402,22 @@ struct TaskConversationView: View {
 
                 conversation
 
-                if let userInputRequest { userInputForm(userInputRequest) }
+                if !isReadOnly, let userInputRequest { userInputForm(userInputRequest) }
 
                 Rectangle()
                     .fill(Color.primary.opacity(0.07))
                     .frame(height: 1)
 
-                composer
+                if isReadOnly {
+                    Label("Archived conversation · read only", systemImage: "lock.fill")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 18)
+                        .accessibilityIdentifier("archived-conversation-read-only")
+                } else {
+                    composer
+                }
             }
 
             if isDiffPresented {
@@ -709,6 +722,7 @@ struct TaskConversationView: View {
             .buttonStyle(.bordered)
             .help("Edit working folders for this task")
             .accessibilityIdentifier("edit-workspace-roots-button")
+            .disabled(isReadOnly)
         }
         .padding(.horizontal, 26)
         .padding(.vertical, 15)
@@ -731,6 +745,7 @@ struct TaskConversationView: View {
                         .background(Color.accentColor.opacity(0.1), in: Capsule())
                 }
                 .buttonStyle(.plain)
+                .disabled(isReadOnly)
                 .popover(item: Binding(
                     get: { repositoryBeingEdited?.repositoryPath == repository.repositoryPath ? RepositoryBadgeEditID(path: repository.repositoryPath) : nil },
                     set: { if $0 == nil { repositoryBeingEdited = nil } }
@@ -763,6 +778,7 @@ struct TaskConversationView: View {
             .buttonStyle(.plain).help("Add a repository").accessibilityLabel("Add repository")
             .accessibilityIdentifier("add-conversation-repository-button")
             .popover(isPresented: $isShowingRepositoryPicker, arrowEdge: .bottom) { repositoryPicker }
+            .disabled(isReadOnly)
         }
     }
 
@@ -1110,7 +1126,7 @@ struct TaskConversationView: View {
                             activatePlanMode()
                         }
                     }
-                    .disabled(isResponding || isLoadingHistory)
+                    .disabled(isReadOnly || isResponding || isLoadingHistory)
                     .accessibilityIdentifier("message-composer")
 
                 HStack(spacing: 12) {
@@ -1445,6 +1461,7 @@ struct TaskConversationView: View {
     }
 
     private func saveAndBack() {
+        if isReadOnly { onBack(); return }
         if isNewTask, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            messages.isEmpty, activities.isEmpty, !isLoadingHistory {
             do {

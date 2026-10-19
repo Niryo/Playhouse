@@ -29,7 +29,7 @@
   },
   {
     "id": "test_task_done_removes_worktree_and_preserves_branch",
-    "expectation": "After a successful Codex turn puts a task in Review, moving it to Done squash-merges the task branch into its explicit target as a single-parent commit, removes the clean managed worktree, retains the source branch, and preserves the saved conversation prompt."
+    "expectation": "After a successful Codex turn puts a task in Review, dropping it on Done squash-merges the task branch, removes the clean managed worktree, retains the source branch and conversation history, reduces the active task count, and exposes the task in the searchable archive with case-insensitive search and a read-only conversation."
   },
   {
     "id": "test_task_done_commits_dirty_worktree_changes",
@@ -37,7 +37,7 @@
   },
   {
     "id": "test_task_done_rejects_dirty_merge_target",
-    "expectation": "A dirty local merge target is detected before the merge, leaves the target unchanged, and moves the reviewed task to Blocked with the reason."
+    "expectation": "A dirty local merge target is detected before the merge, leaves the target unchanged, moves the reviewed task to Blocked with the reason, and keeps it out of the Done archive."
   },
   {
     "id": "test_task_done_rejects_inaccessible_merge_target",
@@ -57,7 +57,7 @@
   },
   {
     "id": "test_task_status_transitions_and_rejects_unknown_status",
-    "expectation": "The board keeps stacked Blocked/Backlog and conditional Waiting Response/In Progress sections fully visible, leaves Review as its own column, hides empty status sections, and preserves Codex-owned task status behavior."
+    "expectation": "The board keeps stacked Blocked/Backlog and conditional Waiting Response/In Progress sections fully visible, leaves Review as its own column, removes Done from the columns, hides empty status sections, and preserves Codex-owned task status behavior."
   },
   {
     "id": "test_task_rename_persists_and_rejects_blank_title",
