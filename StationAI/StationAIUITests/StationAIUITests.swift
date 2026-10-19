@@ -1036,7 +1036,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Blank composer leaves send disabled")
     }
 
-    // case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex, and displays attached images from reloaded conversation history.
+    // case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history.
     func test_conversation_sends_image_attachments() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -1064,6 +1064,9 @@ final class StationAIUITests: XCTestCase {
         let pickedTurn = try XCTUnwrap(JSONSerialization.jsonObject(with: pickedTurnData) as? [String: Any])
         XCTAssertEqual(pickedTurn["userMessage"] as? String, "What is shown in this screenshot?")
         XCTAssertEqual((pickedTurn["images"] as? [String])?.count, 1, "The fixture should receive the picker image alongside the text prompt.")
+        let pickedImage = try XCTUnwrap((pickedTurn["images"] as? [String])?.first)
+        XCTAssertTrue(pickedImage.hasPrefix("data:image/png;base64,"), "The fixture should receive the image as a data URL.")
+        XCTAssertEqual(pickedTurn["imageInputs"] as? [[String: String]], [["type": "image", "url": pickedImage]], "The Codex request should use the tagged image URL payload.")
         app.buttons["Blue"].click()
         element("ai-question-answer-token").click()
         element("ai-question-answer-token").typeText("fixture-secret")
@@ -1096,6 +1099,9 @@ final class StationAIUITests: XCTestCase {
         let pastedTurn = try XCTUnwrap(JSONSerialization.jsonObject(with: pastedTurnData) as? [String: Any])
         XCTAssertTrue(pastedTurn["userMessage"] is NSNull, "The fixture should receive no text for the pasted image-only turn.")
         XCTAssertEqual((pastedTurn["images"] as? [String])?.count, 1, "The fixture should receive the pasted image.")
+        let pastedImage = try XCTUnwrap((pastedTurn["images"] as? [String])?.first)
+        XCTAssertTrue(pastedImage.hasPrefix("data:image/png;base64,"), "The pasted image should reach Codex as a data URL.")
+        XCTAssertEqual(pastedTurn["imageInputs"] as? [[String: String]], [["type": "image", "url": pastedImage]], "Image-only requests should use the tagged image URL payload.")
         attachScreenshot(named: "Chat sends picker text-and-image and pasted image-only messages")
     }
 

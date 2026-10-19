@@ -119,7 +119,12 @@ def main():
                     "turn": {"id": "turn_stationai_fixture", "status": "completed"},
                 }})
                 continue
-            history_path.write_text(json.dumps({"userMessage": turn_message, "images": [item.get("image_url") for item in turn_input if item.get("type") == "image"]}), encoding="utf-8")
+            image_inputs = [item for item in turn_input if item.get("type") == "image"]
+            history_path.write_text(json.dumps({
+                "userMessage": turn_message,
+                "images": [item.get("url") for item in image_inputs],
+                "imageInputs": image_inputs,
+            }), encoding="utf-8")
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": "turn_stationai_fixture", "status": "inProgress"}}})
             if mode.endswith("-abort"):
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {

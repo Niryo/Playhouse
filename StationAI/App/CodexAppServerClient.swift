@@ -250,7 +250,7 @@ final class CodexAppServerClient: ObservableObject {
             method: "turn/start",
             params: [
                 "threadId": threadID,
-                "input": (text.isEmpty ? [] : [["type": "text", "text": text]]) + imageDataURLs.map { ["type": "image", "image_url": $0] },
+                "input": (text.isEmpty ? [] : [["type": "text", "text": text]]) + imageDataURLs.map { ["type": "image", "url": $0] },
                 "model": modelID,
                 "cwd": workspace.cwd.path,
                 "runtimeWorkspaceRoots": workspace.roots.map(\.path),

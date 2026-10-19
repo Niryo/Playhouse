@@ -101,7 +101,7 @@
   },
   {
     "id": "test_conversation_sends_image_attachments",
-    "expectation": "The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex, and displays attached images from reloaded conversation history."
+    "expectation": "The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history."
   },
   {
     "id": "test_conversation_rejects_invalid_image_attachments",
