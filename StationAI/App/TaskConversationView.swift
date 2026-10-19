@@ -3,6 +3,18 @@ import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
 
+private struct AssistantMarkdownBlock: Identifiable {
+    enum Kind {
+        case heading(Int)
+        case listItem
+        case paragraph
+    }
+
+    let id: Int
+    let kind: Kind
+    let text: String
+}
+
 struct TaskConversationView: View {
     private struct PendingImage: Identifiable {
         let id = UUID()
@@ -1018,9 +1030,7 @@ struct TaskConversationView: View {
                     ProgressView()
                         .controlSize(.small)
                 } else {
-                    Text(message.text)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
+                    assistantMarkdownContent(message.text)
                 }
             }
             .font(.system(size: 14))
@@ -1031,7 +1041,7 @@ struct TaskConversationView: View {
                 WorkspaceTheme.panelBackground,
                 in: RoundedRectangle(cornerRadius: 17, style: .continuous)
             )
-            .accessibilityLabel(message.text.isEmpty ? "Waiting for Codex response" : message.text)
+            .accessibilityLabel(message.text.isEmpty ? "Waiting for Codex response" : String(Self.markdownAttributedText(message.text).characters))
             .accessibilityIdentifier("assistant-message-\(message.id)")
         }
         .frame(maxWidth: 620, alignment: .leading)
@@ -1056,6 +1066,54 @@ struct TaskConversationView: View {
         }
             .frame(maxWidth: 620, alignment: .trailing)
             .accessibilityIdentifier("user-message-\(message.id)")
+    }
+
+    private static func markdownAttributedText(_ markdown: String) -> AttributedString {
+        (try? AttributedString(markdown: markdown, options: .init(interpretedSyntax: .full)))
+            ?? AttributedString(markdown)
+    }
+
+    private func assistantMarkdownContent(_ markdown: String) -> some View {
+        let blocks = Self.markdownBlocks(markdown)
+        return VStack(alignment: .leading, spacing: 7) {
+            ForEach(blocks) { block in
+                switch block.kind {
+                case .heading(let level):
+                    Text(Self.markdownAttributedText(block.text))
+                        .font(.system(size: level == 1 ? 19 : level == 2 ? 17 : 15, weight: .semibold))
+                        .accessibilityIdentifier("assistant-markdown-heading-\(block.id)")
+                case .listItem:
+                    HStack(alignment: .firstTextBaseline, spacing: 7) {
+                        Text("•").foregroundStyle(.secondary)
+                        Text(Self.markdownAttributedText(block.text))
+                            .accessibilityIdentifier("assistant-markdown-list-content-\(block.id)")
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("assistant-markdown-list-item-\(block.id)")
+                case .paragraph:
+                    Text(Self.markdownAttributedText(block.text))
+                        .accessibilityIdentifier("assistant-markdown-paragraph-\(block.id)")
+                }
+            }
+        }
+        .textSelection(.enabled)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private static func markdownBlocks(_ markdown: String) -> [AssistantMarkdownBlock] {
+        markdown.components(separatedBy: .newlines).enumerated().compactMap { index, rawLine in
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty else { return nil }
+            let headingPrefix = line.prefix(while: { $0 == "#" })
+            if !headingPrefix.isEmpty, headingPrefix.count <= 6,
+               line.dropFirst(headingPrefix.count).first == " " {
+                return AssistantMarkdownBlock(id: index, kind: .heading(headingPrefix.count), text: String(line.dropFirst(headingPrefix.count + 1)))
+            }
+            if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
+                return AssistantMarkdownBlock(id: index, kind: .listItem, text: String(line.dropFirst(2)))
+            }
+            return AssistantMarkdownBlock(id: index, kind: .paragraph, text: line)
+        }
     }
 
     private var composer: some View {
