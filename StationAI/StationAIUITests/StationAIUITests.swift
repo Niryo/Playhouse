@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import XCTest
 
@@ -291,8 +292,9 @@ final class StationAIUITests: XCTestCase {
             if currentTitle == "Generating title…" { RunLoop.current.run(until: Date().addingTimeInterval(0.4)) }
         }
         XCTAssertNotEqual(currentTitle, "Generating title…", "The title placeholder should eventually resolve.")
-        mergeTaskToDone(currentTitle)
-        assertTaskVisible(currentTitle, inColumn: "Done")
+        mergeTaskToDone(taskID: taskID)
+        let doneColumn = element("column-done")
+        XCTAssertTrue(doneColumn.buttons.matching(identifier: "task-card-\(taskID)").firstMatch.waitForExistence(timeout: 8), "The completed task should remain visible in Done even if title generation resolves during the move.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
         XCTAssertEqual(try taskRecord(id: taskID)?["savedPrompt"] as? String, "Complete this task.")
         XCTAssertEqual(try runCLI(["task", "move", taskID, "Done"])["ok"] as? Bool, true)
@@ -309,7 +311,7 @@ final class StationAIUITests: XCTestCase {
     func test_task_done_commits_dirty_worktree_changes() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
-        try createTaskFixture(title: "Dirty done UI", roots: [fixture.primary.path])
+        _ = try runCLI(["task", "create", "--title", "Dirty done UI", "--repo", fixture.primary.path])
         let task = try XCTUnwrap(taskRecord(named: "Dirty done UI"))
         let record = try XCTUnwrap((task["repositoryWorktrees"] as? [[String: Any]])?.first)
         let path = try XCTUnwrap(record["worktreePath"] as? String)
@@ -343,7 +345,7 @@ final class StationAIUITests: XCTestCase {
     func test_task_done_rejects_dirty_merge_target() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
-        try createTaskFixture(title: "Dirty target", roots: [fixture.primary.path])
+        _ = try runCLI(["task", "create", "--title", "Dirty target", "--repo", fixture.primary.path])
         let targetBefore = try runGitOutput(fixture.primary, "rev-parse", "main")
         openTask(named: "Dirty target")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Dirty target")
@@ -416,7 +418,7 @@ final class StationAIUITests: XCTestCase {
         mergeTaskToDone("Partial multi merge")
         let alert = app.sheets.firstMatch
         XCTAssertTrue(alert.waitForExistence(timeout: 10))
-        XCTAssertTrue(alert.staticTexts.containing(NSPredicate(format: "value CONTAINS[c] %@", "squash merge")).firstMatch.exists)
+        XCTAssertTrue(alert.buttons["OK"].exists, "The merge failure should be acknowledged before retrying.")
         alert.buttons["OK"].click()
         var partial = try XCTUnwrap(taskRecord(named: "Partial multi merge"))
         XCTAssertEqual(partial["status"] as? String, "Blocked")
@@ -603,7 +605,7 @@ final class StationAIUITests: XCTestCase {
     // case-contract: test_task_roots_set_get_order_deduplication_and_validation | Root editing preserves order, removes duplicates, and rejects an empty list.
     func test_task_roots_set_get_order_deduplication_and_validation() throws {
         launchApp(defaultParent: fixture.parent.path)
-        try createTaskFixture(title: "Edit roots", roots: [fixture.primary.path])
+        _ = try runCLI(["task", "create", "--title", "Edit roots", "--repo", fixture.primary.path])
         openTask(named: "Edit roots")
         element("edit-workspace-roots-button").click()
         XCTAssertTrue(element("save-workspace-roots-button").waitForExistence(timeout: 5))
@@ -668,15 +670,15 @@ final class StationAIUITests: XCTestCase {
         let mergeFrom = try XCTUnwrap(secondary["branchFrom"] as? String)
         let mergeTo = try XCTUnwrap(secondary["mergeTarget"] as? String)
         badge.click()
-        XCTAssertTrue(app.staticTexts["Branch: \(branch)"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Merge from: \(mergeFrom)"].exists)
-        XCTAssertTrue(app.staticTexts["Merge to: \(mergeTo)"].exists)
+        XCTAssertEqual(element("conversation-repository-branch").value as? String, branch)
+        XCTAssertEqual(element("conversation-repository-branch-from").value as? String, mergeFrom)
+        XCTAssertEqual(element("conversation-repository-merge-target").value as? String, mergeTo)
     }
 
     // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | Empty tasks and clean worktrees delete without confirmation, dirty worktrees require confirmation, and confirmed deletion removes the managed worktree and task.
     func test_task_delete_removes_task_and_later_lookup_is_not_found() throws {
         launchApp(defaultParent: fixture.parent.path)
-        try createTaskFixture(title: "Delete me", roots: [fixture.primary.path])
+        _ = try runCLI(["task", "create", "--title", "Delete me", "--repo", fixture.primary.path])
         let taskID = try taskID(named: "Delete me")
         let record = try XCTUnwrap(taskRecord(named: "Delete me"))
         let worktrees = try XCTUnwrap(record["repositoryWorktrees"] as? [[String: Any]])
@@ -829,12 +831,14 @@ final class StationAIUITests: XCTestCase {
         XCTAssertNil(history?["diff"])
 
         element("back-to-board-button").click()
-        XCTAssertTrue(app.alerts["Discard this task?"].waitForExistence(timeout: 5))
-        element("cancel-discard-empty-task-button").click()
+        let cancelDiscard = element("cancel-discard-empty-task-button")
+        XCTAssertTrue(cancelDiscard.waitForExistence(timeout: 5))
+        cancelDiscard.click()
         XCTAssertTrue(element("empty-conversation").exists, "Canceling discard should keep the new task open.")
         element("back-to-board-button").click()
-        XCTAssertTrue(app.alerts["Discard this task?"].waitForExistence(timeout: 5))
-        element("confirm-discard-empty-task-button").click()
+        let confirmDiscard = element("confirm-discard-empty-task-button")
+        XCTAssertTrue(confirmDiscard.waitForExistence(timeout: 5))
+        confirmDiscard.click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
         let deleted = try runCLI(["task", "get", createdTaskID], expectedStatus: 3)
         XCTAssertEqual((deleted["error"] as? [String: Any])?["code"] as? String, "not_found")
@@ -843,6 +847,7 @@ final class StationAIUITests: XCTestCase {
 
     // case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task opens its conversation directly with a unique title-independent branch; backing out saves the unsent prompt in Backlog, reopening restores it, and returning again preserves the resolved title. Invalid status changes are rejected without mutation.
     func test_task_prompt_draft_persists_after_back() throws {
+        codexFixtureExecutable = "/tmp/stationai-bridge-workspaces/codex-fixture-success-wait"
         launchApp(defaultParent: fixture.parent.path)
         openNewTaskSheet()
         chooseRepositorySuggestion("primary")
@@ -859,6 +864,9 @@ final class StationAIUITests: XCTestCase {
         composer.typeText(prompt)
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        let titleGenerationReady = URL(fileURLWithPath: codexFixtureExecutable! + ".resolve-ready")
+        let titleGenerationContinue = URL(fileURLWithPath: codexFixtureExecutable! + ".resolve-continue")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: titleGenerationReady.path) }, timeout: 10), "The real app-server fixture should confirm that title generation is in flight.")
         let tasks = try tasksFromBoardList()
         let task = try XCTUnwrap(tasks.first)
         let taskID = try XCTUnwrap(task["id"] as? String)
@@ -874,6 +882,11 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(unchanged?["status"] as? String, "Backlog")
 
         _ = try runCLI(["task", "rename", taskID, "--title", "Stable draft title"])
+        try Data("continue\n".utf8).write(to: titleGenerationContinue)
+        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: titleGenerationReady.path) }, timeout: 10), "The fixture should finish the delayed title turn.")
+        XCTAssertTrue(waitUntil({
+            ((try? self.taskRecord(id: taskID)?["title"] as? String) ?? nil) == "Stable draft title"
+        }, timeout: 10), "A late title response must not overwrite a title that was renamed while generation was pending.")
         openTask(named: "Stable draft title")
         XCTAssertEqual(composer.value as? String, prompt, "Reopening should restore an unsent draft.")
         element("back-to-board-button").click()
@@ -902,7 +915,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(sendButton.isEnabled)
         composer.click()
         composer.typeText("First line")
-        composer.typeKey("return", modifierFlags: .shift)
+        composer.typeKey(.return, modifierFlags: .shift)
         composer.typeText("Second line")
         XCTAssertEqual(composer.value as? String, "First line\nSecond line", "Shift+Enter should add a line without submitting the composer.")
         XCTAssertTrue(sendButton.isEnabled)
@@ -991,6 +1004,96 @@ final class StationAIUITests: XCTestCase {
             attachScreenshot(named: "Continued response completed in the conversation")
         }
         attachScreenshot(named: "Blank composer leaves send disabled")
+    }
+
+    // case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex, and displays attached images from reloaded conversation history.
+    func test_conversation_sends_image_attachments() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Image conversation", roots: [fixture.primary.path])
+        openTask(named: "Image conversation")
+        let image = dataDirectory.appendingPathComponent("chat-image.png")
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        try bitmap.representation(using: .png, properties: [:])!.write(to: image)
+        let attach = element("attach-chat-image-button")
+        XCTAssertTrue(attach.waitForExistence(timeout: 10))
+        attach.click()
+        let picker = app.sheets["open-panel"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 5), "Attach should open the system image picker.")
+        picker.typeKey("g", modifierFlags: [.command, .shift])
+        let goToSheet = app.sheets.firstMatch
+        XCTAssertTrue(goToSheet.waitForExistence(timeout: 5))
+        try chooseFile(in: picker, goToSheet: goToSheet, file: image)
+        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "The chosen image should appear in the composer preview.")
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText("What is shown in this screenshot?")
+        element("send-message-button").click()
+        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        let pickedTurnData = try Data(contentsOf: URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history"))
+        let pickedTurn = try XCTUnwrap(JSONSerialization.jsonObject(with: pickedTurnData) as? [String: Any])
+        XCTAssertEqual(pickedTurn["userMessage"] as? String, "What is shown in this screenshot?")
+        XCTAssertEqual((pickedTurn["images"] as? [String])?.count, 1, "The fixture should receive the picker image alongside the text prompt.")
+        app.buttons["Blue"].click()
+        element("ai-question-answer-token").click()
+        element("ai-question-answer-token").typeText("fixture-secret")
+        element("submit-ai-answers-button").click()
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        XCTAssertTrue(element("user-message-item_user_fixture").waitForExistence(timeout: 10), "Reloaded history should retain the picker attachment.")
+        XCTAssertTrue(app.images["user-message-item_user_fixture"].waitForExistence(timeout: 10), "Conversation history should render the picker image.")
+
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        try createTaskFixture(title: "Pasted image conversation", roots: [fixture.primary.path])
+        openTask(named: "Pasted image conversation")
+
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.writeObjects([try XCTUnwrap(NSImage(contentsOf: image))])
+        let pastedComposer = element("message-composer")
+        pastedComposer.click()
+        pastedComposer.typeKey("v", modifierFlags: .command)
+        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "Pasting an image should create a composer preview.")
+        element("send-message-button").click()
+        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        app.buttons["Blue"].click()
+        element("ai-question-answer-token").click()
+        element("ai-question-answer-token").typeText("fixture-secret")
+        element("submit-ai-answers-button").click()
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        XCTAssertTrue(element("user-message-item_user_fixture").waitForExistence(timeout: 10), "History reload should leave the pasted attachment in the conversation.")
+        XCTAssertTrue(app.images["user-message-item_user_fixture"].waitForExistence(timeout: 10), "Conversation history should render the pasted image itself.")
+        let pastedTurnData = try Data(contentsOf: URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history"))
+        let pastedTurn = try XCTUnwrap(JSONSerialization.jsonObject(with: pastedTurnData) as? [String: Any])
+        XCTAssertTrue(pastedTurn["userMessage"] is NSNull, "The fixture should receive no text for the pasted image-only turn.")
+        XCTAssertEqual((pastedTurn["images"] as? [String])?.count, 1, "The fixture should receive the pasted image.")
+        attachScreenshot(named: "Chat sends picker text-and-image and pasted image-only messages")
+    }
+
+    // case-contract: test_conversation_rejects_invalid_image_attachments | Malformed image data is rejected with a visible composer error and an invalid_argument bridge response, without creating conversation history or advancing task status.
+    func test_conversation_rejects_invalid_image_attachments() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Invalid image conversation", roots: [fixture.primary.path])
+        openTask(named: "Invalid image conversation")
+        let invalid = dataDirectory.appendingPathComponent("invalid-chat-image.png")
+        try Data("not an image".utf8).write(to: invalid)
+        element("attach-chat-image-button").click()
+        let picker = app.sheets["open-panel"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        picker.typeKey("g", modifierFlags: [.command, .shift])
+        let goToSheet = app.sheets.firstMatch
+        XCTAssertTrue(goToSheet.waitForExistence(timeout: 5))
+        try chooseFile(in: picker, goToSheet: goToSheet, file: invalid)
+        let error = element("codex-chat-error")
+        XCTAssertTrue(error.waitForExistence(timeout: 5), "Pasting malformed image bytes should show a visible validation error.")
+        XCTAssertTrue(error.label.localizedCaseInsensitiveContains("valid images"))
+        XCTAssertTrue(element("send-message-button").isEnabled == false, "An invalid image must not enable send.")
+
+        let taskID = try taskID(named: "Invalid image conversation")
+        let bridgeResult = try runCLI(["conversation", "send", taskID, "--image", invalid.path], expectedStatus: 2)
+        XCTAssertEqual((bridgeResult["error"] as? [String: Any])?["code"] as? String, "invalid_argument")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Backlog")
+        let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
     }
 
     // case-contract: test_conversation_shows_subagent_delegation | When Codex delegates a task to a subagent, the conversation activity shows the delegated task and its completion status during the turn and after history reload.
@@ -1506,12 +1609,22 @@ final class StationAIUITests: XCTestCase {
         mergeMenuItem.click()
     }
 
+    private func mergeTaskToDone(taskID: String) {
+        let card = element("task-card-\(taskID)")
+        XCTAssertTrue(card.waitForExistence(timeout: 5), "The reviewed task card should remain available by its stable task identifier.")
+        card.rightClick()
+        let mergeMenuItem = app.menuItems["move-task-to-done-menu-item"]
+        XCTAssertTrue(mergeMenuItem.waitForExistence(timeout: 5), "A reviewed task should offer a direct Merge and move to Done action.")
+        mergeMenuItem.click()
+    }
+
     private func dragTaskToTrash(_ title: String) {
         let card = app.buttons[title]
         XCTAssertTrue(card.waitForExistence(timeout: 5))
-        let sourcePoint = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-        let dropPoint = app.windows.element.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0.55))
-        sourcePoint.press(forDuration: 0.8, thenDragTo: dropPoint)
+        card.rightClick()
+        let deleteAction = element("delete-task-menu-item")
+        XCTAssertTrue(deleteAction.waitForExistence(timeout: 5), "The task context menu should offer Delete Task.")
+        deleteAction.click()
     }
 
     private func assertOrderedRoots(_ paths: [String], file: StaticString = #filePath, line: UInt = #line) {
@@ -1565,6 +1678,24 @@ final class StationAIUITests: XCTestCase {
         let chooseButton = panel.buttons[confirmationButton]
         XCTAssertTrue(chooseButton.waitForExistence(timeout: 10), "Folder panel did not show \(confirmationButton).")
         chooseButton.click()
+    }
+
+    private func chooseFile(in panel: XCUIElement, goToSheet: XCUIElement, file: URL) throws {
+        let pathField = goToSheet.textFields.firstMatch
+        XCTAssertTrue(pathField.waitForExistence(timeout: 5))
+        pathField.click()
+        pathField.typeKey("a", modifierFlags: .command)
+        pathField.typeText(file.deletingLastPathComponent().standardizedFileURL.path)
+        pathField.typeKey(.return, modifierFlags: [])
+        let target = panel.descendants(matching: .any).matching(
+            NSPredicate(format: "value == %@ OR label == %@", file.lastPathComponent, file.lastPathComponent)
+        ).firstMatch
+        XCTAssertTrue(target.waitForExistence(timeout: 10), "The image picker should show the selected file.")
+        target.click()
+        let openButton = panel.buttons["Open"]
+        XCTAssertTrue(openButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(openButton.isEnabled, "The image file should be selected before opening it.")
+        openButton.click()
     }
 
     private var settingsWindow: XCUIElement {

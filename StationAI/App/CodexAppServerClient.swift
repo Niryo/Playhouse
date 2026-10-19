@@ -10,6 +10,23 @@ struct CodexChatMessage: Codable, Identifiable, Equatable {
     let id: String
     let role: CodexChatRole
     var text: String
+    var imageDataURLs: [String]
+
+    init(id: String, role: CodexChatRole, text: String, imageDataURLs: [String] = []) {
+        self.id = id
+        self.role = role
+        self.text = text
+        self.imageDataURLs = imageDataURLs
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, role, text, imageDataURLs }
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        role = try container.decode(CodexChatRole.self, forKey: .role)
+        text = try container.decode(String.self, forKey: .text)
+        imageDataURLs = try container.decodeIfPresent([String].self, forKey: .imageDataURLs) ?? []
+    }
 }
 
 struct CodexUserQuestion: Identifiable, Codable, Equatable {
@@ -190,6 +207,7 @@ final class CodexAppServerClient: ObservableObject {
 
     func sendMessage(
         _ text: String,
+        imageDataURLs: [String] = [],
         mode: CodexConversationMode,
         modelID: String,
         threadID: String,
@@ -232,7 +250,7 @@ final class CodexAppServerClient: ObservableObject {
             method: "turn/start",
             params: [
                 "threadId": threadID,
-                "input": [["type": "text", "text": text]],
+                "input": (text.isEmpty ? [] : [["type": "text", "text": text]]) + imageDataURLs.map { ["type": "image", "image_url": $0] },
                 "model": modelID,
                 "cwd": workspace.cwd.path,
                 "runtimeWorkspaceRoots": workspace.roots.map(\.path),
@@ -787,8 +805,12 @@ final class CodexAppServerClient: ObservableObject {
                 guard part["type"] as? String == "text" else { return nil }
                 return part["text"] as? String
             }.joined()
-            guard !text.isEmpty else { return nil }
-            return CodexChatMessage(id: itemID, role: .user, text: text)
+            let images = content.compactMap { part -> String? in
+                guard part["type"] as? String == "image" else { return nil }
+                return part["image_url"] as? String
+            }
+            guard !text.isEmpty || !images.isEmpty else { return nil }
+            return CodexChatMessage(id: itemID, role: .user, text: text, imageDataURLs: images)
         case "agentMessage":
             guard let text = item["text"] as? String, !text.isEmpty else { return nil }
             return CodexChatMessage(id: itemID, role: .assistant, text: text)

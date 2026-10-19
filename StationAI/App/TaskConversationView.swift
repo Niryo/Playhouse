@@ -1,5 +1,7 @@
+import AppKit
 import SwiftData
 import SwiftUI
+import UniformTypeIdentifiers
 
 @MainActor
 protocol TaskTitleGenerating {
@@ -31,6 +33,11 @@ struct CodexTaskTitleGenerator: TaskTitleGenerating {
 }
 
 struct TaskConversationView: View {
+    private struct PendingImage: Identifiable {
+        let id = UUID()
+        let dataURL: String
+        let image: NSImage
+    }
     private struct RepositoryBadgeEditID: Identifiable, Equatable {
         let path: String
         var id: String { path }
@@ -52,6 +59,8 @@ struct TaskConversationView: View {
     let onBack: () -> Void
 
     @State private var draft = ""
+    @State private var pendingImages: [PendingImage] = []
+    @State private var isShowingImagePicker = false
     @State private var isGeneratingTitle = false
     @State private var conversationMode: CodexConversationMode = .code
     @State private var modelOptions = [CodexModelOption(id: CodexAppServerClient.modelID, name: "GPT-6 Luna", isDefault: true)]
@@ -95,7 +104,7 @@ struct TaskConversationView: View {
     @FocusState private var isRepositorySearchFocused: Bool
 
     private var isSendDisabled: Bool {
-        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || workspaceRootURLs.isEmpty || isResponding || isLoadingHistory
+        (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty) || workspaceRootURLs.isEmpty || isResponding || isLoadingHistory
     }
 
     private var diffHighlightStatus: String {
@@ -128,6 +137,11 @@ struct TaskConversationView: View {
                 repositoryWorktrees: task.repositoryWorktrees,
                 onSave: updateWorkspaceRoots
             )
+        }
+        .fileImporter(isPresented: $isShowingImagePicker, allowedContentTypes: [.image], allowsMultipleSelection: true) { result in
+            do {
+                for url in try result.get() { try addImageData(Data(contentsOf: url)) }
+            } catch { errorMessage = "Couldn't load image: \(error.localizedDescription)" }
         }
         .alert("Discard this task?", isPresented: $isShowingDiscardConfirmation) {
             Button("Discard Task", role: .destructive) {
@@ -1014,23 +1028,43 @@ struct TaskConversationView: View {
     }
 
     private func userBubble(_ message: CodexChatMessage) -> some View {
-        Text(message.text)
-            .font(.system(size: 14))
-            .foregroundStyle(.white)
-            .fixedSize(horizontal: false, vertical: true)
-            .textSelection(.enabled)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 11)
-            .background(
-                Color(red: 0.34, green: 0.40, blue: 0.86),
-                in: RoundedRectangle(cornerRadius: 17, style: .continuous)
-            )
+        VStack(alignment: .trailing, spacing: 8) {
+            ForEach(Array(message.imageDataURLs.enumerated()), id: \.offset) { index, dataURL in
+                if let image = Self.image(fromDataURL: dataURL) {
+                    Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 260, maxHeight: 220)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
+                }
+            }
+            if !message.text.isEmpty {
+                Text(message.text)
+                    .font(.system(size: 14)).foregroundStyle(.white)
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                    .padding(.horizontal, 16).padding(.vertical, 11)
+                    .background(Color(red: 0.34, green: 0.40, blue: 0.86), in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+            }
+        }
             .frame(maxWidth: 620, alignment: .trailing)
             .accessibilityIdentifier("user-message-\(message.id)")
     }
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if !pendingImages.isEmpty {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(pendingImages) { attachment in
+                            Image(nsImage: attachment.image).resizable().scaledToFill()
+                                .frame(width: 64, height: 52).clipShape(RoundedRectangle(cornerRadius: 8))
+                                .overlay(alignment: .topTrailing) {
+                                    Button { pendingImages.removeAll { $0.id == attachment.id } } label: {
+                                        Image(systemName: "xmark.circle.fill").foregroundStyle(.white, .black.opacity(0.7))
+                                    }.buttonStyle(.plain).accessibilityLabel("Remove image")
+                                }
+                        }
+                    }
+                }.accessibilityIdentifier("pending-chat-images")
+            }
             if let actionNotice {
                 Label(actionNotice, systemImage: "hand.raised.fill")
                     .font(.system(size: 11, weight: .medium))
@@ -1059,7 +1093,26 @@ struct TaskConversationView: View {
                         draft += "\n"
                         return .handled
                     }
+                    .onKeyPress(KeyEquivalent("v"), phases: .down) { press in
+                        guard press.modifiers.contains(.command),
+                              let image = NSPasteboard.general.readObjects(forClasses: [NSImage.self])?.first as? NSImage,
+                              let data = image.tiffRepresentation else { return .ignored }
+                        do { try addImageData(data) }
+                        catch { errorMessage = error.localizedDescription }
+                        return .handled
+                    }
                     .onSubmit { sendMessage() }
+                    .onPasteCommand(of: [.image]) { providers in
+                        for provider in providers {
+                            _ = provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+                                guard let data else { return }
+                                Task { @MainActor in
+                                    do { try addImageData(data) }
+                                    catch { errorMessage = error.localizedDescription }
+                                }
+                            }
+                        }
+                    }
                     .onChange(of: draft) { _, newValue in
                         if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/plan" {
                             activatePlanMode()
@@ -1069,6 +1122,9 @@ struct TaskConversationView: View {
                     .accessibilityIdentifier("message-composer")
 
                 HStack(spacing: 12) {
+                    Button { isShowingImagePicker = true } label: { Image(systemName: "paperclip") }
+                        .buttonStyle(.plain).accessibilityLabel("Attach image")
+                        .accessibilityIdentifier("attach-chat-image-button")
                     Menu {
                         ForEach(CodexConversationMode.allCases, id: \.self) { mode in
                             Button {
@@ -1291,7 +1347,7 @@ struct TaskConversationView: View {
 
     private func sendMessage(overrideText: String? = nil) {
         let text = (overrideText ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isResponding, !isLoadingHistory else { return }
+        guard (!text.isEmpty || !pendingImages.isEmpty), !isResponding, !isLoadingHistory else { return }
         if text == "/plan" {
             activatePlanMode()
             return
@@ -1300,10 +1356,12 @@ struct TaskConversationView: View {
 
         let userMessageID = UUID().uuidString
         let assistantMessageID = UUID().uuidString
-        messages.append(CodexChatMessage(id: userMessageID, role: .user, text: text))
+        messages.append(CodexChatMessage(id: userMessageID, role: .user, text: text, imageDataURLs: pendingImages.map(\.dataURL)))
         messages.append(CodexChatMessage(id: assistantMessageID, role: .assistant, text: ""))
         isResponding = true
         draft = ""
+        let imageDataURLs = pendingImages.map(\.dataURL)
+        pendingImages = []
         hasPausedResponse = false
         isPausingResponse = false
         errorMessage = nil
@@ -1312,7 +1370,7 @@ struct TaskConversationView: View {
 
         Task { @MainActor in
             do {
-                _ = try await conversationManager.send(taskID: task.id, text: text, mode: conversationMode, modelID: selectedModelID, onTurnStarting: {
+                _ = try await conversationManager.send(taskID: task.id, text: text, imageDataURLs: imageDataURLs, mode: conversationMode, modelID: selectedModelID, onTurnStarting: {
                     isResponding = true
                 }, onUpdate: { update in
                     switch update.type {
@@ -1365,6 +1423,10 @@ struct TaskConversationView: View {
                 } else {
                     messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
                     draft = text
+                    pendingImages = imageDataURLs.compactMap { dataURL in
+                        guard let image = Self.image(fromDataURL: dataURL) else { return nil }
+                        return PendingImage(dataURL: dataURL, image: image)
+                    }
                     errorMessage = error.localizedDescription
                 }
                 isComposerFocused = true
@@ -1372,6 +1434,22 @@ struct TaskConversationView: View {
 
             isResponding = false
         }
+    }
+
+    private func addImageData(_ data: Data) throws {
+        guard pendingImages.count < 8, data.count <= 10_000_000,
+              let image = NSImage(data: data),
+              let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff),
+              let png = bitmap.representation(using: .png, properties: [:]) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images, each smaller than 10 MB.")
+        }
+        pendingImages.append(PendingImage(dataURL: "data:image/png;base64,\(png.base64EncodedString())", image: image))
+    }
+
+    private static func image(fromDataURL value: String) -> NSImage? {
+        guard let comma = value.firstIndex(of: ","), let data = Data(base64Encoded: String(value[value.index(after: comma)...])) else { return nil }
+        return NSImage(data: data)
     }
 
     private func saveAndBack() {
@@ -1408,6 +1486,11 @@ struct TaskConversationView: View {
         Task { @MainActor in
             let title = await generateTaskTitle(from: prompt)
             let fallback = prompt.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
+            guard let latestTask = try? BoardTaskManager(modelContext: modelContext).taskModel(task.id),
+                  latestTask.title == "Generating title…" else {
+                isGeneratingTitle = false
+                return
+            }
             _ = try? BoardTaskManager(modelContext: modelContext).rename(task.id, title: title.flatMap { $0.isEmpty ? nil : $0 } ?? fallback)
             isGeneratingTitle = false
         }
@@ -1415,7 +1498,8 @@ struct TaskConversationView: View {
 
     private func generateTaskTitle(from prompt: String) async -> String? {
         guard let workspace = try? CodexWorkspaceContext(roots: workspaceRootURLs) else { return nil }
-        return await CodexTaskTitleGenerator(client: CodexAppServerClient()).generateTitle(from: prompt, workspace: workspace)
+        let fixtureExecutable = ProcessInfo.processInfo.environment["STATIONAI_E2E_CODEX_EXECUTABLE"]
+        return await CodexTaskTitleGenerator(client: CodexAppServerClient(codexExecutableOverride: fixtureExecutable)).generateTitle(from: prompt, workspace: workspace)
     }
 
     private func pauseResponse() {

@@ -96,8 +96,30 @@ def main():
             saw_question = True
             turn_input = message.get("params", {}).get("input", [])
             turn_message = next((item.get("text") for item in turn_input if item.get("type") == "text"), None)
-            if turn_message is not None:
-                history_path.write_text(json.dumps({"userMessage": turn_message}), encoding="utf-8")
+            is_title_request = (turn_message or "").startswith("Write a concise task title of at most 8 words")
+            if is_title_request:
+                write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": "turn_stationai_fixture", "status": "inProgress"}}})
+                if mode.endswith("-success-wait"):
+                    ready = Path(str(sys.argv[0]) + ".resolve-ready")
+                    resume = Path(str(sys.argv[0]) + ".resolve-continue")
+                    ready.write_text("Codex task-title turn is active.\n", encoding="utf-8")
+                    deadline = time.monotonic() + 30
+                    while not resume.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    if not resume.exists():
+                        return 3
+                    ready.unlink(missing_ok=True)
+                    resume.unlink(missing_ok=True)
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": "00000000-0000-0000-0000-000000000001",
+                    "item": {"id": "item_stationai_title", "type": "agentMessage", "text": "Generated fixture title"},
+                }})
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": "00000000-0000-0000-0000-000000000001",
+                    "turn": {"id": "turn_stationai_fixture", "status": "completed"},
+                }})
+                continue
+            history_path.write_text(json.dumps({"userMessage": turn_message, "images": [item.get("image_url") for item in turn_input if item.get("type") == "image"]}), encoding="utf-8")
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": "turn_stationai_fixture", "status": "inProgress"}}})
             if mode.endswith("-abort"):
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
@@ -162,10 +184,14 @@ def main():
         elif message.get("method") == "thread/items/list":
             saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
             user_message = saved_history.get("userMessage") or (turn_message if answers else None)
+            user_images = saved_history.get("images", [])
+            user_content = ([{"type": "text", "text": user_message}] if user_message else []) + [
+                {"type": "image", "image_url": image_url} for image_url in user_images
+            ]
             contents = ([
-                {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": user_message}]},
+                {"id": "item_user_fixture", "type": "userMessage", "content": user_content},
                 {"id": "item_assistant_fixture", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."},
-            ] if user_message and not mode.endswith("-empty") else [])
+            ] if user_content and not mode.endswith("-empty") else [])
             if mode.endswith("-subagent"):
                 contents = [
                     {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": "Delegate this task."}]},

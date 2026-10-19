@@ -67,7 +67,11 @@ xattr -d com.apple.provenance "${fixture_root}/codex-fixture-subagent" 2>/dev/nu
 python3 "${repository_root}/scripts/check-test-parity.py"
 
 contract_path="${repository_root}/StationAI/BridgeTests/BridgeTestContracts.json"
-expected_count="$(python3 - "${contract_path}" "${ui_cases[@]}" <<'PY'
+contract_arguments=("${contract_path}")
+if (( ${#ui_cases[@]} > 0 )); then
+  contract_arguments+=("${ui_cases[@]}")
+fi
+expected_count="$(python3 - "${contract_arguments[@]}" <<'PY'
 import json
 import sys
 

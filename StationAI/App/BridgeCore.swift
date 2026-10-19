@@ -600,6 +600,7 @@ final class CodexConversationManager {
     func send(
         taskID: UUID,
         text: String,
+        imageDataURLs: [String] = [],
         mode: CodexConversationMode = .code,
         modelID: String = CodexAppServerClient.modelID,
         userInputAnswers: [String: [String]] = [:],
@@ -608,7 +609,10 @@ final class CodexConversationManager {
         onUserInput: @escaping (CodexUserInputRequest) -> Void = { _ in }
     ) async throws -> CodexThreadHistory {
         let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedText.isEmpty else { throw StationAIManagerError.invalidMessage }
+        guard !normalizedText.isEmpty || !imageDataURLs.isEmpty else { throw StationAIManagerError.invalidMessage }
+        guard imageDataURLs.count <= 8, imageDataURLs.allSatisfy(Self.isValidImageDataURL) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
+        }
         guard Self.isValidModelID(modelID) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
         }
@@ -645,6 +649,7 @@ final class CodexConversationManager {
             }
             try await client.sendMessage(
                 normalizedText,
+                imageDataURLs: imageDataURLs,
                 mode: mode,
                 modelID: modelID,
                 threadID: threadID,
@@ -706,6 +711,20 @@ final class CodexConversationManager {
         !value.isEmpty && value.count <= 100 && value.unicodeScalars.allSatisfy {
             CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-").contains($0)
         }
+    }
+
+    private static func isValidImageDataURL(_ value: String) -> Bool {
+        guard let separator = value.firstIndex(of: ",") else { return false }
+        let mime = String(value[..<separator])
+        guard let data = Data(base64Encoded: String(value[value.index(after: separator)...])), data.count <= 10_000_000 else { return false }
+        let bytes = [UInt8](data.prefix(12))
+        if mime == "data:image/png;base64" {
+            return bytes.starts(with: [137, 80, 78, 71, 13, 10, 26, 10])
+        }
+        if mime == "data:image/jpeg;base64" {
+            return bytes.starts(with: [255, 216, 255])
+        }
+        return false
     }
 }
 
@@ -844,7 +863,7 @@ final class StationAIBridgeRuntime {
                 result = .object(["models": .array(try await conversations.models(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })])
             case "conversation.send":
                 let taskID = try request.requiredUUID("taskID")
-                let message = try request.requiredString("message")
+                let message = request.arguments["message"]?.string ?? ""
                 let modeValue = request.arguments["mode"]?.string ?? CodexConversationMode.code.rawValue
                 guard let mode = CodexConversationMode(rawValue: modeValue) else {
                     throw BridgeCommandError(
@@ -854,11 +873,12 @@ final class StationAIBridgeRuntime {
                 }
                 let modelID = request.arguments["model"]?.string ?? CodexAppServerClient.modelID
                 let answers = try request.optionalStringArrays("answers")
+                let imageDataURLs = request.arguments["images"]?.strings ?? []
                 let conversations = CodexConversationManager(
                     tasks: taskManager,
                     client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
                 )
-                let history = try await conversations.send(taskID: taskID, text: message, mode: mode, modelID: modelID, userInputAnswers: answers, onUpdate: { update in
+                let history = try await conversations.send(taskID: taskID, text: message, imageDataURLs: imageDataURLs, mode: mode, modelID: modelID, userInputAnswers: answers, onUpdate: { update in
                     if let payload = try? Self.value(update) {
                         eventHandler(BridgeEvent(requestID: request.id, type: update.type, payload: payload))
                     }

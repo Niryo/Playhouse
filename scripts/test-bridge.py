@@ -686,6 +686,55 @@ class StationAIBridgeTests(unittest.TestCase):
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["savedPrompt"], prompt)
 
+    # case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex, and displays attached images from reloaded conversation history.
+    def test_conversation_sends_image_attachments(self):
+        task_id = self.create_task(title="Image conversation") ["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-success"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        image = self.data_directory / "tiny.png"
+        image.write_bytes(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"))
+        result, _ = self.call_cli(
+            "conversation", "send", task_id, "--image", str(image),
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        self.assert_success(result)
+        sent = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        self.assertEqual(len(sent["images"]), 1)
+        self.assertTrue(sent["images"][0].startswith("data:image/png;base64,"))
+        text_prompt = "Describe this screenshot."
+        mixed, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", text_prompt, "--image", str(image),
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        self.assert_success(mixed)
+        sent = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        self.assertEqual(sent["userMessage"], text_prompt)
+        self.assertEqual(len(sent["images"]), 1)
+        invalid, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "image", "--image", str(self.data_directory / "missing.png"),
+            expected_status=2,
+        )
+        self.assertNotEqual(invalid.get("error", {}).get("code"), None)
+
+    # case-contract: test_conversation_rejects_invalid_image_attachments | Malformed image data is rejected with a visible composer error and an invalid_argument bridge response, without creating conversation history or advancing task status.
+    def test_conversation_rejects_invalid_image_attachments(self):
+        task_id = self.create_task(title="Invalid image conversation")["id"]
+        invalid_image = self.data_directory / "invalid.png"
+        invalid_image.write_bytes(b"not an image")
+        result, _ = self.call_cli(
+            "conversation", "send", task_id, "--image", str(invalid_image), expected_status=2,
+        )
+        self.assertEqual(result.get("error", {}).get("code"), "invalid_argument")
+        task, _ = self.call_cli("task", "get", task_id)
+        self.assertEqual(self.assert_success(task)["status"], "Backlog")
+        history, _ = self.call_cli("conversation", "history", task_id)
+        self.assertEqual(self.assert_success(history)["messages"], [])
+
     # case-contract: test_conversation_shows_subagent_delegation | When Codex delegates a task to a subagent, the conversation activity shows the delegated task and its completion status during the turn and after history reload.
     def test_conversation_shows_subagent_delegation(self):
         task_id = self.create_task(title="Subagent delegation")["id"]

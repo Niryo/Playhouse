@@ -100,6 +100,14 @@
     "expectation": "Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, and a sent saved prompt remains in conversation history through live-turn controls and history reload."
   },
   {
+    "id": "test_conversation_sends_image_attachments",
+    "expectation": "The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex, and displays attached images from reloaded conversation history."
+  },
+  {
+    "id": "test_conversation_rejects_invalid_image_attachments",
+    "expectation": "Malformed image data is rejected with a visible composer error and an invalid_argument bridge response, without creating conversation history or advancing task status."
+  },
+  {
     "id": "test_conversation_shows_subagent_delegation",
     "expectation": "When Codex delegates a task to a subagent, the conversation activity shows the delegated task and its completion status during the turn and after history reload."
   },

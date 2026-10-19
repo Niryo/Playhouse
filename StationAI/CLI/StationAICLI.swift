@@ -170,7 +170,7 @@ enum StationAICLI {
             case "history": return BridgeRequest(command: "conversation.history", arguments: ["taskID": .string(id)])
             case "models": return BridgeRequest(command: "conversation.models", arguments: ["taskID": .string(id)])
             case "send":
-                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode", "--model", "--answer"])
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode", "--model", "--answer", "--image"])
                 var answers: [String: [String]] = [:]
                 for pair in flags["--answer"] ?? [] {
                     guard let separator = pair.firstIndex(of: "="), separator != pair.startIndex else {
@@ -183,12 +183,20 @@ enum StationAICLI {
                     }
                     answers[questionID, default: []].append(answer)
                 }
+                let images = try (flags["--image"] ?? []).map { path -> BridgeValue in
+                    let url = URL(fileURLWithPath: path)
+                    let data = try Data(contentsOf: url)
+                    guard data.count <= 10_000_000 else { throw CLIError.usage("Each image must be smaller than 10 MB.") }
+                    let mime = url.pathExtension.lowercased() == "jpg" || url.pathExtension.lowercased() == "jpeg" ? "image/jpeg" : "image/png"
+                    return .string("data:\(mime);base64,\(data.base64EncodedString())")
+                }
                 return BridgeRequest(command: "conversation.send", arguments: [
                     "taskID": .string(id),
-                    "message": .string(try requiredFlag("--message", flags: flags).first!),
+                    "message": .string(flags["--message"]?.first ?? ""),
                     "mode": .string(flags["--mode"]?.first ?? "default"),
                     "model": .string(flags["--model"]?.first ?? "gpt-6-luna"),
-                    "answers": .object(answers.mapValues { BridgeValue.array($0.map(BridgeValue.string)) })
+                    "answers": .object(answers.mapValues { BridgeValue.array($0.map(BridgeValue.string)) }),
+                    "images": .array(images)
                 ])
             default: throw CLIError.usage("Unknown conversation operation '\(operation)'.")
             }
@@ -276,7 +284,7 @@ enum StationAICLI {
       stationai settings get|clear-parent|set-parent <path>|set-appearance <dark|light>
       stationai conversation history <task-id>
       stationai conversation models <task-id>
-      stationai conversation send <task-id> --message <text> [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...]
+      stationai conversation send <task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...]
 
     Results are JSON. Conversation send emits JSON event lines followed by a final response.
     """
