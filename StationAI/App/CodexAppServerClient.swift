@@ -141,6 +141,17 @@ final class CodexAppServerClient: ObservableObject {
         self.codexExecutableOverride = Self.ownedTestFixtureExecutable(codexExecutableOverride)
     }
 
+    func diagnosticFields(_ additionalFields: [String: String] = [:]) -> [String: String] {
+        var fields = additionalFields
+        fields["clientPID"] = String(ProcessInfo.processInfo.processIdentifier)
+        fields["codexPID"] = String(process?.processIdentifier ?? -1)
+        fields["activeThreadID"] = activeThreadID ?? ""
+        fields["activeTurnID"] = activeTurnID ?? ""
+        fields["isTurnActive"] = String(isTurnActive)
+        fields["pendingInputThreadID"] = pendingUserInputThreadID ?? ""
+        return fields
+    }
+
     func loadThread(
         id threadID: String,
         workspace: CodexWorkspaceContext,
@@ -279,15 +290,35 @@ final class CodexAppServerClient: ObservableObject {
         activeTurnID = turnID
         isTurnActive = true
         Self.processActiveThreadIDs.insert(threadID)
+        StationAIDiagnostics.record("codex.turn.started", fields: diagnosticFields([
+            "threadID": threadID,
+            "turnID": turnID,
+            "turnStatus": turn["status"] as? String ?? "unknown",
+            "workspaceRootCount": String(workspace.roots.count),
+        ]))
 
         let turnKey = Self.turnKey(threadID: threadID, turnID: turnID)
         switch turn["status"] as? String {
         case "completed":
             break
         case "failed", "interrupted":
+            StationAIDiagnostics.record("codex.turn.ended", fields: diagnosticFields([
+                "threadID": threadID,
+                "turnID": turnID,
+                "turnStatus": turn["status"] as? String ?? "unknown",
+            ]))
             throw ClientError.turnFailed(Self.turnFailureDescription(turn))
         default:
-            try await waitForTurn(turnKey)
+            do {
+                try await waitForTurn(turnKey)
+            } catch {
+                var fields = StationAIDiagnostics.errorFields(error)
+                fields["threadID"] = threadID
+                fields["turnID"] = turnID
+                fields.merge(diagnosticFields()) { _, new in new }
+                StationAIDiagnostics.record("codex.turn.wait_failed", fields: fields)
+                throw error
+            }
         }
 
         if let history = try? await readMessages(threadID: threadID) {
@@ -449,20 +480,35 @@ final class CodexAppServerClient: ObservableObject {
         }
 
         try await ensureInitialized(workspace: workspace)
-        let response = try await request(
-            method: "thread/resume",
-            params: [
-                "threadId": threadID,
-                "model": modelID,
-                "cwd": workspace.cwd.path,
-                "sandbox": "danger-full-access",
-                "approvalPolicy": "never",
-                "approvalsReviewer": "user",
-                "runtimeWorkspaceRoots": workspace.roots.map(\.path)
-            ]
-        )
+        StationAIDiagnostics.record("codex.thread.resume_started", fields: diagnosticFields([
+            "threadID": threadID,
+        ]))
+        let response: [String: Any]
+        do {
+            response = try await request(
+                method: "thread/resume",
+                params: [
+                    "threadId": threadID,
+                    "model": modelID,
+                    "cwd": workspace.cwd.path,
+                    "sandbox": "danger-full-access",
+                    "approvalPolicy": "never",
+                    "approvalsReviewer": "user",
+                    "runtimeWorkspaceRoots": workspace.roots.map(\.path)
+                ]
+            )
+        } catch {
+            var fields = StationAIDiagnostics.errorFields(error)
+            fields["threadID"] = threadID
+            fields.merge(diagnosticFields()) { _, new in new }
+            StationAIDiagnostics.record("codex.thread.resume_failed", fields: fields)
+            throw error
+        }
         try confirmModel(response["model"] as? String, expected: modelID)
         resumedThreadIDs.insert(threadID)
+        StationAIDiagnostics.record("codex.thread.resumed", fields: diagnosticFields([
+            "threadID": threadID,
+        ]))
     }
 
     private func readMessages(threadID: String) async throws -> CodexThreadHistory {
@@ -645,6 +691,12 @@ final class CodexAppServerClient: ObservableObject {
                   let turn = params["turn"] as? [String: Any],
                   let turnID = turn["id"] as? String else { return }
 
+            StationAIDiagnostics.record("codex.turn.ended", fields: diagnosticFields([
+                "threadID": threadID,
+                "turnID": turnID,
+                "turnStatus": turn["status"] as? String ?? "unknown",
+            ]))
+
             let key = Self.turnKey(threadID: threadID, turnID: turnID)
             let result: Result<Void, Error>
             if turn["status"] as? String == "completed" {
@@ -764,6 +816,12 @@ final class CodexAppServerClient: ObservableObject {
         guard process === terminatedProcess else { return }
 
         let exitDetail = "Codex CLI exited with status \(terminatedProcess.terminationStatus)."
+        StationAIDiagnostics.record("codex.app_server.exited", fields: diagnosticFields([
+            "codexPID": String(terminatedProcess.processIdentifier),
+            "exitStatus": String(terminatedProcess.terminationStatus),
+            "activeThreadID": activeThreadID ?? "",
+            "activeTurnID": activeTurnID ?? "",
+        ]))
         let error = ClientError.processExited(exitDetail)
         process = nil
         inputPipe = nil

@@ -29,7 +29,7 @@
   },
   {
     "id": "test_task_done_removes_worktree_and_preserves_branch",
-    "expectation": "After a successful Codex turn puts a task with no changes relative to its merge target in Review, dropping it on Done completes without creating an empty squash commit, removes the clean managed worktree, retains the source branch and conversation history, persists the submitted conversation prompt, reduces the active task count, and exposes the task in the searchable archive with case-insensitive search and a read-only conversation."
+    "expectation": "After a successful Codex turn puts a task with no changes in Review, the merge target advances before Done, and dropping the task on Done preserves the newer target commit without an empty squash commit, removes the clean managed worktree, retains the source branch and conversation history, persists the submitted conversation prompt, reduces the active task count, and exposes the task in the searchable archive with case-insensitive search and a read-only conversation."
   },
   {
     "id": "test_task_done_commits_dirty_worktree_changes",
@@ -81,7 +81,7 @@
   },
   {
     "id": "test_task_delete_removes_task_and_later_lookup_is_not_found",
-    "expectation": "The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check reports the confirmation requirement, and confirmed deletion removes the managed worktree."
+    "expectation": "The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check reports the confirmation requirement, confirmed deletion removes the managed worktree, and the persistent log captures a real deletion failure's task, thread, process, phase, underlying error details, and no task title or conversation text; the failed task and worktree remain available for retry."
   },
   {
     "id": "test_default_parent_settings_read_write_clear_and_validation",
