@@ -237,7 +237,7 @@ final class StationAIUITests: XCTestCase {
         openTask(named: "Folder-only UI")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Folder-only UI")
         element("back-to-board-button").click()
-        mergeTaskToDone("Folder-only UI")
+        moveTaskToDone("Folder-only UI")
         try assertTaskArchived("Folder-only UI")
         XCTAssertEqual(try taskRecord(named: "Folder-only UI")?["status"] as? String, "Done")
         XCTAssertEqual((try taskRecord(named: "Folder-only UI")?["repositoryWorktrees"] as? [[String: Any]])?.count, 0)
@@ -262,8 +262,8 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "An assigned worktree conflict keeps task creation open with an explanation")
     }
 
-    // case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task with no changes in Review, the merge target advances before Done, and dropping the task on Done preserves the newer target commit without an empty squash commit, removes the clean managed worktree, retains the source branch and conversation history, persists the submitted conversation prompt, reduces the active task count, and exposes the task in the searchable archive with case-insensitive search and a read-only conversation.
-    func test_task_done_removes_worktree_and_preserves_branch() throws {
+    // case-contract: test_task_done_preserves_worktree_and_branch | Moving a reviewed task to Done preserves its source branch and worktree without merging into the local target, while retaining conversation history and exposing the task in the searchable read-only archive.
+    func test_task_done_preserves_worktree_and_branch() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
         openNewTaskSheet()
@@ -280,7 +280,6 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(path, fixture.primary.path)
         let taskPrompt = "Please update the README and add concise setup steps for first time contributors tomorrow."
         let generatedBranch = "please-update-the-readme-and-add-concise-setup"
-        XCTAssertEqual(try runGitOutput(fixture.primary, "branch", "--list", generatedBranch).trimmingCharacters(in: .whitespacesAndNewlines), "")
         XCTAssertEqual(record["mergeTarget"] as? String, "main")
         let composer = element("message-composer")
         XCTAssertTrue(waitUntil({ composer.isEnabled && composer.isHittable }, timeout: 15), "The composer should become available after conversation history loads.")
@@ -318,15 +317,15 @@ final class StationAIUITests: XCTestCase {
             if currentTitle == "Generating title…" { RunLoop.current.run(until: Date().addingTimeInterval(0.4)) }
         }
         XCTAssertNotEqual(currentTitle, "Generating title…", "The title placeholder should eventually resolve.")
-        mergeTaskToDone(taskID: taskID)
+        moveTaskToDone(taskID: taskID)
         XCTAssertTrue(waitUntil({ !element("task-card-\(taskID)").exists }, timeout: 15), "The completed task should disappear from the active board.")
         XCTAssertEqual(element("task-count").value as? String, "0", "The active task count should decrease when a task is archived.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
         XCTAssertEqual(try taskRecord(id: taskID)?["savedPrompt"] as? String, taskPrompt)
         XCTAssertEqual(try runCLI(["task", "move", taskID, "Done"])["ok"] as? Bool, true)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path), "Moving a task to Done must preserve its worktree.")
         try runGit(fixture.primary, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)")
-        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetHead, "Completing an unchanged task must preserve the target's newer commit without creating an empty squash commit.")
+        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetHead, "Moving a task to Done must not merge into the local target.")
         XCTAssertEqual(try String(contentsOf: fixture.primary.appendingPathComponent("target-only.txt"), encoding: .utf8), "Master advanced after this task branch was created.\n")
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.primary.appendingPathComponent("task-result.txt").path))
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
@@ -363,224 +362,54 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Completed task opens from the searchable read-only archive")
     }
 
-    // case-contract: test_task_done_commits_dirty_worktree_changes | Moving a reviewed task to Done stages and commits tracked and untracked worktree changes, squash-merges them into the target as a single-parent commit, and removes the managed worktree.
-    func test_task_done_commits_dirty_worktree_changes() throws {
+    // case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done changes only task status and preserves dirty worktree files, branch, and target commit without committing or merging.
+    func test_task_done_preserves_dirty_worktree() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["task", "create", "--title", "Dirty done UI", "--repo", fixture.primary.path])
-        let task = try XCTUnwrap(taskRecord(named: "Dirty done UI"))
-        let record = try XCTUnwrap((task["repositoryWorktrees"] as? [[String: Any]])?.first)
-        var path = try XCTUnwrap(record["worktreePath"] as? String)
         openTask(named: "Dirty done UI")
-        element("message-composer").click()
-        element("message-composer").typeText("Complete this task.")
-        element("send-message-button").click()
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
-        app.buttons["Blue"].click()
-        element("ai-question-answer-token").click()
-        element("ai-question-answer-token").typeText("fixture-secret")
-        element("submit-ai-answers-button").click()
-        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
-        XCTAssertEqual(try taskRecord(named: "Dirty done UI")?["status"] as? String, "Review")
-        let startedRecord = try XCTUnwrap((taskRecord(named: "Dirty done UI")?["repositoryWorktrees"] as? [[String: Any]])?.first)
-        XCTAssertEqual(startedRecord["isPending"] as? Bool, false)
-        path = try XCTUnwrap(startedRecord["worktreePath"] as? String)
-        let startedBranch = try XCTUnwrap(startedRecord["branch"] as? String)
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Dirty done UI")
         element("back-to-board-button").click()
+        let record = try XCTUnwrap((taskRecord(named: "Dirty done UI")?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let path = try XCTUnwrap(record["worktreePath"] as? String)
+        let branch = try XCTUnwrap(record["branch"] as? String)
         try "Edited after review\n".write(to: URL(fileURLWithPath: path).appendingPathComponent("stationai-primary.txt"), atomically: true, encoding: .utf8)
         try "New unsaved work\n".write(to: URL(fileURLWithPath: path).appendingPathComponent("unsaved.txt"), atomically: true, encoding: .utf8)
-        mergeTaskToDone("Dirty done UI")
+        let targetBefore = try runGitOutput(fixture.primary, "rev-parse", "main")
+        let branchHead = try runGitOutput(URL(fileURLWithPath: path), "rev-parse", "HEAD")
+        moveTaskToDone("Dirty done UI")
         try assertTaskArchived("Dirty done UI")
         XCTAssertEqual(try taskRecord(named: "Dirty done UI")?["status"] as? String, "Done")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: path))
-        XCTAssertEqual(try String(contentsOf: fixture.primary.appendingPathComponent("stationai-primary.txt"), encoding: .utf8), "Edited after review\n")
-        XCTAssertEqual(try String(contentsOf: fixture.primary.appendingPathComponent("unsaved.txt"), encoding: .utf8), "New unsaved work\n")
-        XCTAssertEqual(try runGitOutput(fixture.primary, "log", startedBranch, "-1", "--format=%s"), "Complete task: Dirty done UI")
-        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-list", "--parents", "-n", "1", "main").split(separator: " ").count, 2)
-        attachScreenshot(named: "Done commits, merges, and cleans up tracked and untracked task changes")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path), "Done must preserve the task worktree.")
+        XCTAssertEqual(try String(contentsOf: URL(fileURLWithPath: path).appendingPathComponent("stationai-primary.txt"), encoding: .utf8), "Edited after review\n")
+        XCTAssertEqual(try String(contentsOf: URL(fileURLWithPath: path).appendingPathComponent("unsaved.txt"), encoding: .utf8), "New unsaved work\n")
+        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetBefore)
+        XCTAssertEqual(try runGitOutput(URL(fileURLWithPath: path), "rev-parse", "HEAD"), branchHead)
+        try runGit(fixture.primary, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)")
+        attachScreenshot(named: "Done preserves the task worktree without merging")
     }
 
-    // case-contract: test_task_done_rejects_dirty_merge_target | A dirty local merge target is detected before the merge, leaves the target unchanged, moves the reviewed task to Blocked with the reason, and keeps it out of the Done archive.
-    func test_task_done_rejects_dirty_merge_target() throws {
+    // case-contract: test_task_pr_create_reports_real_gh_failure | Creating a PR through the real gh CLI reports an informative failure for a local repository without a usable GitHub remote and persists no partial PR link.
+    func test_task_pr_create_reports_real_gh_failure() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
-        let created = try XCTUnwrap(try runCLI(["task", "create", "--title", "Dirty target", "--repo", fixture.primary.path])["result"] as? [String: Any])
+        let created = try XCTUnwrap(try runCLI(["task", "create", "--title", "PR failure UI", "--repo", fixture.primary.path])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
-        let targetBefore = try runGitOutput(fixture.primary, "rev-parse", "main")
-        openTask(named: "Dirty target")
-        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Dirty target")
+        openTask(named: "PR failure UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "PR failure UI")
         element("back-to-board-button").click()
-        let targetFile = fixture.primary.appendingPathComponent("target-unsaved.txt")
-        try "Keep target edits.\n".write(to: targetFile, atomically: true, encoding: .utf8)
-        mergeTaskToDone("Dirty target")
-        let alert = app.sheets.firstMatch
-        XCTAssertTrue(alert.waitForExistence(timeout: 10))
-        XCTAssertTrue(alert.staticTexts.containing(NSPredicate(format: "value CONTAINS %@", "merge target 'main' has uncommitted changes")).firstMatch.exists)
+        let createButton = element("task-create-pr-\(taskID)")
+        XCTAssertTrue(createButton.waitForExistence(timeout: 5))
+        createButton.click()
+        let alert = app.alerts.firstMatch
+        XCTAssertTrue(alert.waitForExistence(timeout: 20), "The card should report gh's inability to create a PR.")
+        XCTAssertTrue(alert.staticTexts.containing(NSPredicate(format: "label CONTAINS[c] %@", "GitHub CLI")).firstMatch.exists)
         alert.buttons["OK"].click()
-        XCTAssertEqual(try taskRecord(named: "Dirty target")?["status"] as? String, "Blocked")
-        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetBefore)
-        XCTAssertTrue(element("task-card-\(taskID)").exists, "A failed completion should remain visible as Blocked.")
-        element("done-archive-button").click()
-        XCTAssertFalse(element("done-archive-task-\(taskID)").exists, "A failed completion must not appear in the Done archive.")
-        element("close-done-archive-button").click()
-        try FileManager.default.removeItem(at: targetFile)
-    }
-
-    // case-contract: test_task_done_rejects_inaccessible_merge_target | A missing explicit local merge target leaves the branch unmerged and moves the reviewed task to Blocked with the reason.
-    func test_task_done_rejects_inaccessible_merge_target() throws {
-        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
-        let created = try runCLI([
-            "task", "create", "--title", "Missing target", "--repo", fixture.primary.path,
-            "--merge-target", "\(fixture.primary.path)=branch-source"
-        ])
-        XCTAssertEqual(created["ok"] as? Bool, true)
-        launchApp(defaultParent: fixture.parent.path)
-        openTask(named: "Missing target")
-        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Missing target")
-        element("back-to-board-button").click()
-        let targetCommit = try runGitOutput(fixture.primary, "rev-parse", "branch-source")
-        try runGit(fixture.primary, "branch", "-D", "branch-source")
-        mergeTaskToDone("Missing target")
-        let alert = app.sheets.firstMatch
-        XCTAssertTrue(alert.waitForExistence(timeout: 10))
-        XCTAssertTrue(alert.staticTexts.containing(NSPredicate(format: "value CONTAINS %@", "isn't an available local branch")).firstMatch.exists)
-        alert.buttons["OK"].click()
-        XCTAssertEqual(try taskRecord(named: "Missing target")?["status"] as? String, "Blocked")
-        try runGit(fixture.primary, "branch", "branch-source", targetCommit)
-    }
-
-    // case-contract: test_task_done_retries_partial_multi_repository_merge | A later repository squash-commit failure preserves the earlier completed merge and leaves the failed target unchanged and clean; after retry, StationAI skips the completed merge and finishes the remaining repository.
-    func test_task_done_retries_partial_multi_repository_merge() throws {
-        let taskTitle = "Partial multi merge \(String(UUID().uuidString.prefix(8)).lowercased())"
-        let created = try runCLI([
-            "task", "create", "--title", taskTitle, "--repo", fixture.primary.path,
-            "--repo", fixture.secondary.path
-        ])
-        XCTAssertEqual(created["ok"] as? Bool, true)
-        let task = try XCTUnwrap(created["result"] as? [String: Any])
-        let taskID = try XCTUnwrap(task["id"] as? String)
-        XCTAssertTrue((try XCTUnwrap(task["repositoryWorktrees"] as? [[String: Any]])).allSatisfy { $0["isPending"] as? Bool == true })
-        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
-        launchApp(defaultParent: fixture.parent.path)
-        openTask(named: taskTitle)
-        try completeCurrentTaskWithFixtureAnswers(taskTitle: taskTitle)
-        element("back-to-board-button").click()
-        let startedTask = try XCTUnwrap(taskRecord(named: taskTitle))
-        let records = try XCTUnwrap(startedTask["repositoryWorktrees"] as? [[String: Any]])
-        XCTAssertEqual(records.count, 2)
-        XCTAssertTrue(records.allSatisfy { $0["isPending"] as? Bool == false })
-        for (record, repository) in zip(records, [fixture.primary, fixture.secondary]) {
-            let path = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String))
-            let filename = "partial-\(repository.lastPathComponent).txt"
-            try "Change from \(repository.lastPathComponent).\n".write(
-                to: path.appendingPathComponent(filename), atomically: true, encoding: .utf8
-            )
-            try runGit(path, "add", filename)
-            try runGit(path, "commit", "-m", "Add \(filename)")
-        }
-        let hook = fixture.secondary.appendingPathComponent(".git/hooks/pre-commit")
-        try "#!/bin/sh\nexit 1\n".write(to: hook, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
-        let secondaryTargetBefore = try runGitOutput(fixture.secondary, "rev-parse", "main").trimmingCharacters(in: .whitespacesAndNewlines)
-
-        mergeTaskToDone(taskTitle)
-        let alert = app.sheets.firstMatch
-        XCTAssertTrue(alert.waitForExistence(timeout: 10))
-        XCTAssertTrue(alert.buttons["OK"].exists, "The merge failure should be acknowledged before retrying.")
-        alert.buttons["OK"].click()
-        var partial = try XCTUnwrap(taskRecord(named: taskTitle))
-        XCTAssertEqual(partial["status"] as? String, "Blocked")
-        var progress = try XCTUnwrap(partial["repositoryWorktrees"] as? [[String: Any]])
-        XCTAssertEqual(progress.compactMap { $0["mergeCompleted"] as? Bool }, [true, false])
-        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.primary.appendingPathComponent("partial-primary.txt").path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.secondary.appendingPathComponent("partial-secondary.txt").path))
-        XCTAssertEqual(try runGitOutput(fixture.secondary, "rev-parse", "main").trimmingCharacters(in: .whitespacesAndNewlines), secondaryTargetBefore)
-        XCTAssertEqual(try runGitOutput(fixture.secondary, "status", "--porcelain").trimmingCharacters(in: .whitespacesAndNewlines), "")
-        attachScreenshot(named: "Partial multi-repository merge records the first successful merge")
-
-        try FileManager.default.removeItem(at: hook)
-        openTask(named: taskTitle)
-        element("message-composer").click()
-        element("message-composer").typeText("Retry the remaining repository merge.")
-        element("send-message-button").click()
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
-        app.buttons["Blue"].click()
-        element("ai-question-answer-token").click()
-        element("ai-question-answer-token").typeText("fixture-secret")
-        element("submit-ai-answers-button").click()
-        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
-        XCTAssertEqual(try taskRecord(named: taskTitle)?["status"] as? String, "Review")
-        element("back-to-board-button").click()
-        mergeTaskToDone(taskTitle)
-        try assertTaskArchived(taskTitle)
-        partial = try XCTUnwrap(taskRecord(named: taskTitle))
-        XCTAssertEqual(partial["status"] as? String, "Done")
-        progress = try XCTUnwrap(partial["repositoryWorktrees"] as? [[String: Any]])
-        XCTAssertEqual(progress.compactMap { $0["mergeCompleted"] as? Bool }, [true, true])
-        XCTAssertEqual(try String(contentsOf: fixture.primary.appendingPathComponent("partial-primary.txt"), encoding: .utf8), "Change from primary.\n")
-        XCTAssertEqual(try String(contentsOf: fixture.secondary.appendingPathComponent("partial-secondary.txt"), encoding: .utf8), "Change from secondary.\n")
-        XCTAssertTrue((try runCLI(["task", "get", taskID]))["ok"] as? Bool == true)
-    }
-
-    // case-contract: test_task_merge_conflict_resolution_returns_to_review_and_retries | An active conflict-resolution turn remains In Progress when read, leaves the target branch unchanged, and returns the task to Review; a second Done request merges it.
-    func test_task_merge_conflict_resolution_returns_to_review_and_retries() throws {
-        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
-        let created = try runCLI(["task", "create", "--title", "Conflict resolution", "--repo", fixture.primary.path])
-        let task = try XCTUnwrap(created["result"] as? [String: Any])
-        let record = try XCTUnwrap((task["repositoryWorktrees"] as? [[String: Any]])?.first)
-        let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String))
-        let conflictFile = "stationai-primary.txt"
-        try "Task branch version.\n".write(to: worktree.appendingPathComponent(conflictFile), atomically: true, encoding: .utf8)
-        try runGit(worktree, "add", conflictFile)
-        try runGit(worktree, "commit", "-m", "Change task branch version")
-        try "Target branch version.\n".write(to: fixture.primary.appendingPathComponent(conflictFile), atomically: true, encoding: .utf8)
-        try runGit(fixture.primary, "add", conflictFile)
-        try runGit(fixture.primary, "commit", "-m", "Change target branch version")
-        let targetBefore = try runGitOutput(fixture.primary, "rev-parse", "main")
-
-        launchApp(defaultParent: fixture.parent.path)
-        openTask(named: "Conflict resolution")
-        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Conflict resolution")
-        element("back-to-board-button").click()
-
-        codexFixtureExecutable = "/tmp/stationai-bridge-workspaces/codex-fixture-success-wait"
-        app.launchEnvironment["STATIONAI_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
-        relaunchApp()
-        mergeTaskToDone("Conflict resolution")
-        let resolutionExecutable = try XCTUnwrap(codexFixtureExecutable)
-        let ready = URL(fileURLWithPath: resolutionExecutable + ".resolve-ready")
-        let resume = URL(fileURLWithPath: resolutionExecutable + ".resolve-continue")
-        let readyDeadline = Date().addingTimeInterval(15)
-        while Date() < readyDeadline && !FileManager.default.fileExists(atPath: ready.path) {
-            Thread.sleep(forTimeInterval: 0.02)
-        }
-        XCTAssertTrue(FileManager.default.fileExists(atPath: ready.path), "Moving the conflicting task to Done should start the Codex resolution turn.")
-        XCTAssertEqual(try taskRecord(named: "Conflict resolution")?["status"] as? String, "In Progress")
-        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetBefore)
-        let conflictText = try String(contentsOf: worktree.appendingPathComponent(conflictFile), encoding: .utf8)
-        XCTAssertTrue(conflictText.contains("<<<<<<<"))
-
-        try "Resolved task and target changes.\n".write(to: worktree.appendingPathComponent(conflictFile), atomically: true, encoding: .utf8)
-        try runGit(worktree, "add", conflictFile)
-        try "Continue the successful resolution turn.\n".write(to: resume, atomically: true, encoding: .utf8)
-        let reviewDeadline = Date().addingTimeInterval(10)
-        var reviewStatus: String?
-        while Date() < reviewDeadline {
-            reviewStatus = try taskRecord(named: "Conflict resolution")?["status"] as? String
-            if reviewStatus == "Review" { break }
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-        XCTAssertEqual(reviewStatus, "Review")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: ready.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: resume.path))
-        XCTAssertEqual(try runGitOutput(worktree, "ls-files", "-u").trimmingCharacters(in: .whitespacesAndNewlines), "")
-        element("back-to-board-button").click()
-        mergeTaskToDone("Conflict resolution")
-        try assertTaskArchived("Conflict resolution")
-        XCTAssertEqual(try taskRecord(named: "Conflict resolution")?["status"] as? String, "Done")
-        XCTAssertEqual(try String(contentsOf: fixture.primary.appendingPathComponent(conflictFile), encoding: .utf8), "Resolved task and target changes.\n")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: worktree.path))
-        attachScreenshot(named: "Resolved Git conflict returns to Review before the final merge")
+        let current = try XCTUnwrap(taskRecord(id: taskID))
+        let record = try XCTUnwrap((current["repositoryWorktrees"] as? [[String: Any]])?.first)
+        XCTAssertNil(record["pullRequestNumber"])
+        XCTAssertNil(record["pullRequestURL"])
+        XCTAssertEqual(current["status"] as? String, "Review")
     }
 
     // case-contract: test_task_lifecycle_rollout_clears_records_and_clean_worktrees | The one-time lifecycle rollout clears task records and clean managed worktrees, preserves branches, and retains dirty managed worktrees with a notice.
@@ -2284,13 +2113,13 @@ final class StationAIUITests: XCTestCase {
         element("close-done-archive-button").click()
     }
 
-    private func mergeTaskToDone(_ title: String) {
+    private func moveTaskToDone(_ title: String) {
         let card = app.buttons[title]
         XCTAssertTrue(card.waitForExistence(timeout: 5))
         dragTaskToDone(card)
     }
 
-    private func mergeTaskToDone(taskID: String) {
+    private func moveTaskToDone(taskID: String) {
         let card = element("task-card-\(taskID)")
         XCTAssertTrue(card.waitForExistence(timeout: 5), "The reviewed task card should remain available by its stable task identifier.")
         dragTaskToDone(card)

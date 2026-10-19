@@ -185,9 +185,10 @@ class StationAIBridgeTests(unittest.TestCase):
             self.run_git(self.changes, "add", path)
         (self.changes / "shared.txt").write_text("Shared working version.\n", encoding="utf-8")
         (self.changes / "working.txt").write_text("Working tree version.\n", encoding="utf-8")
-        (self.changes / "deleted.txt").unlink()
+        (self.changes / "deleted.txt").unlink(missing_ok=True)
         (self.changes / "untracked.txt").write_text("Untracked file.\n", encoding="utf-8")
-        self.run_git(self.changes, "rm", "staged-deleted.txt")
+        if (self.changes / "staged-deleted.txt").exists():
+            self.run_git(self.changes, "rm", "staged-deleted.txt")
 
     def run_git(self, repository, *arguments):
         completed = subprocess.run(
@@ -329,15 +330,14 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(len(self.assert_success(self.call_cli("task", "list")[0])["tasks"]), 1)
         self.assertTrue(Path(first["repositoryWorktrees"][0]["worktreePath"]).is_dir())
 
-    # case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task with no changes in Review, the merge target advances before Done, and dropping the task on Done preserves the newer target commit without an empty squash commit, removes the clean managed worktree, retains the source branch and conversation history, persists the submitted conversation prompt, reduces the active task count, and exposes the task in the searchable archive with case-insensitive search and a read-only conversation.
-    def test_task_done_removes_worktree_and_preserves_branch(self):
+    # case-contract: test_task_done_preserves_worktree_and_branch | Moving a reviewed task to Done preserves its source branch and worktree without merging into the local target, while retaining conversation history and exposing the task in the searchable read-only archive.
+    def test_task_done_preserves_worktree_and_branch(self):
         task = self.create_repo_task("Untitled task", [self.primary])
         draft = "Please update the README and add concise setup steps for first time contributors tomorrow."
         self.assertEqual(self.assert_success(self.call_cli("task", "prompt", task["id"], "--text", draft)[0])["savedPrompt"], draft)
         self.assertTrue(task["repositoryWorktrees"][0]["isPending"])
         self.assertEqual(task["repositoryWorktrees"][0]["branch"], "auto")
         self.assertEqual(task["repositoryWorktrees"][0]["worktreePath"], str(self.primary))
-        self.assertFalse(self.branch_exists(self.primary, "please-update-the-readme-and-add-concise-setup"))
         executable = self.data_directory / "codex-fixture"
         self.complete_fixture_turn(task["id"])
         started = self.assert_success(self.call_cli("task", "get", task["id"])[0])
@@ -355,9 +355,9 @@ class StationAIBridgeTests(unittest.TestCase):
         target_head = self.run_git(self.primary, "rev-parse", "main")
         response, _ = self.call_cli("task", "move", task["id"], "Done")
         self.assertEqual(self.assert_success(response)["status"], "Done")
-        self.assertFalse(worktree.exists())
-        self.assertEqual(self.run_git(self.primary, "show-ref", "--verify", "--quiet", "refs/heads/please-update-the-readme-and-add-concise-setup"), "")
-        self.assertEqual(self.run_git(self.primary, "rev-parse", "main"), target_head, "Completing an unchanged task must preserve the target's newer commit without creating an empty squash commit.")
+        self.assertTrue(worktree.exists(), "Moving a task to Done must preserve its worktree.")
+        self.assertTrue(self.branch_exists(self.primary, "please-update-the-readme-and-add-concise-setup"))
+        self.assertEqual(self.run_git(self.primary, "rev-parse", "main"), target_head, "Moving a task to Done must not merge into the local target.")
         self.assertEqual((self.primary / "target-only.txt").read_text(encoding="utf-8"), "Master advanced after this task branch was created.\n")
         self.assertFalse((self.primary / "task-result.txt").exists())
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["repositoryWorktrees"][0]["mergeTarget"], "main")
@@ -373,177 +373,38 @@ class StationAIBridgeTests(unittest.TestCase):
         messages = self.assert_success(history)["messages"]
         self.assertTrue(any(message["role"] == "assistant" and "Answers received: Blue / fixture-secret." in message["text"] for message in messages))
 
-    # case-contract: test_task_done_commits_dirty_worktree_changes | Moving a reviewed task to Done stages and commits tracked and untracked worktree changes, squash-merges them into the target as a single-parent commit, and removes the managed worktree.
-    def test_task_done_commits_dirty_worktree_changes(self):
+    # case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done changes only task status and preserves dirty worktree files, branch, and target commit without committing or merging.
+    def test_task_done_preserves_dirty_worktree(self):
         task = self.create_repo_task("Dirty cleanup", [self.primary], materialize=True)
         worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
-        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
-        executable = self.data_directory / "codex-fixture"
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
-        )
-        shutil.copyfile(fixture, executable)
-        executable.chmod(0o755)
-        response, _ = self.call_cli(
-            "conversation", "send", task["id"], "--message", "Complete this task.",
-            "--answer", "color=Blue", "--answer", "token=fixture-secret",
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
-        )
-        self.assertTrue(self.assert_success(response)["messages"])
-        current, _ = self.call_cli("task", "get", task["id"])
-        self.assertEqual(self.assert_success(current)["status"], "Review")
+        self.complete_fixture_turn(task["id"])
         tracked = worktree / "stationai-primary.txt"
         tracked.write_text("Edited after review\n", encoding="utf-8")
-        (worktree / "unsaved.txt").write_text("keep me\n", encoding="utf-8")
+        untracked = worktree / "unsaved.txt"
+        untracked.write_text("keep me\n", encoding="utf-8")
+        target_before = self.run_git(self.primary, "rev-parse", "main")
+        branch = task["repositoryWorktrees"][0]["branch"]
+        branch_head = self.run_git(worktree, "rev-parse", "HEAD")
         response, _ = self.call_cli("task", "move", task["id"], "Done")
         self.assertEqual(self.assert_success(response)["status"], "Done")
-        self.assertFalse(worktree.exists())
-        self.assertEqual((self.primary / "stationai-primary.txt").read_text(encoding="utf-8"), "Edited after review\n")
-        self.assertEqual((self.primary / "unsaved.txt").read_text(encoding="utf-8"), "keep me\n")
-        branch = task["repositoryWorktrees"][0]["branch"]
-        self.assertEqual(self.run_git(self.primary, "log", branch, "-1", "--format=%s").strip(), "Complete task: Dirty cleanup")
-        self.assertEqual(len(self.run_git(self.primary, "rev-list", "--parents", "-n", "1", "main").split()), 2)
+        self.assertTrue(worktree.exists())
+        self.assertEqual(tracked.read_text(encoding="utf-8"), "Edited after review\n")
+        self.assertEqual(untracked.read_text(encoding="utf-8"), "keep me\n")
+        self.assertEqual(self.run_git(self.primary, "rev-parse", "main"), target_before)
+        self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), branch_head)
+        self.assertTrue(self.branch_exists(self.primary, branch))
 
-    # case-contract: test_task_done_rejects_dirty_merge_target | A dirty local merge target is detected before the merge, leaves the target unchanged, moves the reviewed task to Blocked with the reason, and keeps it out of the Done archive.
-    def test_task_done_rejects_dirty_merge_target(self):
-        task = self.create_repo_task("Dirty target", [self.primary])
-        self.complete_fixture_turn(task["id"])
-        target_file = self.primary / "target-unsaved.txt"
-        target_file.write_text("Keep target edits.\n", encoding="utf-8")
-        before = self.run_git(self.primary, "rev-parse", "main")
-        response, _ = self.call_cli("task", "move", task["id"], "Done", expected_status=1)
+    # case-contract: test_task_pr_create_reports_real_gh_failure | Creating a PR through the real gh CLI reports an informative failure for a local repository without a usable GitHub remote and persists no partial PR link.
+    def test_task_pr_create_reports_real_gh_failure(self):
+        task = self.create_repo_task("PR failure", [self.primary], materialize=True)
+        response, _ = self.call_cli("task", "pr", "create", task["id"], expected_status=1)
         self.assert_failure(response, "operation_failed")
-        self.assertIn("merge target 'main' has uncommitted changes", response["error"]["message"])
-        self.assertEqual(self.run_git(self.primary, "rev-parse", "main"), before)
-        self.assertTrue(target_file.is_file())
-        current, _ = self.call_cli("task", "get", task["id"])
-        self.assertEqual(self.assert_success(current)["status"], "Blocked")
-        board, _ = self.call_cli("board", "list")
-        archived_task = next(item for item in self.assert_success(board)["tasks"] if item["id"] == task["id"])
-        self.assertEqual(archived_task["status"], "Blocked", "A failed completion must remain outside the Done archive.")
-        target_file.unlink()
-
-    # case-contract: test_task_done_rejects_inaccessible_merge_target | A missing explicit local merge target leaves the branch unmerged and moves the reviewed task to Blocked with the reason.
-    def test_task_done_rejects_inaccessible_merge_target(self):
-        task = self.create_repo_task(
-            "Missing target", [self.primary], merge_targets={str(self.primary): "branch-source"}
-        )
-        self.complete_fixture_turn(task["id"])
-        branch_source_commit = self.run_git(self.primary, "rev-parse", "branch-source").strip()
-        self.run_git(self.primary, "branch", "-D", "branch-source")
-        response, _ = self.call_cli("task", "move", task["id"], "Done", expected_status=1)
-        self.assert_failure(response, "operation_failed")
-        self.assertIn("isn't an available local branch", response["error"]["message"])
-        current, _ = self.call_cli("task", "get", task["id"])
-        self.assertEqual(self.assert_success(current)["status"], "Blocked")
-        self.assertEqual(self.run_git(self.primary, "branch", "--show-current").strip(), "main")
-        self.run_git(self.primary, "branch", "branch-source", branch_source_commit)
-
-    # case-contract: test_task_done_retries_partial_multi_repository_merge | A later repository squash-commit failure preserves the earlier completed merge and leaves the failed target unchanged and clean; after retry, StationAI skips the completed merge and finishes the remaining repository.
-    def test_task_done_retries_partial_multi_repository_merge(self):
-        task = self.create_repo_task(
-            f"Partial multi merge {uuid.uuid4().hex[:8]}",
-            [self.primary, self.secondary], materialize=True,
-        )
-        worktrees = task["repositoryWorktrees"]
-        self.assertEqual([item["repositoryPath"] for item in worktrees], [str(self.primary), str(self.secondary)])
-        for record, repository in zip(worktrees, [self.primary, self.secondary]):
-            worktree = Path(record["worktreePath"])
-            filename = f"partial-{repository.name}.txt"
-            (worktree / filename).write_text(f"Change from {repository.name}.\n", encoding="utf-8")
-            self.run_git(worktree, "add", filename)
-            self.run_git(worktree, "commit", "-m", f"Add {filename}")
-        hook = self.secondary / ".git" / "hooks" / "pre-commit"
-        hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-        hook.chmod(0o755)
-        secondary_target_before = self.run_git(self.secondary, "rev-parse", "main").strip()
-        self.complete_fixture_turn(task["id"])
-
-        failed, _ = self.call_cli("task", "move", task["id"], "Done", expected_status=1)
-        self.assert_failure(failed, "operation_failed")
+        self.assertTrue(response["error"]["message"], "The gh failure should be explained to the user.")
         current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
-        self.assertEqual(current["status"], "Blocked")
-        self.assertIn("squash merge", current["statusMessage"].lower())
-        progress = current["repositoryWorktrees"]
-        self.assertEqual([item["mergeCompleted"] for item in progress], [True, False])
-        self.assertEqual(self.run_git(self.secondary, "rev-parse", "main").strip(), secondary_target_before)
-        self.assertEqual(self.run_git(self.secondary, "status", "--porcelain").strip(), "")
-        self.assertTrue((self.primary / "partial-primary.txt").is_file())
-        self.assertFalse((self.secondary / "partial-secondary.txt").exists())
-
-        hook.unlink()
-        self.complete_fixture_turn(task["id"], executable_name="codex-fixture-retry")
-        completed, _ = self.call_cli("task", "move", task["id"], "Done")
-        self.assertEqual(self.assert_success(completed)["status"], "Done")
-        current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
-        self.assertEqual([item["mergeCompleted"] for item in current["repositoryWorktrees"]], [True, True])
-        self.assertEqual((self.primary / "partial-primary.txt").read_text(encoding="utf-8"), "Change from primary.\n")
-        self.assertEqual((self.secondary / "partial-secondary.txt").read_text(encoding="utf-8"), "Change from secondary.\n")
-        for record in worktrees:
-            self.assertFalse(Path(record["worktreePath"]).exists())
-
-    # case-contract: test_task_merge_conflict_resolution_returns_to_review_and_retries | An active conflict-resolution turn remains In Progress when read, leaves the target branch unchanged, and returns the task to Review; a second Done request merges it.
-    def test_task_merge_conflict_resolution_returns_to_review_and_retries(self):
-        task = self.create_repo_task("Conflict resolution", [self.primary], materialize=True)
-        record = task["repositoryWorktrees"][0]
-        worktree = Path(record["worktreePath"])
-        conflict_file = "stationai-primary.txt"
-        (worktree / conflict_file).write_text("Task branch version.\n", encoding="utf-8")
-        self.run_git(worktree, "add", conflict_file)
-        self.run_git(worktree, "commit", "-m", "Change task branch version")
-        (self.primary / conflict_file).write_text("Target branch version.\n", encoding="utf-8")
-        self.run_git(self.primary, "add", conflict_file)
-        self.run_git(self.primary, "commit", "-m", "Change target branch version")
-        self.complete_fixture_turn(task["id"])
-
-        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
-        executable = self.data_directory / "codex-fixture-success-wait"
-        shutil.copyfile(fixture, executable)
-        executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
-        )
-        target_before = self.run_git(self.primary, "rev-parse", "main").strip()
-        ready = Path(str(executable) + ".resolve-ready")
-        resume = Path(str(executable) + ".resolve-continue")
-        environment = os.environ.copy()
-        environment.update({
-            "STATIONAI_DATA_DIRECTORY": str(self.data_directory),
-            "STATIONAI_E2E_WORKTREE_DIRECTORY": str(self.worktree_directory),
-            "STATIONAI_E2E_DEFAULTS_SUITE": self.defaults_suite,
-            "STATIONAI_BRIDGE_SERVICE_NAME": arguments.service_name,
-            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
-        })
-        process = subprocess.Popen(
-            [str(arguments.cli), "task", "move", task["id"], "Done"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, env=environment,
-        )
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline and not ready.exists():
-            time.sleep(0.02)
-        self.assertTrue(ready.exists(), "Moving a conflicting task to Done should start Codex conflict resolution.")
-        active = self.assert_success(self.call_cli("task", "get", task["id"])[0])
-        self.assertEqual(active["status"], "In Progress", "Reading an active conflict-resolution task must preserve its live status.")
-        self.assertEqual(self.run_git(self.primary, "rev-parse", "main").strip(), target_before)
-        self.assertIn("<<<<<<<", (worktree / conflict_file).read_text(encoding="utf-8"))
-        (worktree / conflict_file).write_text("Resolved task and target changes.\n", encoding="utf-8")
-        self.run_git(worktree, "add", conflict_file)
-        resume.write_text("Continue the successful resolution turn.\n", encoding="utf-8")
-        stdout = process.stdout.read() if process.stdout else ""
-        stderr = process.stderr.read() if process.stderr else ""
-        self.assertEqual(process.wait(timeout=30), 0, f"Conflict resolution failed: {stdout}; {stderr}")
-        response = json.loads([line for line in stdout.splitlines() if line.strip()][-1])
-        self.assertEqual(self.assert_success(response)["status"], "Review")
-        self.assertEqual(self.run_git(worktree, "ls-files", "-u").strip(), "")
-        self.assertEqual(len(self.run_git(worktree, "show", "-s", "--format=%P", "HEAD").split()), 2)
-
-        reviewed = self.assert_success(self.call_cli("task", "get", task["id"])[0])
-        self.assertEqual(reviewed["status"], "Review")
-        completed, _ = self.call_cli("task", "move", task["id"], "Done")
-        self.assertEqual(self.assert_success(completed)["status"], "Done")
-        self.assertNotEqual(self.run_git(self.primary, "rev-parse", "main").strip(), target_before)
-        self.assertEqual((self.primary / conflict_file).read_text(encoding="utf-8"), "Resolved task and target changes.\n")
-        self.assertFalse(worktree.exists())
+        record = current["repositoryWorktrees"][0]
+        self.assertIsNone(record.get("pullRequestNumber"))
+        self.assertIsNone(record.get("pullRequestURL"))
+        self.assertEqual(current["status"], "Review")
 
     # case-contract: test_task_lifecycle_rollout_clears_records_and_clean_worktrees | The one-time lifecycle rollout clears task records and clean managed worktrees, preserves branches, and retains dirty managed worktrees with a notice.
     def test_task_lifecycle_rollout_clears_records_and_clean_worktrees(self):

@@ -39,6 +39,7 @@ enum BridgeValue: Codable, Equatable {
     }
 
     var string: String? { if case .string(let value) = self { value } else { nil } }
+    var bool: Bool? { if case .boolean(let value) = self { value } else { nil } }
     var strings: [String]? {
         guard case .array(let values) = self else { return nil }
         let strings = values.compactMap(\.string)

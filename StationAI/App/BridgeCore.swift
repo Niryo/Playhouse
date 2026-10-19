@@ -162,6 +162,74 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     }
 }
 
+enum GitHubPullRequestManager {
+    struct PullRequest: Decodable {
+        let number: Int
+        let url: String
+    }
+
+    private struct PullRequestState: Decodable {
+        let mergedAt: String?
+    }
+
+    static func resolveExecutable() throws -> String {
+        let paths = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map {
+            URL(fileURLWithPath: String($0)).appendingPathComponent("gh").path
+        } + ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
+        guard let path = paths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            throw BridgeCommandError(code: "operation_failed", message: "GitHub CLI (gh) isn't available. Install GitHub CLI and try again.")
+        }
+        return path
+    }
+
+    static func findOpen(_ record: RepositoryWorktreeRecord, executable: String) throws -> PullRequest? {
+        let result = try run(executable, ["pr", "list", "--head", record.branch, "--state", "open", "--json", "number,url", "--limit", "1"], directory: record.worktreePath)
+        return try JSONDecoder().decode([PullRequest].self, from: Data(result.utf8)).first
+    }
+
+    static func create(_ record: RepositoryWorktreeRecord, title: String, body: String, executable: String) throws -> PullRequest {
+        let result = try run(executable, ["pr", "create", "--title", title, "--body", body, "--head", record.branch], directory: record.worktreePath)
+        guard let url = result.split(whereSeparator: \.isNewline).last.map(String.init),
+              URL(string: url)?.host != nil,
+              let number = URL(string: url)?.pathComponents.last.flatMap(Int.init) else {
+            throw BridgeCommandError(code: "operation_failed", message: "GitHub CLI created a pull request but did not return its number and URL.")
+        }
+        return PullRequest(number: number, url: url)
+    }
+
+    static func isMerged(_ record: RepositoryWorktreeRecord, executable: String) throws -> Bool {
+        guard let number = record.pullRequestNumber else { return true }
+        let result = try run(executable, ["pr", "view", String(number), "--json", "mergedAt"], directory: record.worktreePath)
+        return try JSONDecoder().decode(PullRequestState.self, from: Data(result.utf8)).mergedAt != nil
+    }
+
+    private static func run(_ executable: String, _ arguments: [String], directory: String) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.currentDirectoryURL = URL(fileURLWithPath: directory, isDirectory: true)
+        let output = Pipe()
+        let error = Pipe()
+        process.standardOutput = output
+        process.standardError = error
+        do { try process.run() } catch {
+            throw BridgeCommandError(code: "operation_failed", message: "Couldn't start GitHub CLI: \(error.localizedDescription)")
+        }
+        let stdout = output.fileHandleForReading.readDataToEndOfFile()
+        let stderr = error.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let text = String(data: stdout, encoding: .utf8) ?? ""
+        guard process.terminationStatus == 0 else {
+            let detail = String(data: stderr, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let guidance = detail.localizedCaseInsensitiveContains("auth") || detail.localizedCaseInsensitiveContains("login")
+                ? "GitHub CLI isn't authorized. Run `gh auth login` in Terminal, then try again. "
+                : "GitHub CLI couldn't complete the request. "
+            throw BridgeCommandError(code: "operation_failed", message: guidance + (detail.isEmpty ? "Exit status \(process.terminationStatus)." : detail))
+        }
+        return text
+    }
+}
+
 enum StationAIManagerError: LocalizedError {
     case invalidTitle
     case taskNotFound(UUID)
@@ -172,6 +240,7 @@ enum StationAIManagerError: LocalizedError {
     case invalidMessage
     case repositoryAssigned(String)
     case invalidTransition(String)
+    case unmergedPullRequests([Int])
 
     var errorDescription: String? {
         switch self {
@@ -193,6 +262,8 @@ enum StationAIManagerError: LocalizedError {
             "This branch worktree is already assigned to another active task: \(path). Choose another branch or finish that task first."
         case .invalidTransition(let message):
             message
+        case .unmergedPullRequests(let numbers):
+            "Pull request(s) \(numbers.map { "#\($0)" }.joined(separator: ", ")) haven't been merged. Confirm that you want to mark this task Done."
         }
     }
 }
@@ -309,7 +380,8 @@ final class BoardTaskManager {
         _ id: UUID,
         to statusName: String,
         client: CodexAppServerClient? = nil,
-        onConflictResolutionStart: (() -> Void)? = nil
+        onConflictResolutionStart: (() -> Void)? = nil,
+        allowUnmergedPullRequests: Bool = false
     ) async throws -> BoardTaskRecord {
         guard let status = TaskStatus(rawValue: statusName) else {
             throw StationAIManagerError.invalidStatus(statusName)
@@ -323,79 +395,81 @@ final class BoardTaskManager {
             throw StationAIManagerError.invalidTransition("Only a task in Review can move to Done.")
         }
 
-        do {
-            let mergeCandidates = task.repositoryWorktrees.enumerated().filter { !$0.element.isPending && !$0.element.mergeCompleted }
-            for (_, record) in mergeCandidates {
-                try StationAIWorktreeManager.commitChanges(record, message: "Complete task: \(task.title)")
+        let linkedRecords = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil }
+        if !linkedRecords.isEmpty && !allowUnmergedPullRequests {
+            let executable = try GitHubPullRequestManager.resolveExecutable()
+            let unmerged = try linkedRecords.filter { try !GitHubPullRequestManager.isMerged($0, executable: executable) }
+            if !unmerged.isEmpty {
+                throw StationAIManagerError.unmergedPullRequests(unmerged.compactMap(\.pullRequestNumber))
             }
-            var conflicts: [(offset: Int, element: RepositoryWorktreeRecord)] = []
-            for candidate in mergeCandidates {
-                if try StationAIWorktreeManager.preflightMerge(candidate.element) {
-                    conflicts.append(candidate)
-                }
-            }
-
-            if !conflicts.isEmpty {
-                for (index, record) in conflicts {
-                    try StationAIWorktreeManager.beginConflictResolution(record)
-                    var updated = task.repositoryWorktrees
-                    updated[index].mergeError = "Codex is resolving conflicts with \(record.mergeTarget ?? "the target branch")."
-                    task.repositoryWorktrees = updated
-                }
-                task.status = .inProgress
-                task.statusMessage = "Codex is resolving merge conflicts before the task can be merged."
-                clearProgressReport(task)
-                try modelContext.save()
-                guard let client else {
-                    throw BridgeCommandError(code: "operation_failed", message: "A Codex client is required to resolve merge conflicts.")
-                }
-                let repositorySummary = conflicts.map {
-                    "\($0.element.branch) into \($0.element.mergeTarget ?? "target") in \($0.element.repositoryPath)"
-                }.joined(separator: "\n")
-                _ = try await CodexConversationManager(tasks: self, client: client).send(
-                    taskID: id,
-                    text: "Resolve the active Git merge conflicts for this task. Preserve the task branch's intended changes and the target branch's changes. Do not discard unrelated work. Resolve every unmerged path and explain the resolution. Repositories:\n\(repositorySummary)",
-                    onTurnStarting: onConflictResolutionStart
-                )
-                for (index, record) in conflicts {
-                    try StationAIWorktreeManager.finishConflictResolution(record)
-                    var updated = task.repositoryWorktrees
-                    updated[index].mergeError = nil
-                    task.repositoryWorktrees = updated
-                }
-                task.status = .review
-                task.statusMessage = "Merge conflicts are resolved. Review the changes, then move the task to Done to retry the merge."
-                try modelContext.save()
-                return BoardTaskRecord(task: task)
-            }
-
-            for (index, record) in mergeCandidates {
-                try StationAIWorktreeManager.mergeIntoTarget(record)
-                var updated = task.repositoryWorktrees
-                updated[index].mergeCompleted = true
-                updated[index].mergeError = nil
-                task.repositoryWorktrees = updated
-                try modelContext.save()
-            }
-            for record in task.repositoryWorktrees where record.createdByStationAI {
-                if FileManager.default.fileExists(atPath: record.worktreePath) {
-                    try StationAIWorktreeManager.remove(record)
-                }
-            }
-            let retainedExternalRoots = task.repositoryWorktrees.filter { !$0.isPending && !$0.createdByStationAI }.map(\.worktreePath)
-            task.workspaceRootPaths = try Self.normalizeOptionalRoots(retainedExternalRoots + task.contextFolderPaths)
-            task.status = .done
-            task.statusMessage = nil
-            clearProgressReport(task)
-            try modelContext.save()
-            return BoardTaskRecord(task: task)
-        } catch {
-            task.status = .blocked
-            task.statusMessage = error.localizedDescription
-            clearProgressReport(task)
-            try? modelContext.save()
-            throw error
         }
+        task.status = .done
+        task.statusMessage = nil
+        clearProgressReport(task)
+        try modelContext.save()
+        return BoardTaskRecord(task: task)
+    }
+
+    func createPullRequests(_ id: UUID, client: CodexAppServerClient) async throws -> BoardTaskRecord {
+        let task = try requireTask(id)
+        guard !task.repositoryWorktrees.isEmpty else {
+            throw BridgeCommandError(code: "invalid_transition", message: "This task has no repository for a pull request.")
+        }
+        let gh = try GitHubPullRequestManager.resolveExecutable()
+        guard !task.repositoryWorktrees.contains(where: \.isPending) else {
+            throw BridgeCommandError(code: "invalid_transition", message: "Start the task conversation before creating a pull request so its repository worktree is ready.")
+        }
+        var records = task.repositoryWorktrees
+        for index in records.indices where records[index].pullRequestNumber == nil || records[index].pullRequestURL == nil {
+            if let existing = try GitHubPullRequestManager.findOpen(records[index], executable: gh) {
+                records[index].pullRequestNumber = existing.number
+                records[index].pullRequestURL = existing.url
+            }
+        }
+        task.repositoryWorktrees = records
+        try modelContext.save()
+        guard records.contains(where: { $0.pullRequestNumber == nil || $0.pullRequestURL == nil }) else {
+            return BoardTaskRecord(task: task)
+        }
+
+        let conversation = try await CodexConversationManager(tasks: self, client: client).history(taskID: id)
+        let conversationText = conversation.messages.map { "\($0.role.rawValue): \($0.text)" }.joined(separator: "\n\n")
+        let summary: String
+        if !conversationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let roots = records.map { URL(fileURLWithPath: $0.worktreePath, isDirectory: true) }
+            let workspace = try CodexWorkspaceContext(roots: roots)
+            let summaryThread = try await client.startThread(workspace: workspace, modelID: CodexAppServerClient.modelID)
+            var generated = ""
+            try await client.sendMessage(
+                "Write a very concise GitHub pull request description. Explain what problem this change solves, how it solves it, and briefly mention any special issue or caveat from the conversation. Use Markdown, no more than three short sections, and return only the description.\n\nTask: \(task.title)\n\nConversation:\n\(conversationText)",
+                mode: .plan,
+                modelID: CodexAppServerClient.modelID,
+                threadID: summaryThread,
+                workspace: workspace,
+                developerInstructions: "",
+                onDelta: { _ in },
+                onFinalMessage: { generated = $0.trimmingCharacters(in: .whitespacesAndNewlines) },
+                onActivity: { _ in }, onDiff: { _ in }, onHistory: { _ in },
+                onActionRequest: {}, onUserInput: { _ in }
+            )
+            guard !generated.isEmpty else {
+                throw BridgeCommandError(code: "operation_failed", message: "Codex returned an empty pull request summary. Try again.")
+            }
+            summary = generated
+        } else {
+            summary = "Implements: \(task.title)."
+        }
+
+        for index in records.indices where records[index].pullRequestNumber == nil || records[index].pullRequestURL == nil {
+            let record = records[index]
+            try StationAIWorktreeManager.commitChanges(record, message: "Complete task: \(task.title)")
+            let created = try GitHubPullRequestManager.create(record, title: task.title, body: summary, executable: gh)
+            records[index].pullRequestNumber = created.number
+            records[index].pullRequestURL = created.url
+            task.repositoryWorktrees = records
+            try modelContext.save()
+        }
+        return BoardTaskRecord(task: task)
     }
 
     func setLifecycleStatus(_ id: UUID, to status: TaskStatus, message: String? = nil) throws -> BoardTaskRecord {
@@ -1149,6 +1223,12 @@ final class StationAIBridgeRuntime {
                 result = try Self.value(await taskManager.move(
                     taskID,
                     to: status,
+                    client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string),
+                    allowUnmergedPullRequests: request.arguments["allowUnmergedPullRequests"]?.bool ?? false
+                ))
+            case "task.pr.create":
+                result = try Self.value(await taskManager.createPullRequests(
+                    request.requiredUUID("taskID"),
                     client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
                 ))
             case "task.progress.publish":
@@ -1268,7 +1348,9 @@ final class StationAIBridgeRuntime {
             let code: String
             switch error {
             case .taskNotFound: code = "not_found"
-            case .invalidTitle, .invalidStatus, .noWorkspaceRoots, .unavailableWorkspaceRoot, .invalidParentFolder, .invalidMessage, .repositoryAssigned, .invalidTransition: code = "invalid_argument"
+            case .invalidTitle, .invalidStatus, .noWorkspaceRoots, .unavailableWorkspaceRoot, .invalidParentFolder, .invalidMessage, .repositoryAssigned: code = "invalid_argument"
+            case .invalidTransition: code = "invalid_argument"
+            case .unmergedPullRequests: code = "invalid_transition"
             }
             return .failure(request, code: code, message: error.localizedDescription)
         } catch {

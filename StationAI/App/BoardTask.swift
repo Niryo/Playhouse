@@ -133,10 +133,12 @@ struct RepositoryWorktreeRecord: Codable, Equatable {
     var mergeCompleted: Bool = false
     var mergeError: String? = nil
     var isPending: Bool = false
+    var pullRequestNumber: Int? = nil
+    var pullRequestURL: String? = nil
 
     private enum CodingKeys: String, CodingKey {
         case repositoryPath, branch, worktreePath, branchFrom, createdByStationAI
-        case mergeTarget, mergeCompleted, mergeError, isPending
+        case mergeTarget, mergeCompleted, mergeError, isPending, pullRequestNumber, pullRequestURL
     }
 
     init(
@@ -148,7 +150,9 @@ struct RepositoryWorktreeRecord: Codable, Equatable {
         mergeTarget: String? = nil,
         mergeCompleted: Bool = false,
         mergeError: String? = nil,
-        isPending: Bool = false
+        isPending: Bool = false,
+        pullRequestNumber: Int? = nil,
+        pullRequestURL: String? = nil
     ) {
         self.repositoryPath = repositoryPath
         self.branch = branch
@@ -159,6 +163,8 @@ struct RepositoryWorktreeRecord: Codable, Equatable {
         self.mergeCompleted = mergeCompleted
         self.mergeError = mergeError
         self.isPending = isPending
+        self.pullRequestNumber = pullRequestNumber
+        self.pullRequestURL = pullRequestURL
     }
 
     init(from decoder: Decoder) throws {
@@ -172,5 +178,7 @@ struct RepositoryWorktreeRecord: Codable, Equatable {
         mergeCompleted = try values.decodeIfPresent(Bool.self, forKey: .mergeCompleted) ?? false
         mergeError = try values.decodeIfPresent(String.self, forKey: .mergeError)
         isPending = try values.decodeIfPresent(Bool.self, forKey: .isPending) ?? false
+        pullRequestNumber = try values.decodeIfPresent(Int.self, forKey: .pullRequestNumber)
+        pullRequestURL = try values.decodeIfPresent(String.self, forKey: .pullRequestURL)
     }
 }

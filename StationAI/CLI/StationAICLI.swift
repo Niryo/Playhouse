@@ -85,8 +85,18 @@ enum StationAICLI {
                 let id = try firstPositional(tail)
                 return BridgeRequest(command: "task.get", arguments: ["taskID": .string(id)])
             case "move":
-                guard tail.count == 2 else { throw CLIError.usage("Use: stationai task move <task-id> <status>") }
-                return BridgeRequest(command: "task.move", arguments: ["taskID": .string(tail[0]), "status": .string(tail[1])])
+                guard (2...3).contains(tail.count), tail.count == 2 || tail[2] == "--allow-unmerged" else {
+                    throw CLIError.usage("Use: stationai task move <task-id> <status> [--allow-unmerged]")
+                }
+                return BridgeRequest(command: "task.move", arguments: [
+                    "taskID": .string(tail[0]), "status": .string(tail[1]),
+                    "allowUnmergedPullRequests": .boolean(tail.count == 3)
+                ])
+            case "pr":
+                guard tail.count == 2, tail[0] == "create" else {
+                    throw CLIError.usage("Use: stationai task pr create <task-id>")
+                }
+                return BridgeRequest(command: "task.pr.create", arguments: ["taskID": .string(tail[1])])
             case "progress":
                 guard let action = tail.first else { throw CLIError.usage("Use: stationai task progress publish|custom|clear <task-id> ...") }
                 let values = Array(tail.dropFirst())
@@ -317,6 +327,8 @@ enum StationAICLI {
       stationai task create --title <title> --root <path> [--root <path>...]
       stationai task create --title <title> --repo <path> [--repo <path>...] [--branch <repo-path>=<name>] [--branch-from <repo-path>=<ref>] [--merge-target <repo-path>=<local-branch>]
       stationai task move <task-id> Done
+      stationai task move <task-id> Done --allow-unmerged
+      stationai task pr create <task-id>
       stationai task progress publish <task-id> --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail <text>]
       stationai task progress custom <task-id> --label <label> [--detail <text>]
       stationai task progress clear <task-id>

@@ -22,6 +22,10 @@ struct KanbanBoardView: View {
     @State private var archiveSearchText = ""
     @State private var archivedConversationText: [UUID: String] = [:]
     @State private var isIndexingArchive = false
+    @State private var taskCreatingPullRequests = Set<UUID>()
+    @State private var taskAwaitingUnmergedConfirmation: UUID?
+    @State private var pullRequestError: String?
+    @State private var doneMoveError: String?
 
     var body: some View {
         Group {
@@ -94,6 +98,39 @@ struct KanbanBoardView: View {
             }
         } message: {
             Text(saveError ?? "Please try again.")
+        }
+        .alert("Couldn't create pull request", isPresented: Binding(
+            get: { pullRequestError != nil },
+            set: { if !$0 { pullRequestError = nil } }
+        )) {
+            Button("OK", role: .cancel) { pullRequestError = nil }
+        } message: {
+            Text(pullRequestError ?? "Please try again.")
+        }
+        .alert("Couldn't check pull request status", isPresented: Binding(
+            get: { doneMoveError != nil },
+            set: { if !$0 { doneMoveError = nil } }
+        )) {
+            Button("OK", role: .cancel) { doneMoveError = nil }
+        } message: {
+            Text(doneMoveError ?? "Please try again.")
+        }
+        .confirmationDialog(
+            "This task has an unmerged pull request",
+            isPresented: Binding(
+                get: { taskAwaitingUnmergedConfirmation != nil },
+                set: { if !$0 { taskAwaitingUnmergedConfirmation = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Mark Done Anyway", role: .destructive) {
+                guard let id = taskAwaitingUnmergedConfirmation else { return }
+                taskAwaitingUnmergedConfirmation = nil
+                moveTask(id: id, to: .done, allowUnmergedPullRequests: true)
+            }
+            Button("Cancel", role: .cancel) { taskAwaitingUnmergedConfirmation = nil }
+        } message: {
+            Text("The pull request hasn't been merged. Marking this task Done will keep its worktree and branch as they are.")
         }
         .alert("Some task worktrees were kept", isPresented: Binding(
             get: { lifecycleResetNotice != nil },
@@ -186,7 +223,9 @@ struct KanbanBoardView: View {
         KanbanColumnView(
             status: status,
             tasks: tasks.filter { $0.status == status },
-            onMoveTask: moveTask,
+            onMoveTask: { id, status in moveTask(id: id, to: status) },
+            onCreatePullRequests: createPullRequests,
+            creatingPullRequestTaskIDs: taskCreatingPullRequests,
             onAddTask: openNewTask,
             onOpenTask: { selectedTask = $0 },
             onRenameTask: { taskBeingRenamed = $0 },
@@ -408,7 +447,7 @@ struct KanbanBoardView: View {
         isSelectedTaskNew = selectedTask != nil
     }
 
-    private func moveTask(id: UUID, to status: TaskStatus) {
+    private func moveTask(id: UUID, to status: TaskStatus, allowUnmergedPullRequests: Bool = false) {
         guard let task = tasks.first(where: { $0.id == id }), task.status != status else { return }
         guard status == .done else { return }
         Task { @MainActor in
@@ -417,10 +456,25 @@ struct KanbanBoardView: View {
                     id,
                     to: status.rawValue,
                     client: codexClient,
-                    onConflictResolutionStart: { selectedTask = task }
+                    onConflictResolutionStart: { selectedTask = task },
+                    allowUnmergedPullRequests: allowUnmergedPullRequests
                 )
+            } catch StationAIManagerError.unmergedPullRequests {
+                taskAwaitingUnmergedConfirmation = id
             } catch {
-                saveError = error.localizedDescription
+                doneMoveError = error.localizedDescription
+            }
+        }
+    }
+
+    private func createPullRequests(for task: BoardTask) {
+        guard taskCreatingPullRequests.insert(task.id).inserted else { return }
+        Task { @MainActor in
+            defer { taskCreatingPullRequests.remove(task.id) }
+            do {
+                _ = try await BoardTaskManager(modelContext: modelContext).createPullRequests(task.id, client: codexClient)
+            } catch {
+                pullRequestError = error.localizedDescription
             }
         }
     }
@@ -505,6 +559,8 @@ private struct KanbanColumnView: View {
     let status: TaskStatus
     let tasks: [BoardTask]
     let onMoveTask: (UUID, TaskStatus) -> Void
+    let onCreatePullRequests: (BoardTask) -> Void
+    let creatingPullRequestTaskIDs: Set<UUID>
     let onAddTask: () -> Void
     let onOpenTask: (BoardTask) -> Void
     let onRenameTask: (BoardTask) -> Void
@@ -607,6 +663,8 @@ private struct KanbanColumnView: View {
             onOpen: { onOpenTask(task) },
             onRename: { onRenameTask(task) },
             onDelete: { onDeleteTask(task) },
+            onCreatePullRequests: { onCreatePullRequests(task) },
+            isCreatingPullRequests: creatingPullRequestTaskIDs.contains(task.id),
             onMoveToDone: task.status == .review ? { onMoveTask(task.id, .done) } : nil
         )
 
@@ -766,6 +824,8 @@ private struct TaskCardView: View {
     let onOpen: () -> Void
     let onRename: () -> Void
     let onDelete: () -> Void
+    let onCreatePullRequests: () -> Void
+    let isCreatingPullRequests: Bool
     let onMoveToDone: (() -> Void)?
 
     var body: some View {
@@ -779,9 +839,7 @@ private struct TaskCardView: View {
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 0)
-                    Image(systemName: "line.3.horizontal")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.tertiary)
+                    Spacer(minLength: 0)
                 }
 
                 if let progressLabel = task.progressLabel, !progressLabel.isEmpty {
@@ -852,12 +910,41 @@ private struct TaskCardView: View {
             .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
+        .overlay(alignment: .topTrailing) {
+            if !task.repositoryWorktrees.isEmpty {
+                HStack(spacing: 5) {
+                    let linked = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
+                    if linked.isEmpty {
+                        Button(action: onCreatePullRequests) {
+                            if isCreatingPullRequests {
+                                ProgressView().controlSize(.mini)
+                            } else {
+                                Text("PR").font(.system(size: 10, weight: .semibold))
+                            }
+                        }
+                        .disabled(isCreatingPullRequests)
+                        .accessibilityIdentifier("task-create-pr-\(task.id.uuidString)")
+                    } else {
+                        ForEach(linked, id: \.repositoryPath) { record in
+                            if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
+                                Link("#\(number)", destination: url)
+                                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                    .accessibilityIdentifier("task-pr-link-\(task.id.uuidString)-\(number)")
+                            }
+                        }
+                    }
+                }
+                .buttonStyle(.borderless)
+                .padding(.trailing, 14)
+                .padding(.top, 12)
+            }
+        }
         .accessibilityLabel(task.title)
         .accessibilityHint("Open task")
         .accessibilityIdentifier("task-card-\(task.id.uuidString)")
         .contextMenu {
             if let onMoveToDone {
-                Button("Merge and move to Done", systemImage: "arrow.triangle.merge", action: onMoveToDone)
+                Button("Move to Done", systemImage: "checkmark.circle", action: onMoveToDone)
                     .accessibilityIdentifier("move-task-to-done-menu-item")
             }
             Button("Rename…", systemImage: "pencil", action: onRename)
