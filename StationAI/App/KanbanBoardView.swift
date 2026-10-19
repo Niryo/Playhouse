@@ -150,6 +150,7 @@ struct KanbanBoardView: View {
             .scrollIndicators(.visible)
             .accessibilityIdentifier("board-columns-scroll-view")
         }
+        .background(DragEndEventMonitor(draggedTaskID: $draggedTaskID))
     }
 
     @ViewBuilder
@@ -239,7 +240,7 @@ struct KanbanBoardView: View {
         guard !isChoosingDefaultParent else { return }
         do {
             let created = try BoardTaskManager(modelContext: modelContext).create(
-                title: "Generating title…",
+                title: "Untitled task",
                 repositories: [],
                 contextFolders: []
             )
@@ -258,7 +259,7 @@ struct KanbanBoardView: View {
             return spec
         }
         let created = try BoardTaskManager(modelContext: modelContext).create(
-            title: "Generating title…",
+            title: "Untitled task",
             repositories: branchSpecs,
             contextFolders: contextFolders.map { $0.standardizedFileURL.path }
         )
@@ -322,6 +323,51 @@ struct KanbanBoardView: View {
         taskBeingDeleted = nil
     }
 
+}
+
+private struct DragEndEventMonitor: NSViewRepresentable {
+    @Binding var draggedTaskID: UUID?
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(draggedTaskID: $draggedTaskID)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        context.coordinator.install()
+        return NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.draggedTaskID = $draggedTaskID
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.uninstall()
+    }
+
+    final class Coordinator {
+        var draggedTaskID: Binding<UUID?>
+        private var mouseUpMonitor: Any?
+
+        init(draggedTaskID: Binding<UUID?>) {
+            self.draggedTaskID = draggedTaskID
+        }
+
+        func install() {
+            guard mouseUpMonitor == nil else { return }
+            mouseUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+                guard let self, self.draggedTaskID.wrappedValue != nil else { return event }
+                self.draggedTaskID.wrappedValue = nil
+                return event
+            }
+        }
+
+        func uninstall() {
+            guard let mouseUpMonitor else { return }
+            NSEvent.removeMonitor(mouseUpMonitor)
+            self.mouseUpMonitor = nil
+        }
+    }
 }
 
 private struct TrashDropTarget: View {

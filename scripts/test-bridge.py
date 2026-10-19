@@ -564,7 +564,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(added["mergeTarget"])
         fresh, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"], updated["repositoryWorktrees"])
-    # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | Empty tasks and clean worktrees delete without confirmation, dirty worktrees require confirmation, and confirmed deletion removes the managed worktree and task.
+    # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The trash drop target appears during a task drag and disappears when the drag ends; empty tasks and clean worktrees delete without confirmation, dirty worktrees require confirmation, and confirmed deletion removes the managed worktree and task.
     def test_task_delete_removes_task_and_later_lookup_is_not_found(self):
         task = self.create_repo_task("Delete me", [self.primary])
         task_id = task["id"]
@@ -625,12 +625,12 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "roots", "get", task_id)
         self.assertEqual(self.assert_success(response)["roots"], [str(self.primary)])
 
-    # case-contract: test_new_task_has_empty_conversation_history | Creating a task opens its empty conversation with the repository picker search focused and shows a loading title while title generation is pending; the task has no stored messages or activity, and confirming discard deletes it while canceling keeps it.
+    # case-contract: test_new_task_has_empty_conversation_history | Creating a task opens its empty conversation with the repository picker search focused and shows Untitled task until a first prompt starts title generation; the task has no stored messages or activity, and confirming discard deletes it while canceling keeps it.
     def test_new_task_has_empty_conversation_history(self):
-        response, _ = self.call_cli("task", "create", "--title", "Generating title…")
+        response, _ = self.call_cli("task", "create", "--title", "Untitled task")
         task_id = self.assert_success(response)["id"]
         response, _ = self.call_cli("task", "get", task_id)
-        self.assertEqual(self.assert_success(response)["title"], "Generating title…")
+        self.assertEqual(self.assert_success(response)["title"], "Untitled task")
         response, _ = self.call_cli("conversation", "history", task_id)
         history = self.assert_success(response)
         self.assertEqual(history["activities"], [])

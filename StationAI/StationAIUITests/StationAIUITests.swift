@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 import Foundation
 import XCTest
 
@@ -675,15 +676,33 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(element("conversation-repository-merge-target").value as? String, mergeTo)
     }
 
-    // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | Empty tasks and clean worktrees delete without confirmation, dirty worktrees require confirmation, and confirmed deletion removes the managed worktree and task.
+    // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The trash drop target appears during a task drag and disappears when the drag ends; empty tasks and clean worktrees delete without confirmation, dirty worktrees require confirmation, and confirmed deletion removes the managed worktree and task.
     func test_task_delete_removes_task_and_later_lookup_is_not_found() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
+        XCTAssertFalse(element("task-trash-drop-target").exists, "The trash drop target should be hidden when no task is being dragged.")
         _ = try runCLI(["task", "create", "--title", "Delete me", "--repo", fixture.primary.path])
         let taskID = try taskID(named: "Delete me")
-        let record = try XCTUnwrap(taskRecord(named: "Delete me"))
+        openTask(named: "Delete me")
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        composer.click()
+        composer.typeText("Prepare a task for drag deletion.")
+        element("send-message-button").click()
+        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        app.buttons["Blue"].click()
+        element("ai-question-answer-token").click()
+        element("ai-question-answer-token").typeText("fixture-secret")
+        element("submit-ai-answers-button").click()
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
+        element("back-to-board-button").click()
+        _ = try runCLI(["task", "rename", taskID, "--title", "Delete me"])
+        let record = try XCTUnwrap(taskRecord(id: taskID))
         let worktrees = try XCTUnwrap(record["repositoryWorktrees"] as? [[String: Any]])
         let worktreePath = try XCTUnwrap(worktrees.first?["worktreePath"] as? String)
         XCTAssertTrue(FileManager.default.fileExists(atPath: worktreePath))
+        dragTaskToBoardHeaderAndCheckTrashLifecycle("Delete me")
         let cleanCheck = try runCLI(["task", "delete-check", taskID])
         XCTAssertEqual((cleanCheck["result"] as? [String: Any])?["requiresConfirmation"] as? Bool, false)
         try "unsaved work\n".write(toFile: URL(fileURLWithPath: worktreePath).appendingPathComponent("trash-test.txt").path, atomically: true, encoding: .utf8)
@@ -695,12 +714,14 @@ final class StationAIUITests: XCTestCase {
         cancel.click()
         XCTAssertTrue(app.buttons["Delete me"].exists, "Cancelling the trash confirmation must preserve the task.")
         XCTAssertTrue(FileManager.default.fileExists(atPath: worktreePath), "Cancelling must preserve the worktree.")
+        XCTAssertFalse(element("task-trash-drop-target").exists, "The trash drop target should remain hidden after deletion is canceled.")
 
         dragTaskToTrash("Delete me")
         let confirmation = element("confirm-delete-task-button")
         XCTAssertTrue(confirmation.waitForExistence(timeout: 5))
         confirmation.click()
         XCTAssertEqual(element("task-count").value as? String, "0")
+        XCTAssertFalse(element("task-trash-drop-target").exists, "The trash drop target should be hidden after deletion completes.")
         XCTAssertFalse(FileManager.default.fileExists(atPath: worktreePath), "Confirmed deletion must remove the task's dirty managed worktree.")
 
         assertCLIError(try runCLI(["task", "get", taskID], expectedStatus: 3), code: "not_found")
@@ -808,13 +829,13 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Existing task roots survive clearing the default parent")
     }
 
-    // case-contract: test_new_task_has_empty_conversation_history | Creating a task opens its empty conversation with the repository picker search focused and shows a loading title while title generation is pending; the task has no stored messages or activity, and confirming discard deletes it while canceling keeps it.
+    // case-contract: test_new_task_has_empty_conversation_history | Creating a task opens its empty conversation with the repository picker search focused and shows Untitled task until a first prompt starts title generation; the task has no stored messages or activity, and confirming discard deletes it while canceling keeps it.
     func test_new_task_has_empty_conversation_history() throws {
         launchApp(defaultParent: fixture.parent.path)
         element("new-task-button").click()
         XCTAssertTrue(element("empty-conversation").waitForExistence(timeout: 10))
-        XCTAssertTrue(element("task-title-generating-loader").waitForExistence(timeout: 5), "The conversation header should show a loader while the persisted title is still generating.")
-        XCTAssertTrue(app.staticTexts["Generating title…"].exists, "The conversation header should name the title-generation state instead of showing an untitled task.")
+        XCTAssertTrue(app.staticTexts["Untitled task"].exists, "An empty conversation should keep its untitled title until the first prompt is added.")
+        XCTAssertFalse(element("task-title-generating-loader").exists, "Title generation should not start before the first prompt.")
         let repositorySearch = element("conversation-repository-search")
         XCTAssertTrue(repositorySearch.waitForExistence(timeout: 10), "A new task should open the repository picker immediately.")
         repositorySearch.typeText("primary")
@@ -1625,6 +1646,29 @@ final class StationAIUITests: XCTestCase {
         let deleteAction = element("delete-task-menu-item")
         XCTAssertTrue(deleteAction.waitForExistence(timeout: 5), "The task context menu should offer Delete Task.")
         deleteAction.click()
+    }
+
+    private func dragTaskToBoardHeaderAndCheckTrashLifecycle(_ title: String) {
+        let card = app.buttons[title]
+        XCTAssertTrue(card.waitForExistence(timeout: 5))
+        let cardPoint = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).screenPoint
+        let headerPoint = element("board-title").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).screenPoint
+        postMouseEvent(.leftMouseDown, at: cardPoint)
+        postMouseEvent(.leftMouseDragged, at: CGPoint(x: cardPoint.x + 24, y: cardPoint.y + 8))
+        XCTAssertTrue(element("task-trash-drop-target").waitForExistence(timeout: 5), "The trash drop target should appear during an active task drag.")
+        postMouseEvent(.leftMouseDragged, at: headerPoint)
+        postMouseEvent(.leftMouseUp, at: headerPoint)
+        XCTAssertTrue(waitUntil({ !element("task-trash-drop-target").exists }, timeout: 5), "The trash drop target should disappear when the drag ends outside the board drop targets.")
+        XCTAssertTrue(app.buttons[title].exists, "Ending a drag over the board header should leave the task untouched.")
+    }
+
+    private func postMouseEvent(_ type: CGEventType, at point: CGPoint) {
+        guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else {
+            XCTFail("Could not create a mouse event for the task drag UI check.")
+            return
+        }
+        event.post(tap: .cghidEventTap)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.15))
     }
 
     private func assertOrderedRoots(_ paths: [String], file: StaticString = #filePath, line: UInt = #line) {
