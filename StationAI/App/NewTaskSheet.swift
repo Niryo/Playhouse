@@ -132,23 +132,19 @@ struct NewTaskSheet: View {
                         moveRepositoryHighlight(direction: -1)
                     }
                     .onKeyPress(.return) {
-                        guard let path = keyboardHighlightedRepositoryPath,
-                              let repository = matchingRepositorySuggestions.first(where: { $0.path == path }) else { return .ignored }
-                        selectRepository(repository)
-                        return .handled
-                    }
-                    .onSubmit {
+                        if let path = keyboardHighlightedRepositoryPath,
+                           let repository = matchingRepositorySuggestions.first(where: { $0.path == path }) {
+                            selectRepository(repository)
+                            return .handled
+                        }
+
                         let query = repositorySearch.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !query.isEmpty {
-                            guard let candidate = matchingRepositorySuggestions.first else { return }
+                        if query.isEmpty {
+                            restoreLastSelectedRepositories()
+                        } else if let candidate = matchingRepositorySuggestions.first {
                             selectRepository(candidate)
-                            return
                         }
-                        guard !didOverrideRepositoryDefault, repositories.isEmpty else { return }
-                        repositories = lastSelectedRepositoryPaths.compactMap { path in
-                            let marker = URL(fileURLWithPath: path).appendingPathComponent(".git")
-                            return FileManager.default.fileExists(atPath: marker.path) ? repositorySpec(for: path) : nil
-                        }
+                        return .handled
                     }
                 if !repositorySearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     let availableRepositories = matchingRepositorySuggestions
@@ -243,7 +239,7 @@ struct NewTaskSheet: View {
     private var repositorySearchPlaceholder: String {
         guard !lastSelectedRepositoryPaths.isEmpty else { return "Enter a repository name to search…" }
         let names = lastSelectedRepositoryPaths.map { URL(fileURLWithPath: $0).lastPathComponent }
-        return "Last used: \(names.joined(separator: ", ")) — press Return to reuse"
+        return "Last used: \(names.joined(separator: ", ")) — press ↵ to reuse"
     }
 
     private var matchingRepositorySuggestions: [URL] {
@@ -252,6 +248,14 @@ struct NewTaskSheet: View {
         return suggestedRepositories.filter { candidate in
             !repositories.contains(where: { URL(fileURLWithPath: $0.repositoryPath).standardizedFileURL.path == candidate.standardizedFileURL.path }) &&
             (candidate.lastPathComponent.localizedCaseInsensitiveContains(query) || candidate.path.localizedCaseInsensitiveContains(query))
+        }
+    }
+
+    private func restoreLastSelectedRepositories() {
+        guard !didOverrideRepositoryDefault, repositories.isEmpty else { return }
+        repositories = lastSelectedRepositoryPaths.compactMap { path in
+            let marker = URL(fileURLWithPath: path).appendingPathComponent(".git")
+            return FileManager.default.fileExists(atPath: marker.path) ? repositorySpec(for: path) : nil
         }
     }
 

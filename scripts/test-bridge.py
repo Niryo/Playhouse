@@ -909,7 +909,7 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("settings", "get")
         self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.secondary), str(self.primary)])
 
-    # case-contract: test_repository_suggestions_skip_nested_repositories_and_symlinks | Suggestions include top-level Git roots and skip nested repositories and symlink targets; remembered defaults persist only ordered repository paths, and restoring them starts with auto/default/default branch fields even after a task used custom branch details; typing and arrow-key selection overrides the repository default and persists after task creation.
+    # case-contract: test_repository_suggestions_skip_nested_repositories_and_symlinks | Suggestions include top-level Git roots and skip nested repositories and symlink targets; the picker placeholder shows saved repositories with a Return arrow, and blank Return reuses them in order with auto/default/default branch fields even after a task used custom branch details, while typing and arrow-key selection overrides that default and persists after task creation.
     def test_repository_suggestions_skip_nested_repositories_and_symlinks(self):
         response, _ = self.call_cli("workspace", "suggest", "--parent", self.fixture / "suggested-parent")
         repositories = self.assert_success(response)["repositories"]
@@ -922,6 +922,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.secondary), str(self.primary)])
         response, _ = self.call_cli("settings", "get")
         self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.secondary), str(self.primary)])
+
 
     # case-contract: test_task_roots_remain_after_default_parent_is_cleared | Clearing the default parent does not change roots already saved on a task.
     def test_task_roots_remain_after_default_parent_is_cleared(self):
