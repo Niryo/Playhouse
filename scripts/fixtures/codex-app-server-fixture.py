@@ -186,6 +186,11 @@ def main():
                     "threadId": "00000000-0000-0000-0000-000000000001",
                     "turn": {"id": "turn_stationai_fixture", "status": "completed"},
                 }})
+            elif mode.endswith("-markdown"):
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": "00000000-0000-0000-0000-000000000001",
+                    "turn": {"id": "turn_stationai_fixture", "status": "completed"},
+                }})
             elif mode.endswith("-hold"):
                 time.sleep(30)
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
