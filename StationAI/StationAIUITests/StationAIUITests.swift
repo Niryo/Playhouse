@@ -1192,7 +1192,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Workspace settings can be changed and cleared")
     }
 
-    // case-contract: test_repository_suggestions_skip_nested_repositories_and_symlinks | Suggestions include top-level Git roots and skip nested repositories and symlink targets; blank Return reuses the saved repositories in order, while typing and arrow-key selection overrides that default, which persists after task creation.
+    // case-contract: test_repository_suggestions_skip_nested_repositories_and_symlinks | Suggestions include top-level Git roots and skip nested repositories and symlink targets; the picker placeholder shows saved repositories with a Return arrow, and blank Return reuses them in order, while typing and arrow-key selection overrides that default, which persists after task creation.
     func test_repository_suggestions_skip_nested_repositories_and_symlinks() throws {
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["settings", "set-last-repositories", "--repo", fixture.secondary.path, "--repo", fixture.primary.path])
@@ -1200,6 +1200,7 @@ final class StationAIUITests: XCTestCase {
         let repositorySearch = element("workspace-repository-search")
         XCTAssertTrue(repositorySearch.waitForExistence(timeout: 5), "The create task sheet should let the user search by repository name.")
         XCTAssertTrue((repositorySearch.placeholderValue ?? "").contains("secondary, primary"), "The picker should show the saved two-repository default.")
+        XCTAssertTrue((repositorySearch.placeholderValue ?? "").contains("↵"), "The placeholder should show a Return arrow to signal that Return applies the saved repositories.")
         repositorySearch.click()
         repositorySearch.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(element("selected-repository-0").waitForExistence(timeout: 5), "Return on an empty search should restore the first saved repository.")
