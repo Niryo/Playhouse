@@ -636,6 +636,187 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Waiting Response above In Progress with Review kept separate")
     }
 
+    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, clears explicitly and at turn completion, and the board card shows the built-in icon, label, and detail without changing lifecycle status; each turn receives hidden CLI usage instructions.
+    func test_task_progress_reports_publish_persist_and_clear() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Progress reports", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Progress reports")
+        let executable = URL(fileURLWithPath: "/tmp/stationai-bridge-workspaces/codex-fixture-progress-hold-release")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
+        codexFixtureExecutable = executable.path
+        let activeMarker = URL(fileURLWithPath: executable.path + ".turn-active")
+        let releaseMarker = URL(fileURLWithPath: executable.path + ".turn-release")
+        try? FileManager.default.removeItem(at: activeMarker)
+        try? FileManager.default.removeItem(at: releaseMarker)
+
+        let process = Process()
+        process.executableURL = cliURL
+        process.arguments = ["conversation", "send", taskID, "--message", "Work on this task."]
+        var environment = ProcessInfo.processInfo.environment
+        environment["STATIONAI_DATA_DIRECTORY"] = dataDirectory.path
+        environment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
+        environment["STATIONAI_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
+        environment["STATIONAI_BRIDGE_SERVICE_NAME"] = serviceName
+        environment["STATIONAI_E2E_CODEX_EXECUTABLE"] = executable.path
+        process.environment = environment
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+
+        defer {
+            if process.isRunning {
+                try? "Release the active turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+                process.waitUntilExit()
+            }
+            try? FileManager.default.removeItem(at: activeMarker)
+            try? FileManager.default.removeItem(at: releaseMarker)
+        }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The Codex fixture should hold the conversation turn open.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+
+        let built = try runCLI(["task", "progress", "publish", taskID, "--type", "building", "--detail", "Compiling the app"])
+        XCTAssertEqual((built["result"] as? [String: Any])?["progressLabel"] as? String, "Building")
+        let reportID = "task-progress-report-\(taskID.uppercased())"
+        let report = element(reportID)
+        let icon = element("task-progress-icon-\(taskID.uppercased())")
+        XCTAssertTrue(waitUntil({
+            report.exists && report.label.contains("Building") && report.label.contains("Compiling the app")
+                && (report.value as? String)?.contains("hammer") == true
+        }, timeout: 10), "The board card should expose the Building icon, label, and detail.")
+        XCTAssertTrue(waitUntil({ icon.exists && icon.label == "hammer" }, timeout: 10), "The Building SF Symbol should be exposed as a visible, accessible image.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress", "Publishing progress must not change lifecycle state.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["progressDetail"] as? String, "Compiling the app", "A fresh CLI/XPC connection should read the persisted report.")
+
+        let custom = try runCLI(["task", "progress", "custom", taskID, "--label", "Checking migration", "--detail", "Reading the stored task data"])
+        let customRecord = try XCTUnwrap(custom["result"] as? [String: Any])
+        XCTAssertNil(customRecord["progressType"] as? String)
+        XCTAssertEqual(customRecord["progressLabel"] as? String, "Checking migration")
+        XCTAssertTrue(waitUntil({
+            report.exists && report.label.contains("Checking migration") && report.label.contains("Reading the stored task data")
+                && (report.value as? String)?.contains("sparkle") == true
+        }, timeout: 10), "The task card should update to a custom report with its detail and generic icon.")
+        XCTAssertTrue(waitUntil({ icon.exists && icon.label == "sparkle" }, timeout: 10), "The custom report should expose its generic SF Symbol as a visible, accessible image.")
+        assertCLIError(try runCLI(["task", "progress", "publish", taskID, "--type", "unknown"], expectedStatus: 2), code: "invalid_argument")
+        assertCLIError(try runCLI(["task", "progress", "custom", taskID, "--label", " "], expectedStatus: 2), code: "invalid_argument")
+
+        let cleared = try runCLI(["task", "progress", "clear", taskID])
+        XCTAssertNil((cleared["result"] as? [String: Any])?["progressLabel"])
+        XCTAssertTrue(waitForDisappearance(report), "Clearing a report should remove its secondary row from the card.")
+        _ = try runCLI(["task", "progress", "publish", taskID, "--type", "testing"])
+        try "Release the active turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+        process.waitUntilExit()
+        let output = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let errorOutput = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 0, "The fixture conversation should finish successfully: \(output) \(errorOutput)")
+        let responseLine = try XCTUnwrap(output.split(whereSeparator: \.isNewline).last)
+        let response = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(responseLine.utf8)) as? [String: Any])
+        XCTAssertTrue(response["ok"] as? Bool == true)
+        let finished = try XCTUnwrap(taskRecord(id: taskID))
+        XCTAssertEqual(finished["status"] as? String, "Review")
+        XCTAssertNil(finished["progressLabel"], "Turn completion should clear the last live report.")
+        XCTAssertTrue(waitForDisappearance(report), "Turn completion should remove the progress row from the board card.")
+        let turnData = try Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
+        let turn = try XCTUnwrap(try JSONSerialization.jsonObject(with: turnData) as? [String: Any])
+        let instructions = try XCTUnwrap(turn["developerInstructions"] as? String)
+        XCTAssertTrue(instructions.contains(cliURL.path))
+        XCTAssertTrue(instructions.contains("task progress publish"))
+        XCTAssertTrue(instructions.contains("hidden from the conversation"))
+    }
+
+    // case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; the task card removes the report while lifecycle states remain Blocked or Waiting Response, and answering the question resumes the task successfully.
+    func test_task_progress_reports_clear_on_failed_turns_and_questions() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        var heldTurns: [(Process, URL, URL)] = []
+        defer {
+            for (process, activeMarker, releaseMarker) in heldTurns {
+                if process.isRunning {
+                    try? "Release the active turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+                    process.waitUntilExit()
+                }
+                try? FileManager.default.removeItem(at: activeMarker)
+                try? FileManager.default.removeItem(at: releaseMarker)
+            }
+        }
+        for (fixtureName, expectedReason) in [
+            ("codex-fixture-progress-hold-release-failed", "failed"),
+            ("codex-fixture-progress-hold-release-interrupted", "interrupted"),
+        ] {
+            let title = "Progress \(expectedReason)"
+            try createTaskFixture(title: title, roots: [fixture.primary.path])
+            let taskID = try taskID(named: title)
+            let executable = URL(fileURLWithPath: "/tmp/stationai-bridge-workspaces/\(fixtureName)")
+            let turn = try startProgressFixtureTurn(taskID: taskID, executable: executable)
+            heldTurns.append((turn.process, turn.activeMarker, turn.releaseMarker))
+            XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: turn.activeMarker.path) }, timeout: 10))
+            let report = element("task-progress-report-\(taskID.uppercased())")
+            _ = try runCLI(["task", "progress", "publish", taskID, "--type", "testing", "--detail", "Waiting for the result"])
+            XCTAssertTrue(waitUntil({ report.exists && report.label.contains("Testing") }, timeout: 10), "The active task card should show progress before a failed turn.")
+            XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+
+            try "Release the active turn.\n".write(to: turn.releaseMarker, atomically: true, encoding: .utf8)
+            turn.process.waitUntilExit()
+            let output = String(data: turn.stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let finalLine = try XCTUnwrap(output.split(whereSeparator: \.isNewline).last)
+            let finalResponse = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(finalLine.utf8)) as? [String: Any])
+            XCTAssertFalse(finalResponse["ok"] as? Bool ?? true, "The fixture turn should end as \(expectedReason).")
+            let stopped = try XCTUnwrap(taskRecord(id: taskID))
+            XCTAssertEqual(stopped["status"] as? String, "Blocked")
+            XCTAssertNil(stopped["progressLabel"] as? String)
+            XCTAssertTrue(waitForDisappearance(report), "A failed or interrupted turn should remove its progress row from the card.")
+        }
+
+        let questionFixture = URL(fileURLWithPath: "/tmp/stationai-bridge-workspaces/codex-fixture-progress-question")
+        codexFixtureExecutable = questionFixture.path
+        app.launchEnvironment["STATIONAI_E2E_CODEX_EXECUTABLE"] = questionFixture.path
+        relaunchApp()
+        try createTaskFixture(title: "Progress question", roots: [fixture.primary.path])
+        openTask(named: "Progress question")
+        let questionTaskID = try taskID(named: "Progress question")
+        let activeMarker = URL(fileURLWithPath: questionFixture.path + ".turn-active")
+        let releaseMarker = URL(fileURLWithPath: questionFixture.path + ".turn-release")
+        try? FileManager.default.removeItem(at: activeMarker)
+        try? FileManager.default.removeItem(at: releaseMarker)
+        defer {
+            try? "Release the active turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+            try? FileManager.default.removeItem(at: activeMarker)
+            try? FileManager.default.removeItem(at: releaseMarker)
+        }
+        element("message-composer").click()
+        element("message-composer").typeText("Please ask your questions.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The question fixture should hold the turn before asking for input.")
+        let waitingReport = try runCLI(["task", "progress", "publish", questionTaskID, "--type", "reviewing", "--detail", "Preparing a question"])
+        XCTAssertEqual((waitingReport["result"] as? [String: Any])?["progressLabel"] as? String, "Reviewing")
+        try "Release the active turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        XCTAssertEqual(try taskRecord(id: questionTaskID)?["status"] as? String, "Waiting Response")
+        XCTAssertNil(try taskRecord(id: questionTaskID)?["progressLabel"] as? String, "Progress should clear as soon as Codex requests user input.")
+        element("back-to-board-button").click()
+        let waitingCard = element("task-card-\(questionTaskID.uppercased())")
+        XCTAssertTrue(waitingCard.waitForExistence(timeout: 8))
+        let waitingReportRow = element("task-progress-report-\(questionTaskID.uppercased())")
+        XCTAssertTrue(waitForDisappearance(waitingReportRow), "The Waiting Response card should not retain the agent's progress row.")
+        openTask(named: "Progress question")
+        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 5), "Reopening should preserve the pending question.")
+        app.buttons["Blue"].click()
+        element("ai-question-answer-token").click()
+        element("ai-question-answer-token").typeText("fixture-secret")
+        element("submit-ai-answers-button").click()
+        let completionDeadline = Date().addingTimeInterval(10)
+        var completedStatus: String?
+        while Date() < completionDeadline {
+            completedStatus = try taskRecord(id: questionTaskID)?["status"] as? String
+            if completedStatus == "Review" { break }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        XCTAssertEqual(completedStatus, "Review", "Answering the question should resume and finish the task.")
+        XCTAssertNil(try taskRecord(id: questionTaskID)?["progressLabel"] as? String)
+        try? FileManager.default.removeItem(at: activeMarker)
+        try? FileManager.default.removeItem(at: releaseMarker)
+    }
+
     // case-contract: test_task_rename_persists_and_rejects_blank_title | A rename persists; rejecting a blank rename preserves the last valid title.
     func test_task_rename_persists_and_rejects_blank_title() throws {
         launchApp(defaultParent: fixture.parent.path)
@@ -2163,6 +2344,36 @@ final class StationAIUITests: XCTestCase {
         )
         XCTAssertEqual(response["version"] as? Int, 1)
         return response
+    }
+
+    private func startProgressFixtureTurn(
+        taskID: String,
+        executable: URL
+    ) throws -> (process: Process, stdout: Pipe, stderr: Pipe, activeMarker: URL, releaseMarker: URL) {
+        let process = Process()
+        process.executableURL = cliURL
+        process.arguments = ["conversation", "send", taskID, "--message", "Work on this task."]
+        var environment = ProcessInfo.processInfo.environment
+        environment["STATIONAI_DATA_DIRECTORY"] = dataDirectory.path
+        environment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
+        environment["STATIONAI_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
+        environment["STATIONAI_BRIDGE_SERVICE_NAME"] = serviceName
+        environment["STATIONAI_E2E_CODEX_EXECUTABLE"] = executable.path
+        process.environment = environment
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        let activeMarker = URL(fileURLWithPath: executable.path + ".turn-active")
+        let releaseMarker = URL(fileURLWithPath: executable.path + ".turn-release")
+        try? FileManager.default.removeItem(at: activeMarker)
+        try? FileManager.default.removeItem(at: releaseMarker)
+        try process.run()
+        return (
+            process, stdout, stderr,
+            activeMarker,
+            releaseMarker
+        )
     }
 
     private func runGit(_ repository: URL, _ arguments: String...) throws {

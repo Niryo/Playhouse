@@ -30,12 +30,43 @@ enum TaskStatus: String, CaseIterable, Identifiable {
     }
 }
 
+enum TaskProgressType: String, CaseIterable, Identifiable {
+    case planning
+    case searching
+    case building
+    case running
+    case testing
+    case reviewing
+    case writing
+    case committing
+
+    var id: String { rawValue }
+
+    var label: String { rawValue.capitalized }
+
+    var symbol: String {
+        switch self {
+        case .planning: "map"
+        case .searching: "magnifyingglass"
+        case .building: "hammer"
+        case .running: "play.fill"
+        case .testing: "checkmark.seal"
+        case .reviewing: "eye"
+        case .writing: "pencil.line"
+        case .committing: "arrow.triangle.branch"
+        }
+    }
+}
+
 @Model
 final class BoardTask {
     var id: UUID
     var title: String
     var statusRawValue: String
     var statusMessage: String?
+    var progressTypeRawValue: String?
+    var progressLabel: String?
+    var progressDetail: String?
     var createdAt: Date
     var codexThreadID: String?
     var savedPrompt: String?
@@ -73,6 +104,9 @@ final class BoardTask {
         self.title = title
         statusRawValue = status.rawValue
         statusMessage = nil
+        progressTypeRawValue = nil
+        progressLabel = nil
+        progressDetail = nil
         createdAt = .now
         codexThreadID = nil
         savedPrompt = nil
