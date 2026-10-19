@@ -1590,23 +1590,58 @@ struct TaskConversationView: View {
         Task { @MainActor in
             let title = await generateTaskTitle(from: prompt)
             let fallback = prompt.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
-            guard let latestTask = try? BoardTaskManager(modelContext: modelContext).taskModel(task.id),
-                  latestTask.title == "Generating title…" else {
+            let taskManager = BoardTaskManager(modelContext: modelContext)
+            let latestTask: BoardTask
+            do {
+                latestTask = try taskManager.taskModel(task.id)
+            } catch {
+                var fields = StationAIDiagnostics.errorFields(error)
+                fields["taskID"] = task.id.uuidString
+                fields["titleSource"] = title == nil ? "prompt-fallback" : "codex"
+                StationAIDiagnostics.record("task.title_apply.skipped", fields: fields.merging(["reason": "task_unavailable"]) { _, new in new })
                 isGeneratingTitle = false
                 return
             }
-            _ = try? BoardTaskManager(modelContext: modelContext).rename(task.id, title: title.flatMap { $0.isEmpty ? nil : $0 } ?? fallback)
+            guard latestTask.title == "Generating title…" else {
+                StationAIDiagnostics.record("task.title_apply.skipped", fields: [
+                    "taskID": task.id.uuidString,
+                    "reason": "title_changed",
+                    "currentTitleState": StationAITaskTitleDiagnostics.state(of: latestTask.title),
+                    "titleSource": title == nil ? "prompt-fallback" : "codex"
+                ])
+                isGeneratingTitle = false
+                return
+            }
+            let resolvedTitle = title.flatMap { $0.isEmpty ? nil : $0 } ?? fallback
+            do {
+                _ = try taskManager.rename(task.id, title: resolvedTitle)
+                StationAIDiagnostics.record("task.title_apply.succeeded", fields: [
+                    "taskID": task.id.uuidString,
+                    "titleSource": title == nil ? "prompt-fallback" : "codex",
+                    "fallbackWordCount": title == nil ? String(fallback.split(whereSeparator: \.isWhitespace).count) : "0"
+                ])
+            } catch {
+                var fields = StationAIDiagnostics.errorFields(error, redacting: [resolvedTitle, prompt])
+                fields["taskID"] = task.id.uuidString
+                fields["titleSource"] = title == nil ? "prompt-fallback" : "codex"
+                StationAIDiagnostics.record("task.title_apply.failed", fields: fields)
+            }
             isGeneratingTitle = false
         }
     }
 
     private func generateTaskTitle(from prompt: String) async -> String? {
         guard let workspace = try? CodexWorkspaceContext(roots: workspaceRootURLs) else {
-            NSLog("StationAI task title generation skipped because the task workspace is unavailable.")
+            StationAIDiagnostics.record("task.title_generation.failed", fields: [
+                "taskID": task.id.uuidString,
+                "phase": "workspace-resolution",
+                "reason": "workspace_unavailable"
+            ])
             return nil
         }
         let fixtureExecutable = ProcessInfo.processInfo.environment["STATIONAI_E2E_CODEX_EXECUTABLE"]
-        return await CodexTaskTitleGenerator(client: CodexAppServerClient(codexExecutableOverride: fixtureExecutable)).generateTitle(from: prompt, workspace: workspace)
+        return await CodexTaskTitleGenerator(client: CodexAppServerClient(codexExecutableOverride: fixtureExecutable))
+            .generateTitle(from: prompt, workspace: workspace, taskID: task.id)
     }
 
     private func pauseResponse() {

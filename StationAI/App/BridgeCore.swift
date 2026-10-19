@@ -5,10 +5,18 @@ import SwiftData
 struct CodexTaskTitleGenerator {
     let client: CodexAppServerClient
 
-    func generateTitle(from prompt: String, workspace: CodexWorkspaceContext) async -> String? {
+    func generateTitle(from prompt: String, workspace: CodexWorkspaceContext, taskID: UUID) async -> String? {
+        var phase = "thread-start"
+        var threadID = ""
         do {
-            let threadID = try await client.startThread(workspace: workspace, modelID: CodexAppServerClient.modelID)
+            threadID = try await client.startThread(workspace: workspace, modelID: CodexAppServerClient.modelID)
+            StationAIDiagnostics.record("task.title_generation.started", fields: [
+                "taskID": taskID.uuidString,
+                "threadID": threadID,
+                "modelID": CodexAppServerClient.modelID
+            ])
             var generated: String?
+            phase = "title-turn"
             try await client.sendMessage(
                 "Write a concise task title of at most 8 words for this request. Return only the title:\n\n\(prompt)",
                 mode: .plan,
@@ -23,13 +31,38 @@ struct CodexTaskTitleGenerator {
             )
             guard let title = generated?.components(separatedBy: .newlines).first,
                   !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                NSLog("StationAI task title generation completed without returning a title.")
+                StationAIDiagnostics.record("task.title_generation.failed", fields: [
+                    "taskID": taskID.uuidString,
+                    "threadID": threadID,
+                    "phase": phase,
+                    "reason": "empty_response"
+                ])
                 return nil
             }
+            StationAIDiagnostics.record("task.title_generation.succeeded", fields: [
+                "taskID": taskID.uuidString,
+                "threadID": threadID,
+                "phase": phase,
+                "titleWordCount": String(title.split(whereSeparator: \.isWhitespace).count)
+            ])
             return title
         } catch {
-            NSLog("StationAI task title generation failed: %@", error.localizedDescription)
+            var fields = StationAIDiagnostics.errorFields(error, redacting: [prompt])
+            fields["taskID"] = taskID.uuidString
+            fields["threadID"] = threadID
+            fields["phase"] = phase
+            StationAIDiagnostics.record("task.title_generation.failed", fields: fields)
             return nil
+        }
+    }
+}
+
+enum StationAITaskTitleDiagnostics {
+    static func state(of title: String) -> String {
+        switch title {
+        case "Untitled task": "untitled"
+        case "Generating title…": "generating"
+        default: "custom"
         }
     }
 }
@@ -889,10 +922,41 @@ final class CodexConversationManager {
                     codexExecutableOverride: self.client.executableOverrideForTitleGeneration
                 )
                 let generated = await CodexTaskTitleGenerator(client: titleClient)
-                    .generateTitle(from: normalizedText, workspace: workspace)
+                    .generateTitle(from: normalizedText, workspace: workspace, taskID: taskID)
                 let fallback = normalizedText.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
-                guard let latest = try? self.tasks.taskModel(taskID), latest.title == "Generating title…" else { return }
-                _ = try? self.tasks.rename(taskID, title: generated.flatMap { $0.isEmpty ? nil : $0 } ?? fallback)
+                let latest: BoardTask
+                do {
+                    latest = try self.tasks.taskModel(taskID)
+                } catch {
+                    var fields = StationAIDiagnostics.errorFields(error)
+                    fields["taskID"] = taskID.uuidString
+                    fields["titleSource"] = generated == nil ? "prompt-fallback" : "codex"
+                    StationAIDiagnostics.record("task.title_apply.skipped", fields: fields.merging(["reason": "task_unavailable"]) { _, new in new })
+                    return
+                }
+                guard latest.title == "Generating title…" else {
+                    StationAIDiagnostics.record("task.title_apply.skipped", fields: [
+                        "taskID": taskID.uuidString,
+                        "reason": "title_changed",
+                        "currentTitleState": StationAITaskTitleDiagnostics.state(of: latest.title),
+                        "titleSource": generated == nil ? "prompt-fallback" : "codex"
+                    ])
+                    return
+                }
+                let resolvedTitle = generated.flatMap { $0.isEmpty ? nil : $0 } ?? fallback
+                do {
+                    _ = try self.tasks.rename(taskID, title: resolvedTitle)
+                    StationAIDiagnostics.record("task.title_apply.succeeded", fields: [
+                        "taskID": taskID.uuidString,
+                        "titleSource": generated == nil ? "prompt-fallback" : "codex",
+                        "fallbackWordCount": generated == nil ? String(fallback.split(whereSeparator: \.isWhitespace).count) : "0"
+                    ])
+                } catch {
+                    var fields = StationAIDiagnostics.errorFields(error, redacting: [resolvedTitle, normalizedText])
+                    fields["taskID"] = taskID.uuidString
+                    fields["titleSource"] = generated == nil ? "prompt-fallback" : "codex"
+                    StationAIDiagnostics.record("task.title_apply.failed", fields: fields)
+                }
             }
         } else {
             titleGeneration = nil

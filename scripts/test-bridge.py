@@ -950,7 +950,7 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "get", task_id, expected_status=3)
         self.assert_failure(response, "not_found")
 
-    # case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while backing out saves an unsent prompt; reopening restores the draft without creating a branch or worktree, and invalid status changes are rejected without mutation.
+    # case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while backing out saves an unsent prompt; reopening restores the draft without creating a branch or worktree, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
     def test_task_prompt_draft_persists_after_back(self):
         suggestions, _ = self.call_cli("workspace", "suggest", "--parent", self.fixture / "suggested-parent")
         self.assertIn(str(self.primary), self.assert_success(suggestions)["repositories"])
@@ -975,7 +975,63 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(reopened_task["savedPrompt"], prompt)
         self.assertEqual(reopened_task["status"], "Backlog")
         self.assertEqual(reopened_task["title"], "Stable draft title")
-    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and sending to an Untitled task persists either the Codex-generated title or a prompt-based fallback when title generation fails.
+
+        delayed_task = self.create_task(title="Untitled task", roots=[self.primary])
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-title-success-wait"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        fixture_owner = self.data_directory / ".stationai-codex-fixture-owner"
+        fixture_owner.write_text("StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8")
+        ready = Path(str(executable) + ".resolve-ready")
+        resume = Path(str(executable) + ".resolve-continue")
+        environment = os.environ.copy()
+        environment.update({
+            "STATIONAI_DATA_DIRECTORY": str(self.data_directory),
+            "STATIONAI_E2E_WORKTREE_DIRECTORY": str(self.worktree_directory),
+            "STATIONAI_E2E_DEFAULTS_SUITE": self.defaults_suite,
+            "STATIONAI_BRIDGE_SERVICE_NAME": arguments.service_name,
+            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
+        })
+        process = subprocess.Popen(
+            [
+                str(self.cli), "conversation", "send", delayed_task["id"],
+                "--message", "Explain the delayed title result.",
+                "--answer", "color=Blue", "--answer", "token=fixture-secret",
+            ],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment,
+        )
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not ready.exists():
+            time.sleep(0.02)
+        if not ready.exists():
+            resume.write_text("Release the title-generation fixture.\n", encoding="utf-8")
+            output, error_output = process.communicate(timeout=30)
+            self.fail(f"Title generation did not reach its delayed response: {output}\n{error_output}")
+        renamed_title = "Stable title chosen while generation is pending"
+        renamed, _ = self.call_cli("task", "rename", delayed_task["id"], "--title", renamed_title)
+        self.assertEqual(self.assert_success(renamed)["title"], renamed_title)
+        resume.write_text("Release the title-generation fixture.\n", encoding="utf-8")
+        output, error_output = process.communicate(timeout=30)
+        self.assertEqual(process.returncode, 0, f"CLI send failed: {output}\n{error_output}")
+        delayed_result = json.loads([line for line in output.splitlines() if line.strip()][-1])
+        self.assertTrue(delayed_result.get("ok"), delayed_result.get("error"))
+        final_task = self.assert_success(self.call_cli("task", "get", delayed_task["id"])[0])
+        self.assertEqual(final_task["title"], renamed_title)
+        title_events = [
+            json.loads(line)
+            for line in (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8").splitlines()
+            if json.loads(line).get("taskID") == delayed_task["id"]
+            and json.loads(line).get("event", "").startswith("task.title_")
+        ]
+        skipped = next(event for event in title_events if event["event"] == "task.title_apply.skipped")
+        self.assertEqual(skipped["reason"], "title_changed")
+        self.assertEqual(skipped["currentTitleState"], "custom")
+        self.assertEqual(skipped["titleSource"], "codex")
+        serialized_title_events = json.dumps(title_events)
+        self.assertNotIn("Explain the delayed title result.", serialized_title_events)
+        self.assertNotIn("Generated fixture title", serialized_title_events)
+    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and sending to an Untitled task persists either the Codex-generated title or a prompt-based fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text.
     def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
         task_id = self.create_task(title="Blank conversation send", roots=[self.primary])["id"]
         response, _ = self.call_cli("conversation", "send", task_id, "--message", " ", expected_status=2)
@@ -1012,6 +1068,20 @@ class StationAIBridgeTests(unittest.TestCase):
         titled_record = self.assert_success(titled)
         self.assertEqual(titled_record["savedPrompt"], title_prompt)
         self.assertEqual(titled_record["title"], "Generated fixture title")
+        title_events = [
+            json.loads(line)
+            for line in (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8").splitlines()
+            if json.loads(line).get("taskID") == title_task["id"]
+            and json.loads(line).get("event", "").startswith("task.title_")
+        ]
+        generation_started = next(event for event in title_events if event["event"] == "task.title_generation.started")
+        generation_succeeded = next(event for event in title_events if event["event"] == "task.title_generation.succeeded")
+        title_applied = next(event for event in title_events if event["event"] == "task.title_apply.succeeded")
+        self.assertEqual(generation_started["threadID"], generation_succeeded["threadID"])
+        self.assertTrue(generation_started["threadID"])
+        self.assertTrue(generation_succeeded["threadID"])
+        self.assertEqual(title_applied["titleSource"], "codex")
+        self.assertEqual(title_applied["taskID"], title_task["id"])
 
         failure_executable = self.data_directory / "codex-fixture-title-failure"
         shutil.copyfile(fixture, failure_executable)
@@ -1028,6 +1098,23 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(failed_title_record["savedPrompt"], failure_prompt)
         self.assertEqual(failed_title_record["title"], failure_prompt)
         self.assertNotEqual(failed_title_record["title"], "Generating title…")
+        failure_events = [
+            json.loads(line)
+            for line in (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8").splitlines()
+            if json.loads(line).get("taskID") == failed_title_task["id"]
+            and json.loads(line).get("event", "").startswith("task.title_")
+        ]
+        generation_failed = next(event for event in failure_events if event["event"] == "task.title_generation.failed")
+        fallback_applied = next(event for event in failure_events if event["event"] == "task.title_apply.succeeded")
+        self.assertEqual(generation_failed["phase"], "title-turn")
+        self.assertTrue(generation_failed["threadID"])
+        self.assertTrue(generation_failed.get("errorDescription"))
+        self.assertIn("Fixture rejected task-title generation.", generation_failed["errorDescription"])
+        self.assertEqual(fallback_applied["titleSource"], "prompt-fallback")
+        title_log = json.dumps(title_events + failure_events)
+        self.assertNotIn(title_prompt, title_log)
+        self.assertNotIn("Generated fixture title", title_log)
+        self.assertNotIn(failure_prompt, title_log)
 
     # case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history.
     def test_conversation_sends_image_attachments(self):

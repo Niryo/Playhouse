@@ -1368,9 +1368,9 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "New conversation shows its empty state")
     }
 
-    // case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while backing out saves an unsent prompt; reopening restores the draft without creating a branch or worktree, and invalid status changes are rejected without mutation.
+    // case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while backing out saves an unsent prompt; reopening restores the draft without creating a branch or worktree, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
     func test_task_prompt_draft_persists_after_back() throws {
-        codexFixtureExecutable = "/tmp/stationai-bridge-workspaces/codex-fixture-success-wait"
+        codexFixtureExecutable = "/tmp/stationai-bridge-workspaces/codex-fixture-title-success-wait"
         launchApp(defaultParent: fixture.parent.path)
         openNewTaskSheet()
         chooseRepositorySuggestion("primary")
@@ -1412,6 +1412,17 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({
             ((try? self.taskRecord(id: taskID)?["title"] as? String) ?? nil) == "Stable draft title"
         }, timeout: 10), "A late title response must not overwrite a title that was renamed while generation was pending.")
+        XCTAssertTrue(waitUntil({
+            (try? self.diagnosticEvents().contains { $0["taskID"] as? String == taskID && $0["event"] as? String == "task.title_apply.skipped" }) == true
+        }, timeout: 10), "The late result should be logged as skipped after the user renames the task.")
+        let titleEvents = try diagnosticEvents().filter { $0["taskID"] as? String == taskID }
+        let skippedTitle = try XCTUnwrap(titleEvents.first { $0["event"] as? String == "task.title_apply.skipped" })
+        XCTAssertEqual(skippedTitle["reason"] as? String, "title_changed")
+        XCTAssertEqual(skippedTitle["currentTitleState"] as? String, "custom")
+        XCTAssertEqual(skippedTitle["titleSource"] as? String, "codex")
+        let serializedTitleEvents = String(data: try JSONSerialization.data(withJSONObject: titleEvents), encoding: .utf8) ?? ""
+        XCTAssertFalse(serializedTitleEvents.contains(prompt), "Title diagnostics must not include conversation text.")
+        XCTAssertFalse(serializedTitleEvents.contains("Stable draft title"), "Title diagnostics must not include a user-renamed title.")
         openTask(named: "Stable draft title")
         XCTAssertEqual(composer.value as? String, prompt, "Reopening should restore an unsent draft.")
         element("back-to-board-button").click()
@@ -1420,7 +1431,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Unsent task prompt is saved after returning to backlog")
     }
 
-    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and sending to an Untitled task persists either the Codex-generated title or a prompt-based fallback when title generation fails.
+    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and sending to an Untitled task persists either the Codex-generated title or a prompt-based fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text.
     func test_conversation_composer_rejects_blank_and_supports_live_turn_controls() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Blank message", roots: [fixture.primary.path])
@@ -1476,7 +1487,21 @@ final class StationAIUITests: XCTestCase {
             XCTAssertTrue(waitUntil({
                 ((try? self.taskRecord(id: titleTaskID)?["title"] as? String) ?? nil) == "Generated fixture title"
             }, timeout: 20), "Sending a prompt from an empty task should persist the Codex-generated title.")
+            XCTAssertTrue(waitUntil({
+                (try? self.diagnosticEvents().contains { $0["taskID"] as? String == titleTaskID && $0["event"] as? String == "task.title_apply.succeeded" }) == true
+            }, timeout: 10), "The generated title application should be logged.")
             XCTAssertEqual(try taskRecord(id: titleTaskID)?["savedPrompt"] as? String, titlePrompt)
+            let titleEvents = try diagnosticEvents().filter { $0["taskID"] as? String == titleTaskID }
+            let generationStarted = try XCTUnwrap(titleEvents.first { $0["event"] as? String == "task.title_generation.started" })
+            let generationSucceeded = try XCTUnwrap(titleEvents.first { $0["event"] as? String == "task.title_generation.succeeded" })
+            let titleApplied = try XCTUnwrap(titleEvents.first { $0["event"] as? String == "task.title_apply.succeeded" })
+            XCTAssertEqual(generationStarted["threadID"] as? String, generationSucceeded["threadID"] as? String)
+            XCTAssertTrue((generationStarted["threadID"] as? String)?.isEmpty == false)
+            XCTAssertTrue((generationSucceeded["threadID"] as? String)?.isEmpty == false)
+            XCTAssertEqual(titleApplied["titleSource"] as? String, "codex")
+            let serializedTitleEvents = String(data: try JSONSerialization.data(withJSONObject: titleEvents), encoding: .utf8) ?? ""
+            XCTAssertFalse(serializedTitleEvents.contains(titlePrompt), "Title diagnostics must not include conversation text.")
+            XCTAssertFalse(serializedTitleEvents.contains("Generated fixture title"), "Title diagnostics must not include generated title text.")
             _ = try runCLI(["task", "rename", titleTaskID, "--title", "Generated title success"])
             element("back-to-board-button").click()
 
@@ -1495,7 +1520,20 @@ final class StationAIUITests: XCTestCase {
             XCTAssertTrue(waitUntil({
                 ((try? self.taskRecord(id: failureTaskID)?["title"] as? String) ?? nil) == failurePrompt
             }, timeout: 20), "When title generation fails, the submitted prompt should become the persisted fallback title.")
+            XCTAssertTrue(waitUntil({
+                (try? self.diagnosticEvents().contains { $0["taskID"] as? String == failureTaskID && $0["event"] as? String == "task.title_apply.succeeded" }) == true
+            }, timeout: 10), "The prompt fallback application should be logged.")
             XCTAssertEqual(try taskRecord(id: failureTaskID)?["savedPrompt"] as? String, failurePrompt)
+            let failureTitleEvents = try diagnosticEvents().filter { $0["taskID"] as? String == failureTaskID }
+            let titleGenerationFailure = try XCTUnwrap(failureTitleEvents.first { $0["event"] as? String == "task.title_generation.failed" })
+            let fallbackApplied = try XCTUnwrap(failureTitleEvents.first { $0["event"] as? String == "task.title_apply.succeeded" })
+            XCTAssertEqual(titleGenerationFailure["phase"] as? String, "title-turn")
+            XCTAssertTrue((titleGenerationFailure["threadID"] as? String)?.isEmpty == false)
+            XCTAssertTrue((titleGenerationFailure["errorDescription"] as? String)?.isEmpty == false)
+            XCTAssertTrue((titleGenerationFailure["errorDescription"] as? String)?.contains("Fixture rejected task-title generation.") == true)
+            XCTAssertEqual(fallbackApplied["titleSource"] as? String, "prompt-fallback")
+            let serializedFailureTitleEvents = String(data: try JSONSerialization.data(withJSONObject: failureTitleEvents), encoding: .utf8) ?? ""
+            XCTAssertFalse(serializedFailureTitleEvents.contains(failurePrompt), "Title diagnostics must not include conversation text.")
             app.terminate()
             codexFixtureExecutable = nil
             launchApp(defaultParent: fixture.parent.path)

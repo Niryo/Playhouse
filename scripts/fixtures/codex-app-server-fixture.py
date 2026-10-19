@@ -112,7 +112,7 @@ def main():
                         "turn": {"id": TURN_ID, "status": "failed", "error": {"message": "Fixture rejected task-title generation."}},
                     }})
                     continue
-                if mode.endswith("-success-wait"):
+                if mode.endswith("-title-success-wait"):
                     ready = Path(str(sys.argv[0]) + ".resolve-ready")
                     resume = Path(str(sys.argv[0]) + ".resolve-continue")
                     ready.write_text("Codex task-title turn is active.\n", encoding="utf-8")
@@ -155,7 +155,7 @@ def main():
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
-            elif mode.endswith("-success-wait"):
+            elif mode.endswith("-success-wait") and not mode.endswith("-title-success-wait"):
                 ready = Path(str(sys.argv[0]) + ".resolve-ready")
                 resume = Path(str(sys.argv[0]) + ".resolve-continue")
                 ready.write_text("Codex conflict-resolution turn is active.\n", encoding="utf-8")
