@@ -781,6 +781,34 @@ private struct TaskCardView: View {
                         .foregroundStyle(.tertiary)
                 }
 
+                if let progressLabel = task.progressLabel, !progressLabel.isEmpty {
+                    HStack(alignment: .top, spacing: 6) {
+                        let progressType = TaskProgressType(rawValue: task.progressTypeRawValue ?? "")
+                        Image(systemName: progressType?.symbol ?? "sparkle")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Color.accentColor)
+                            .accessibilityLabel(progressType?.symbol ?? "sparkle")
+                            .accessibilityIdentifier("task-progress-icon-\(task.id.uuidString)")
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(progressLabel)
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.primary)
+                                .accessibilityIdentifier("task-progress-label-\(task.id.uuidString)")
+                            if let progressDetail = task.progressDetail, !progressDetail.isEmpty {
+                                Text(progressDetail)
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                                    .accessibilityIdentifier("task-progress-detail-\(task.id.uuidString)")
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("task-progress-report-\(task.id.uuidString)")
+                    .accessibilityValue("Progress icon: \(TaskProgressType(rawValue: task.progressTypeRawValue ?? "")?.symbol ?? "sparkle")")
+                }
+
                 if let statusMessage = task.statusMessage, !statusMessage.isEmpty {
                     Text(statusMessage)
                         .font(.system(size: 10))

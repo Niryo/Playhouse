@@ -142,6 +142,37 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(current)["status"], "Review")
         return result
 
+    def start_progress_fixture_turn(self, task_id, fixture_name, answers=()):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / fixture_name
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        environment = os.environ.copy()
+        environment.update({
+            "STATIONAI_DATA_DIRECTORY": str(self.data_directory),
+            "STATIONAI_E2E_WORKTREE_DIRECTORY": str(self.worktree_directory),
+            "STATIONAI_E2E_DEFAULTS_SUITE": self.defaults_suite,
+            "STATIONAI_BRIDGE_SERVICE_NAME": arguments.service_name,
+            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
+        })
+        command = [str(self.cli), "conversation", "send", task_id, "--message", "Work on this task."]
+        for answer in answers:
+            command.extend(["--answer", answer])
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
+        active = Path(str(executable) + ".turn-active")
+        release = Path(str(executable) + ".turn-release")
+        deadline = time.monotonic() + 10
+        while not active.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not active.exists():
+            release.write_text("Release the active turn.\n", encoding="utf-8")
+            process.communicate(timeout=20)
+            self.fail(f"Fixture turn {fixture_name} did not become active.")
+        return process, executable, active, release
+
     def prepare_workspace_changes(self):
         marker = self.fixture / ".stationai-bridge-fixture"
         if not marker.is_file() or marker.read_text(encoding="utf-8") != "StationAI bridge tests own this deterministic fixture (v1).\n":
@@ -548,6 +579,135 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIn("Only a task in Review", response["error"]["message"])
         response, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(response)["status"], "Backlog")
+
+    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, clears explicitly and at turn completion, and the board card shows the built-in icon, label, and detail without changing lifecycle status; each turn receives hidden CLI usage instructions.
+    def test_task_progress_reports_publish_persist_and_clear(self):
+        task_id = self.create_task("Progress reports", roots=[self.primary])["id"]
+        response, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "building", expected_status=1)
+        self.assert_failure(response, "invalid_transition")
+
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-hold-release"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = os.environ.copy()
+        environment.update({
+            "STATIONAI_DATA_DIRECTORY": str(self.data_directory),
+            "STATIONAI_E2E_WORKTREE_DIRECTORY": str(self.worktree_directory),
+            "STATIONAI_E2E_DEFAULTS_SUITE": self.defaults_suite,
+            "STATIONAI_BRIDGE_SERVICE_NAME": arguments.service_name,
+            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
+        })
+        turn = subprocess.Popen(
+            [str(self.cli), "conversation", "send", task_id, "--message", "Work on this task."],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment,
+        )
+        active_marker = Path(str(executable) + ".turn-active")
+        release_marker = Path(str(executable) + ".turn-release")
+        try:
+            deadline = time.monotonic() + 10
+            while not active_marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(active_marker.exists(), "The fixture turn did not become active.")
+            current, _ = self.call_cli("task", "get", task_id)
+            self.assertEqual(self.assert_success(current)["status"], "In Progress")
+
+            published, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "building", "--detail", "Compiling the app")
+            record = self.assert_success(published)
+            self.assertEqual(record["progressType"], "building")
+            self.assertEqual(record["progressLabel"], "Building")
+            self.assertEqual(record["progressDetail"], "Compiling the app")
+            fresh, _ = self.call_cli("task", "get", task_id)
+            self.assertEqual(self.assert_success(fresh)["progressDetail"], "Compiling the app")
+
+            invalid_type, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "unknown", expected_status=2)
+            self.assert_failure(invalid_type, "invalid_argument")
+            custom, _ = self.call_cli("task", "progress", "custom", task_id, "--label", "Checking migration", "--detail", "Reading the stored task data")
+            custom_record = self.assert_success(custom)
+            self.assertIsNone(custom_record.get("progressType"))
+            self.assertEqual(custom_record["progressLabel"], "Checking migration")
+            self.assertEqual(custom_record["progressDetail"], "Reading the stored task data")
+            blank_custom, _ = self.call_cli("task", "progress", "custom", task_id, "--label", " ", expected_status=2)
+            self.assert_failure(blank_custom, "invalid_argument")
+
+            cleared, _ = self.call_cli("task", "progress", "clear", task_id)
+            self.assertIsNone(self.assert_success(cleared).get("progressLabel"))
+            final_report, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "testing")
+            self.assertEqual(self.assert_success(final_report)["progressLabel"], "Testing")
+            release_marker.write_text("Release the active turn.\n", encoding="utf-8")
+            stdout, stderr = turn.communicate(timeout=20)
+            self.assertEqual(turn.returncode, 0, f"Fixture conversation failed: {stdout}; {stderr}")
+            final_response = json.loads([line for line in stdout.splitlines() if line.strip()][-1])
+            self.assertTrue(final_response["ok"], final_response.get("error"))
+            finished, _ = self.call_cli("task", "get", task_id)
+            finished_record = self.assert_success(finished)
+            self.assertEqual(finished_record["status"], "Review")
+            self.assertIsNone(finished_record.get("progressLabel"))
+            turn_data = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+            instructions = turn_data["developerInstructions"]
+            self.assertIn(str(self.cli), instructions)
+            self.assertIn("task progress publish", instructions)
+            self.assertIn("hidden from the conversation", instructions)
+        finally:
+            if turn.poll() is None:
+                release_marker.write_text("Release the active turn.\n", encoding="utf-8")
+                turn.communicate(timeout=20)
+            active_marker.unlink(missing_ok=True)
+            release_marker.unlink(missing_ok=True)
+
+    # case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; the task card removes the report while lifecycle states remain Blocked or Waiting Response, and answering the question resumes the task successfully.
+    def test_task_progress_reports_clear_on_failed_turns_and_questions(self):
+        for fixture_name, expected_reason in [
+            ("codex-fixture-progress-hold-release-failed", "failed"),
+            ("codex-fixture-progress-hold-release-interrupted", "interrupted"),
+        ]:
+            task_id = self.create_task(f"Progress {expected_reason}", roots=[self.primary])["id"]
+            process, executable, active, release = self.start_progress_fixture_turn(task_id, fixture_name)
+            try:
+                report, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "testing", "--detail", "Waiting for the result")
+                self.assertEqual(self.assert_success(report)["progressLabel"], "Testing")
+                release.write_text("Release the active turn.\n", encoding="utf-8")
+                stdout, stderr = process.communicate(timeout=20)
+                self.assertEqual(process.returncode, 1, f"Expected the fixture {expected_reason} turn to fail: {stdout}; {stderr}")
+                final_response = json.loads([line for line in stdout.splitlines() if line.strip()][-1])
+                self.assert_failure(final_response, "operation_failed")
+                current, _ = self.call_cli("task", "get", task_id)
+                current_record = self.assert_success(current)
+                self.assertEqual(current_record["status"], "Blocked")
+                self.assertIsNone(current_record.get("progressLabel"))
+            finally:
+                if process.poll() is None:
+                    release.write_text("Release the active turn.\n", encoding="utf-8")
+                    process.communicate(timeout=20)
+                active.unlink(missing_ok=True)
+                release.unlink(missing_ok=True)
+
+        task_id = self.create_task("Progress question", roots=[self.primary])["id"]
+        process, executable, active, release = self.start_progress_fixture_turn(
+            task_id, "codex-fixture-progress-question",
+            answers=["color=Blue", "token=fixture-secret"],
+        )
+        try:
+            report, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "reviewing")
+            self.assertEqual(self.assert_success(report)["progressLabel"], "Reviewing")
+            release.write_text("Release the active turn.\n", encoding="utf-8")
+            stdout, stderr = process.communicate(timeout=20)
+            self.assertEqual(process.returncode, 0, f"Answering the fixture question should complete the turn: {stdout}; {stderr}")
+            final_response = json.loads([line for line in stdout.splitlines() if line.strip()][-1])
+            self.assertTrue(final_response["ok"], final_response.get("error"))
+            current, _ = self.call_cli("task", "get", task_id)
+            current_record = self.assert_success(current)
+            self.assertEqual(current_record["status"], "Review")
+            self.assertIsNone(current_record.get("progressLabel"))
+        finally:
+            if process.poll() is None:
+                release.write_text("Release the active turn.\n", encoding="utf-8")
+                process.communicate(timeout=20)
+            active.unlink(missing_ok=True)
+            release.unlink(missing_ok=True)
 
     # case-contract: test_task_rename_persists_and_rejects_blank_title | A rename persists; rejecting a blank rename preserves the last valid title.
     def test_task_rename_persists_and_rejects_blank_title(self):

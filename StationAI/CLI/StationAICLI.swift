@@ -87,6 +87,34 @@ enum StationAICLI {
             case "move":
                 guard tail.count == 2 else { throw CLIError.usage("Use: stationai task move <task-id> <status>") }
                 return BridgeRequest(command: "task.move", arguments: ["taskID": .string(tail[0]), "status": .string(tail[1])])
+            case "progress":
+                guard let action = tail.first else { throw CLIError.usage("Use: stationai task progress publish|custom|clear <task-id> ...") }
+                let values = Array(tail.dropFirst())
+                switch action {
+                case "publish":
+                    guard let id = values.first else { throw CLIError.usage("Use: stationai task progress publish <task-id> --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail <text>]") }
+                    let flags = try parseFlags(Array(values.dropFirst()), valueFlags: ["--type", "--detail"])
+                    var requestArguments: [String: BridgeValue] = [
+                        "taskID": .string(id),
+                        "type": .string(try requiredFlag("--type", flags: flags).first!)
+                    ]
+                    if let detail = flags["--detail"]?.first { requestArguments["detail"] = .string(detail) }
+                    return BridgeRequest(command: "task.progress.publish", arguments: requestArguments)
+                case "custom":
+                    guard let id = values.first else { throw CLIError.usage("Use: stationai task progress custom <task-id> --label <label> [--detail <text>]") }
+                    let flags = try parseFlags(Array(values.dropFirst()), valueFlags: ["--label", "--detail"])
+                    var requestArguments: [String: BridgeValue] = [
+                        "taskID": .string(id),
+                        "label": .string(try requiredFlag("--label", flags: flags).first!)
+                    ]
+                    if let detail = flags["--detail"]?.first { requestArguments["detail"] = .string(detail) }
+                    return BridgeRequest(command: "task.progress.custom", arguments: requestArguments)
+                case "clear":
+                    guard values.count == 1 else { throw CLIError.usage("Use: stationai task progress clear <task-id>") }
+                    return BridgeRequest(command: "task.progress.clear", arguments: ["taskID": .string(values[0])])
+                default:
+                    throw CLIError.usage("Unknown task progress operation '\(action)'.")
+                }
             case "rename":
                 guard let id = tail.first else { throw CLIError.usage("Use: stationai task rename <task-id> --title <title>") }
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--title"])
@@ -289,6 +317,9 @@ enum StationAICLI {
       stationai task create --title <title> --root <path> [--root <path>...]
       stationai task create --title <title> --repo <path> [--repo <path>...] [--branch <repo-path>=<name>] [--branch-from <repo-path>=<ref>] [--merge-target <repo-path>=<local-branch>]
       stationai task move <task-id> Done
+      stationai task progress publish <task-id> --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail <text>]
+      stationai task progress custom <task-id> --label <label> [--detail <text>]
+      stationai task progress clear <task-id>
       stationai task rename <task-id> --title <title>
       stationai task repository add <task-id> --repo <path>
       stationai task roots get <task-id>
