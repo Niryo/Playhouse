@@ -121,7 +121,7 @@
   },
   {
     "id": "test_plan_mode_renders_markdown_in_conversation",
-    "expectation": "Selecting Plan mode sends a planning turn; Markdown headings and lists render as distinct conversation elements after reopening, and bridge history preserves the assistant's exact Markdown source."
+    "expectation": "Selecting Plan mode sends a planning turn; a completed <proposed_plan> is automatically rendered as Markdown without exposing its wrapper tags, including after reopening, while bridge history preserves the exact source."
   },
   {
     "id": "test_conversation_mode_rejects_unknown_mode_without_starting_a_turn",
