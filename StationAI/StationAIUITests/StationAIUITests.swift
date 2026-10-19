@@ -389,7 +389,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Done preserves the task worktree without merging")
     }
 
-    // case-contract: test_task_pr_create_reports_real_gh_failure | Creating a PR through the real gh CLI reports an informative failure for a local repository without a usable GitHub remote and persists no partial PR link.
+    // case-contract: test_task_pr_create_reports_real_gh_failure | A repository-backed Done task exposes a PR action in the archive; when the real gh CLI cannot create one for a local repository without a usable GitHub remote, it reports the failure, persists no partial PR link, and preserves Done status.
     func test_task_pr_create_reports_real_gh_failure() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -398,18 +398,53 @@ final class StationAIUITests: XCTestCase {
         openTask(named: "PR failure UI")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "PR failure UI")
         element("back-to-board-button").click()
-        let createButton = element("task-create-pr-\(taskID)")
+        moveTaskToDone(taskID: taskID)
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
+        element("done-archive-button").click()
+        let archiveTask = element("done-archive-task-\(taskID)")
+        XCTAssertTrue(archiveTask.waitForExistence(timeout: 10), "The completed task should be listed in the archive.")
+        let createButton = element("done-archive-create-pr-\(taskID)")
         XCTAssertTrue(createButton.waitForExistence(timeout: 5))
         createButton.click()
         let alert = app.alerts.firstMatch
-        XCTAssertTrue(alert.waitForExistence(timeout: 20), "The card should report gh's inability to create a PR.")
+        XCTAssertTrue(alert.waitForExistence(timeout: 20), "The archived task should report gh's inability to create a PR.")
         XCTAssertTrue(alert.staticTexts.containing(NSPredicate(format: "label CONTAINS[c] %@", "GitHub CLI")).firstMatch.exists)
         alert.buttons["OK"].click()
         let current = try XCTUnwrap(taskRecord(id: taskID))
         let record = try XCTUnwrap((current["repositoryWorktrees"] as? [[String: Any]])?.first)
         XCTAssertNil(record["pullRequestNumber"])
         XCTAssertNil(record["pullRequestURL"])
-        XCTAssertEqual(current["status"] as? String, "Review")
+        XCTAssertEqual(current["status"] as? String, "Done")
+    }
+
+    // case-contract: test_done_archive_displays_existing_pull_request_link | A Done task's real SwiftData record can retain a linked PR number and URL across fresh CLI/XPC reads so the archive can render the existing PR link.
+    func test_done_archive_displays_existing_pull_request_link() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        launchApp(defaultParent: fixture.parent.path)
+        let created = try XCTUnwrap(try runCLI(["task", "create", "--title", "Archived linked PR UI", "--repo", fixture.primary.path])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Archived linked PR UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Archived linked PR UI")
+        element("back-to-board-button").click()
+        moveTaskToDone(taskID: taskID)
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
+
+        app.terminate()
+        XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 10), "The app must close its SwiftData container before seeding the isolated store.")
+        let prURL = "https://github.com/stationai-test/fixture/pull/123"
+        try seedDoneTaskPullRequest(taskID: taskID, number: 123, url: prURL)
+        let persisted = try XCTUnwrap(taskRecord(id: taskID))
+        XCTAssertEqual(persisted["status"] as? String, "Done")
+        let record = try XCTUnwrap((persisted["repositoryWorktrees"] as? [[String: Any]])?.first)
+        XCTAssertEqual(record["pullRequestNumber"] as? Int, 123)
+        XCTAssertEqual(record["pullRequestURL"] as? String, prURL)
+
+        launchApp(defaultParent: fixture.parent.path)
+        element("done-archive-button").click()
+        XCTAssertTrue(element("done-archive-task-\(taskID)").waitForExistence(timeout: 10))
+        let prLink = app.links["done-archive-pr-link-\(taskID)-123"]
+        XCTAssertTrue(prLink.waitForExistence(timeout: 10), "The Done archive should show the saved PR number as a link.")
+        attachScreenshot(named: "Done archive shows the linked pull request")
     }
 
     // case-contract: test_task_lifecycle_rollout_clears_records_and_clean_worktrees | The one-time lifecycle rollout clears task records and clean managed worktrees, preserves branches, and retains dirty managed worktrees with a notice.
@@ -2305,6 +2340,38 @@ final class StationAIUITests: XCTestCase {
     private func taskID(named title: String) throws -> String {
         let record = try XCTUnwrap(taskRecord(named: title), "No task named \(title) exists in the real store.")
         return try XCTUnwrap(record["id"] as? String)
+    }
+
+    private func seedDoneTaskPullRequest(taskID: String, number: Int, url: String) throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let modelSource = repositoryRoot.appendingPathComponent("StationAI/App/BoardTask.swift")
+        let seederSource = repositoryRoot.appendingPathComponent("scripts/seed-task-pr-link.swift")
+        let seeder = dataDirectory.appendingPathComponent("seed-task-pr-link")
+
+        let compile = Process()
+        compile.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        compile.arguments = ["swiftc", "-module-name", "StationAI", modelSource.path, seederSource.path, "-o", seeder.path]
+        let compileOutput = Pipe()
+        compile.standardOutput = compileOutput
+        compile.standardError = compileOutput
+        try compile.run()
+        compile.waitUntilExit()
+        let compileText = String(data: compileOutput.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(compile.terminationStatus, 0, "The SwiftData fixture seeder should compile: \(compileText)")
+
+        let seed = Process()
+        seed.executableURL = seeder
+        seed.arguments = [dataDirectory.path, taskID, String(number), url]
+        let seedOutput = Pipe()
+        seed.standardOutput = seedOutput
+        seed.standardError = seedOutput
+        try seed.run()
+        seed.waitUntilExit()
+        let seedText = String(data: seedOutput.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(seed.terminationStatus, 0, "The isolated SwiftData task record should be seeded: \(seedText)")
+        XCTAssertTrue(seedText.contains("Seeded linked PR #\(number)"), seedText)
     }
 
     private func runCLI(

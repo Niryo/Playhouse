@@ -372,12 +372,47 @@ struct KanbanBoardView: View {
                             }
                             .buttonStyle(.plain)
                             .accessibilityIdentifier("done-archive-task-\(task.id.uuidString)")
+                            .overlay(alignment: .trailing) {
+                                if !task.repositoryWorktrees.isEmpty {
+                                    archivedTaskPullRequestControl(task)
+                                        .buttonStyle(.borderless)
+                                        .padding(.trailing, 10)
+                                }
+                            }
                         }
                     }
                     .padding(.horizontal, 10)
                 }
                 .scrollIndicators(.visible)
                 .accessibilityIdentifier("done-archive-list")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func archivedTaskPullRequestControl(_ task: BoardTask) -> some View {
+        let linked = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
+        if linked.isEmpty {
+            Button {
+                createPullRequests(for: task)
+            } label: {
+                if taskCreatingPullRequests.contains(task.id) {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Text("PR").font(.system(size: 10, weight: .semibold))
+                }
+            }
+            .disabled(taskCreatingPullRequests.contains(task.id))
+            .accessibilityIdentifier("done-archive-create-pr-\(task.id.uuidString)")
+        } else {
+            HStack(spacing: 5) {
+                ForEach(linked, id: \.repositoryPath) { record in
+                    if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
+                        Link("#\(number)", destination: url)
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .accessibilityIdentifier("done-archive-pr-link-\(task.id.uuidString)-\(number)")
+                    }
+                }
             }
         }
     }

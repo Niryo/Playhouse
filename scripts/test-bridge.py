@@ -142,6 +142,30 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(current)["status"], "Review")
         return result
 
+    def seed_done_task_pull_request(self, task_id, number=123):
+        repository_root = Path(__file__).resolve().parent.parent
+        executable = self.data_directory / "seed-task-pr-link"
+        subprocess.run(
+            [
+                "xcrun", "swiftc", "-module-name", "StationAI",
+                str(repository_root / "StationAI" / "App" / "BoardTask.swift"),
+                str(repository_root / "scripts" / "seed-task-pr-link.swift"),
+                "-o", str(executable),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        seeded_url = f"https://github.com/stationai-test/fixture/pull/{number}"
+        result = subprocess.run(
+            [str(executable), str(self.data_directory), task_id, str(number), seeded_url],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn(f"Seeded linked PR #{number}", result.stdout)
+        return seeded_url
+
     def start_progress_fixture_turn(self, task_id, fixture_name, answers=()):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / fixture_name
@@ -394,17 +418,35 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), branch_head)
         self.assertTrue(self.branch_exists(self.primary, branch))
 
-    # case-contract: test_task_pr_create_reports_real_gh_failure | Creating a PR through the real gh CLI reports an informative failure for a local repository without a usable GitHub remote and persists no partial PR link.
+    # case-contract: test_task_pr_create_reports_real_gh_failure | A repository-backed Done task exposes a PR action in the archive; when the real gh CLI cannot create one for a local repository without a usable GitHub remote, it reports the failure, persists no partial PR link, and preserves Done status.
     def test_task_pr_create_reports_real_gh_failure(self):
         task = self.create_repo_task("PR failure", [self.primary], materialize=True)
+        completed, _ = self.call_cli("task", "move", task["id"], "Done")
+        self.assertEqual(self.assert_success(completed)["status"], "Done")
+
         response, _ = self.call_cli("task", "pr", "create", task["id"], expected_status=1)
         self.assert_failure(response, "operation_failed")
-        self.assertTrue(response["error"]["message"], "The gh failure should be explained to the user.")
+        self.assertIn("GitHub CLI", response["error"]["message"])
         current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         record = current["repositoryWorktrees"][0]
         self.assertIsNone(record.get("pullRequestNumber"))
         self.assertIsNone(record.get("pullRequestURL"))
-        self.assertEqual(current["status"], "Review")
+        self.assertEqual(current["status"], "Done")
+
+    # case-contract: test_done_archive_displays_existing_pull_request_link | A Done task's real SwiftData record can retain a linked PR number and URL across fresh CLI/XPC reads so the archive can render the existing PR link.
+    def test_done_archive_displays_existing_pull_request_link(self):
+        task = self.create_repo_task("Archived linked PR", [self.primary], materialize=True)
+        completed, _ = self.call_cli("task", "move", task["id"], "Done")
+        self.assertEqual(self.assert_success(completed)["status"], "Done")
+        url = self.seed_done_task_pull_request(task["id"])
+
+        current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(current["status"], "Done")
+        record = current["repositoryWorktrees"][0]
+        self.assertEqual(record["pullRequestNumber"], 123)
+        self.assertEqual(record["pullRequestURL"], url)
+        archived = next(item for item in self.assert_success(self.call_cli("board", "list")[0])["tasks"] if item["id"] == task["id"])
+        self.assertEqual(archived["repositoryWorktrees"][0]["pullRequestNumber"], 123)
 
     # case-contract: test_task_lifecycle_rollout_clears_records_and_clean_worktrees | The one-time lifecycle rollout clears task records and clean managed worktrees, preserves branches, and retains dirty managed worktrees with a notice.
     def test_task_lifecycle_rollout_clears_records_and_clean_worktrees(self):
