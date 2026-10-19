@@ -262,7 +262,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "An assigned worktree conflict keeps task creation open with an explanation")
     }
 
-    // case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task in Review, dropping it on Done squash-merges the task branch, removes the clean managed worktree, retains the source branch and conversation history, reduces the active task count, and exposes the task in the searchable archive with case-insensitive search and a read-only conversation.
+    // case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task in Review, dropping it on Done squash-merges the task branch, removes the clean managed worktree, retains the source branch and conversation history, persists the submitted conversation prompt, reduces the active task count, and exposes the task in the searchable archive with case-insensitive search and a read-only conversation.
     func test_task_done_removes_worktree_and_preserves_branch() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -1125,7 +1125,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Unsent task prompt is saved after returning to backlog")
     }
 
-    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, and a sent saved prompt remains in conversation history through live-turn controls and history reload.
+    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and sending to an Untitled task persists either the Codex-generated title or a prompt-based fallback when title generation fails.
     func test_conversation_composer_rejects_blank_and_supports_live_turn_controls() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Blank message", roots: [fixture.primary.path])
@@ -1162,7 +1162,51 @@ final class StationAIUITests: XCTestCase {
         let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
         XCTAssertEqual((history?["activities"] as? [Any])?.count, 0)
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
-        if FileManager.default.fileExists(atPath: "/tmp/stationai-codex-live-ui-integration") {
+        let isLiveIntegration = FileManager.default.fileExists(atPath: "/tmp/stationai-codex-live-ui-integration")
+        if !isLiveIntegration {
+            app.terminate()
+            codexFixtureExecutable = "/tmp/stationai-bridge-workspaces/codex-fixture-title-success"
+            launchApp(defaultParent: fixture.parent.path)
+            let titleTask = try XCTUnwrap(
+                (try runCLI(["task", "create", "--title", "Untitled task", "--root", fixture.primary.path])["result"] as? [String: Any])
+            )
+            let titleTaskID = try XCTUnwrap(titleTask["id"] as? String)
+            openTask(named: "Untitled task")
+            let titleComposer = element("message-composer")
+            XCTAssertTrue(titleComposer.waitForExistence(timeout: 10))
+            let titlePrompt = "Explain the workspace layout briefly."
+            titleComposer.click()
+            titleComposer.typeText(titlePrompt)
+            element("send-message-button").click()
+            XCTAssertTrue(waitUntil({
+                ((try? self.taskRecord(id: titleTaskID)?["title"] as? String) ?? nil) == "Generated fixture title"
+            }, timeout: 20), "Sending a prompt from an empty task should persist the Codex-generated title.")
+            XCTAssertEqual(try taskRecord(id: titleTaskID)?["savedPrompt"] as? String, titlePrompt)
+            _ = try runCLI(["task", "rename", titleTaskID, "--title", "Generated title success"])
+            element("back-to-board-button").click()
+
+            codexFixtureExecutable = "/tmp/stationai-bridge-workspaces/codex-fixture-title-failure"
+            let failureTask = try XCTUnwrap(
+                (try runCLI(["task", "create", "--title", "Untitled task", "--root", fixture.primary.path])["result"] as? [String: Any])
+            )
+            let failureTaskID = try XCTUnwrap(failureTask["id"] as? String)
+            openTask(named: "Untitled task")
+            let failureComposer = element("message-composer")
+            XCTAssertTrue(failureComposer.waitForExistence(timeout: 10))
+            let failurePrompt = "Explain how repository setup works for new contributors"
+            failureComposer.click()
+            failureComposer.typeText(failurePrompt)
+            element("send-message-button").click()
+            XCTAssertTrue(waitUntil({
+                ((try? self.taskRecord(id: failureTaskID)?["title"] as? String) ?? nil) == failurePrompt
+            }, timeout: 20), "When title generation fails, the submitted prompt should become the persisted fallback title.")
+            XCTAssertEqual(try taskRecord(id: failureTaskID)?["savedPrompt"] as? String, failurePrompt)
+            app.terminate()
+            codexFixtureExecutable = nil
+            launchApp(defaultParent: fixture.parent.path)
+            openTask(named: "Blank message")
+        }
+        if isLiveIntegration {
             let livePrompt = "In stationai-primary.txt, append exactly the line `StationAI UI pause marker 6A20F1`. Then run a shell command that executes `sleep 90; printf PAUSE_TEST_FINISHED`. Do not modify any other files. Reply with a short summary after the command finishes."
             let savedPrompt = try runCLI(["task", "prompt", taskID, "--text", livePrompt])["result"] as? [String: Any]
             XCTAssertEqual(savedPrompt?["savedPrompt"] as? String, livePrompt)

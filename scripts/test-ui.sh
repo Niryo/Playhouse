@@ -58,11 +58,13 @@ cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_
 cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-interrupted"
 cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-abort"
 cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-success"
+cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-title-success"
+cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-title-failure"
 cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-hold"
 cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-success-wait"
 cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-nonblocking-slow"
 cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-subagent"
-chmod 755 "${fixture_root}/codex-fixture-ui" "${fixture_root}/codex-fixture-empty" "${fixture_root}/codex-fixture-nonblocking" "${fixture_root}/codex-fixture-slow" "${fixture_root}/codex-fixture-plan-slow" "${fixture_root}/codex-fixture-nonblocking-slow" "${fixture_root}/codex-fixture-interrupted" "${fixture_root}/codex-fixture-abort" "${fixture_root}/codex-fixture-success" "${fixture_root}/codex-fixture-hold" "${fixture_root}/codex-fixture-success-wait" "${fixture_root}/codex-fixture-subagent"
+chmod 755 "${fixture_root}/codex-fixture-ui" "${fixture_root}/codex-fixture-empty" "${fixture_root}/codex-fixture-nonblocking" "${fixture_root}/codex-fixture-slow" "${fixture_root}/codex-fixture-plan-slow" "${fixture_root}/codex-fixture-nonblocking-slow" "${fixture_root}/codex-fixture-interrupted" "${fixture_root}/codex-fixture-abort" "${fixture_root}/codex-fixture-success" "${fixture_root}/codex-fixture-title-success" "${fixture_root}/codex-fixture-title-failure" "${fixture_root}/codex-fixture-hold" "${fixture_root}/codex-fixture-success-wait" "${fixture_root}/codex-fixture-subagent"
 xattr -d com.apple.quarantine "${fixture_root}/codex-fixture-subagent" 2>/dev/null || true
 xattr -d com.apple.provenance "${fixture_root}/codex-fixture-subagent" 2>/dev/null || true
 python3 "${repository_root}/scripts/check-test-parity.py"

@@ -2,6 +2,38 @@ import Foundation
 import SwiftData
 
 @MainActor
+struct CodexTaskTitleGenerator {
+    let client: CodexAppServerClient
+
+    func generateTitle(from prompt: String, workspace: CodexWorkspaceContext) async -> String? {
+        do {
+            let threadID = try await client.startThread(workspace: workspace, modelID: CodexAppServerClient.modelID)
+            var generated: String?
+            try await client.sendMessage(
+                "Write a concise task title of at most 8 words for this request. Return only the title:\n\n\(prompt)",
+                mode: .plan,
+                modelID: CodexAppServerClient.modelID,
+                threadID: threadID,
+                workspace: workspace,
+                onDelta: { _ in },
+                onFinalMessage: { generated = $0.trimmingCharacters(in: .whitespacesAndNewlines) },
+                onActivity: { _ in }, onDiff: { _ in }, onHistory: { _ in },
+                onActionRequest: {}, onUserInput: { _ in }
+            )
+            guard let title = generated?.components(separatedBy: .newlines).first,
+                  !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                NSLog("StationAI task title generation completed without returning a title.")
+                return nil
+            }
+            return title
+        } catch {
+            NSLog("StationAI task title generation failed: %@", error.localizedDescription)
+            return nil
+        }
+    }
+}
+
+@MainActor
 enum StationAIStore {
     static func makeContainer(dataDirectory: String? = nil) throws -> ModelContainer {
         let schema = Schema([BoardTask.self])
@@ -742,8 +774,28 @@ final class CodexConversationManager {
             throw StationAIManagerError.invalidTransition("Done tasks are closed. Create a new task for follow-up work.")
         }
         task = try tasks.prepareRepositoryWorktrees(taskID, fallbackPrompt: normalizedText)
+        if !normalizedText.isEmpty {
+            _ = try tasks.savePrompt(taskID, prompt: normalizedText, status: .inProgress)
+        }
         let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
         let workspace = try CodexWorkspaceContext(roots: roots)
+        let shouldGenerateTitle = !normalizedText.isEmpty && ["Untitled task", "Generating title…"].contains(task.title)
+        let titleGeneration: Task<Void, Never>?
+        if shouldGenerateTitle {
+            _ = try tasks.rename(taskID, title: "Generating title…")
+            titleGeneration = Task { @MainActor in
+                let titleClient = CodexAppServerClient(
+                    codexExecutableOverride: self.client.executableOverrideForTitleGeneration
+                )
+                let generated = await CodexTaskTitleGenerator(client: titleClient)
+                    .generateTitle(from: normalizedText, workspace: workspace)
+                let fallback = normalizedText.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
+                guard let latest = try? self.tasks.taskModel(taskID), latest.title == "Generating title…" else { return }
+                _ = try? self.tasks.rename(taskID, title: generated.flatMap { $0.isEmpty ? nil : $0 } ?? fallback)
+            }
+        } else {
+            titleGeneration = nil
+        }
         let started = try tasks.setLifecycleStatus(taskID, to: .inProgress)
         onUpdate(ConversationUpdate(type: "started", taskStatus: started.status))
         do {
@@ -811,9 +863,11 @@ final class CodexConversationManager {
             }
             _ = try tasks.setLifecycleStatus(taskID, to: .review)
         } catch {
+            await titleGeneration?.value
             _ = try? tasks.setLifecycleStatus(taskID, to: .blocked, message: error.localizedDescription)
             throw error
         }
+        await titleGeneration?.value
         let finalHistory = try await history(taskID: taskID) {
             onUpdate(ConversationUpdate(
                 type: "action_notice",

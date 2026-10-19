@@ -298,7 +298,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(len(self.assert_success(self.call_cli("task", "list")[0])["tasks"]), 1)
         self.assertTrue(Path(first["repositoryWorktrees"][0]["worktreePath"]).is_dir())
 
-    # case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task in Review, dropping it on Done squash-merges the task branch, removes the clean managed worktree, retains the source branch and conversation history, reduces the active task count, and exposes the task in the searchable archive with case-insensitive search and a read-only conversation.
+    # case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task in Review, dropping it on Done squash-merges the task branch, removes the clean managed worktree, retains the source branch and conversation history, persists the submitted conversation prompt, reduces the active task count, and exposes the task in the searchable archive with case-insensitive search and a read-only conversation.
     def test_task_done_removes_worktree_and_preserves_branch(self):
         task = self.create_repo_task("Untitled task", [self.primary])
         draft = "Please update the README and add concise setup steps for first time contributors tomorrow."
@@ -329,7 +329,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(self.primary, "log", "main", "-1", "--format=%s").strip(), "Please Update The Readme And Add Concise Setup")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["repositoryWorktrees"][0]["mergeTarget"], "main")
         completed, _ = self.call_cli("task", "get", task["id"])
-        self.assertEqual(self.assert_success(completed)["savedPrompt"], draft)
+        self.assertEqual(self.assert_success(completed)["savedPrompt"], "Complete this task.")
         board, _ = self.call_cli("board", "list")
         archived = next(item for item in self.assert_success(board)["tasks"] if item["id"] == task["id"])
         self.assertEqual(archived["status"], "Done")
@@ -729,7 +729,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(reopened_task["savedPrompt"], prompt)
         self.assertEqual(reopened_task["status"], "Backlog")
         self.assertEqual(reopened_task["title"], "Stable draft title")
-    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, and a sent saved prompt remains in conversation history through live-turn controls and history reload.
+    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and sending to an Untitled task persists either the Codex-generated title or a prompt-based fallback when title generation fails.
     def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
         task_id = self.create_task(title="Blank conversation send", roots=[self.primary])["id"]
         response, _ = self.call_cli("conversation", "send", task_id, "--message", " ", expected_status=2)
@@ -750,6 +750,38 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(any(message["role"] == "user" and message["text"] == prompt for message in persisted["messages"]))
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["savedPrompt"], prompt)
+
+        title_task = self.create_task("Untitled task", [self.primary])
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-title-success"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        title_prompt = "Explain the workspace layout briefly."
+        sent, _ = self.call_cli(
+            "conversation", "send", title_task["id"], "--message", title_prompt,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        self.assert_success(sent)
+        titled, _ = self.call_cli("task", "get", title_task["id"])
+        titled_record = self.assert_success(titled)
+        self.assertEqual(titled_record["savedPrompt"], title_prompt)
+        self.assertEqual(titled_record["title"], "Generated fixture title")
+
+        failure_executable = self.data_directory / "codex-fixture-title-failure"
+        shutil.copyfile(fixture, failure_executable)
+        failure_executable.chmod(0o755)
+        failure_prompt = "Explain how repository setup works for new contributors"
+        failed_title_task = self.create_task("Untitled task", [self.primary])
+        sent, _ = self.call_cli(
+            "conversation", "send", failed_title_task["id"], "--message", failure_prompt,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(failure_executable)},
+        )
+        self.assert_success(sent)
+        failed_title, _ = self.call_cli("task", "get", failed_title_task["id"])
+        failed_title_record = self.assert_success(failed_title)
+        self.assertEqual(failed_title_record["savedPrompt"], failure_prompt)
+        self.assertEqual(failed_title_record["title"], failure_prompt)
+        self.assertNotEqual(failed_title_record["title"], "Generating title…")
 
     # case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history.
     def test_conversation_sends_image_attachments(self):

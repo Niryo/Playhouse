@@ -8,6 +8,13 @@ import sys
 import time
 from pathlib import Path
 
+if "-title-" in Path(sys.argv[0]).name:
+    THREAD_ID = f"stationai-fixture-{os.getpid()}"
+    TURN_ID = f"turn-stationai-fixture-{os.getpid()}"
+else:
+    THREAD_ID = "00000000-0000-0000-0000-000000000001"
+    TURN_ID = "turn_stationai_fixture"
+
 
 def write(value):
     sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
@@ -42,8 +49,8 @@ def question_request(request_id):
         "id": request_id,
         "method": "item/tool/requestUserInput",
         "params": {
-            "threadId": "00000000-0000-0000-0000-000000000001",
-            "turnId": "turn_stationai_fixture",
+            "threadId": THREAD_ID,
+            "turnId": TURN_ID,
             "itemId": "item_stationai_question",
             "questions": questions,
             "isBlocking": "-nonblocking" not in mode and "-plan" not in mode,
@@ -56,7 +63,7 @@ def subagent_item(status):
         "id": "item_stationai_subagent",
         "type": "collabAgentToolCall",
         "tool": "spawnAgent",
-        "senderThreadId": "00000000-0000-0000-0000-000000000001",
+        "senderThreadId": THREAD_ID,
         "receiverThreadIds": ["00000000-0000-0000-0000-000000000002"],
         "prompt": "Inspect the project structure and report relevant files.",
         "agentsStates": {
@@ -88,9 +95,9 @@ def main():
         if message.get("method") == "initialize":
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"serverInfo": {"name": "stationai-fixture", "version": "1"}}})
         elif message.get("method") == "thread/start":
-            write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": "00000000-0000-0000-0000-000000000001"}, "model": "gpt-6-luna"}})
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": "gpt-6-luna"}})
         elif message.get("method") == "thread/resume":
-            write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": "00000000-0000-0000-0000-000000000001"}, "model": "gpt-6-luna"}})
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": "gpt-6-luna"}})
         elif message.get("method") == "turn/start":
             saw_turn = True
             saw_question = True
@@ -98,7 +105,13 @@ def main():
             turn_message = next((item.get("text") for item in turn_input if item.get("type") == "text"), None)
             is_title_request = (turn_message or "").startswith("Write a concise task title of at most 8 words")
             if is_title_request:
-                write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": "turn_stationai_fixture", "status": "inProgress"}}})
+                write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": TURN_ID, "status": "inProgress"}}})
+                if mode.endswith("-title-failure"):
+                    write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                        "threadId": THREAD_ID,
+                        "turn": {"id": TURN_ID, "status": "failed", "error": {"message": "Fixture rejected task-title generation."}},
+                    }})
+                    continue
                 if mode.endswith("-success-wait"):
                     ready = Path(str(sys.argv[0]) + ".resolve-ready")
                     resume = Path(str(sys.argv[0]) + ".resolve-continue")
@@ -111,12 +124,12 @@ def main():
                     ready.unlink(missing_ok=True)
                     resume.unlink(missing_ok=True)
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
-                    "threadId": "00000000-0000-0000-0000-000000000001",
+                    "threadId": THREAD_ID,
                     "item": {"id": "item_stationai_title", "type": "agentMessage", "text": "Generated fixture title"},
                 }})
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
-                    "threadId": "00000000-0000-0000-0000-000000000001",
-                    "turn": {"id": "turn_stationai_fixture", "status": "completed"},
+                    "threadId": THREAD_ID,
+                    "turn": {"id": TURN_ID, "status": "completed"},
                 }})
                 continue
             image_inputs = [item for item in turn_input if item.get("type") == "image"]
@@ -125,16 +138,21 @@ def main():
                 "images": [item.get("url") for item in image_inputs],
                 "imageInputs": image_inputs,
             }), encoding="utf-8")
-            write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": "turn_stationai_fixture", "status": "inProgress"}}})
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": TURN_ID, "status": "inProgress"}}})
             if mode.endswith("-abort"):
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
-                    "threadId": "00000000-0000-0000-0000-000000000001",
-                    "turn": {"id": "turn_stationai_fixture", "status": "interrupted", "error": {"message": "Fixture interrupted the conflict-resolution turn."}},
+                    "threadId": THREAD_ID,
+                    "turn": {"id": TURN_ID, "status": "interrupted", "error": {"message": "Fixture interrupted the conflict-resolution turn."}},
                 }})
             elif mode.endswith("-success"):
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
-                    "threadId": "00000000-0000-0000-0000-000000000001",
-                    "turn": {"id": "turn_stationai_fixture", "status": "completed"},
+                    "threadId": THREAD_ID,
+                    "turn": {"id": TURN_ID, "status": "completed"},
+                }})
+            elif mode.endswith("-title-failure"):
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": THREAD_ID,
+                    "turn": {"id": TURN_ID, "status": "completed"},
                 }})
             elif mode.endswith("-success-wait"):
                 ready = Path(str(sys.argv[0]) + ".resolve-ready")
@@ -148,25 +166,25 @@ def main():
                 ready.unlink(missing_ok=True)
                 resume.unlink(missing_ok=True)
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
-                    "threadId": "00000000-0000-0000-0000-000000000001",
-                    "turn": {"id": "turn_stationai_fixture", "status": "completed"},
+                    "threadId": THREAD_ID,
+                    "turn": {"id": TURN_ID, "status": "completed"},
                 }})
             elif mode.endswith("-subagent"):
                 write({"jsonrpc": "2.0", "method": "item/started", "params": {
-                    "threadId": "00000000-0000-0000-0000-000000000001", "item": subagent_item("inProgress"),
+                    "threadId": THREAD_ID, "item": subagent_item("inProgress"),
                 }})
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
-                    "threadId": "00000000-0000-0000-0000-000000000001", "item": subagent_item("completed"),
+                    "threadId": THREAD_ID, "item": subagent_item("completed"),
                 }})
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
-                    "threadId": "00000000-0000-0000-0000-000000000001",
-                    "turn": {"id": "turn_stationai_fixture", "status": "completed"},
+                    "threadId": THREAD_ID,
+                    "turn": {"id": TURN_ID, "status": "completed"},
                 }})
             elif mode.endswith("-hold"):
                 time.sleep(30)
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
-                    "threadId": "00000000-0000-0000-0000-000000000001",
-                    "turn": {"id": "turn_stationai_fixture", "status": "completed"},
+                    "threadId": THREAD_ID,
+                    "turn": {"id": TURN_ID, "status": "completed"},
                 }})
             else:
                 question_request(901)
@@ -182,8 +200,8 @@ def main():
                 "token": {"answers": ["fixture-secret"]},
             }
             write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
-                "threadId": "00000000-0000-0000-0000-000000000001",
-                "turn": {"id": "turn_stationai_fixture", "status": "interrupted" if mode.endswith("-interrupted") else ("failed" if failed else "completed"),
+                "threadId": THREAD_ID,
+                "turn": {"id": TURN_ID, "status": "interrupted" if mode.endswith("-interrupted") else ("failed" if failed else "completed"),
                          **({"error": {"message": "Codex interrupted this turn."}} if mode.endswith("-interrupted") else ({"error": {"message": "Question response was missing or incorrect."}} if failed else {}))},
             }})
         elif message.get("method") == "thread/items/list":
@@ -204,7 +222,7 @@ def main():
                     subagent_item("completed"),
                 ]
             write({"jsonrpc": "2.0", "id": message["id"], "result": {
-                "data": [{"item": item, "turnId": "turn_stationai_fixture"} for item in contents],
+                "data": [{"item": item, "turnId": TURN_ID} for item in contents],
                 "nextCursor": None,
             }})
     if not saw_turn:

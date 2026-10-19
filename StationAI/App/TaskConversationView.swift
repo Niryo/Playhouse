@@ -3,35 +3,6 @@ import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
 
-@MainActor
-protocol TaskTitleGenerating {
-    func generateTitle(from prompt: String, workspace: CodexWorkspaceContext) async -> String?
-}
-
-@MainActor
-struct CodexTaskTitleGenerator: TaskTitleGenerating {
-    let client: CodexAppServerClient
-
-    func generateTitle(from prompt: String, workspace: CodexWorkspaceContext) async -> String? {
-        do {
-            let threadID = try await client.startThread(workspace: workspace, modelID: CodexAppServerClient.modelID)
-            var generated: String?
-            try await client.sendMessage(
-                "Write a concise task title of at most 8 words for this request. Return only the title:\n\n\(prompt)",
-                mode: .plan,
-                modelID: CodexAppServerClient.modelID,
-                threadID: threadID,
-                workspace: workspace,
-                onDelta: { _ in },
-                onFinalMessage: { generated = $0.trimmingCharacters(in: .whitespacesAndNewlines) },
-                onActivity: { _ in }, onDiff: { _ in }, onHistory: { _ in },
-                onActionRequest: {}, onUserInput: { _ in }
-            )
-            return generated?.components(separatedBy: .newlines).first
-        } catch { return nil }
-    }
-}
-
 struct TaskConversationView: View {
     private struct PendingImage: Identifiable {
         let id = UUID()
@@ -1391,7 +1362,7 @@ struct TaskConversationView: View {
             activatePlanMode()
             return
         }
-        saveDraftAndGenerateTitle(status: .inProgress)
+        saveDraftAndGenerateTitle(status: .inProgress, prompt: text, generateTitle: false)
 
         let userMessageID = UUID().uuidString
         let assistantMessageID = UUID().uuidString
@@ -1506,8 +1477,8 @@ struct TaskConversationView: View {
         saveDraftAndGenerateTitle(status: nil, then: onBack)
     }
 
-    private func saveDraftAndGenerateTitle(status: TaskStatus?, then completion: (() -> Void)? = nil) {
-        let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func saveDraftAndGenerateTitle(status: TaskStatus?, prompt submittedPrompt: String? = nil, generateTitle: Bool = true, then completion: (() -> Void)? = nil) {
+        let prompt = (submittedPrompt ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else {
             if task.title == "Generating title…" {
                 _ = try? BoardTaskManager(modelContext: modelContext).rename(task.id, title: "Untitled task")
@@ -1515,7 +1486,7 @@ struct TaskConversationView: View {
             completion?()
             return
         }
-        let shouldGenerateTitle = task.title == "Generating title…" || task.title == "Untitled task"
+        let shouldGenerateTitle = generateTitle && (task.title == "Generating title…" || task.title == "Untitled task")
         do {
             _ = try BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: prompt, status: status)
             if shouldGenerateTitle {
@@ -1542,7 +1513,10 @@ struct TaskConversationView: View {
     }
 
     private func generateTaskTitle(from prompt: String) async -> String? {
-        guard let workspace = try? CodexWorkspaceContext(roots: workspaceRootURLs) else { return nil }
+        guard let workspace = try? CodexWorkspaceContext(roots: workspaceRootURLs) else {
+            NSLog("StationAI task title generation skipped because the task workspace is unavailable.")
+            return nil
+        }
         let fixtureExecutable = ProcessInfo.processInfo.environment["STATIONAI_E2E_CODEX_EXECUTABLE"]
         return await CodexTaskTitleGenerator(client: CodexAppServerClient(codexExecutableOverride: fixtureExecutable)).generateTitle(from: prompt, workspace: workspace)
     }

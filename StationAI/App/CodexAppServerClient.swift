@@ -133,6 +133,7 @@ final class CodexAppServerClient: ObservableObject {
     private var pendingUserInputThreadID: String?
     private var pendingUserInputQuestions: [String: CodexUserQuestion] = [:]
     private let codexExecutableOverride: String?
+    var executableOverrideForTitleGeneration: String? { codexExecutableOverride }
     private var turnWaiters: [String: CheckedContinuation<Void, Error>] = [:]
     private var completedTurns: [String: Result<Void, Error>] = [:]
 
