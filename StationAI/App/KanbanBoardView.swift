@@ -17,7 +17,6 @@ struct KanbanBoardView: View {
     @State private var taskBeingRenamed: BoardTask?
     @State private var taskBeingDeleted: BoardTask?
     @State private var isShowingDeleteConfirmation = false
-    @State private var isTrashTargetActive = false
 
     var body: some View {
         Group {
@@ -136,12 +135,6 @@ struct KanbanBoardView: View {
                                 .frame(width: 264)
                         }
                     }
-                    if draggedTaskID != nil {
-                        TrashDropTarget(isActive: $isTrashTargetActive, onDrop: deleteTaskFromTrash)
-                            .frame(width: 104, height: 480)
-                            .accessibilityIdentifier("task-trash-drop-target")
-                            .transition(.opacity.combined(with: .move(edge: .trailing)))
-                    }
                 }
                 .padding(.horizontal, 30)
                 .padding(.top, 22)
@@ -150,7 +143,6 @@ struct KanbanBoardView: View {
             .scrollIndicators(.visible)
             .accessibilityIdentifier("board-columns-scroll-view")
         }
-        .background(DragEndEventMonitor(draggedTaskID: $draggedTaskID))
     }
 
     @ViewBuilder
@@ -293,107 +285,6 @@ struct KanbanBoardView: View {
         }
     }
 
-    private func deleteTaskFromTrash(_ id: UUID) {
-        draggedTaskID = nil
-        isTrashTargetActive = false
-        guard let task = tasks.first(where: { $0.id == id }) else { return }
-        taskBeingDeleted = task
-        Task { @MainActor in
-            do {
-                let needsConfirmation = try await BoardTaskManager(modelContext: modelContext)
-                    .deleteRequiresConfirmation(id, client: CodexAppServerClient())
-                if needsConfirmation {
-                    isShowingDeleteConfirmation = true
-                } else {
-                    deleteTask(task)
-                }
-            } catch {
-                // If inspection fails, ask before removing anything.
-                isShowingDeleteConfirmation = true
-            }
-        }
-    }
-
-    private func deleteTask(_ task: BoardTask) {
-        do {
-            try BoardTaskManager(modelContext: modelContext).delete(task.id)
-        } catch {
-            saveError = error.localizedDescription
-        }
-        taskBeingDeleted = nil
-    }
-
-}
-
-private struct DragEndEventMonitor: NSViewRepresentable {
-    @Binding var draggedTaskID: UUID?
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(draggedTaskID: $draggedTaskID)
-    }
-
-    func makeNSView(context: Context) -> NSView {
-        context.coordinator.install()
-        return NSView(frame: .zero)
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        context.coordinator.draggedTaskID = $draggedTaskID
-    }
-
-    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
-        coordinator.uninstall()
-    }
-
-    final class Coordinator {
-        var draggedTaskID: Binding<UUID?>
-        private var mouseUpMonitor: Any?
-
-        init(draggedTaskID: Binding<UUID?>) {
-            self.draggedTaskID = draggedTaskID
-        }
-
-        func install() {
-            guard mouseUpMonitor == nil else { return }
-            mouseUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
-                guard let self, self.draggedTaskID.wrappedValue != nil else { return event }
-                self.draggedTaskID.wrappedValue = nil
-                return event
-            }
-        }
-
-        func uninstall() {
-            guard let mouseUpMonitor else { return }
-            NSEvent.removeMonitor(mouseUpMonitor)
-            self.mouseUpMonitor = nil
-        }
-    }
-}
-
-private struct TrashDropTarget: View {
-    @Binding var isActive: Bool
-    let onDrop: (UUID) -> Void
-
-    var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "trash")
-                .font(.system(size: 24, weight: .medium))
-            Text("Delete")
-                .font(.system(size: 12, weight: .semibold))
-        }
-        .foregroundStyle(isActive ? Color.white : Color.red)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(isActive ? Color.red : Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Color.red.opacity(0.35), lineWidth: 1))
-        .onDrop(of: [.plainText], isTargeted: $isActive) { providers in
-            guard let provider = providers.first else { return false }
-            _ = provider.loadObject(ofClass: NSString.self) { value, _ in
-                guard let value = value as? String, let id = UUID(uuidString: value) else { return }
-                DispatchQueue.main.async { onDrop(id) }
-            }
-            return true
-        }
-    }
 }
 
 private struct KanbanColumnView: View {

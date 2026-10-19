@@ -73,7 +73,7 @@
   },
   {
     "id": "test_task_delete_removes_task_and_later_lookup_is_not_found",
-    "expectation": "The trash drop target appears during a task drag and disappears when the drag ends; empty tasks and clean worktrees delete without confirmation, dirty worktrees require confirmation, and confirmed deletion removes the managed worktree and task."
+    "expectation": "The task context menu offers Delete Task with a confirmation dialog; canceling preserves the task and worktree, and confirming removes them. CLI delete-check reports whether a clean or dirty worktree requires confirmation, and CLI deletion removes the task and managed worktree."
   },
   {
     "id": "test_default_parent_settings_read_write_clear_and_validation",

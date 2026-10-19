@@ -573,7 +573,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assert_failure(invalid, "operation_failed")
         fresh, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"], updated["repositoryWorktrees"])
-    # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The trash drop target appears during a task drag and disappears when the drag ends; empty tasks and clean worktrees delete without confirmation, dirty worktrees require confirmation, and confirmed deletion removes the managed worktree and task.
+    # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers Delete Task with a confirmation dialog; canceling preserves the task and worktree, and confirming removes them. CLI delete-check reports whether a clean or dirty worktree requires confirmation, and CLI deletion removes the task and managed worktree.
     def test_task_delete_removes_task_and_later_lookup_is_not_found(self):
         task = self.create_repo_task("Delete me", [self.primary])
         task_id = task["id"]
