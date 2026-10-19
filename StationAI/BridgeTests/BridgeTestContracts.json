@@ -69,7 +69,7 @@
   },
   {
     "id": "test_conversation_repository_picker_adds_repository_worktree",
-    "expectation": "Typing in the conversation repository picker filters suggestions; adding one persists a worktree badge whose popover shows the exact stored branch, merge-from, and merge-to values."
+    "expectation": "Adding a repository already used as a folder to an empty task creates and persists its managed worktree; the conversation shows a badge beside the title with the exact branch, merge-from, and merge-to values."
   },
   {
     "id": "test_task_delete_removes_task_and_later_lookup_is_not_found",

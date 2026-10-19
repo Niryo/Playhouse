@@ -675,19 +675,25 @@ struct TaskConversationView: View {
             .accessibilityIdentifier("back-to-board-button")
 
             VStack(alignment: .leading, spacing: 4) {
-                if isGeneratingTitle || task.title == "Generating title…" {
-                    HStack(spacing: 7) {
-                        ProgressView()
-                            .controlSize(.small)
-                            .accessibilityIdentifier("task-title-generating-loader")
-                        Text("Generating title…")
+                HStack(spacing: 8) {
+                    if isGeneratingTitle || task.title == "Generating title…" {
+                        HStack(spacing: 7) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .accessibilityIdentifier("task-title-generating-loader")
+                            Text("Generating title…")
+                        }
+                        .accessibilityIdentifier("task-title-generating")
+                    } else {
+                        Text(task.title)
+                            .font(.system(size: 14, weight: .semibold))
+                            .lineLimit(1)
+                            .accessibilityIdentifier("task-view-title")
                     }
-                    .accessibilityIdentifier("task-title-generating")
-                } else {
-                Text(task.title)
-                    .font(.system(size: 14, weight: .semibold))
-                    .lineLimit(1)
-                    .accessibilityIdentifier("task-view-title")
+
+                    Spacer(minLength: 8)
+
+                    repositoryBadges
                 }
 
                 HStack(spacing: 6) {
@@ -706,56 +712,9 @@ struct TaskConversationView: View {
                         .accessibilityIdentifier("task-status-message")
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             Spacer(minLength: 0)
-
-            HStack(spacing: 5) {
-                ForEach(task.repositoryWorktrees, id: \.repositoryPath) { repository in
-                    let name = URL(fileURLWithPath: repository.repositoryPath).lastPathComponent
-                    Button {
-                        repositoryBeingEdited = repository
-                        editedBranch = repository.branch
-                        editedBranchFrom = repository.branchFrom
-                        editedMergeTarget = repository.mergeTarget ?? ""
-                    } label: {
-                        Text(name).font(.system(size: 10, weight: .medium)).lineLimit(1)
-                            .padding(.horizontal, 8).padding(.vertical, 5)
-                            .background(Color.accentColor.opacity(0.1), in: Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .popover(item: Binding(
-                        get: { repositoryBeingEdited?.repositoryPath == repository.repositoryPath ? RepositoryBadgeEditID(path: repository.repositoryPath) : nil },
-                        set: { if $0 == nil { repositoryBeingEdited = nil } }
-                    )) { _ in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(name).font(.system(size: 12, weight: .semibold))
-                            TextField("Branch", text: $editedBranch).accessibilityIdentifier("conversation-repository-branch")
-                            TextField("Merge from", text: $editedBranchFrom).accessibilityIdentifier("conversation-repository-branch-from")
-                            TextField("Merge to", text: $editedMergeTarget).accessibilityIdentifier("conversation-repository-merge-target")
-                            HStack {
-                                Button("Remove Repository", role: .destructive) { removeConversationRepository(repository) }
-                                    .accessibilityIdentifier("remove-conversation-repository-button")
-                                Spacer()
-                                Button("Save") { saveConversationRepository(repository) }
-                                    .buttonStyle(.borderedProminent)
-                                    .accessibilityIdentifier("save-conversation-repository-button")
-                            }
-                        }
-                        .font(.system(size: 11)).padding(12).frame(minWidth: 270, alignment: .leading)
-                    }
-                    .accessibilityIdentifier("conversation-repository-badge-\(name)")
-                }
-                Button {
-                    isShowingRepositoryPicker.toggle()
-                    if suggestedRepositories.isEmpty { loadSuggestedRepositories() }
-                } label: {
-                    Image(systemName: "plus").font(.system(size: 10, weight: .semibold))
-                        .frame(width: 22, height: 22).background(Color.primary.opacity(0.07), in: Circle())
-                }
-                .buttonStyle(.plain).help("Add a repository").accessibilityLabel("Add repository")
-                .accessibilityIdentifier("add-conversation-repository-button")
-                .popover(isPresented: $isShowingRepositoryPicker, arrowEdge: .bottom) { repositoryPicker }
-            }
 
             Button {
                 isShowingWorkspaceEditor = true
@@ -773,6 +732,56 @@ struct TaskConversationView: View {
         .background(Color(nsColor: .windowBackgroundColor).opacity(0.96))
     }
 
+    private var repositoryBadges: some View {
+        HStack(spacing: 5) {
+            ForEach(task.repositoryWorktrees, id: \.repositoryPath) { repository in
+                let name = URL(fileURLWithPath: repository.repositoryPath).lastPathComponent
+                Button {
+                    repositoryBeingEdited = repository
+                    editedBranch = repository.branch
+                    editedBranchFrom = repository.branchFrom
+                    editedMergeTarget = repository.mergeTarget ?? ""
+                } label: {
+                    Text(name).font(.system(size: 10, weight: .medium)).lineLimit(1)
+                        .padding(.horizontal, 8).padding(.vertical, 5)
+                        .background(Color.accentColor.opacity(0.1), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .popover(item: Binding(
+                    get: { repositoryBeingEdited?.repositoryPath == repository.repositoryPath ? RepositoryBadgeEditID(path: repository.repositoryPath) : nil },
+                    set: { if $0 == nil { repositoryBeingEdited = nil } }
+                )) { _ in
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(name).font(.system(size: 12, weight: .semibold))
+                        TextField("Branch", text: $editedBranch).accessibilityIdentifier("conversation-repository-branch")
+                        TextField("Merge from", text: $editedBranchFrom).accessibilityIdentifier("conversation-repository-branch-from")
+                        TextField("Merge to", text: $editedMergeTarget).accessibilityIdentifier("conversation-repository-merge-target")
+                        HStack {
+                            Button("Remove Repository", role: .destructive) { removeConversationRepository(repository) }
+                                .accessibilityIdentifier("remove-conversation-repository-button")
+                            Spacer()
+                            Button("Save") { saveConversationRepository(repository) }
+                                .buttonStyle(.borderedProminent)
+                                .accessibilityIdentifier("save-conversation-repository-button")
+                        }
+                    }
+                    .font(.system(size: 11)).padding(12).frame(minWidth: 270, alignment: .leading)
+                }
+                .accessibilityIdentifier("conversation-repository-badge-\(name)")
+            }
+            Button {
+                isShowingRepositoryPicker.toggle()
+                if suggestedRepositories.isEmpty { loadSuggestedRepositories() }
+            } label: {
+                Image(systemName: "plus").font(.system(size: 10, weight: .semibold))
+                    .frame(width: 22, height: 22).background(Color.primary.opacity(0.07), in: Circle())
+            }
+            .buttonStyle(.plain).help("Add a repository").accessibilityLabel("Add repository")
+            .accessibilityIdentifier("add-conversation-repository-button")
+            .popover(isPresented: $isShowingRepositoryPicker, arrowEdge: .bottom) { repositoryPicker }
+        }
+    }
+
     private var repositoryPicker: some View {
         VStack(alignment: .leading, spacing: 8) {
             TextField("Search repositories…", text: $repositorySearch)
@@ -780,7 +789,6 @@ struct TaskConversationView: View {
                 .focused($isRepositorySearchFocused)
                 .accessibilityIdentifier("conversation-repository-search")
             let available = suggestedRepositories.filter { candidate in
-                !workspaceRootURLs.contains(where: { $0.path == candidate.standardizedFileURL.path }) &&
                 !task.repositoryWorktrees.contains(where: { URL(fileURLWithPath: $0.repositoryPath).standardizedFileURL.path == candidate.standardizedFileURL.path }) &&
                 (repositorySearch.isEmpty || candidate.lastPathComponent.localizedCaseInsensitiveContains(repositorySearch) || candidate.path.localizedCaseInsensitiveContains(repositorySearch))
             }
@@ -791,7 +799,7 @@ struct TaskConversationView: View {
                     LazyVStack(alignment: .leading, spacing: 2) {
                         ForEach(available, id: \.path) { repository in
                             Button {
-                                updateWorkspaceRoots(workspaceRootURLs + [repository])
+                                addConversationRepository(repository)
                                 repositorySearch = ""
                                 isShowingRepositoryPicker = false
                             } label: {
@@ -1551,6 +1559,18 @@ struct TaskConversationView: View {
             Task { await refreshWorkspaceChanges() }
         } catch {
             errorMessage = "Couldn't save working folders: \(error.localizedDescription)"
+        }
+    }
+
+    private func addConversationRepository(_ repository: URL) {
+        do {
+            _ = try BoardTaskManager(modelContext: modelContext).addRepository(
+                task.id,
+                repositoryPath: repository.standardizedFileURL.path
+            )
+            Task { await refreshWorkspaceChanges() }
+        } catch {
+            errorMessage = "Couldn't add repository: \(error.localizedDescription)"
         }
     }
 

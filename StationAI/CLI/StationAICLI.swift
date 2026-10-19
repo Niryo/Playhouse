@@ -92,6 +92,17 @@ enum StationAICLI {
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--title"])
                 let title = try requiredFlag("--title", flags: flags).first!
                 return BridgeRequest(command: "task.rename", arguments: ["taskID": .string(id), "title": .string(title)])
+            case "repository":
+                guard tail.count >= 2, tail[0] == "add" else {
+                    throw CLIError.usage("Use: stationai task repository add <task-id> --repo <path>")
+                }
+                let id = tail[1]
+                let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--repo"])
+                let repository = try requiredFlag("--repo", flags: flags).first!
+                return BridgeRequest(command: "task.repository.add", arguments: [
+                    "taskID": .string(id),
+                    "repositoryPath": .string(repository)
+                ])
             case "prompt":
                 guard let id = tail.first else { throw CLIError.usage("Use: stationai task prompt <task-id> --text <prompt> [--status <status>]") }
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--text", "--status"])
@@ -274,6 +285,7 @@ enum StationAICLI {
       stationai task create --title <title> --repo <path> [--repo <path>...] [--branch <repo-path>=<name>] [--branch-from <repo-path>=<ref>] [--merge-target <repo-path>=<local-branch>]
       stationai task move <task-id> Done
       stationai task rename <task-id> --title <title>
+      stationai task repository add <task-id> --repo <path>
       stationai task roots get <task-id>
       stationai task roots set <task-id> --root <path> [--root <path>...]
       stationai task changes list <task-id>

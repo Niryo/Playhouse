@@ -549,19 +549,28 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "roots", "get", task_id)
         self.assertEqual(self.assert_success(response)["roots"], expected_roots)
 
-    # case-contract: test_conversation_repository_picker_adds_repository_worktree | Typing in the conversation repository picker filters suggestions; adding one persists a worktree badge whose popover shows the exact stored branch, merge-from, and merge-to values.
+    # case-contract: test_conversation_repository_picker_adds_repository_worktree | Adding a repository already used as a folder to an empty task creates and persists its managed worktree; the conversation shows a badge beside the title with the exact branch, merge-from, and merge-to values.
     def test_conversation_repository_picker_adds_repository_worktree(self):
-        task = self.create_repo_task("Add repository in conversation", [self.primary])
+        task = self.create_task("Add repository in conversation", [self.primary])
         task_id = task["id"]
-        roots = task["workspaceRoots"]
-        response, _ = self.call_cli("task", "roots", "set", task_id, "--root", roots[0], "--root", self.secondary)
+        self.assertEqual(task["repositoryWorktrees"], [])
+        self.assertEqual(task["workspaceRoots"], [str(self.primary)])
+        response, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.primary)
         updated = self.assert_success(response)
-        self.assertEqual(len(updated["repositoryWorktrees"]), 2)
-        added = next(item for item in updated["repositoryWorktrees"] if item["repositoryPath"] == str(self.secondary))
+        self.assertEqual(len(updated["repositoryWorktrees"]), 1)
+        added = updated["repositoryWorktrees"][0]
+        self.assertEqual(added["repositoryPath"], str(self.primary))
+        self.assertNotEqual(added["worktreePath"], str(self.primary))
         self.assertTrue(Path(added["worktreePath"]).is_dir())
         self.assertTrue(added["branch"])
         self.assertTrue(added["branchFrom"])
         self.assertTrue(added["mergeTarget"])
+        self.assertEqual(updated["workspaceRoots"], [added["worktreePath"]])
+        self.assertEqual(updated["contextFolders"], [])
+        duplicate, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.primary, expected_status=2)
+        self.assert_failure(duplicate, "invalid_argument")
+        invalid, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.custom, expected_status=1)
+        self.assert_failure(invalid, "operation_failed")
         fresh, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"], updated["repositoryWorktrees"])
     # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The trash drop target appears during a task drag and disappears when the drag ends; empty tasks and clean worktrees delete without confirmation, dirty worktrees require confirmation, and confirmed deletion removes the managed worktree and task.

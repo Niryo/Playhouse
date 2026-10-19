@@ -190,6 +190,51 @@ final class BoardTaskManager {
     }
 
     @discardableResult
+    func addRepository(_ id: UUID, repositoryPath: String) throws -> BoardTaskRecord {
+        let task = try requireTask(id)
+        let repository = try StationAIWorktreeManager.repositoryRoot(repositoryPath)
+        guard !task.repositoryWorktrees.contains(where: {
+            URL(fileURLWithPath: $0.repositoryPath).standardizedFileURL.path == repository
+        }) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "This repository is already attached to the task: \(repository)")
+        }
+
+        let branch = "task-\(UUID().uuidString.prefix(8).lowercased())"
+        let record = try StationAIWorktreeManager.resolve(
+            spec: RepositoryWorktreeSpec(repositoryPath: repository, branch: branch, branchFrom: nil),
+            title: task.title,
+            root: worktreeRoot
+        )
+        let worktreePath = URL(fileURLWithPath: record.worktreePath).standardizedFileURL.path
+        do {
+            for other in try listModels() where other.id != id && other.status != .done {
+                if other.repositoryWorktrees.contains(where: {
+                    URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == worktreePath
+                }) {
+                    throw StationAIManagerError.repositoryAssigned(worktreePath)
+                }
+            }
+
+            var repositories = task.repositoryWorktrees
+            repositories.append(record)
+            let contextFolders = try Self.normalizeOptionalRoots(
+                task.contextFolderPaths.filter {
+                    URL(fileURLWithPath: $0).standardizedFileURL.path != repository
+                }
+            )
+            let roots = try Self.normalizeOptionalRoots(repositories.map(\.worktreePath) + contextFolders)
+            task.repositoryWorktrees = repositories
+            task.contextFolderPaths = contextFolders
+            task.workspaceRootPaths = roots
+            try modelContext.save()
+            return BoardTaskRecord(task: task)
+        } catch {
+            if record.createdByStationAI { try? StationAIWorktreeManager.remove(record) }
+            throw error
+        }
+    }
+
+    @discardableResult
     func move(
         _ id: UUID,
         to statusName: String,
@@ -523,6 +568,12 @@ final class WorkspaceManager {
         return try taskManager.setWorkspaceRoots(taskID, roots: roots)
     }
 
+    @discardableResult
+    func addRepository(_ repositoryPath: String, to taskID: UUID) throws -> BoardTaskRecord {
+        guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
+        return try taskManager.addRepository(taskID, repositoryPath: repositoryPath)
+    }
+
     func changes(for taskID: UUID) async throws -> WorkspaceChangeInventory {
         guard taskManager != nil else {
             throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.")
@@ -803,6 +854,11 @@ final class StationAIBridgeRuntime {
                 let taskID = try request.requiredUUID("taskID")
                 let title = try request.requiredString("title")
                 result = try Self.value(taskManager.rename(taskID, title: title))
+            case "task.repository.add":
+                result = try Self.value(workspaces.addRepository(
+                    request.requiredString("repositoryPath"),
+                    to: request.requiredUUID("taskID")
+                ))
             case "task.prompt.save":
                 let status = try request.arguments["status"]?.string.map { value -> TaskStatus in
                     guard let status = TaskStatus(rawValue: value) else { throw StationAIManagerError.invalidStatus(value) }
