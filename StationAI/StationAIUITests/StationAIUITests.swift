@@ -262,7 +262,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "An assigned worktree conflict keeps task creation open with an explanation")
     }
 
-    // case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task with no changes relative to its merge target in Review, dropping it on Done completes without creating an empty squash commit, removes the clean managed worktree, retains the source branch and conversation history, persists the submitted conversation prompt, reduces the active task count, and exposes the task in the searchable archive with case-insensitive search and a read-only conversation.
+    // case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task with no changes in Review, the merge target advances before Done, and dropping the task on Done preserves the newer target commit without an empty squash commit, removes the clean managed worktree, retains the source branch and conversation history, persists the submitted conversation prompt, reduces the active task count, and exposes the task in the searchable archive with case-insensitive search and a read-only conversation.
     func test_task_done_removes_worktree_and_preserves_branch() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -301,8 +301,15 @@ final class StationAIUITests: XCTestCase {
         branch = try XCTUnwrap(startedRecord["branch"] as? String)
         XCTAssertNotEqual(path, fixture.primary.path)
         XCTAssertEqual(branch, generatedBranch)
+        let taskBranchHead = try runGitOutput(URL(fileURLWithPath: path), "rev-parse", "HEAD")
+        let originalTargetHead = try runGitOutput(fixture.primary, "rev-parse", "main")
+        XCTAssertEqual(taskBranchHead, originalTargetHead)
+        try "Master advanced after this task branch was created.\n".write(
+            to: fixture.primary.appendingPathComponent("target-only.txt"), atomically: true, encoding: .utf8
+        )
+        try runGit(fixture.primary, "add", "target-only.txt")
+        try runGit(fixture.primary, "commit", "-m", "Advance merge target while task is under review")
         let targetHead = try runGitOutput(fixture.primary, "rev-parse", "main")
-        XCTAssertEqual(try runGitOutput(URL(fileURLWithPath: path), "rev-parse", "HEAD"), targetHead)
         element("back-to-board-button").click()
         let titleDeadline = Date().addingTimeInterval(20)
         var currentTitle = "Generating title…"
@@ -319,7 +326,8 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try runCLI(["task", "move", taskID, "Done"])["ok"] as? Bool, true)
         XCTAssertFalse(FileManager.default.fileExists(atPath: path))
         try runGit(fixture.primary, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)")
-        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetHead, "Completing an unchanged task must not create an empty target commit.")
+        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetHead, "Completing an unchanged task must preserve the target's newer commit without creating an empty squash commit.")
+        XCTAssertEqual(try String(contentsOf: fixture.primary.appendingPathComponent("target-only.txt"), encoding: .utf8), "Master advanced after this task branch was created.\n")
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.primary.appendingPathComponent("task-result.txt").path))
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
 
@@ -949,7 +957,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("conversation-repository-merge-target").exists, "The merge-to value becomes editable only after selecting its pencil control.")
     }
 
-    // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check reports the confirmation requirement, and confirmed deletion removes the managed worktree.
+    // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check reports the confirmation requirement, confirmed deletion removes the managed worktree, and the persistent log captures a real deletion failure's task, thread, process, phase, underlying error details, and no task title or conversation text; the failed task and worktree remain available for retry.
     func test_task_delete_removes_task_and_later_lookup_is_not_found() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -968,6 +976,17 @@ final class StationAIUITests: XCTestCase {
         element("confirm-delete-task-button").click()
         assertCLIError(try runCLI(["task", "get", pendingID], expectedStatus: 3), code: "not_found")
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.secondary.path), "Deleting a pending task must preserve its source repository.")
+
+        let diagnosticLog = try String(contentsOf: dataDirectory.appendingPathComponent("Diagnostics.jsonl"), encoding: .utf8)
+        let deleteEvents = try diagnosticLog.split(whereSeparator: \.isNewline).compactMap {
+            try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+        }
+        let pendingDeleteEvent = try XCTUnwrap(deleteEvents.first {
+            $0["event"] as? String == "task.delete.succeeded" && $0["taskID"] as? String == pendingID
+        }, "Deleting a task through the visible menu should leave a persistent diagnostic event.")
+        XCTAssertEqual(pendingDeleteEvent["taskStatus"] as? String, "Backlog")
+        XCTAssertNotNil(pendingDeleteEvent["processID"] as? String)
+        XCTAssertNotNil(pendingDeleteEvent["storePath"] as? String)
 
         let cleanTitle = "Clean delete \(String(UUID().uuidString.prefix(8)).lowercased())"
         _ = try runCLI(["task", "create", "--title", cleanTitle, "--repo", fixture.primary.path])
@@ -1025,6 +1044,71 @@ final class StationAIUITests: XCTestCase {
         confirmation.click()
         XCTAssertFalse(FileManager.default.fileExists(atPath: dirtyPath), "Confirmed deletion must remove the dirty managed worktree.")
         assertCLIError(try runCLI(["task", "get", dirtyID], expectedStatus: 3), code: "not_found")
+        let brokenRepository = dataDirectory.appendingPathComponent("delete-failure-repository", isDirectory: true)
+        try FileManager.default.createDirectory(at: brokenRepository, withIntermediateDirectories: true)
+        try runGit(brokenRepository, "init", "--initial-branch=main")
+        try runGit(brokenRepository, "config", "user.name", "StationAI UI Test")
+        try runGit(brokenRepository, "config", "user.email", "stationai-ui-test@example.invalid")
+        try "owned diagnostic fixture\n".write(
+            to: brokenRepository.appendingPathComponent("README.md"), atomically: true, encoding: .utf8
+        )
+        try runGit(brokenRepository, "add", "README.md")
+        try runGit(brokenRepository, "commit", "-m", "Baseline")
+        let failureTitle = "PRIVATE_DELETE_TITLE_\(String(UUID().uuidString.prefix(8)))"
+        let failurePrompt = "PRIVATE_CONVERSATION_TEXT_\(String(UUID().uuidString.prefix(8)))"
+        _ = try runCLI(["task", "create", "--title", failureTitle, "--repo", brokenRepository.path])
+        openTask(named: failureTitle)
+        element("message-composer").click()
+        element("message-composer").typeText(failurePrompt)
+        element("send-message-button").click()
+        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        app.buttons["Blue"].click()
+        element("ai-question-answer-token").click()
+        element("ai-question-answer-token").typeText("fixture-secret")
+        element("submit-ai-answers-button").click()
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        element("back-to-board-button").click()
+        let failureTask = try XCTUnwrap(taskRecord(named: failureTitle))
+        let failureID = try XCTUnwrap(failureTask["id"] as? String)
+        let failureRecord = try XCTUnwrap((failureTask["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let failureWorktree = try XCTUnwrap(failureRecord["worktreePath"] as? String)
+        let movedRepository = dataDirectory.appendingPathComponent("delete-failure-repository-restored-after-error", isDirectory: true)
+        try FileManager.default.moveItem(at: brokenRepository, to: movedRepository)
+        deleteTaskFromContextMenu(failureTitle)
+        XCTAssertTrue(element("confirm-delete-task-button").waitForExistence(timeout: 5))
+        element("confirm-delete-task-button").click()
+        let saveErrorAlert = app.alerts["Couldn't save changes"]
+        XCTAssertTrue(saveErrorAlert.waitForExistence(timeout: 10), "A worktree-removal failure should be visible to the user.")
+        XCTAssertTrue(
+            saveErrorAlert.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Diagnostics.jsonl")).firstMatch.exists,
+            "The failure alert should point to the persistent diagnostic log."
+        )
+        let failureLog = try String(contentsOf: dataDirectory.appendingPathComponent("Diagnostics.jsonl"), encoding: .utf8)
+        let failureEvents = try failureLog.split(whereSeparator: \.isNewline).compactMap {
+            try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+        }
+        let failedDelete = try XCTUnwrap(failureEvents.first {
+            $0["event"] as? String == "task.delete.failed" && $0["taskID"] as? String == failureID
+        })
+        XCTAssertEqual(failedDelete["phase"] as? String, "worktree-removal")
+        XCTAssertEqual(failedDelete["taskStatus"] as? String, "Review")
+        XCTAssertTrue((failedDelete["threadID"] as? String)?.isEmpty == false)
+        XCTAssertNotNil(failedDelete["clientPID"] as? String)
+        XCTAssertNotNil(failedDelete["codexPID"] as? String)
+        XCTAssertNotNil(failedDelete["error0Domain"] as? String)
+        XCTAssertNotNil(failedDelete["error0Code"] as? String)
+        XCTAssertFalse(failureLog.contains(failureTitle), "Diagnostics must not record task titles.")
+        XCTAssertFalse(failureLog.contains(failurePrompt), "Diagnostics must not record conversation text.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: failureWorktree), "A failed deletion must preserve the worktree for retry.")
+        XCTAssertEqual(try taskRecord(id: failureID)?["id"] as? String, failureID, "A failed deletion must preserve the task for retry.")
+        saveErrorAlert.buttons["OK"].click()
+        try FileManager.default.moveItem(at: movedRepository, to: brokenRepository)
+        deleteTaskFromContextMenu(failureTitle)
+        XCTAssertTrue(element("confirm-delete-task-button").waitForExistence(timeout: 5))
+        element("confirm-delete-task-button").click()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: failureWorktree), "Restoring the repository should allow deletion to be retried.")
+        assertCLIError(try runCLI(["task", "get", failureID], expectedStatus: 3), code: "not_found")
+
         XCTAssertEqual(try tasksFromBoardList().count, 0)
         attachScreenshot(named: "Deleted task removed from the board")
     }

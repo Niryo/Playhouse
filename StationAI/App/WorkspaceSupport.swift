@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 import SwiftUI
 
@@ -486,6 +487,11 @@ enum StationAIWorktreeManager {
         guard status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw BridgeCommandError(code: "operation_failed", message: "The merge target '\(target)' has uncommitted changes in \(targetWorktree).")
         }
+        let ancestry = try git(targetWorktree, ["merge-base", "--is-ancestor", record.branch, target], allowFailure: true)
+        guard ancestry.status == 0 || ancestry.status == 1 else {
+            throw BridgeCommandError(code: "operation_failed", message: "Couldn't check whether task branch '\(record.branch)' is already contained in merge target '\(target)': \(ancestry.output.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        guard ancestry.status != 0 else { return }
         let changes = try git(targetWorktree, ["diff", "--quiet", target, record.branch], allowFailure: true)
         guard changes.status == 0 || changes.status == 1 else {
             throw BridgeCommandError(code: "operation_failed", message: "Couldn't compare task branch '\(record.branch)' with merge target '\(target)': \(changes.output.trimmingCharacters(in: .whitespacesAndNewlines))")
@@ -894,5 +900,86 @@ struct WorkspaceSettingsView: View {
                 }
             }
         }
+    }
+}
+
+@MainActor
+enum StationAIDiagnostics {
+    private static var directoryOverride: URL?
+
+    static func useDataDirectory(_ path: String?) {
+        directoryOverride = path.map { URL(fileURLWithPath: $0, isDirectory: true) }
+    }
+
+    static var logURL: URL {
+        let directory: URL
+        if let directoryOverride {
+            directory = directoryOverride
+        } else if let dataDirectory = ProcessInfo.processInfo.environment["STATIONAI_DATA_DIRECTORY"] {
+            directory = URL(fileURLWithPath: dataDirectory, isDirectory: true)
+        } else if let supportDirectory = try? FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        ) {
+            directory = supportDirectory.appendingPathComponent("StationAI", isDirectory: true)
+        } else {
+            directory = FileManager.default.temporaryDirectory.appendingPathComponent("StationAI", isDirectory: true)
+        }
+        return directory.appendingPathComponent("Diagnostics.jsonl")
+    }
+
+    static var storeURL: URL {
+        logURL.deletingLastPathComponent().appendingPathComponent("StationAI.store")
+    }
+
+    static func record(_ event: String, fields: [String: String] = [:]) {
+        var entry = fields
+        entry["timestamp"] = ISO8601DateFormatter().string(from: Date())
+        entry["event"] = event
+        entry["process"] = ProcessInfo.processInfo.processName
+        entry["processID"] = String(ProcessInfo.processInfo.processIdentifier)
+        guard var data = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys]) else { return }
+        data.append(0x0A)
+
+        let url = logURL
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let descriptor = open(url.path, O_WRONLY | O_CREAT | O_APPEND, S_IRUSR | S_IWUSR)
+            guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            defer { close(descriptor) }
+            let written = data.withUnsafeBytes { buffer in
+                Darwin.write(descriptor, buffer.baseAddress, buffer.count)
+            }
+            guard written == data.count else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        } catch {
+            NSLog("StationAI couldn't write diagnostics: %@", error.localizedDescription)
+        }
+    }
+
+    static func errorFields(_ error: Error, redacting sensitiveValues: [String] = []) -> [String: String] {
+        let values = sensitiveValues.filter { !$0.isEmpty }.sorted { $0.count > $1.count }
+        func sanitized(_ value: String?) -> String? {
+            guard var value else { return nil }
+            for sensitiveValue in values {
+                value = value.replacingOccurrences(of: sensitiveValue, with: "[redacted]", options: [.caseInsensitive])
+            }
+            return value
+        }
+
+        var fields: [String: String] = [:]
+        fields["errorDescription"] = sanitized(error.localizedDescription)
+        var underlying: NSError? = error as NSError
+        var depth = 0
+        while let current = underlying, depth < 5 {
+            let prefix = "error\(depth)"
+            fields["\(prefix)Domain"] = current.domain
+            fields["\(prefix)Code"] = String(current.code)
+            if let reason = sanitized(current.localizedFailureReason) { fields["\(prefix)Reason"] = reason }
+            underlying = current.userInfo[NSUnderlyingErrorKey] as? NSError
+            depth += 1
+        }
+        return fields
     }
 }

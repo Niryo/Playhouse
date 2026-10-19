@@ -71,9 +71,12 @@ struct KanbanBoardView: View {
             Button("Delete Task", role: .destructive) {
                 guard let taskBeingDeleted else { return }
                 do {
-                    try BoardTaskManager(modelContext: modelContext).delete(taskBeingDeleted.id)
+                    try BoardTaskManager(modelContext: modelContext).delete(
+                        taskBeingDeleted.id,
+                        diagnostics: codexClient.diagnosticFields()
+                    )
                 } catch {
-                    saveError = error.localizedDescription
+                    saveError = "\(error.localizedDescription)\n\nDiagnostic log: \(StationAIDiagnostics.logURL.path)"
                 }
                 self.taskBeingDeleted = nil
             }

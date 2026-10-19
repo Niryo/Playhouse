@@ -329,7 +329,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(len(self.assert_success(self.call_cli("task", "list")[0])["tasks"]), 1)
         self.assertTrue(Path(first["repositoryWorktrees"][0]["worktreePath"]).is_dir())
 
-    # case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task with no changes relative to its merge target in Review, dropping it on Done completes without creating an empty squash commit, removes the clean managed worktree, retains the source branch and conversation history, persists the submitted conversation prompt, reduces the active task count, and exposes the task in the searchable archive with case-insensitive search and a read-only conversation.
+    # case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task with no changes in Review, the merge target advances before Done, and dropping the task on Done preserves the newer target commit without an empty squash commit, removes the clean managed worktree, retains the source branch and conversation history, persists the submitted conversation prompt, reduces the active task count, and exposes the task in the searchable archive with case-insensitive search and a read-only conversation.
     def test_task_done_removes_worktree_and_preserves_branch(self):
         task = self.create_repo_task("Untitled task", [self.primary])
         draft = "Please update the README and add concise setup steps for first time contributors tomorrow."
@@ -349,11 +349,16 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), target_head)
         current, _ = self.call_cli("task", "get", task["id"])
         self.assertEqual(self.assert_success(current)["status"], "Review")
+        (self.primary / "target-only.txt").write_text("Master advanced after this task branch was created.\n", encoding="utf-8")
+        self.run_git(self.primary, "add", "target-only.txt")
+        self.run_git(self.primary, "commit", "-m", "Advance merge target while task is under review")
+        target_head = self.run_git(self.primary, "rev-parse", "main")
         response, _ = self.call_cli("task", "move", task["id"], "Done")
         self.assertEqual(self.assert_success(response)["status"], "Done")
         self.assertFalse(worktree.exists())
         self.assertEqual(self.run_git(self.primary, "show-ref", "--verify", "--quiet", "refs/heads/please-update-the-readme-and-add-concise-setup"), "")
-        self.assertEqual(self.run_git(self.primary, "rev-parse", "main"), target_head, "Completing an unchanged task must not create an empty target commit.")
+        self.assertEqual(self.run_git(self.primary, "rev-parse", "main"), target_head, "Completing an unchanged task must preserve the target's newer commit without creating an empty squash commit.")
+        self.assertEqual((self.primary / "target-only.txt").read_text(encoding="utf-8"), "Master advanced after this task branch was created.\n")
         self.assertFalse((self.primary / "task-result.txt").exists())
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["repositoryWorktrees"][0]["mergeTarget"], "main")
         completed, _ = self.call_cli("task", "get", task["id"])
@@ -759,7 +764,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assert_failure(invalid, "operation_failed")
         fresh, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"], updated["repositoryWorktrees"])
-    # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check reports the confirmation requirement, and confirmed deletion removes the managed worktree.
+    # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check reports the confirmation requirement, confirmed deletion removes the managed worktree, and the persistent log captures a real deletion failure's task, thread, process, phase, underlying error details, and no task title or conversation text; the failed task and worktree remain available for retry.
     def test_task_delete_removes_task_and_later_lookup_is_not_found(self):
         pending = self.create_repo_task("Pending delete", [self.primary])
         pending_id = pending["id"]
@@ -770,6 +775,17 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertFalse(self.assert_success(response)["requiresConfirmation"])
         response, _ = self.call_cli("task", "delete", pending_id)
         self.assertTrue(self.assert_success(response)["deleted"])
+        diagnostic_lines = [
+            json.loads(line)
+            for line in (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        delete_event = next(
+            event for event in diagnostic_lines
+            if event.get("event") == "task.delete.succeeded" and event.get("taskID") == pending_id
+        )
+        self.assertEqual(delete_event["taskStatus"], "Backlog")
+        self.assertIn("processID", delete_event)
+        self.assertIn("storePath", delete_event)
         self.assertTrue(Path(pending_path).is_dir(), "Deleting a pending task must preserve the source repository.")
         response, _ = self.call_cli("task", "get", pending_id, expected_status=3)
         self.assert_failure(response, "not_found")
@@ -792,6 +808,50 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertFalse(dirty_worktree.exists(), "Confirmed deletion must remove the dirty managed worktree.")
         response, _ = self.call_cli("task", "get", dirty_id, expected_status=3)
         self.assert_failure(response, "not_found")
+
+        broken_repository = self.data_directory / "delete-failure-repository"
+        broken_repository.mkdir()
+        self.run_git(broken_repository, "init", "--initial-branch=main")
+        self.run_git(broken_repository, "config", "user.name", "StationAI Test")
+        self.run_git(broken_repository, "config", "user.email", "stationai-test@example.invalid")
+        (broken_repository / "README.md").write_text("owned diagnostic fixture\n", encoding="utf-8")
+        self.run_git(broken_repository, "add", "README.md")
+        self.run_git(broken_repository, "commit", "-m", "Baseline")
+        failure_title = f"PRIVATE_DELETE_TITLE_{uuid.uuid4().hex[:8]}"
+        failure_prompt = f"PRIVATE_CONVERSATION_TEXT_{uuid.uuid4().hex[:8]}"
+        broken = self.create_repo_task(failure_title, [broken_repository])
+        broken_id = broken["id"]
+        self.complete_fixture_turn(broken_id, message=failure_prompt)
+        broken, _ = self.call_cli("task", "get", broken_id)
+        broken = self.assert_success(broken)
+        broken_worktree = Path(broken["repositoryWorktrees"][0]["worktreePath"])
+        moved_repository = self.data_directory / "delete-failure-repository-restored-after-error"
+        broken_repository.rename(moved_repository)
+        response, _ = self.call_cli("task", "delete", broken_id, expected_status=1)
+        self.assert_failure(response, "operation_failed")
+        diagnostic_lines = [
+            json.loads(line)
+            for line in (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        failure_event = next(
+            event for event in diagnostic_lines
+            if event.get("event") == "task.delete.failed" and event.get("taskID") == broken_id
+        )
+        self.assertEqual(failure_event["phase"], "worktree-removal")
+        self.assertTrue(failure_event.get("threadID"))
+        self.assertIn("processID", failure_event)
+        self.assertIn("error0Domain", failure_event)
+        self.assertIn("error0Code", failure_event)
+        serialized_diagnostics = json.dumps(diagnostic_lines)
+        self.assertNotIn(failure_title, serialized_diagnostics)
+        self.assertNotIn(failure_prompt, serialized_diagnostics)
+        self.assertTrue(broken_worktree.exists(), "A failed worktree removal must leave its worktree available for recovery.")
+        preserved, _ = self.call_cli("task", "get", broken_id)
+        self.assertEqual(self.assert_success(preserved)["id"], broken_id)
+        moved_repository.rename(broken_repository)
+        response, _ = self.call_cli("task", "delete", broken_id)
+        self.assertTrue(self.assert_success(response)["deleted"])
+        self.assertFalse(broken_worktree.exists())
 
         response, _ = self.call_cli("board", "list")
         self.assertEqual(self.assert_success(response)["tasks"], [])

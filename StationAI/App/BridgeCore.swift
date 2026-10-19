@@ -36,23 +36,24 @@ struct CodexTaskTitleGenerator {
 
 @MainActor
 enum StationAIStore {
-    static func makeContainer(dataDirectory: String? = nil) throws -> ModelContainer {
-        let schema = Schema([BoardTask.self])
-        let storeURL: URL
+    static func storeURL(dataDirectory: String? = nil) throws -> URL {
         if let dataDirectory {
-            let directory = URL(fileURLWithPath: dataDirectory, isDirectory: true)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            storeURL = directory.appendingPathComponent("StationAI.store")
-        } else {
-            let supportDirectory = try FileManager.default.url(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask,
-                appropriateFor: nil,
-                create: true
-            ).appendingPathComponent("StationAI", isDirectory: true)
-            try FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
-            storeURL = supportDirectory.appendingPathComponent("StationAI.store")
+            return URL(fileURLWithPath: dataDirectory, isDirectory: true).appendingPathComponent("StationAI.store")
         }
+        let supportDirectory = try FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        ).appendingPathComponent("StationAI", isDirectory: true)
+        return supportDirectory.appendingPathComponent("StationAI.store")
+    }
+
+    static func makeContainer(dataDirectory: String? = nil) throws -> ModelContainer {
+        StationAIDiagnostics.useDataDirectory(dataDirectory)
+        let schema = Schema([BoardTask.self])
+        let storeURL = try Self.storeURL(dataDirectory: dataDirectory)
+        try FileManager.default.createDirectory(at: storeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
 
         let configuration = ModelConfiguration(
             "StationAI",
@@ -511,13 +512,38 @@ final class BoardTaskManager {
         return BoardTaskRecord(task: task)
     }
 
-    func delete(_ id: UUID) throws {
+    func delete(_ id: UUID, diagnostics: [String: String] = [:]) throws {
         let task = try requireTask(id)
-        for worktree in task.repositoryWorktrees {
-            if !worktree.isPending { try StationAIWorktreeManager.removeAfterConfirmation(worktree) }
+        var phase = "worktree-removal"
+        var fields = [
+            "taskID": task.id.uuidString,
+            "taskStatus": task.status.rawValue,
+            "threadID": task.codexThreadID ?? "",
+            "worktreeCount": String(task.repositoryWorktrees.count),
+            "storePath": StationAIDiagnostics.storeURL.path
+        ]
+        fields.merge(diagnostics) { _, new in new }
+        StationAIDiagnostics.record("task.delete.started", fields: fields)
+        do {
+            for worktree in task.repositoryWorktrees {
+                guard !worktree.isPending else { continue }
+                fields["worktreePath"] = worktree.worktreePath
+                StationAIDiagnostics.record("task.delete.worktree_removal_started", fields: fields)
+                try StationAIWorktreeManager.removeAfterConfirmation(worktree)
+                StationAIDiagnostics.record("task.delete.worktree_removal_succeeded", fields: fields)
+            }
+            phase = "swiftdata-save"
+            modelContext.delete(task)
+            try modelContext.save()
+            StationAIDiagnostics.record("task.delete.succeeded", fields: fields)
+        } catch {
+            fields["phase"] = phase
+            fields.merge(
+                StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
+            ) { _, new in new }
+            StationAIDiagnostics.record("task.delete.failed", fields: fields)
+            throw error
         }
-        modelContext.delete(task)
-        try modelContext.save()
     }
 
     func taskModel(_ id: UUID) throws -> BoardTask {
@@ -777,7 +803,29 @@ final class CodexConversationManager {
         let workspace = try CodexWorkspaceContext(roots: historyRoots.map {
             URL(fileURLWithPath: $0, isDirectory: true)
         })
-        return try await client.loadThread(id: threadID, workspace: workspace, onActionRequest: onActionRequest)
+        StationAIDiagnostics.record("conversation.history.started", fields: client.diagnosticFields([
+            "taskID": taskID.uuidString,
+            "threadID": threadID,
+            "taskStatus": task.status.rawValue
+        ]))
+        do {
+            let history = try await client.loadThread(id: threadID, workspace: workspace, onActionRequest: onActionRequest)
+            StationAIDiagnostics.record("conversation.history.succeeded", fields: client.diagnosticFields([
+                "taskID": taskID.uuidString,
+                "threadID": threadID,
+                "messageCount": String(history.messages.count),
+                "activityCount": String(history.activities.count)
+            ]))
+            return history
+        } catch {
+            var fields = StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
+            fields["taskID"] = taskID.uuidString
+            fields["threadID"] = threadID
+            fields["taskStatus"] = task.status.rawValue
+            fields.merge(client.diagnosticFields()) { _, new in new }
+            StationAIDiagnostics.record("conversation.history.failed", fields: fields)
+            throw error
+        }
     }
 
     func models(taskID: UUID) async throws -> [CodexModelOption] {
@@ -814,6 +862,12 @@ final class CodexConversationManager {
             throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
         }
         var task = try tasks.taskModel(taskID)
+        StationAIDiagnostics.record("conversation.send.started", fields: client.diagnosticFields([
+            "taskID": taskID.uuidString,
+            "threadID": task.codexThreadID ?? "new",
+            "taskStatus": task.status.rawValue,
+            "mode": mode.rawValue
+        ]))
         defer {
             if let threadID = task.codexThreadID {
                 client.clearTurnStarting(threadID: threadID)
@@ -918,6 +972,11 @@ final class CodexConversationManager {
         } catch {
             await titleGeneration?.value
             _ = try? tasks.setLifecycleStatus(taskID, to: .blocked, message: error.localizedDescription)
+            var fields = StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
+            fields["taskID"] = taskID.uuidString
+            fields["threadID"] = task.codexThreadID ?? ""
+            fields.merge(client.diagnosticFields()) { _, new in new }
+            StationAIDiagnostics.record("conversation.send.failed", fields: fields)
             throw error
         }
         await titleGeneration?.value
