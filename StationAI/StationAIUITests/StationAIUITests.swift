@@ -1377,6 +1377,58 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Conversation shows a completed subagent delegation")
     }
 
+    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; Markdown headings and lists render as distinct conversation elements after reopening, and bridge history preserves the assistant's exact Markdown source.
+    func test_plan_mode_renders_markdown_in_conversation() throws {
+        let fixtureRoot = URL(fileURLWithPath: "/tmp/stationai-bridge-workspaces", isDirectory: true)
+        let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
+        XCTAssertEqual(
+            try String(contentsOf: fixtureOwnerMarker, encoding: .utf8),
+            "StationAI bridge tests own this deterministic fixture (v1).\n",
+            "Refusing to use a Codex fixture in a directory StationAI does not own."
+        )
+        let fixtureCopy = fixtureRoot.appendingPathComponent("codex-fixture-markdown")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureCopy.path), "The UI runner must prepare the Markdown fixture before launch.")
+        codexFixtureExecutable = fixtureCopy.path
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Plan mode Markdown", roots: [fixture.primary.path])
+        openTask(named: "Plan mode Markdown")
+
+        let modeMenu = element("conversation-mode-menu")
+        XCTAssertTrue(modeMenu.waitForExistence(timeout: 10))
+        modeMenu.click()
+        let planMode = app.menuItems["Plan mode"]
+        XCTAssertTrue(planMode.waitForExistence(timeout: 5))
+        planMode.click()
+        XCTAssertTrue(modeMenu.label.contains("Plan mode"))
+
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText("Plan the task.")
+        element("send-message-button").click()
+        let taskID = try taskID(named: "Plan mode Markdown")
+        let markdownReply = "## Implementation plan\n\nStart with the **workspace model**.\n\n- Add structured conversation rendering\n- Verify history after reopening"
+        let assistantMarkdown = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", "Implementation plan"))
+            .firstMatch
+        XCTAssertTrue(assistantMarkdown.waitForExistence(timeout: 30), "The Plan mode response should appear in the conversation.")
+
+        element("back-to-board-button").click()
+        openTask(named: "Plan mode Markdown")
+        let reloadedHistory = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        let reloadedMessages = reloadedHistory?["messages"] as? [[String: Any]] ?? []
+        XCTAssertTrue(reloadedMessages.contains { $0["role"] as? String == "assistant" && $0["text"] as? String == markdownReply }, "The exact Markdown source should persist after reopening the plan conversation.")
+        let heading = app.descendants(matching: .any).matching(identifier: "assistant-markdown-heading-0").firstMatch
+        let firstListItem = app.descendants(matching: .any).matching(identifier: "assistant-markdown-list-item-4").firstMatch
+        let secondListItem = app.descendants(matching: .any).matching(identifier: "assistant-markdown-list-item-5").firstMatch
+        XCTAssertTrue(heading.waitForExistence(timeout: 10), "Plan headings should render as distinct elements after reopening.")
+        XCTAssertTrue(heading.label.contains("Implementation plan"), "The rendered heading should retain the plan title after reopening.")
+        XCTAssertTrue(firstListItem.waitForExistence(timeout: 5), "The first plan list entry should render after reopening.")
+        XCTAssertTrue(firstListItem.label.contains("Add structured conversation rendering"))
+        XCTAssertTrue(secondListItem.waitForExistence(timeout: 5), "The second plan list entry should render after reopening.")
+        XCTAssertTrue(secondListItem.label.contains("Verify history after reopening"))
+        attachScreenshot(named: "Plan mode response renders a structured Markdown plan")
+    }
+
     // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer shows a Codex-reported model, while unsupported modes and malformed model IDs are rejected before creating history.
     func test_conversation_mode_rejects_unknown_mode_without_starting_a_turn() throws {
         launchApp(defaultParent: fixture.parent.path)

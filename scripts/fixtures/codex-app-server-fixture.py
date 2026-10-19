@@ -162,6 +162,11 @@ def main():
                     "threadId": "00000000-0000-0000-0000-000000000001",
                     "turn": {"id": "turn_stationai_fixture", "status": "completed"},
                 }})
+            elif mode.endswith("-markdown"):
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": "00000000-0000-0000-0000-000000000001",
+                    "turn": {"id": "turn_stationai_fixture", "status": "completed"},
+                }})
             elif mode.endswith("-hold"):
                 time.sleep(30)
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
@@ -202,6 +207,12 @@ def main():
                     {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": "Delegate this task."}]},
                     {"id": "item_assistant_fixture", "type": "agentMessage", "text": "The subagent inspected the project structure."},
                     subagent_item("completed"),
+                ]
+            if mode.endswith("-markdown"):
+                saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
+                contents = [
+                    {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": saved_history.get("userMessage", "Plan the task.")} ]},
+                    {"id": "item_assistant_fixture", "type": "agentMessage", "text": "## Implementation plan\n\nStart with the **workspace model**.\n\n- Add structured conversation rendering\n- Verify history after reopening"},
                 ]
             write({"jsonrpc": "2.0", "id": message["id"], "result": {
                 "data": [{"item": item, "turnId": "turn_stationai_fixture"} for item in contents],
