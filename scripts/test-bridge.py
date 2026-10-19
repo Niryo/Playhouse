@@ -105,7 +105,7 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli(*command)
         return self.assert_success(response)
 
-    def create_repo_task(self, title, repositories, branches=None, branch_from=None, roots=None, merge_targets=None):
+    def create_repo_task(self, title, repositories, branches=None, branch_from=None, roots=None, merge_targets=None, materialize=False):
         command = ["task", "create", "--title", title]
         for repository in repositories:
             command.extend(["--repo", repository])
@@ -118,7 +118,11 @@ class StationAIBridgeTests(unittest.TestCase):
         for root in roots or []:
             command.extend(["--root", root])
         response, _ = self.call_cli(*command)
-        return self.assert_success(response)
+        task = self.assert_success(response)
+        if materialize:
+            self.complete_fixture_turn(task["id"])
+            task = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        return task
 
     def complete_fixture_turn(self, task_id, executable_name="codex-fixture", message="Complete this task."):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -161,8 +165,16 @@ class StationAIBridgeTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.returncode, 0, f"{completed.stderr}\n{completed.stdout}")
         return completed.stdout
+
+    def branch_exists(self, repository, branch):
+        return subprocess.run(
+            ["git", "-C", str(repository), "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            check=False,
+            capture_output=True,
+            text=True,
+        ).returncode == 0
 
     def changes_diff(self, task_id, path, group, expected_status=0):
         response, _ = self.call_cli(
@@ -205,60 +217,63 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assert_failure(response, "invalid_argument")
 
-    # case-contract: test_task_creation_persists_ordered_roots_across_fresh_connections | A repository task creates a title-derived worktree and persists its repository, branch, path, explicit merge target, and task state across fresh connections.
+    # case-contract: test_task_creation_persists_ordered_roots_across_fresh_connections | Creating a repository task persists its selected branch settings as pending, shows auto when no branch is chosen, and creates no Git branch or worktree until the first conversation send.
     def test_task_creation_persists_ordered_roots_across_fresh_connections(self):
+        branch_token = uuid.uuid4().hex[:8]
+        title = f"Bridge task {branch_token}"
+        generated_branch = f"bridge-task-{branch_token}"
         created = self.create_repo_task(
-            "Bridge task", [self.primary], branch_from={str(self.primary): "branch-source"},
+            title, [self.primary], branch_from={str(self.primary): "branch-source"},
             merge_targets={str(self.primary): "branch-source"}, roots=[self.custom]
         )
         task_id = created["id"]
         self.assertEqual(created["status"], "Backlog")
         self.assertEqual(created["repositoryWorktrees"][0]["repositoryPath"], str(self.primary))
-        self.assertEqual(created["repositoryWorktrees"][0]["branch"], "bridge-task")
+        self.assertEqual(created["repositoryWorktrees"][0]["branch"], "auto")
+        self.assertTrue(created["repositoryWorktrees"][0]["isPending"])
+        self.assertEqual(created["repositoryWorktrees"][0]["worktreePath"], str(self.primary))
         self.assertEqual(created["repositoryWorktrees"][0]["branchFrom"], "branch-source")
         self.assertEqual(created["repositoryWorktrees"][0]["mergeTarget"], "branch-source")
-        self.assertEqual(
-            self.run_git(self.primary, "rev-parse", "bridge-task"),
-            self.run_git(self.primary, "rev-parse", "branch-source"),
-        )
-        self.assertNotEqual(
-            self.run_git(self.primary, "rev-parse", "bridge-task"),
-            self.run_git(self.primary, "rev-parse", "main"),
-        )
-        self.assertTrue(created["repositoryWorktrees"][0]["worktreePath"].startswith(str(self.worktree_directory)))
+        self.assertFalse(self.branch_exists(self.primary, generated_branch))
         self.assertEqual(created["contextFolders"], [str(self.custom)])
-        self.assertEqual(created["workspaceRoots"], [created["repositoryWorktrees"][0]["worktreePath"], str(self.custom)])
+        self.assertEqual(created["workspaceRoots"], [str(self.primary), str(self.custom)])
 
         # Each CLI call starts a new process and XPC connection over the same real store.
         response, _ = self.call_cli("task", "get", task_id)
         task = self.assert_success(response)
-        self.assertEqual(task["title"], "Bridge task")
+        self.assertEqual(task["title"], title)
         self.assertEqual(task["repositoryWorktrees"], created["repositoryWorktrees"])
         self.assertEqual(task["workspaceRoots"], created["workspaceRoots"])
         response, _ = self.call_cli("board", "list")
         self.assertEqual([task["id"] for task in self.assert_success(response)["tasks"]], [task_id])
 
-    # case-contract: test_task_creation_reuses_existing_branch_worktree | Creating a task for a branch with an existing worktree reuses that exact path.
+    # case-contract: test_task_creation_reuses_existing_branch_worktree | A selected existing branch remains pending until task start, then reuses its exact existing worktree path.
     def test_task_creation_reuses_existing_branch_worktree(self):
         existing = self.worktree_directory / "external-existing"
         branch = f"already-here-{uuid.uuid4().hex[:8]}"
         self.run_git(self.primary, "worktree", "add", "-b", branch, str(existing), "main")
         task = self.create_repo_task("Reuse branch", [self.primary], branches={str(self.primary): branch})
+        self.assertTrue(task["repositoryWorktrees"][0]["isPending"])
+        self.assertEqual(task["repositoryWorktrees"][0]["worktreePath"], str(self.primary))
+        self.complete_fixture_turn(task["id"])
+        task = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertFalse(task["repositoryWorktrees"][0]["isPending"])
         self.assertEqual(task["repositoryWorktrees"][0]["worktreePath"], str(existing))
         self.assertFalse(task["repositoryWorktrees"][0]["createdByStationAI"])
 
-    # case-contract: test_task_creation_creates_worktrees_in_multiple_repositories | A task selecting multiple repositories gets one correctly persisted worktree per repository.
+    # case-contract: test_task_creation_creates_worktrees_in_multiple_repositories | Selecting multiple repositories persists pending auto branch records without creating branches or worktrees before the task starts.
     def test_task_creation_creates_worktrees_in_multiple_repositories(self):
-        task = self.create_repo_task("Multi repository", [self.secondary, self.primary])
+        branch_token = uuid.uuid4().hex[:8]
+        title = f"Multi repository {branch_token}"
+        generated_branch = f"multi-repository-{branch_token}"
+        task = self.create_repo_task(title, [self.secondary, self.primary])
         self.assertEqual([item["repositoryPath"] for item in task["repositoryWorktrees"]], [str(self.secondary), str(self.primary)])
-        self.assertEqual([item["branch"] for item in task["repositoryWorktrees"]], ["multi-repository", "multi-repository"])
+        self.assertEqual([item["branch"] for item in task["repositoryWorktrees"]], ["auto", "auto"])
+        self.assertTrue(all(item["isPending"] for item in task["repositoryWorktrees"]))
         self.assertEqual([item["branchFrom"] for item in task["repositoryWorktrees"]], ["main", "main"])
         for repository in [self.secondary, self.primary]:
-            self.assertEqual(
-                self.run_git(repository, "rev-parse", "multi-repository"),
-                self.run_git(repository, "rev-parse", "main"),
-            )
-        self.assertEqual(task["workspaceRoots"], [item["worktreePath"] for item in task["repositoryWorktrees"]])
+            self.assertFalse(self.branch_exists(repository, generated_branch))
+        self.assertEqual(task["workspaceRoots"], [str(self.secondary), str(self.primary)])
 
     # case-contract: test_task_creation_supports_non_git_folder_only_context | A folder-only task persists its context without Git worktrees and reaches Done after a successful turn without attempting a merge.
     def test_task_creation_supports_non_git_folder_only_context(self):
@@ -273,7 +288,7 @@ class StationAIBridgeTests(unittest.TestCase):
 
     # case-contract: test_task_creation_rejects_worktree_assigned_to_active_task | A worktree already assigned to another active task is rejected without creating another task.
     def test_task_creation_rejects_worktree_assigned_to_active_task(self):
-        first = self.create_repo_task("First owner", [self.primary], branches={str(self.primary): "active-shared"})
+        first = self.create_repo_task("First owner", [self.primary], branches={str(self.primary): "active-shared"}, materialize=True)
         response, _ = self.call_cli(
             "task", "create", "--title", "Second owner", "--repo", self.primary,
             "--branch", f"{self.primary}=active-shared", expected_status=2,
@@ -285,36 +300,32 @@ class StationAIBridgeTests(unittest.TestCase):
 
     # case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task in Review, dropping it on Done squash-merges the task branch, removes the clean managed worktree, retains the source branch and conversation history, reduces the active task count, and exposes the task in the searchable archive with case-insensitive search and a read-only conversation.
     def test_task_done_removes_worktree_and_preserves_branch(self):
-        task = self.create_repo_task("Done cleanup", [self.primary])
-        draft = "Complete the task and preserve its conversation."
+        task = self.create_repo_task("Untitled task", [self.primary])
+        draft = "Please update the README and add concise setup steps for first time contributors tomorrow."
         self.assertEqual(self.assert_success(self.call_cli("task", "prompt", task["id"], "--text", draft)[0])["savedPrompt"], draft)
-        worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
+        self.assertTrue(task["repositoryWorktrees"][0]["isPending"])
+        self.assertEqual(task["repositoryWorktrees"][0]["branch"], "auto")
+        self.assertEqual(task["repositoryWorktrees"][0]["worktreePath"], str(self.primary))
+        self.assertFalse(self.branch_exists(self.primary, "please-update-the-readme-and-add-concise-setup"))
+        self.complete_fixture_turn(task["id"])
+        started = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        record = started["repositoryWorktrees"][0]
+        self.assertFalse(record["isPending"])
+        self.assertEqual(record["branch"], "please-update-the-readme-and-add-concise-setup")
+        worktree = Path(record["worktreePath"])
         (worktree / "task-result.txt").write_text("Task branch change\n", encoding="utf-8")
         self.run_git(worktree, "add", "task-result.txt")
         self.run_git(worktree, "commit", "-m", "Complete task branch")
-        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
-        executable = self.data_directory / "codex-fixture"
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
-        )
-        shutil.copyfile(fixture, executable)
-        executable.chmod(0o755)
-        response, _ = self.call_cli(
-            "conversation", "send", task["id"], "--message", "Complete this task.",
-            "--answer", "color=Blue", "--answer", "token=fixture-secret",
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
-        )
-        self.assert_success(response)
         current, _ = self.call_cli("task", "get", task["id"])
         self.assertEqual(self.assert_success(current)["status"], "Review")
         response, _ = self.call_cli("task", "move", task["id"], "Done")
         self.assertEqual(self.assert_success(response)["status"], "Done")
         self.assertFalse(worktree.exists())
-        self.assertEqual(self.run_git(self.primary, "show-ref", "--verify", "--quiet", "refs/heads/done-cleanup"), "")
+        self.assertEqual(self.run_git(self.primary, "show-ref", "--verify", "--quiet", "refs/heads/please-update-the-readme-and-add-concise-setup"), "")
         self.assertEqual((self.primary / "task-result.txt").read_text(encoding="utf-8"), "Task branch change\n")
         target_parents = self.run_git(self.primary, "rev-list", "--parents", "-n", "1", "main").split()
         self.assertEqual(len(target_parents), 2, "A squash merge should create a single-parent target commit.")
-        self.assertEqual(self.run_git(self.primary, "log", "main", "-1", "--format=%s").strip(), "Done Cleanup")
+        self.assertEqual(self.run_git(self.primary, "log", "main", "-1", "--format=%s").strip(), "Please Update The Readme And Add Concise Setup")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["repositoryWorktrees"][0]["mergeTarget"], "main")
         completed, _ = self.call_cli("task", "get", task["id"])
         self.assertEqual(self.assert_success(completed)["savedPrompt"], draft)
@@ -330,7 +341,7 @@ class StationAIBridgeTests(unittest.TestCase):
 
     # case-contract: test_task_done_commits_dirty_worktree_changes | Moving a reviewed task to Done stages and commits tracked and untracked worktree changes, squash-merges them into the target as a single-parent commit, and removes the managed worktree.
     def test_task_done_commits_dirty_worktree_changes(self):
-        task = self.create_repo_task("Dirty cleanup", [self.primary])
+        task = self.create_repo_task("Dirty cleanup", [self.primary], materialize=True)
         worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture"
@@ -396,7 +407,10 @@ class StationAIBridgeTests(unittest.TestCase):
 
     # case-contract: test_task_done_retries_partial_multi_repository_merge | A later repository squash-commit failure preserves the earlier completed merge and leaves the failed target unchanged and clean; after retry, StationAI skips the completed merge and finishes the remaining repository.
     def test_task_done_retries_partial_multi_repository_merge(self):
-        task = self.create_repo_task("Partial multi merge", [self.primary, self.secondary])
+        task = self.create_repo_task(
+            f"Partial multi merge {uuid.uuid4().hex[:8]}",
+            [self.primary, self.secondary], materialize=True,
+        )
         worktrees = task["repositoryWorktrees"]
         self.assertEqual([item["repositoryPath"] for item in worktrees], [str(self.primary), str(self.secondary)])
         for record, repository in zip(worktrees, [self.primary, self.secondary]):
@@ -436,7 +450,7 @@ class StationAIBridgeTests(unittest.TestCase):
 
     # case-contract: test_task_merge_conflict_resolution_returns_to_review_and_retries | An active conflict-resolution turn remains In Progress when read, leaves the target branch unchanged, and returns the task to Review; a second Done request merges it.
     def test_task_merge_conflict_resolution_returns_to_review_and_retries(self):
-        task = self.create_repo_task("Conflict resolution", [self.primary])
+        task = self.create_repo_task("Conflict resolution", [self.primary], materialize=True)
         record = task["repositoryWorktrees"][0]
         worktree = Path(record["worktreePath"])
         conflict_file = "stationai-primary.txt"
@@ -499,8 +513,10 @@ class StationAIBridgeTests(unittest.TestCase):
 
     # case-contract: test_task_lifecycle_rollout_clears_records_and_clean_worktrees | The one-time lifecycle rollout clears task records and clean managed worktrees, preserves branches, and retains dirty managed worktrees with a notice.
     def test_task_lifecycle_rollout_clears_records_and_clean_worktrees(self):
-        clean = self.create_repo_task("Rollout clean", [self.primary])
-        dirty = self.create_repo_task("Rollout dirty", [self.secondary])
+        clean = self.create_repo_task("Rollout clean", [self.primary], materialize=True)
+        dirty = self.create_repo_task(
+            "Rollout dirty", [self.secondary], branch_from={str(self.secondary): "main"}, materialize=True
+        )
         clean_record = clean["repositoryWorktrees"][0]
         dirty_record = dirty["repositoryWorktrees"][0]
         clean_path = Path(clean_record["worktreePath"])
@@ -561,7 +577,7 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "roots", "get", task_id)
         self.assertEqual(self.assert_success(response)["roots"], expected_roots)
 
-    # case-contract: test_conversation_repository_picker_adds_repository_worktree | Adding a repository already used as a folder to an empty task creates and persists its managed worktree; the conversation shows a badge beside the title with the exact branch, merge-from, and merge-to values.
+    # case-contract: test_conversation_repository_picker_adds_repository_worktree | Adding a repository persists a pending auto branch; the repository details show labeled read-only branch, merge-from, and merge-to values with pencil controls, and no worktree exists before the first send.
     def test_conversation_repository_picker_adds_repository_worktree(self):
         task = self.create_task("Add repository in conversation", [self.primary])
         task_id = task["id"]
@@ -572,12 +588,12 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(len(updated["repositoryWorktrees"]), 1)
         added = updated["repositoryWorktrees"][0]
         self.assertEqual(added["repositoryPath"], str(self.primary))
-        self.assertNotEqual(added["worktreePath"], str(self.primary))
-        self.assertTrue(Path(added["worktreePath"]).is_dir())
-        self.assertTrue(added["branch"])
+        self.assertEqual(added["worktreePath"], str(self.primary))
+        self.assertTrue(added["isPending"])
+        self.assertEqual(added["branch"], "auto")
         self.assertTrue(added["branchFrom"])
         self.assertTrue(added["mergeTarget"])
-        self.assertEqual(updated["workspaceRoots"], [added["worktreePath"]])
+        self.assertEqual(updated["workspaceRoots"], [str(self.primary)])
         self.assertEqual(updated["contextFolders"], [])
         duplicate, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.primary, expected_status=2)
         self.assert_failure(duplicate, "invalid_argument")
@@ -585,30 +601,40 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assert_failure(invalid, "operation_failed")
         fresh, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"], updated["repositoryWorktrees"])
-    # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers Delete Task with a confirmation dialog; canceling preserves the task and worktree, and confirming removes them. CLI delete-check reports whether a clean or dirty worktree requires confirmation, and CLI deletion removes the task and managed worktree.
+    # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check reports the confirmation requirement, and confirmed deletion removes the managed worktree.
     def test_task_delete_removes_task_and_later_lookup_is_not_found(self):
-        task = self.create_repo_task("Delete me", [self.primary])
-        task_id = task["id"]
-        worktree_path = task["repositoryWorktrees"][0]["worktreePath"]
-        self.assertTrue(Path(worktree_path).is_dir())
-        response, _ = self.call_cli("task", "delete-check", task_id)
-        self.assertFalse(self.assert_success(response)["requiresConfirmation"], "An empty task with a clean worktree needs no confirmation.")
-
-        dirty_task = self.create_repo_task("Delete dirty", [self.secondary])
-        dirty_task_id = dirty_task["id"]
-        dirty_worktree = Path(dirty_task["repositoryWorktrees"][0]["worktreePath"])
-        (dirty_worktree / "unsaved-work.txt").write_text("work that needs confirmation\n", encoding="utf-8")
-        response, _ = self.call_cli("task", "delete-check", dirty_task_id)
-        self.assertTrue(self.assert_success(response)["requiresConfirmation"], "Uncommitted work must require confirmation.")
-        dirty_response, _ = self.call_cli("task", "delete", dirty_task_id)
-        self.assertTrue(self.assert_success(dirty_response)["deleted"])
-        self.assertFalse(dirty_worktree.exists(), "Confirmed deletion must remove the dirty managed worktree.")
-
-        response, _ = self.call_cli("task", "delete", task_id)
+        pending = self.create_repo_task("Pending delete", [self.primary])
+        pending_id = pending["id"]
+        pending_path = pending["repositoryWorktrees"][0]["worktreePath"]
+        self.assertTrue(pending["repositoryWorktrees"][0]["isPending"])
+        self.assertEqual(pending_path, str(self.primary))
+        response, _ = self.call_cli("task", "delete-check", pending_id)
+        self.assertFalse(self.assert_success(response)["requiresConfirmation"])
+        response, _ = self.call_cli("task", "delete", pending_id)
         self.assertTrue(self.assert_success(response)["deleted"])
-        self.assertFalse(Path(worktree_path).exists(), "Deleting a task must remove its clean managed worktree.")
-        response, _ = self.call_cli("task", "get", task_id, expected_status=3)
+        self.assertTrue(Path(pending_path).is_dir(), "Deleting a pending task must preserve the source repository.")
+        response, _ = self.call_cli("task", "get", pending_id, expected_status=3)
         self.assert_failure(response, "not_found")
+
+        clean = self.create_repo_task(f"Clean delete {uuid.uuid4().hex[:8]}", [self.primary], materialize=True)
+        clean_id = clean["id"]
+        clean_worktree = Path(clean["repositoryWorktrees"][0]["worktreePath"])
+        response, _ = self.call_cli("task", "delete", clean_id)
+        self.assertTrue(self.assert_success(response)["deleted"])
+        self.assertFalse(clean_worktree.exists(), "Deleting a clean managed worktree must remove it.")
+
+        dirty = self.create_repo_task(f"Delete dirty {uuid.uuid4().hex[:8]}", [self.secondary], materialize=True)
+        dirty_id = dirty["id"]
+        dirty_worktree = Path(dirty["repositoryWorktrees"][0]["worktreePath"])
+        (dirty_worktree / "unsaved-work.txt").write_text("work that needs confirmation\n", encoding="utf-8")
+        response, _ = self.call_cli("task", "delete-check", dirty_id)
+        self.assertTrue(self.assert_success(response)["requiresConfirmation"])
+        response, _ = self.call_cli("task", "delete", dirty_id)
+        self.assertTrue(self.assert_success(response)["deleted"])
+        self.assertFalse(dirty_worktree.exists(), "Confirmed deletion must remove the dirty managed worktree.")
+        response, _ = self.call_cli("task", "get", dirty_id, expected_status=3)
+        self.assert_failure(response, "not_found")
+
         response, _ = self.call_cli("board", "list")
         self.assertEqual(self.assert_success(response)["tasks"], [])
 
@@ -662,12 +688,14 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "get", task_id, expected_status=3)
         self.assert_failure(response, "not_found")
 
-    # case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task opens its conversation directly with a unique title-independent branch; backing out saves the unsent prompt in Backlog, reopening restores it, and returning again preserves the resolved title. Invalid status changes are rejected without mutation.
+    # case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while backing out saves an unsent prompt; reopening restores the draft without creating a branch or worktree, and invalid status changes are rejected without mutation.
     def test_task_prompt_draft_persists_after_back(self):
         suggestions, _ = self.call_cli("workspace", "suggest", "--parent", self.fixture / "suggested-parent")
         self.assertIn(str(self.primary), self.assert_success(suggestions)["repositories"])
         task = self.create_repo_task("Draft persistence", [self.primary], branches={str(self.primary): "draft-persistence"})
         self.assertEqual(task["repositoryWorktrees"][0]["branch"], "draft-persistence")
+        self.assertTrue(task["repositoryWorktrees"][0]["isPending"])
+        self.assertEqual(task["repositoryWorktrees"][0]["worktreePath"], str(self.primary))
         task_id = task["id"]
         prompt = "Please update the README and explain the change."
         response, _ = self.call_cli("task", "prompt", task_id, "--text", prompt, "--status", "Backlog")

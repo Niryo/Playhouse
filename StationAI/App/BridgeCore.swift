@@ -162,25 +162,27 @@ final class BoardTaskManager {
         var worktrees: [RepositoryWorktreeRecord] = []
         do {
             for spec in repositories {
-                let record = try StationAIWorktreeManager.resolve(spec: spec, title: normalizedTitle, root: worktreeRoot)
-                let normalizedWorktree = URL(fileURLWithPath: record.worktreePath).standardizedFileURL.path
+                let record = try StationAIWorktreeManager.pendingRecord(spec: spec)
+                let normalizedWorktree = URL(fileURLWithPath: record.repositoryPath).standardizedFileURL.path
                 guard !worktrees.contains(where: { $0.repositoryPath == record.repositoryPath }) else {
                     throw BridgeCommandError(code: "invalid_argument", message: "A repository can be selected only once per task: \(record.repositoryPath)")
                 }
                 for other in try listModels() where other.status != .done {
-                    if other.repositoryWorktrees.contains(where: { URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == normalizedWorktree }) {
+                    if record.branch != "auto", other.repositoryWorktrees.contains(where: {
+                        $0.repositoryPath == record.repositoryPath && $0.branch == record.branch
+                    }) {
+                        throw StationAIManagerError.repositoryAssigned(record.repositoryPath)
+                    }
+                    if other.repositoryWorktrees.contains(where: { !$0.isPending && URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == normalizedWorktree }) {
                         throw StationAIManagerError.repositoryAssigned(normalizedWorktree)
                     }
                 }
                 worktrees.append(record)
             }
         } catch {
-            for record in worktrees where record.createdByStationAI && FileManager.default.fileExists(atPath: record.worktreePath) {
-                try? StationAIWorktreeManager.remove(record)
-            }
             throw error
         }
-        let roots = try Self.normalizeOptionalRoots(worktrees.map(\.worktreePath) + folders)
+        let roots = try Self.normalizeOptionalRoots(worktrees.map(\.repositoryPath) + folders)
         let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: roots)
         task.repositoryWorktrees = worktrees
         task.contextFolderPaths = folders
@@ -199,17 +201,12 @@ final class BoardTaskManager {
             throw BridgeCommandError(code: "invalid_argument", message: "This repository is already attached to the task: \(repository)")
         }
 
-        let branch = "task-\(UUID().uuidString.prefix(8).lowercased())"
-        let record = try StationAIWorktreeManager.resolve(
-            spec: RepositoryWorktreeSpec(repositoryPath: repository, branch: branch, branchFrom: nil),
-            title: task.title,
-            root: worktreeRoot
-        )
-        let worktreePath = URL(fileURLWithPath: record.worktreePath).standardizedFileURL.path
+        let record = try StationAIWorktreeManager.pendingRecord(spec: RepositoryWorktreeSpec(repositoryPath: repository, branch: nil, branchFrom: nil))
+        let worktreePath = URL(fileURLWithPath: record.repositoryPath).standardizedFileURL.path
         do {
             for other in try listModels() where other.id != id && other.status != .done {
                 if other.repositoryWorktrees.contains(where: {
-                    URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == worktreePath
+                    !$0.isPending && URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == worktreePath
                 }) {
                     throw StationAIManagerError.repositoryAssigned(worktreePath)
                 }
@@ -222,7 +219,7 @@ final class BoardTaskManager {
                     URL(fileURLWithPath: $0).standardizedFileURL.path != repository
                 }
             )
-            let roots = try Self.normalizeOptionalRoots(repositories.map(\.worktreePath) + contextFolders)
+            let roots = try Self.normalizeOptionalRoots(repositories.map { $0.isPending ? $0.repositoryPath : $0.worktreePath } + contextFolders)
             task.repositoryWorktrees = repositories
             task.contextFolderPaths = contextFolders
             task.workspaceRootPaths = roots
@@ -254,7 +251,7 @@ final class BoardTaskManager {
         }
 
         do {
-            let mergeCandidates = task.repositoryWorktrees.enumerated().filter { !$0.element.mergeCompleted }
+            let mergeCandidates = task.repositoryWorktrees.enumerated().filter { !$0.element.isPending && !$0.element.mergeCompleted }
             for (_, record) in mergeCandidates {
                 try StationAIWorktreeManager.commitChanges(record, message: "Complete task: \(task.title)")
             }
@@ -311,7 +308,7 @@ final class BoardTaskManager {
                     try StationAIWorktreeManager.remove(record)
                 }
             }
-            let retainedExternalRoots = task.repositoryWorktrees.filter { !$0.createdByStationAI }.map(\.worktreePath)
+            let retainedExternalRoots = task.repositoryWorktrees.filter { !$0.isPending && !$0.createdByStationAI }.map(\.worktreePath)
             task.workspaceRootPaths = try Self.normalizeOptionalRoots(retainedExternalRoots + task.contextFolderPaths)
             task.status = .done
             task.statusMessage = nil
@@ -409,15 +406,12 @@ final class BoardTaskManager {
             var folders: [String] = []
             for path in paths where !existingPaths.contains(path) {
                 if FileManager.default.fileExists(atPath: URL(fileURLWithPath: path).appendingPathComponent(".git").path) {
-                    let record = try StationAIWorktreeManager.resolve(
-                        spec: RepositoryWorktreeSpec(repositoryPath: path, branch: nil, branchFrom: nil),
-                        title: task.title,
-                        root: worktreeRoot
+                    let record = try StationAIWorktreeManager.pendingRecord(
+                        spec: RepositoryWorktreeSpec(repositoryPath: path, branch: nil, branchFrom: nil)
                     )
-                    let worktreePath = URL(fileURLWithPath: record.worktreePath).standardizedFileURL.path
+                    let worktreePath = URL(fileURLWithPath: record.repositoryPath).standardizedFileURL.path
                     for other in try listModels() where other.id != id && other.status != .done {
-                        if other.repositoryWorktrees.contains(where: { URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == worktreePath }) {
-                            if record.createdByStationAI { try? StationAIWorktreeManager.remove(record) }
+                        if other.repositoryWorktrees.contains(where: { !$0.isPending && URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == worktreePath }) {
                             throw StationAIManagerError.repositoryAssigned(worktreePath)
                         }
                     }
@@ -439,7 +433,7 @@ final class BoardTaskManager {
     func delete(_ id: UUID) throws {
         let task = try requireTask(id)
         for worktree in task.repositoryWorktrees {
-            try StationAIWorktreeManager.removeAfterConfirmation(worktree)
+            if !worktree.isPending { try StationAIWorktreeManager.removeAfterConfirmation(worktree) }
         }
         modelContext.delete(task)
         try modelContext.save()
@@ -449,9 +443,61 @@ final class BoardTaskManager {
         try requireTask(id)
     }
 
+    func prepareRepositoryWorktrees(_ id: UUID, fallbackPrompt: String? = nil) throws -> BoardTask {
+        let task = try requireTask(id)
+        let pending = task.repositoryWorktrees.filter(\.isPending)
+        guard !pending.isEmpty else { return task }
+        let branchTitle: String
+        if ["Generating title…", "Untitled task"].contains(task.title) {
+            let prompt = task.savedPrompt ?? fallbackPrompt ?? task.title
+            branchTitle = prompt.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
+        } else {
+            branchTitle = task.title
+        }
+        var resolved: [RepositoryWorktreeRecord] = []
+        do {
+            for item in pending {
+                let requestedBranch = item.branch == "auto" ? nil : item.branch
+                let record = try StationAIWorktreeManager.resolve(
+                    spec: RepositoryWorktreeSpec(
+                        repositoryPath: item.repositoryPath,
+                        branch: requestedBranch,
+                        branchFrom: item.branchFrom,
+                        mergeTarget: item.mergeTarget
+                    ),
+                    title: branchTitle,
+                    root: worktreeRoot
+                )
+                let path = URL(fileURLWithPath: record.worktreePath).standardizedFileURL.path
+                for other in try listModels() where other.id != id && other.status != .done {
+                    if other.repositoryWorktrees.contains(where: {
+                        !$0.isPending && URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == path
+                    }) {
+                        throw StationAIManagerError.repositoryAssigned(path)
+                    }
+                }
+                resolved.append(record)
+            }
+            var iterator = resolved.makeIterator()
+            task.repositoryWorktrees = task.repositoryWorktrees.map { $0.isPending ? (iterator.next() ?? $0) : $0 }
+            task.workspaceRootPaths = try Self.normalizeOptionalRoots(task.repositoryWorktrees.map(\.worktreePath) + task.contextFolderPaths)
+            try modelContext.save()
+            return task
+        } catch {
+            for record in resolved where record.createdByStationAI {
+                try? StationAIWorktreeManager.remove(record)
+            }
+            throw error
+        }
+    }
+
     func deleteRequiresConfirmation(_ id: UUID, client: CodexAppServerClient) async throws -> Bool {
         let task = try requireTask(id)
-        let dirtyWorktree = try task.repositoryWorktrees.contains { try StationAIWorktreeManager.hasChanges($0) }
+        let dirtyWorktree = try task.repositoryWorktrees.contains { record in
+            guard !record.isPending else { return false }
+            return try StationAIWorktreeManager.hasChanges(record)
+        }
+        if dirtyWorktree { return true }
         guard task.codexThreadID != nil else { return dirtyWorktree }
         let history = try await CodexConversationManager(tasks: self, client: client).history(taskID: id)
         let hasConversation = history.messages.contains { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -670,7 +716,7 @@ final class CodexConversationManager {
         guard Self.isValidModelID(modelID) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
         }
-        let task = try tasks.taskModel(taskID)
+        var task = try tasks.taskModel(taskID)
         defer {
             if let threadID = task.codexThreadID {
                 client.clearTurnStarting(threadID: threadID)
@@ -679,6 +725,7 @@ final class CodexConversationManager {
         guard task.status != .done else {
             throw StationAIManagerError.invalidTransition("Done tasks are closed. Create a new task for follow-up work.")
         }
+        task = try tasks.prepareRepositoryWorktrees(taskID, fallbackPrompt: normalizedText)
         let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
         let workspace = try CodexWorkspaceContext(roots: roots)
         let started = try tasks.setLifecycleStatus(taskID, to: .inProgress)

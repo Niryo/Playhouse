@@ -9,15 +9,15 @@
   },
   {
     "id": "test_task_creation_persists_ordered_roots_across_fresh_connections",
-    "expectation": "A repository task creates a title-derived worktree and persists its repository, branch, path, explicit merge target, and task state across fresh connections."
+    "expectation": "Creating a repository task persists its selected branch settings as pending, shows auto when no branch is chosen, and creates no Git branch or worktree until the first conversation send."
   },
   {
     "id": "test_task_creation_reuses_existing_branch_worktree",
-    "expectation": "Creating a task for a branch with an existing worktree reuses that exact path."
+    "expectation": "A selected existing branch remains pending until task start, then reuses its exact existing worktree path."
   },
   {
     "id": "test_task_creation_creates_worktrees_in_multiple_repositories",
-    "expectation": "A task selecting multiple repositories gets one correctly persisted worktree per repository."
+    "expectation": "Selecting multiple repositories persists pending auto branch records without creating branches or worktrees before the task starts."
   },
   {
     "id": "test_task_creation_supports_non_git_folder_only_context",
@@ -69,11 +69,11 @@
   },
   {
     "id": "test_conversation_repository_picker_adds_repository_worktree",
-    "expectation": "Adding a repository already used as a folder to an empty task creates and persists its managed worktree; the conversation shows a badge beside the title with the exact branch, merge-from, and merge-to values."
+    "expectation": "Adding a repository persists a pending auto branch; the repository details show labeled read-only branch, merge-from, and merge-to values with pencil controls, and no worktree exists before the first send."
   },
   {
     "id": "test_task_delete_removes_task_and_later_lookup_is_not_found",
-    "expectation": "The task context menu offers Delete Task with a confirmation dialog; canceling preserves the task and worktree, and confirming removes them. CLI delete-check reports whether a clean or dirty worktree requires confirmation, and CLI deletion removes the task and managed worktree."
+    "expectation": "The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check reports the confirmation requirement, and confirmed deletion removes the managed worktree."
   },
   {
     "id": "test_default_parent_settings_read_write_clear_and_validation",
@@ -93,7 +93,7 @@
   },
   {
     "id": "test_task_prompt_draft_persists_after_back",
-    "expectation": "Creating a repository task opens its conversation directly with a unique title-independent branch; backing out saves the unsent prompt in Backlog, reopening restores it, and returning again preserves the resolved title. Invalid status changes are rejected without mutation."
+    "expectation": "Creating a repository task leaves its selected branch pending while backing out saves an unsent prompt; reopening restores the draft without creating a branch or worktree, and invalid status changes are rejected without mutation."
   },
   {
     "id": "test_conversation_composer_rejects_blank_and_supports_live_turn_controls",

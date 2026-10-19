@@ -357,6 +357,30 @@ enum StationAIWorktreeManager {
         return RepositoryWorktreeRecord(repositoryPath: repository, branch: branch, worktreePath: destination.path, branchFrom: branchFrom, createdByStationAI: true, mergeTarget: mergeTarget)
     }
 
+    static func pendingRecord(spec: RepositoryWorktreeSpec) throws -> RepositoryWorktreeRecord {
+        let repository = try repositoryRoot(spec.repositoryPath)
+        let branchFrom = try resolveBase(repository: repository, requested: spec.branchFrom)
+        let mergeTarget = try resolveMergeTarget(repository: repository, requested: spec.mergeTarget)
+        let branch = spec.branch?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let branch, !branch.isEmpty {
+            guard !branch.hasPrefix("-"), try git(repository, ["check-ref-format", "--branch", branch], allowFailure: true).status == 0 else {
+                throw BridgeCommandError(code: "invalid_argument", message: "'(branch)' isn't a valid Git branch name.")
+            }
+            guard branch != mergeTarget else {
+                throw BridgeCommandError(code: "invalid_argument", message: "A task branch can't also be its merge target: \(branch).")
+            }
+        }
+        return RepositoryWorktreeRecord(
+            repositoryPath: repository,
+            branch: branch.flatMap { $0.isEmpty ? nil : $0 } ?? "auto",
+            worktreePath: repository,
+            branchFrom: branchFrom,
+            createdByStationAI: false,
+            mergeTarget: mergeTarget,
+            isPending: true
+        )
+    }
+
     static func preflightMerge(_ record: RepositoryWorktreeRecord) throws -> Bool {
         try preflightRemoval(record)
         guard let target = record.mergeTarget,

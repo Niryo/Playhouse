@@ -100,6 +100,8 @@ struct TaskConversationView: View {
     @State private var editedBranch = ""
     @State private var editedBranchFrom = ""
     @State private var editedMergeTarget = ""
+    @State private var editingRepositoryField: String?
+    @State private var isShowingDiscardConfirmation = false
     @FocusState private var isComposerFocused: Bool
     @FocusState private var isRepositorySearchFocused: Bool
 
@@ -739,6 +741,7 @@ struct TaskConversationView: View {
                     editedBranch = repository.branch
                     editedBranchFrom = repository.branchFrom
                     editedMergeTarget = repository.mergeTarget ?? ""
+                    editingRepositoryField = nil
                 } label: {
                     Text(name).font(.system(size: 10, weight: .medium)).lineLimit(1)
                         .padding(.horizontal, 8).padding(.vertical, 5)
@@ -752,9 +755,9 @@ struct TaskConversationView: View {
                 )) { _ in
                     VStack(alignment: .leading, spacing: 8) {
                         Text(name).font(.system(size: 12, weight: .semibold))
-                        TextField("Branch", text: $editedBranch).accessibilityIdentifier("conversation-repository-branch")
-                        TextField("Merge from", text: $editedBranchFrom).accessibilityIdentifier("conversation-repository-branch-from")
-                        TextField("Merge to", text: $editedMergeTarget).accessibilityIdentifier("conversation-repository-merge-target")
+                        repositoryDetailRow("Branch name", value: $editedBranch, field: "branch", placeholder: "auto", identifier: "conversation-repository-branch")
+                        repositoryDetailRow("Branch from", value: $editedBranchFrom, field: "from", placeholder: "default", identifier: "conversation-repository-branch-from")
+                        repositoryDetailRow("Merge to", value: $editedMergeTarget, field: "to", placeholder: "default", identifier: "conversation-repository-merge-target")
                         HStack {
                             Button("Remove Repository", role: .destructive) { removeConversationRepository(repository) }
                                 .accessibilityIdentifier("remove-conversation-repository-button")
@@ -1596,6 +1599,27 @@ struct TaskConversationView: View {
         task.repositoryWorktrees = repositories
         try? modelContext.save()
         repositoryBeingEdited = nil
+    }
+
+    @ViewBuilder
+    private func repositoryDetailRow(_ title: String, value: Binding<String>, field: String, placeholder: String, identifier: String) -> some View {
+        HStack(spacing: 8) {
+            Text(title).foregroundStyle(.secondary).frame(width: 82, alignment: .leading)
+            if editingRepositoryField == field {
+                TextField(placeholder, text: value).textFieldStyle(.roundedBorder).accessibilityIdentifier(identifier)
+            } else {
+                Text(value.wrappedValue.isEmpty ? placeholder : value.wrappedValue)
+                    .lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("\(identifier)-value")
+                Button {
+                    editingRepositoryField = field
+                } label: {
+                    Image(systemName: "pencil").font(.system(size: 10, weight: .medium))
+                }
+                .buttonStyle(.plain).help("Edit \(title)").accessibilityLabel("Edit \(title)")
+                .accessibilityIdentifier("\(identifier)-edit")
+            }
+        }
     }
 
     private func removeConversationRepository(_ repository: RepositoryWorktreeRecord) {

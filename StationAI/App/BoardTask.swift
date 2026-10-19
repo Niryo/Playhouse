@@ -98,10 +98,11 @@ struct RepositoryWorktreeRecord: Codable, Equatable {
     var mergeTarget: String? = nil
     var mergeCompleted: Bool = false
     var mergeError: String? = nil
+    var isPending: Bool = false
 
     private enum CodingKeys: String, CodingKey {
         case repositoryPath, branch, worktreePath, branchFrom, createdByStationAI
-        case mergeTarget, mergeCompleted, mergeError
+        case mergeTarget, mergeCompleted, mergeError, isPending
     }
 
     init(
@@ -112,7 +113,8 @@ struct RepositoryWorktreeRecord: Codable, Equatable {
         createdByStationAI: Bool,
         mergeTarget: String? = nil,
         mergeCompleted: Bool = false,
-        mergeError: String? = nil
+        mergeError: String? = nil,
+        isPending: Bool = false
     ) {
         self.repositoryPath = repositoryPath
         self.branch = branch
@@ -122,6 +124,7 @@ struct RepositoryWorktreeRecord: Codable, Equatable {
         self.mergeTarget = mergeTarget
         self.mergeCompleted = mergeCompleted
         self.mergeError = mergeError
+        self.isPending = isPending
     }
 
     init(from decoder: Decoder) throws {
@@ -134,5 +137,6 @@ struct RepositoryWorktreeRecord: Codable, Equatable {
         mergeTarget = try values.decodeIfPresent(String.self, forKey: .mergeTarget)
         mergeCompleted = try values.decodeIfPresent(Bool.self, forKey: .mergeCompleted) ?? false
         mergeError = try values.decodeIfPresent(String.self, forKey: .mergeError)
+        isPending = try values.decodeIfPresent(Bool.self, forKey: .isPending) ?? false
     }
 }

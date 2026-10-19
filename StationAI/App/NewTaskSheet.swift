@@ -14,7 +14,6 @@ struct NewTaskSheet: View {
     @FocusState private var focusedRepositoryField: EditableRepositoryField?
     @State private var isChoosingInitialParent = false
     @State private var createError: String?
-    @State private var generatedTaskBranch = "task-\(UUID().uuidString.prefix(8).lowercased())"
 
     private enum EditableRepositoryField: Hashable {
         case branch(Int)
@@ -72,7 +71,7 @@ struct NewTaskSheet: View {
                         Spacer(minLength: 2)
                         editableRepositoryTag(
                             label: "branch",
-                            value: repositories[index].branch ?? generatedTaskBranch,
+                            value: repositories[index].branch ?? "auto",
                             identifier: "repository-branch-tag-\(index)",
                             textFieldIdentifier: "repository-branch-\(index)",
                             field: .branch(index),
@@ -241,8 +240,8 @@ struct NewTaskSheet: View {
 
     private func branchBinding(at index: Int) -> Binding<String> {
         Binding(
-            get: { repositories.indices.contains(index) ? (repositories[index].branch ?? generatedTaskBranch) : "" },
-            set: { if repositories.indices.contains(index) { repositories[index].branch = $0 } }
+            get: { repositories.indices.contains(index) ? (repositories[index].branch ?? "auto") : "" },
+            set: { if repositories.indices.contains(index) { repositories[index].branch = $0 == "auto" ? nil : $0 } }
         )
     }
 
@@ -339,7 +338,7 @@ struct NewTaskSheet: View {
     private func repositorySpec(for path: String) -> RepositoryWorktreeSpec {
         let branchFrom = try? StationAIWorktreeManager.defaultBranchFrom(repositoryPath: path)
         let mergeTarget = try? StationAIWorktreeManager.defaultLocalBranch(repositoryPath: path)
-        return RepositoryWorktreeSpec(repositoryPath: path, branch: generatedTaskBranch, branchFrom: branchFrom, mergeTarget: mergeTarget)
+        return RepositoryWorktreeSpec(repositoryPath: path, branch: nil, branchFrom: branchFrom, mergeTarget: mergeTarget)
     }
 }
 
