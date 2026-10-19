@@ -764,7 +764,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assert_failure(invalid, "operation_failed")
         fresh, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"], updated["repositoryWorktrees"])
-    # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check reports the confirmation requirement, confirmed deletion removes the managed worktree, and the persistent log captures a real deletion failure's task, thread, process, phase, underlying error details, and no task title or conversation text; the failed task and worktree remain available for retry.
+    # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives confirmation from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Diagnostics identify conversation failure phase and capture real deletion errors without task titles or conversation text, and failed deletion leaves the task and worktree available for retry.
     def test_task_delete_removes_task_and_later_lookup_is_not_found(self):
         pending = self.create_repo_task("Pending delete", [self.primary])
         pending_id = pending["id"]
@@ -792,7 +792,29 @@ class StationAIBridgeTests(unittest.TestCase):
 
         clean = self.create_repo_task(f"Clean delete {uuid.uuid4().hex[:8]}", [self.primary], materialize=True)
         clean_id = clean["id"]
+        self.complete_fixture_turn(clean_id)
+        clean, _ = self.call_cli("task", "get", clean_id)
+        clean = self.assert_success(clean)
         clean_worktree = Path(clean["repositoryWorktrees"][0]["worktreePath"])
+        self.assertEqual(self.run_git(clean_worktree, "status", "--porcelain").strip(), "")
+        clean_thread_id = clean["codexThreadID"]
+        resume_events_before = sum(
+            event.get("event") == "codex.thread.resume_started" and event.get("threadID") == clean_thread_id
+            for event in (
+                json.loads(line)
+                for line in (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8").splitlines()
+            )
+        )
+        response, _ = self.call_cli("task", "delete-check", clean_id)
+        self.assertTrue(self.assert_success(response)["requiresConfirmation"])
+        resume_events_after = sum(
+            event.get("event") == "codex.thread.resume_started" and event.get("threadID") == clean_thread_id
+            for event in (
+                json.loads(line)
+                for line in (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8").splitlines()
+            )
+        )
+        self.assertEqual(resume_events_after, resume_events_before, "Delete-check must not resume a conversation thread already owned by the app.")
         response, _ = self.call_cli("task", "delete", clean_id)
         self.assertTrue(self.assert_success(response)["deleted"])
         self.assertFalse(clean_worktree.exists(), "Deleting a clean managed worktree must remove it.")
@@ -1263,7 +1285,7 @@ class StationAIBridgeTests(unittest.TestCase):
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Review")
 
-    # case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes also persist Blocked across connections, and a new prompt can finish in Review.
+    # case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes persist Blocked across connections, and diagnostics identify the failed turn phase and store path; a new prompt can finish in Review.
     def test_codex_interrupted_turn_blocks_with_reason_and_can_retry(self):
         task_id = self.create_task("Interrupted turn", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -1286,6 +1308,16 @@ class StationAIBridgeTests(unittest.TestCase):
         blocked = self.assert_success(task)
         self.assertEqual(blocked["status"], "Blocked")
         self.assertIn("interrupted", blocked["statusMessage"].lower())
+        diagnostic_lines = [
+            json.loads(line)
+            for line in (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        send_failure = next(
+            event for event in diagnostic_lines
+            if event.get("event") == "conversation.send.failed" and event.get("taskID") == task_id
+        )
+        self.assertEqual(send_failure["phase"], "codex-turn")
+        self.assertEqual(send_failure["storePath"], str(self.data_directory / "StationAI.store"))
         self.complete_fixture_turn(task_id, executable_name="codex-fixture-retry")
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Review")

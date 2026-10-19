@@ -957,7 +957,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("conversation-repository-merge-target").exists, "The merge-to value becomes editable only after selecting its pencil control.")
     }
 
-    // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check reports the confirmation requirement, confirmed deletion removes the managed worktree, and the persistent log captures a real deletion failure's task, thread, process, phase, underlying error details, and no task title or conversation text; the failed task and worktree remain available for retry.
+    // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives confirmation from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Diagnostics identify conversation failure phase and capture real deletion errors without task titles or conversation text, and failed deletion leaves the task and worktree available for retry.
     func test_task_delete_removes_task_and_later_lookup_is_not_found() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -999,6 +999,17 @@ final class StationAIUITests: XCTestCase {
         let cleanPath = try XCTUnwrap(cleanRecord["worktreePath"] as? String)
         XCTAssertEqual(cleanRecord["isPending"] as? Bool, false)
         XCTAssertTrue(FileManager.default.fileExists(atPath: cleanPath))
+        XCTAssertEqual(try runGitOutput(URL(fileURLWithPath: cleanPath), "status", "--porcelain").trimmingCharacters(in: .whitespacesAndNewlines), "")
+        let cleanThreadID = try XCTUnwrap(cleanTask["codexThreadID"] as? String)
+        let resumeEventsBeforeDeleteCheck = try diagnosticEvents().filter {
+            $0["event"] as? String == "codex.thread.resume_started" && $0["threadID"] as? String == cleanThreadID
+        }.count
+        let cleanCheck = try runCLI(["task", "delete-check", cleanID])
+        XCTAssertEqual((cleanCheck["result"] as? [String: Any])?["requiresConfirmation"] as? Bool, true)
+        let resumeEventsAfterDeleteCheck = try diagnosticEvents().filter {
+            $0["event"] as? String == "codex.thread.resume_started" && $0["threadID"] as? String == cleanThreadID
+        }.count
+        XCTAssertEqual(resumeEventsAfterDeleteCheck, resumeEventsBeforeDeleteCheck, "Delete-check must not resume a conversation thread already owned by the app.")
         deleteTaskFromContextMenu(cleanTitle)
         let cleanConfirmation = element("confirm-delete-task-button")
         XCTAssertTrue(cleanConfirmation.waitForExistence(timeout: 5))
@@ -1917,7 +1928,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(named: "Non-blocking question")?["status"] as? String, "Review")
     }
 
-    // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes also persist Blocked across connections, and a new prompt can finish in Review.
+    // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes persist Blocked across connections, and diagnostics identify the failed turn phase and store path; a new prompt can finish in Review.
     func test_codex_interrupted_turn_blocks_with_reason_and_can_retry() throws {
         _ = try runCLI(["task", "create", "--title", "Interrupted turn", "--root", fixture.primary.path])
         codexFixtureExecutable = URL(fileURLWithPath: "/tmp/stationai-bridge-workspaces/codex-fixture-interrupted").path
@@ -1936,6 +1947,12 @@ final class StationAIUITests: XCTestCase {
         let blocked = try XCTUnwrap(taskRecord(named: "Interrupted turn"))
         XCTAssertEqual(blocked["status"] as? String, "Blocked")
         XCTAssertTrue((blocked["statusMessage"] as? String)?.localizedCaseInsensitiveContains("interrupted") == true)
+        let interruptedID = try taskID(named: "Interrupted turn")
+        let sendFailure = try XCTUnwrap(diagnosticEvents().first {
+            $0["event"] as? String == "conversation.send.failed" && $0["taskID"] as? String == interruptedID
+        })
+        XCTAssertEqual(sendFailure["phase"] as? String, "codex-turn")
+        XCTAssertEqual(sendFailure["storePath"] as? String, dataDirectory.appendingPathComponent("StationAI.store").path)
 
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         app.launchEnvironment["STATIONAI_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
@@ -2388,6 +2405,13 @@ final class StationAIUITests: XCTestCase {
     private func taskRecord(id: String) throws -> [String: Any]? {
         let response = try runCLI(["task", "get", id])
         return response["result"] as? [String: Any]
+    }
+
+    private func diagnosticEvents() throws -> [[String: Any]] {
+        let log = try String(contentsOf: dataDirectory.appendingPathComponent("Diagnostics.jsonl"), encoding: .utf8)
+        return try log.split(whereSeparator: \.isNewline).compactMap {
+            try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+        }
     }
 
     private func taskID(named title: String) throws -> String {

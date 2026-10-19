@@ -81,7 +81,7 @@
   },
   {
     "id": "test_task_delete_removes_task_and_later_lookup_is_not_found",
-    "expectation": "The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check reports the confirmation requirement, confirmed deletion removes the managed worktree, and the persistent log captures a real deletion failure's task, thread, process, phase, underlying error details, and no task title or conversation text; the failed task and worktree remain available for retry."
+    "expectation": "The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives confirmation from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Diagnostics identify conversation failure phase and capture real deletion errors without task titles or conversation text, and failed deletion leaves the task and worktree available for retry."
   },
   {
     "id": "test_default_parent_settings_read_write_clear_and_validation",
@@ -137,7 +137,7 @@
   },
   {
     "id": "test_codex_interrupted_turn_blocks_with_reason_and_can_retry",
-    "expectation": "Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes also persist Blocked across connections, and a new prompt can finish in Review."
+    "expectation": "Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes persist Blocked across connections, and diagnostics identify the failed turn phase and store path; a new prompt can finish in Review."
   },
   {
     "id": "test_codex_empty_question_request_is_rejected",

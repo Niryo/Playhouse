@@ -598,18 +598,16 @@ final class BoardTaskManager {
         }
     }
 
-    func deleteRequiresConfirmation(_ id: UUID, client: CodexAppServerClient) async throws -> Bool {
+    func deleteRequiresConfirmation(_ id: UUID) throws -> Bool {
         let task = try requireTask(id)
         let dirtyWorktree = try task.repositoryWorktrees.contains { record in
             guard !record.isPending else { return false }
             return try StationAIWorktreeManager.hasChanges(record)
         }
         if dirtyWorktree { return true }
-        guard task.codexThreadID != nil else { return dirtyWorktree }
-        let history = try await CodexConversationManager(tasks: self, client: client).history(taskID: id)
-        let hasConversation = history.messages.contains { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            || !history.activities.isEmpty || history.diff != nil
-        return dirtyWorktree || hasConversation
+        let hasSavedConversation = task.codexThreadID != nil
+            || !(task.savedPrompt?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        return dirtyWorktree || hasSavedConversation
     }
 
     func save() throws {
@@ -903,6 +901,7 @@ final class CodexConversationManager {
         defer { _ = try? tasks.clearProgressReport(taskID) }
         let started = try tasks.setLifecycleStatus(taskID, to: .inProgress)
         onUpdate(ConversationUpdate(type: "started", taskStatus: started.status))
+        var phase = "thread-start"
         do {
             let threadID: String
             if let existing = task.codexThreadID {
@@ -911,6 +910,7 @@ final class CodexConversationManager {
                 threadID = try await client.startThread(workspace: workspace, modelID: modelID)
                 task.codexThreadID = threadID
                 do {
+                    phase = "thread-persistence"
                     try tasks.save()
                 } catch {
                     task.codexThreadID = nil
@@ -921,6 +921,7 @@ final class CodexConversationManager {
                 client.markTurnStarting(threadID: threadID)
                 onTurnStarting?()
             }
+            phase = "codex-turn"
             try await client.sendMessage(
                 normalizedText,
                 imageDataURLs: imageDataURLs,
@@ -964,18 +965,22 @@ final class CodexConversationManager {
                     onUserInput(request)
                 }
             )
+            phase = "worktree-finalization"
             let current = try tasks.taskModel(taskID)
             for record in current.repositoryWorktrees where record.mergeError != nil {
                 try StationAIWorktreeManager.finishConflictResolution(record)
             }
+            phase = "review-status-persistence"
             _ = try tasks.setLifecycleStatus(taskID, to: .review)
         } catch {
             await titleGeneration?.value
-            _ = try? tasks.setLifecycleStatus(taskID, to: .blocked, message: error.localizedDescription)
             var fields = StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
             fields["taskID"] = taskID.uuidString
             fields["threadID"] = task.codexThreadID ?? ""
+            fields["phase"] = phase
+            fields["storePath"] = StationAIDiagnostics.storeURL.path
             fields.merge(client.diagnosticFields()) { _, new in new }
+            _ = try? tasks.setLifecycleStatus(taskID, to: .blocked, message: error.localizedDescription)
             StationAIDiagnostics.record("conversation.send.failed", fields: fields)
             throw error
         }
@@ -1118,10 +1123,7 @@ final class StationAIBridgeRuntime {
                 try taskManager.delete(request.requiredUUID("taskID"))
                 result = .object(["deleted": .boolean(true)])
             case "task.delete.requires-confirmation":
-                let requiresConfirmation = try await taskManager.deleteRequiresConfirmation(
-                    request.requiredUUID("taskID"),
-                    client: CodexAppServerClient()
-                )
+                let requiresConfirmation = try taskManager.deleteRequiresConfirmation(request.requiredUUID("taskID"))
                 result = .object(["requiresConfirmation": .boolean(requiresConfirmation)])
             case "task.roots.get", "workspace.roots":
                 result = .object(["roots": .array(try workspaces.roots(for: request.requiredUUID("taskID")).map(BridgeValue.string))])
