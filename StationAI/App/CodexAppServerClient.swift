@@ -213,6 +213,7 @@ final class CodexAppServerClient: ObservableObject {
         modelID: String,
         threadID: String,
         workspace: CodexWorkspaceContext,
+        developerInstructions: String,
         onDelta: @escaping (String) -> Void,
         onFinalMessage: @escaping (String) -> Void,
         onActivity: @escaping (CodexActivity) -> Void,
@@ -264,7 +265,7 @@ final class CodexAppServerClient: ObservableObject {
                     "settings": [
                         "model": modelID,
                         "reasoningEffort": NSNull(),
-                        "developerInstructions": NSNull()
+                        "developerInstructions": developerInstructions
                     ]
                 ]
             ]
@@ -906,5 +907,31 @@ final class CodexAppServerClient: ObservableObject {
         var paths = (existingPath ?? "").split(separator: ":").map(String.init)
         paths.append(contentsOf: ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin", "/usr/bin", "/bin"])
         return Array(NSOrderedSet(array: paths)).compactMap { $0 as? String }.joined(separator: ":")
+    }
+}
+
+enum TaskProgressReportInstructions {
+    static func make(taskID: UUID) -> String {
+        let executable = cliExecutableURL().path
+        let quotedExecutable = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let id = taskID.uuidString
+        return """
+        Report your current work on the StationAI task board using the StationAI CLI. At meaningful phase changes and while substantial work is underway, publish a concise progress report; do not report every small step. Use these commands for this task:
+        \(quotedExecutable) task progress publish \(id) --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail \"short detail\"]
+        \(quotedExecutable) task progress custom \(id) --label \"short label\" [--detail \"short detail\"]
+        \(quotedExecutable) task progress clear \(id)
+        Progress reports are hidden from the conversation and shown on the task card. Keep details brief. Do not use lifecycle task status commands for progress; StationAI clears the report when the turn finishes or requests user input.
+        """
+    }
+
+    private static func cliExecutableURL() -> URL {
+        let fileManager = FileManager.default
+        var candidate = Bundle.main.bundleURL
+        for _ in 0..<5 {
+            let cli = candidate.appendingPathComponent("Contents/MacOS/stationai-cli")
+            if fileManager.isExecutableFile(atPath: cli.path) { return cli }
+            candidate.deleteLastPathComponent()
+        }
+        return Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/stationai-cli")
     }
 }

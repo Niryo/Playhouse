@@ -22,6 +22,7 @@ struct CodexTaskTitleGenerator: TaskTitleGenerating {
                 modelID: CodexAppServerClient.modelID,
                 threadID: threadID,
                 workspace: workspace,
+                developerInstructions: "",
                 onDelta: { _ in },
                 onFinalMessage: { generated = $0.trimmingCharacters(in: .whitespacesAndNewlines) },
                 onActivity: { _ in }, onDiff: { _ in }, onHistory: { _ in },

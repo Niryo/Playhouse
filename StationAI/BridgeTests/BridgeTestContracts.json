@@ -60,6 +60,14 @@
     "expectation": "The board keeps stacked Blocked/Backlog and conditional Waiting Response/In Progress sections fully visible, leaves Review as its own column, removes Done from the columns, hides empty status sections, and preserves Codex-owned task status behavior."
   },
   {
+    "id": "test_task_progress_reports_publish_persist_and_clear",
+    "expectation": "The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, clears explicitly and at turn completion, and the board card shows the built-in icon, label, and detail without changing lifecycle status; each turn receives hidden CLI usage instructions."
+  },
+  {
+    "id": "test_task_progress_reports_clear_on_failed_turns_and_questions",
+    "expectation": "Progress reports clear when turns fail or are interrupted and when Codex requests user input; the task card removes the report while lifecycle states remain Blocked or Waiting Response, and answering the question resumes the task successfully."
+  },
+  {
     "id": "test_task_rename_persists_and_rejects_blank_title",
     "expectation": "A rename persists; rejecting a blank rename preserves the last valid title."
   },

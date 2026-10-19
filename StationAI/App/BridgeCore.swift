@@ -68,6 +68,9 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let title: String
     let status: String
     let statusMessage: String?
+    let progressType: String?
+    let progressLabel: String?
+    let progressDetail: String?
     let createdAt: Date
     let codexThreadID: String?
     let savedPrompt: String?
@@ -80,6 +83,9 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         title = task.title
         status = task.status.rawValue
         statusMessage = task.statusMessage
+        progressType = task.progressTypeRawValue
+        progressLabel = task.progressLabel
+        progressDetail = task.progressDetail
         createdAt = task.createdAt
         codexThreadID = task.codexThreadID
         savedPrompt = task.savedPrompt
@@ -271,6 +277,7 @@ final class BoardTaskManager {
                 }
                 task.status = .inProgress
                 task.statusMessage = "Codex is resolving merge conflicts before the task can be merged."
+                clearProgressReport(task)
                 try modelContext.save()
                 guard let client else {
                     throw BridgeCommandError(code: "operation_failed", message: "A Codex client is required to resolve merge conflicts.")
@@ -312,11 +319,13 @@ final class BoardTaskManager {
             task.workspaceRootPaths = try Self.normalizeOptionalRoots(retainedExternalRoots + task.contextFolderPaths)
             task.status = .done
             task.statusMessage = nil
+            clearProgressReport(task)
             try modelContext.save()
             return BoardTaskRecord(task: task)
         } catch {
             task.status = .blocked
             task.statusMessage = error.localizedDescription
+            clearProgressReport(task)
             try? modelContext.save()
             throw error
         }
@@ -331,8 +340,44 @@ final class BoardTaskManager {
         guard task.status != .done else { return BoardTaskRecord(task: task) }
         task.status = status
         task.statusMessage = message
+        if status != .inProgress { clearProgressReport(task) }
         try modelContext.save()
         return BoardTaskRecord(task: task)
+    }
+
+    @discardableResult
+    func publishProgressReport(_ id: UUID, type: TaskProgressType?, customLabel: String? = nil, detail: String? = nil) throws -> BoardTaskRecord {
+        let task = try requireTask(id)
+        guard task.status == .inProgress else {
+            throw BridgeCommandError(code: "invalid_transition", message: "Progress reports can only be published while a task is In Progress.")
+        }
+        let label = type?.label ?? customLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !label.isEmpty, label.count <= 60 else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Progress labels must contain 1 to 60 characters.")
+        }
+        let normalizedDetail = detail?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (normalizedDetail?.count ?? 0) <= 200 else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Progress details must be 200 characters or fewer.")
+        }
+        task.progressTypeRawValue = type?.rawValue
+        task.progressLabel = label
+        task.progressDetail = normalizedDetail?.isEmpty == true ? nil : normalizedDetail
+        try modelContext.save()
+        return BoardTaskRecord(task: task)
+    }
+
+    @discardableResult
+    func clearProgressReport(_ id: UUID) throws -> BoardTaskRecord {
+        let task = try requireTask(id)
+        clearProgressReport(task)
+        try modelContext.save()
+        return BoardTaskRecord(task: task)
+    }
+
+    private func clearProgressReport(_ task: BoardTask) {
+        task.progressTypeRawValue = nil
+        task.progressLabel = nil
+        task.progressDetail = nil
     }
 
     func reconcileLifecycleStatusOnOpen(_ id: UUID, client: CodexAppServerClient) throws -> BoardTaskRecord {
@@ -387,7 +432,10 @@ final class BoardTaskManager {
             throw StationAIManagerError.invalidTransition("Saving a task prompt can only place it in Backlog or Progress.")
         }
         task.savedPrompt = prompt
-        if let status { task.status = status }
+        if let status {
+            task.status = status
+            if status != .inProgress { clearProgressReport(task) }
+        }
         try modelContext.save()
         return BoardTaskRecord(task: task)
     }
@@ -744,6 +792,8 @@ final class CodexConversationManager {
         task = try tasks.prepareRepositoryWorktrees(taskID, fallbackPrompt: normalizedText)
         let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
         let workspace = try CodexWorkspaceContext(roots: roots)
+        _ = try tasks.clearProgressReport(taskID)
+        defer { _ = try? tasks.clearProgressReport(taskID) }
         let started = try tasks.setLifecycleStatus(taskID, to: .inProgress)
         onUpdate(ConversationUpdate(type: "started", taskStatus: started.status))
         do {
@@ -771,6 +821,7 @@ final class CodexConversationManager {
                 modelID: modelID,
                 threadID: threadID,
                 workspace: workspace,
+                developerInstructions: TaskProgressReportInstructions.make(taskID: taskID),
                 onDelta: { delta in onUpdate(ConversationUpdate(type: "text_delta", text: delta)) },
                 onFinalMessage: { message in onUpdate(ConversationUpdate(type: "assistant_final", text: message)) },
                 onActivity: { activity in onUpdate(ConversationUpdate(type: "activity", activity: activity)) },
@@ -781,6 +832,7 @@ final class CodexConversationManager {
                     onUpdate(ConversationUpdate(type: "action_notice", message: message))
                 },
                 onUserInput: { request in
+                    _ = try? self.tasks.clearProgressReport(taskID)
                     let status = request.isBlocking
                         ? (try? self.tasks.setLifecycleStatus(taskID, to: .waitingResponse))
                         : (try? self.tasks.get(taskID))
@@ -916,6 +968,21 @@ final class StationAIBridgeRuntime {
                     to: status,
                     client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
                 ))
+            case "task.progress.publish":
+                let rawType = try request.requiredString("type")
+                guard let type = TaskProgressType(rawValue: rawType) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Unknown progress type '\(rawType)'. Valid types: \(TaskProgressType.allCases.map(\.rawValue).joined(separator: ", ")).")
+                }
+                let detail = request.arguments["detail"]?.string
+                result = try Self.value(taskManager.publishProgressReport(request.requiredUUID("taskID"), type: type, detail: detail))
+            case "task.progress.custom":
+                result = try Self.value(taskManager.publishProgressReport(
+                    request.requiredUUID("taskID"), type: nil,
+                    customLabel: request.requiredString("label"),
+                    detail: request.arguments["detail"]?.string
+                ))
+            case "task.progress.clear":
+                result = try Self.value(taskManager.clearProgressReport(request.requiredUUID("taskID")))
             case "task.rename":
                 let taskID = try request.requiredUUID("taskID")
                 let title = try request.requiredString("title")
