@@ -862,6 +862,27 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(history["activities"], activities)
         self.assertTrue(any("subagent inspected" in message["text"].lower() for message in history["messages"]))
 
+    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; Markdown headings and lists render as distinct conversation elements after reopening, and bridge history preserves the assistant's exact Markdown source.
+    def test_plan_mode_renders_markdown_in_conversation(self):
+        task_id = self.create_task(title="Plan mode Markdown", roots=[self.primary])["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-markdown"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        markdown_reply = "## Implementation plan\n\nStart with the **workspace model**.\n\n- Add structured conversation rendering\n- Verify history after reopening"
+        sent, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Plan the task.", "--mode", "plan",
+            extra_environment=env,
+        )
+        messages = self.assert_success(sent)["messages"]
+        self.assertTrue(any(message["role"] == "assistant" and message["text"] == markdown_reply for message in messages))
+        history, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        self.assertTrue(any(message["role"] == "assistant" and message["text"] == markdown_reply for message in self.assert_success(history)["messages"]))
+
     # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer shows a Codex-reported model, while unsupported modes and malformed model IDs are rejected before creating history.
     def test_conversation_mode_rejects_unknown_mode_without_starting_a_turn(self):
         task_id = self.create_task(title="Conversation mode validation")["id"]
