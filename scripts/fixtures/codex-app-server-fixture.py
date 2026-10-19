@@ -228,6 +228,37 @@ def main():
                     "threadId": "00000000-0000-0000-0000-000000000001",
                     "turn": {"id": "turn_stationai_fixture", "status": turn_status, **turn_error},
                 }})
+            elif mode.endswith("-question"):
+                active = Path(str(sys.argv[0]) + ".turn-active")
+                release = Path(str(sys.argv[0]) + ".turn-release")
+                active.write_text("The progress report fixture turn is active.\n", encoding="utf-8")
+                deadline = time.monotonic() + 30
+                while not release.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                was_released = release.exists()
+                active.unlink(missing_ok=True)
+                release.unlink(missing_ok=True)
+                if not was_released:
+                    return 3
+                question_request(901)
+            elif "-hold-release" in mode:
+                active = Path(str(sys.argv[0]) + ".turn-active")
+                release = Path(str(sys.argv[0]) + ".turn-release")
+                active.write_text("The progress report fixture turn is active.\n", encoding="utf-8")
+                deadline = time.monotonic() + 30
+                while not release.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                was_released = release.exists()
+                active.unlink(missing_ok=True)
+                release.unlink(missing_ok=True)
+                if not was_released:
+                    return 3
+                turn_status = "interrupted" if "-interrupted" in mode else ("failed" if "-failed" in mode else "completed")
+                turn_error = {"error": {"message": "Codex interrupted this turn." if turn_status == "interrupted" else "Codex failed this turn."}} if turn_status != "completed" else {}
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": "00000000-0000-0000-0000-000000000001",
+                    "turn": {"id": "turn_stationai_fixture", "status": turn_status, **turn_error},
+                }})
             else:
                 question_request(901)
         elif message.get("id") == 901:

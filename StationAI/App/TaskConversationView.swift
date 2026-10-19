@@ -15,6 +15,36 @@ private struct AssistantMarkdownBlock: Identifiable {
     let text: String
 }
 
+@MainActor
+protocol TaskTitleGenerating {
+    func generateTitle(from prompt: String, workspace: CodexWorkspaceContext) async -> String?
+}
+
+@MainActor
+struct CodexTaskTitleGenerator: TaskTitleGenerating {
+    let client: CodexAppServerClient
+
+    func generateTitle(from prompt: String, workspace: CodexWorkspaceContext) async -> String? {
+        do {
+            let threadID = try await client.startThread(workspace: workspace, modelID: CodexAppServerClient.modelID)
+            var generated: String?
+            try await client.sendMessage(
+                "Write a concise task title of at most 8 words for this request. Return only the title:\n\n\(prompt)",
+                mode: .plan,
+                modelID: CodexAppServerClient.modelID,
+                threadID: threadID,
+                workspace: workspace,
+                developerInstructions: "",
+                onDelta: { _ in },
+                onFinalMessage: { generated = $0.trimmingCharacters(in: .whitespacesAndNewlines) },
+                onActivity: { _ in }, onDiff: { _ in }, onHistory: { _ in },
+                onActionRequest: {}, onUserInput: { _ in }
+            )
+            return generated?.components(separatedBy: .newlines).first
+        } catch { return nil }
+    }
+}
+
 struct TaskConversationView: View {
     private struct PendingImage: Identifiable {
         let id = UUID()
