@@ -329,7 +329,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(len(self.assert_success(self.call_cli("task", "list")[0])["tasks"]), 1)
         self.assertTrue(Path(first["repositoryWorktrees"][0]["worktreePath"]).is_dir())
 
-    # case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task in Review, dropping it on Done squash-merges the task branch, removes the clean managed worktree, retains the source branch and conversation history, persists the submitted conversation prompt, reduces the active task count, and exposes the task in the searchable archive with case-insensitive search and a read-only conversation.
+    # case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task with no changes relative to its merge target in Review, dropping it on Done completes without creating an empty squash commit, removes the clean managed worktree, retains the source branch and conversation history, persists the submitted conversation prompt, reduces the active task count, and exposes the task in the searchable archive with case-insensitive search and a read-only conversation.
     def test_task_done_removes_worktree_and_preserves_branch(self):
         task = self.create_repo_task("Untitled task", [self.primary])
         draft = "Please update the README and add concise setup steps for first time contributors tomorrow."
@@ -345,19 +345,16 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertFalse(record["isPending"])
         self.assertEqual(record["branch"], "please-update-the-readme-and-add-concise-setup")
         worktree = Path(record["worktreePath"])
-        (worktree / "task-result.txt").write_text("Task branch change\n", encoding="utf-8")
-        self.run_git(worktree, "add", "task-result.txt")
-        self.run_git(worktree, "commit", "-m", "Complete task branch")
+        target_head = self.run_git(self.primary, "rev-parse", "main")
+        self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), target_head)
         current, _ = self.call_cli("task", "get", task["id"])
         self.assertEqual(self.assert_success(current)["status"], "Review")
         response, _ = self.call_cli("task", "move", task["id"], "Done")
         self.assertEqual(self.assert_success(response)["status"], "Done")
         self.assertFalse(worktree.exists())
         self.assertEqual(self.run_git(self.primary, "show-ref", "--verify", "--quiet", "refs/heads/please-update-the-readme-and-add-concise-setup"), "")
-        self.assertEqual((self.primary / "task-result.txt").read_text(encoding="utf-8"), "Task branch change\n")
-        target_parents = self.run_git(self.primary, "rev-list", "--parents", "-n", "1", "main").split()
-        self.assertEqual(len(target_parents), 2, "A squash merge should create a single-parent target commit.")
-        self.assertEqual(self.run_git(self.primary, "log", "main", "-1", "--format=%s").strip(), "Please Update The Readme And Add Concise Setup")
+        self.assertEqual(self.run_git(self.primary, "rev-parse", "main"), target_head, "Completing an unchanged task must not create an empty target commit.")
+        self.assertFalse((self.primary / "task-result.txt").exists())
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["repositoryWorktrees"][0]["mergeTarget"], "main")
         completed, _ = self.call_cli("task", "get", task["id"])
         self.assertEqual(self.assert_success(completed)["savedPrompt"], "Complete this task.")

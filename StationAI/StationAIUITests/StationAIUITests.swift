@@ -262,7 +262,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "An assigned worktree conflict keeps task creation open with an explanation")
     }
 
-    // case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task in Review, dropping it on Done squash-merges the task branch, removes the clean managed worktree, retains the source branch and conversation history, persists the submitted conversation prompt, reduces the active task count, and exposes the task in the searchable archive with case-insensitive search and a read-only conversation.
+    // case-contract: test_task_done_removes_worktree_and_preserves_branch | After a successful Codex turn puts a task with no changes relative to its merge target in Review, dropping it on Done completes without creating an empty squash commit, removes the clean managed worktree, retains the source branch and conversation history, persists the submitted conversation prompt, reduces the active task count, and exposes the task in the searchable archive with case-insensitive search and a read-only conversation.
     func test_task_done_removes_worktree_and_preserves_branch() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -301,9 +301,8 @@ final class StationAIUITests: XCTestCase {
         branch = try XCTUnwrap(startedRecord["branch"] as? String)
         XCTAssertNotEqual(path, fixture.primary.path)
         XCTAssertEqual(branch, generatedBranch)
-        try "Task branch change\n".write(to: URL(fileURLWithPath: path).appendingPathComponent("task-result.txt"), atomically: true, encoding: .utf8)
-        try runGit(URL(fileURLWithPath: path), "add", "task-result.txt")
-        try runGit(URL(fileURLWithPath: path), "commit", "-m", "Complete task branch")
+        let targetHead = try runGitOutput(fixture.primary, "rev-parse", "main")
+        XCTAssertEqual(try runGitOutput(URL(fileURLWithPath: path), "rev-parse", "HEAD"), targetHead)
         element("back-to-board-button").click()
         let titleDeadline = Date().addingTimeInterval(20)
         var currentTitle = "Generating title…"
@@ -320,9 +319,8 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try runCLI(["task", "move", taskID, "Done"])["ok"] as? Bool, true)
         XCTAssertFalse(FileManager.default.fileExists(atPath: path))
         try runGit(fixture.primary, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)")
-        XCTAssertEqual(try String(contentsOf: fixture.primary.appendingPathComponent("task-result.txt"), encoding: .utf8), "Task branch change\n")
-        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-list", "--parents", "-n", "1", "main").split(separator: " ").count, 2)
-        XCTAssertEqual(try runGitOutput(fixture.primary, "log", "main", "-1", "--format=%s"), branch.split(separator: "-").map { $0.capitalized }.joined(separator: " "))
+        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetHead, "Completing an unchanged task must not create an empty target commit.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.primary.appendingPathComponent("task-result.txt").path))
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
 
         let titleMatch = try XCTUnwrap(try runCLI(["task", "create", "--title", "fixture-secret title match", "--root", fixture.custom.path])["result"] as? [String: Any])
