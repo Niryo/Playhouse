@@ -171,6 +171,11 @@ enum StationAICLI {
             case "set-parent":
                 guard rest.count == 2 else { throw CLIError.usage("Use: stationai settings set-parent <path>") }
                 return BridgeRequest(command: "settings.set-parent", arguments: ["path": .string(rest[1])])
+            case "set-last-repositories":
+                let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--repo"])
+                return BridgeRequest(command: "settings.set-last-repositories", arguments: [
+                    "repositories": .array((flags["--repo"] ?? []).map(BridgeValue.string))
+                ])
             default: throw CLIError.usage("Unknown settings operation '\(operation)'.")
             }
         case "conversation":
@@ -293,7 +298,7 @@ enum StationAICLI {
       stationai task delete <task-id>
       stationai task delete-check <task-id>
       stationai workspace suggest --parent <path>
-      stationai settings get|clear-parent|set-parent <path>|set-appearance <dark|light>
+      stationai settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>
       stationai conversation history <task-id>
       stationai conversation models <task-id>
       stationai conversation send <task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...]

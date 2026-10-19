@@ -9,6 +9,9 @@ struct NewTaskSheet: View {
     @State private var contextFolders: [URL] = []
     @State private var suggestedRepositories: [URL] = []
     @State private var repositorySearch = ""
+    @State private var lastSelectedRepositoryPaths: [String] = []
+    @State private var didOverrideRepositoryDefault = false
+    @State private var keyboardHighlightedRepositoryPath: String?
     @State private var editingRepositoryField: EditableRepositoryField?
     @State private var hoveredRepositoryTag: String?
     @FocusState private var focusedRepositoryField: EditableRepositoryField?
@@ -113,14 +116,42 @@ struct NewTaskSheet: View {
                     }
                 }
 
-                TextField("Enter a repository name to search…", text: $repositorySearch)
+                TextField(repositorySearchPlaceholder, text: $repositorySearch)
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("workspace-repository-search")
-                if !repositorySearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    let availableRepositories = suggestedRepositories.filter { candidate in
-                        !repositories.contains(where: { URL(fileURLWithPath: $0.repositoryPath).standardizedFileURL.path == candidate.standardizedFileURL.path }) &&
-                        (candidate.lastPathComponent.localizedCaseInsensitiveContains(repositorySearch) || candidate.path.localizedCaseInsensitiveContains(repositorySearch))
+                    .onChange(of: repositorySearch) { _, value in
+                        keyboardHighlightedRepositoryPath = nil
+                        if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            didOverrideRepositoryDefault = true
+                        }
                     }
+                    .onKeyPress(.downArrow) {
+                        moveRepositoryHighlight(direction: 1)
+                    }
+                    .onKeyPress(.upArrow) {
+                        moveRepositoryHighlight(direction: -1)
+                    }
+                    .onKeyPress(.return) {
+                        guard let path = keyboardHighlightedRepositoryPath,
+                              let repository = matchingRepositorySuggestions.first(where: { $0.path == path }) else { return .ignored }
+                        selectRepository(repository)
+                        return .handled
+                    }
+                    .onSubmit {
+                        let query = repositorySearch.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !query.isEmpty {
+                            guard let candidate = matchingRepositorySuggestions.first else { return }
+                            selectRepository(candidate)
+                            return
+                        }
+                        guard !didOverrideRepositoryDefault, repositories.isEmpty else { return }
+                        repositories = lastSelectedRepositoryPaths.compactMap { path in
+                            let marker = URL(fileURLWithPath: path).appendingPathComponent(".git")
+                            return FileManager.default.fileExists(atPath: marker.path) ? repositorySpec(for: path) : nil
+                        }
+                    }
+                if !repositorySearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let availableRepositories = matchingRepositorySuggestions
                     if suggestedRepositories.isEmpty {
                         ProgressView("Finding repositories…")
                             .font(.system(size: 10))
@@ -132,8 +163,7 @@ struct NewTaskSheet: View {
                             LazyVStack(spacing: 0) {
                                 ForEach(availableRepositories, id: \.path) { repository in
                                     Button {
-                                        repositories.append(repositorySpec(for: repository.path))
-                                        repositorySearch = ""
+                                        selectRepository(repository)
                                     } label: {
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(repository.lastPathComponent).font(.system(size: 11, weight: .medium))
@@ -141,6 +171,7 @@ struct NewTaskSheet: View {
                                         }
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                         .padding(7)
+                                        .background(keyboardHighlightedRepositoryPath == repository.path ? Color.accentColor.opacity(0.16) : .clear)
                                         .contentShape(Rectangle())
                                     }
                                     .buttonStyle(.plain)
@@ -177,6 +208,7 @@ struct NewTaskSheet: View {
                 Button("Done") {
                     do {
                         try onCreate(repositories, contextFolders)
+                        try WorkspaceSettingsManager().setLastSelectedRepositories(repositories.map(\.repositoryPath))
                         dismiss()
                     } catch {
                         createError = error.localizedDescription
@@ -194,6 +226,7 @@ struct NewTaskSheet: View {
         .background(WorkspaceTheme.windowBackground)
         .onAppear {
             parentFolderURL = WorkspaceSettingsManager().defaultParentFolderURL
+            lastSelectedRepositoryPaths = WorkspaceSettingsManager().lastSelectedRepositories
             if parentFolderURL == nil {
                 chooseInitialParent()
             } else {
@@ -205,6 +238,42 @@ struct NewTaskSheet: View {
                 URL(fileURLWithPath: $0, isDirectory: true)
             }) ?? []
         }
+    }
+
+    private var repositorySearchPlaceholder: String {
+        guard !lastSelectedRepositoryPaths.isEmpty else { return "Enter a repository name to search…" }
+        let names = lastSelectedRepositoryPaths.map { URL(fileURLWithPath: $0).lastPathComponent }
+        return "Last used: \(names.joined(separator: ", ")) — press Return to reuse"
+    }
+
+    private var matchingRepositorySuggestions: [URL] {
+        let query = repositorySearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return [] }
+        return suggestedRepositories.filter { candidate in
+            !repositories.contains(where: { URL(fileURLWithPath: $0.repositoryPath).standardizedFileURL.path == candidate.standardizedFileURL.path }) &&
+            (candidate.lastPathComponent.localizedCaseInsensitiveContains(query) || candidate.path.localizedCaseInsensitiveContains(query))
+        }
+    }
+
+    private func moveRepositoryHighlight(direction: Int) -> KeyPress.Result {
+        let options = matchingRepositorySuggestions
+        guard !options.isEmpty else { return .ignored }
+        let currentIndex = options.firstIndex(where: { $0.path == keyboardHighlightedRepositoryPath })
+        let nextIndex: Int
+        if let currentIndex {
+            nextIndex = (currentIndex + direction + options.count) % options.count
+        } else {
+            nextIndex = direction > 0 ? 0 : options.count - 1
+        }
+        keyboardHighlightedRepositoryPath = options[nextIndex].path
+        return .handled
+    }
+
+    private func selectRepository(_ repository: URL) {
+        didOverrideRepositoryDefault = true
+        repositories.append(repositorySpec(for: repository.path))
+        repositorySearch = ""
+        keyboardHighlightedRepositoryPath = nil
     }
 
     private func chooseInitialParent() {

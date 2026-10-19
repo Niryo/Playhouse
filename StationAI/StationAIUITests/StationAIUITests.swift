@@ -844,11 +844,20 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Deleted task removed from the board")
     }
 
-    // case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; Dark and Light appearance choices persist, and Dark renders the workspace canvas as #1E1E1E in the VS Code Dark+ palette.
+    // case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; the ordered last-used repository list persists across fresh CLI/XPC connections and rejects unavailable repositories; Dark and Light appearance choices persist, and Dark renders the workspace canvas as #1E1E1E in the VS Code Dark+ palette.
     func test_default_parent_settings_read_write_clear_and_validation() throws {
         launchApp(defaultParent: nil)
         let initialSettings = try runCLI(["settings", "get"])["result"] as? [String: Any]
         XCTAssertNil(initialSettings?["defaultParentFolder"] as? String)
+        _ = try runCLI(["settings", "set-last-repositories", "--repo", fixture.secondary.path, "--repo", fixture.primary.path])
+        let initialRepositories = try runCLI(["settings", "get"])["result"] as? [String: Any]
+        XCTAssertEqual(initialRepositories?["lastSelectedRepositories"] as? [String], [fixture.secondary.path, fixture.primary.path])
+        assertCLIError(
+            try runCLI(["settings", "set-last-repositories", "--repo", fixture.missing.path], expectedStatus: 2),
+            code: "invalid_argument"
+        )
+        let unchangedRepositories = try runCLI(["settings", "get"])["result"] as? [String: Any]
+        XCTAssertEqual(unchangedRepositories?["lastSelectedRepositories"] as? [String], [fixture.secondary.path, fixture.primary.path])
 
         element("new-task-button").click()
         let firstRunPanel = openFolderPanel
@@ -914,23 +923,79 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Workspace settings can be changed and cleared")
     }
 
-    // case-contract: test_repository_suggestions_skip_nested_repositories_and_symlinks | Suggestions include top-level Git roots and skip nested repositories and symlink targets.
+    // case-contract: test_repository_suggestions_skip_nested_repositories_and_symlinks | Suggestions include top-level Git roots and skip nested repositories and symlink targets; blank Return reuses the saved repositories in order, while typing and arrow-key selection overrides that default, which persists after task creation.
     func test_repository_suggestions_skip_nested_repositories_and_symlinks() throws {
         launchApp(defaultParent: fixture.parent.path)
+        _ = try runCLI(["settings", "set-last-repositories", "--repo", fixture.secondary.path, "--repo", fixture.primary.path])
         openNewTaskSheet()
         let repositorySearch = element("workspace-repository-search")
         XCTAssertTrue(repositorySearch.waitForExistence(timeout: 5), "The create task sheet should let the user search by repository name.")
+        XCTAssertTrue((repositorySearch.placeholderValue ?? "").contains("secondary, primary"), "The picker should show the saved two-repository default.")
+        repositorySearch.click()
+        repositorySearch.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(element("selected-repository-0").waitForExistence(timeout: 5), "Return on an empty search should restore the first saved repository.")
+        XCTAssertTrue(element("selected-repository-1").exists, "Return on an empty search should restore every saved repository in order.")
+        XCTAssertEqual(element("selected-repository-0").label, "secondary")
+        XCTAssertEqual(element("selected-repository-1").label, "primary")
+        element("create-task-button").click()
+        XCTAssertTrue(element("empty-conversation").waitForExistence(timeout: 10), "Done should create a task with the restored repositories.")
+        let savedRepositories = try runCLI(["settings", "get"])["result"] as? [String: Any]
+        XCTAssertEqual(savedRepositories?["lastSelectedRepositories"] as? [String], [fixture.secondary.path, fixture.primary.path])
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+
+        openNewTaskSheet()
+        let overrideSearch = element("workspace-repository-search")
+        XCTAssertTrue((overrideSearch.placeholderValue ?? "").contains("secondary, primary"), "Creating a task should preserve the same next-task default.")
+        overrideSearch.click()
+        replaceText(overrideSearch, with: "alternate")
+        XCTAssertTrue(element("repository-suggestion-alternate").waitForExistence(timeout: 10))
+        overrideSearch.typeKey(.downArrow, modifierFlags: [])
+        overrideSearch.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(element("selected-repository-0").waitForExistence(timeout: 5))
+        XCTAssertEqual(element("selected-repository-0").label, "alternate")
+        XCTAssertFalse(element("selected-repository-1").exists, "Typing and choosing a suggestion should replace the saved multi-repository default.")
+        element("create-task-button").click()
+        XCTAssertTrue(element("empty-conversation").waitForExistence(timeout: 10))
+        let overrideSettings = try runCLI(["settings", "get"])["result"] as? [String: Any]
+        XCTAssertEqual(overrideSettings?["lastSelectedRepositories"] as? [String], [fixture.alternate.path])
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+
+        openNewTaskSheet()
+        let persistedOverrideSearch = element("workspace-repository-search")
+        XCTAssertTrue((persistedOverrideSearch.placeholderValue ?? "").contains("alternate"), "The arrow-selected repository should become the next task default.")
+        persistedOverrideSearch.click()
+        persistedOverrideSearch.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(element("selected-repository-0").waitForExistence(timeout: 5))
+        XCTAssertEqual(element("selected-repository-0").label, "alternate")
+        XCTAssertFalse(element("selected-repository-1").exists)
+        element("cancel-task-button").click()
+
+        openNewTaskSheet()
+        let typedReturnSearch = element("workspace-repository-search")
+        replaceText(typedReturnSearch, with: "primary")
+        XCTAssertTrue(element("repository-suggestion-primary").waitForExistence(timeout: 10))
+        typedReturnSearch.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(element("selected-repository-0").waitForExistence(timeout: 5), "Return after typing should select the matching repository.")
+        XCTAssertEqual(element("selected-repository-0").label, "primary")
+        XCTAssertFalse(element("selected-repository-1").exists, "Typing and pressing Return should replace the saved alternate repository.")
+        element("cancel-task-button").click()
+
+        openNewTaskSheet()
+        let emptySearch = element("workspace-repository-search")
+        XCTAssertTrue(emptySearch.waitForExistence(timeout: 5))
         XCTAssertFalse(element("repository-suggestion-primary").exists, "Repository suggestions should stay hidden until the user types a query.")
-        replaceText(repositorySearch, with: "primary")
+        replaceText(emptySearch, with: "primary")
         XCTAssertTrue(element("repository-suggestion-primary").waitForExistence(timeout: 10))
         XCTAssertFalse(element("repository-suggestion-secondary").exists, "Autocomplete should show only repositories matching the query.")
         XCTAssertFalse(element("repository-suggestion-nested").exists)
-        replaceText(repositorySearch, with: "linked-outside")
+        replaceText(emptySearch, with: "linked-outside")
         XCTAssertTrue(app.staticTexts["No matching repositories. Use Browse to add a folder."].waitForExistence(timeout: 5))
-        replaceText(repositorySearch, with: "group")
+        replaceText(emptySearch, with: "group")
         XCTAssertTrue(element("repository-suggestion-secondary").waitForExistence(timeout: 5), "A path-only query should find a repository inside a matching parent folder.")
         XCTAssertFalse(element("repository-suggestion-primary").exists)
-        replaceText(repositorySearch, with: "changes")
+        replaceText(emptySearch, with: "changes")
 
         let result = try runCLI(["workspace", "suggest", "--parent", fixture.parent.path])["result"] as? [String: Any]
         let expectedRepositories = [fixture.primary.path, fixture.secondary.path, fixture.alternate.path, fixture.changes.path].sorted()

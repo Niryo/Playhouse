@@ -560,6 +560,10 @@ final class WorkspaceSettingsManager {
         defaults.string(forKey: WorkspaceSettings.defaultParentFolderKey) ?? ""
     }
 
+    var lastSelectedRepositories: [String] {
+        defaults.stringArray(forKey: WorkspaceSettings.lastSelectedRepositoriesKey) ?? []
+    }
+
     var appearance: String {
         let value = defaults.string(forKey: WorkspaceSettings.appearanceKey) ?? "dark"
         return value == "light" ? "light" : "dark"
@@ -585,6 +589,18 @@ final class WorkspaceSettingsManager {
             throw StationAIManagerError.invalidParentFolder(path)
         }
         defaults.set(url.path, forKey: WorkspaceSettings.defaultParentFolderKey)
+    }
+
+    func setLastSelectedRepositories(_ paths: [String]) throws {
+        var normalized: [String] = []
+        for path in paths {
+            let url = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+            guard FileManager.default.fileExists(atPath: url.appendingPathComponent(".git").path) else {
+                throw StationAIManagerError.unavailableWorkspaceRoot(path)
+            }
+            if !normalized.contains(url.path) { normalized.append(url.path) }
+        }
+        defaults.set(normalized, forKey: WorkspaceSettings.lastSelectedRepositoriesKey)
     }
 }
 
@@ -947,6 +963,7 @@ final class StationAIBridgeRuntime {
                 result = .object([
                     "defaultParentFolder": settings.defaultParentFolderPath.isEmpty ? .null : .string(settings.defaultParentFolderPath),
                     "defaultParentAvailable": .boolean(settings.defaultParentFolderURL != nil),
+                    "lastSelectedRepositories": .array(settings.lastSelectedRepositories.map(BridgeValue.string)),
                     "appearance": .string(settings.appearance)
                 ])
             case "settings.set-appearance":
@@ -958,6 +975,10 @@ final class StationAIBridgeRuntime {
             case "settings.clear-parent":
                 try settings.setDefaultParentFolder(nil)
                 result = .object(["defaultParentFolder": .null])
+            case "settings.set-last-repositories":
+                let repositories = try request.requiredStrings("repositories")
+                try settings.setLastSelectedRepositories(repositories)
+                result = .object(["lastSelectedRepositories": .array(settings.lastSelectedRepositories.map(BridgeValue.string))])
             case "conversation.history":
                 let conversations = CodexConversationManager(
                     tasks: taskManager,

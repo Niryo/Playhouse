@@ -4,6 +4,7 @@ import SwiftUI
 
 enum WorkspaceSettings {
     static let defaultParentFolderKey = "defaultWorkspaceParentFolderPath"
+    static let lastSelectedRepositoriesKey = "lastSelectedRepositories"
     static let appearanceKey = "appearance"
 
     static var preferencesStore: UserDefaults {
