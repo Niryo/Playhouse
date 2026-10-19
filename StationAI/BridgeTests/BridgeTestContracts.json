@@ -89,7 +89,7 @@
   },
   {
     "id": "test_repository_suggestions_skip_nested_repositories_and_symlinks",
-    "expectation": "Suggestions include top-level Git roots and skip nested repositories and symlink targets; blank Return reuses the saved repositories in order, while typing and arrow-key selection overrides that default, which persists after task creation."
+    "expectation": "Suggestions include top-level Git roots and skip nested repositories and symlink targets; remembered defaults persist only ordered repository paths, and restoring them starts with auto/default/default branch fields even after a task used custom branch details; typing and arrow-key selection overrides the repository default and persists after task creation."
   },
   {
     "id": "test_task_roots_remain_after_default_parent_is_cleared",

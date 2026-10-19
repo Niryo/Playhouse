@@ -405,9 +405,7 @@ struct NewTaskSheet: View {
     }
 
     private func repositorySpec(for path: String) -> RepositoryWorktreeSpec {
-        let branchFrom = try? StationAIWorktreeManager.defaultBranchFrom(repositoryPath: path)
-        let mergeTarget = try? StationAIWorktreeManager.defaultLocalBranch(repositoryPath: path)
-        return RepositoryWorktreeSpec(repositoryPath: path, branch: nil, branchFrom: branchFrom, mergeTarget: mergeTarget)
+        RepositoryWorktreeSpec(repositoryPath: path, branch: nil, branchFrom: nil, mergeTarget: nil)
     }
 }
 

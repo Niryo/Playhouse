@@ -1203,7 +1203,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Workspace settings can be changed and cleared")
     }
 
-    // case-contract: test_repository_suggestions_skip_nested_repositories_and_symlinks | Suggestions include top-level Git roots and skip nested repositories and symlink targets; blank Return reuses the saved repositories in order, while typing and arrow-key selection overrides that default, which persists after task creation.
+    // case-contract: test_repository_suggestions_skip_nested_repositories_and_symlinks | Suggestions include top-level Git roots and skip nested repositories and symlink targets; remembered defaults persist only ordered repository paths, and restoring them starts with auto/default/default branch fields even after a task used custom branch details; typing and arrow-key selection overrides the repository default and persists after task creation.
     func test_repository_suggestions_skip_nested_repositories_and_symlinks() throws {
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["settings", "set-last-repositories", "--repo", fixture.secondary.path, "--repo", fixture.primary.path])
@@ -1217,6 +1217,15 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("selected-repository-1").exists, "Return on an empty search should restore every saved repository in order.")
         XCTAssertEqual(element("selected-repository-0").label, "secondary")
         XCTAssertEqual(element("selected-repository-1").label, "primary")
+        XCTAssertTrue(element("repository-branch-tag-0").label.contains("auto"))
+        XCTAssertTrue(element("repository-branch-from-tag-0").label.contains("default"))
+        XCTAssertTrue(element("repository-merge-target-tag-0").label.contains("default"))
+        openRepositoryTag("repository-branch-tag-0", field: "repository-branch-0")
+        replaceText(element("repository-branch-0"), with: "remembered-task-branch")
+        openRepositoryTag("repository-branch-from-tag-0", field: "repository-branch-from-0")
+        replaceText(element("repository-branch-from-0"), with: "main")
+        openRepositoryTag("repository-merge-target-tag-0", field: "repository-merge-target-0")
+        replaceText(element("repository-merge-target-0"), with: "main")
         element("create-task-button").click()
         XCTAssertTrue(element("empty-conversation").waitForExistence(timeout: 10), "Done should create a task with the restored repositories.")
         let savedRepositories = try runCLI(["settings", "get"])["result"] as? [String: Any]
@@ -1228,10 +1237,21 @@ final class StationAIUITests: XCTestCase {
         let overrideSearch = element("workspace-repository-search")
         XCTAssertTrue((overrideSearch.placeholderValue ?? "").contains("secondary, primary"), "Creating a task should preserve the same next-task default.")
         overrideSearch.click()
-        replaceText(overrideSearch, with: "alternate")
-        XCTAssertTrue(element("repository-suggestion-alternate").waitForExistence(timeout: 10))
-        overrideSearch.typeKey(.downArrow, modifierFlags: [])
         overrideSearch.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(element("selected-repository-0").waitForExistence(timeout: 5))
+        XCTAssertTrue(element("repository-branch-tag-0").label.contains("auto"))
+        XCTAssertTrue(element("repository-branch-from-tag-0").label.contains("default"))
+        XCTAssertTrue(element("repository-merge-target-tag-0").label.contains("default"))
+        element("cancel-task-button").click()
+
+        openNewTaskSheet()
+        let nextOverrideSearch = element("workspace-repository-search")
+        XCTAssertTrue((nextOverrideSearch.placeholderValue ?? "").contains("secondary, primary"), "Creating a task should preserve the same next-task default.")
+        nextOverrideSearch.click()
+        replaceText(nextOverrideSearch, with: "alternate")
+        XCTAssertTrue(element("repository-suggestion-alternate").waitForExistence(timeout: 10))
+        nextOverrideSearch.typeKey(.downArrow, modifierFlags: [])
+        nextOverrideSearch.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(element("selected-repository-0").waitForExistence(timeout: 5))
         XCTAssertEqual(element("selected-repository-0").label, "alternate")
         XCTAssertFalse(element("selected-repository-1").exists, "Typing and choosing a suggestion should replace the saved multi-repository default.")
