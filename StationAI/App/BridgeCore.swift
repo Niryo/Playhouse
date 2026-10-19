@@ -987,6 +987,8 @@ final class CodexConversationManager {
         }
         let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
         let workspace = try CodexWorkspaceContext(roots: roots)
+        _ = try tasks.clearProgressReport(taskID)
+        defer { _ = try? tasks.clearProgressReport(taskID) }
         let shouldGenerateTitle = !normalizedText.isEmpty && ["Untitled task", "Generating title…"].contains(task.title)
         let titleGeneration: Task<Void, Never>?
         if shouldGenerateTitle {

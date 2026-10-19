@@ -65,7 +65,7 @@
   },
   {
     "id": "test_task_delete_removes_task_and_later_lookup_is_not_found",
-    "expectation": "The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives confirmation from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Diagnostics identify conversation failure phase and capture real deletion errors without task titles or conversation text, and failed deletion leaves the task and worktree available for retry."
+    "expectation": "The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Diagnostics identify the conversation failure phase and the persistent log captures a real deletion failure's task, thread, process, phase, and underlying error details without task titles or conversation text; the failed task and worktree remain available for retry."
   },
   {
     "id": "test_default_parent_settings_read_write_clear_and_validation",
@@ -105,7 +105,7 @@
   },
   {
     "id": "test_plan_mode_renders_markdown_in_conversation",
-    "expectation": "Selecting Plan mode sends a planning turn; Markdown headings and lists render as distinct conversation elements after reopening, and bridge history preserves the assistant's exact Markdown source."
+    "expectation": "Selecting Plan mode sends a planning turn; a completed <proposed_plan> is automatically rendered as Markdown without exposing its wrapper tags, including after reopening, while bridge history preserves the exact source."
   },
   {
     "id": "test_conversation_mode_rejects_unknown_mode_without_starting_a_turn",

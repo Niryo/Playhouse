@@ -667,7 +667,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assert_failure(invalid, "operation_failed")
         fresh, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"], updated["repositoryWorktrees"])
-    # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives confirmation from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Diagnostics identify conversation failure phase and capture real deletion errors without task titles or conversation text, and failed deletion leaves the task and worktree available for retry.
+    # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Diagnostics identify the conversation failure phase and the persistent log captures a real deletion failure's task, thread, process, phase, and underlying error details without task titles or conversation text; the failed task and worktree remain available for retry.
     def test_task_delete_removes_task_and_later_lookup_is_not_found(self):
         pending = self.create_repo_task("Pending delete", [self.primary])
         pending_id = pending["id"]
@@ -826,6 +826,11 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("settings", "get")
         self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.secondary), str(self.primary)])
 
+
+        response, _ = self.call_cli("settings", "set-last-repositories", "--repo", self.secondary, "--repo", self.primary)
+        self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.secondary), str(self.primary)])
+        response, _ = self.call_cli("settings", "get")
+        self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.secondary), str(self.primary)])
 
     # case-contract: test_task_roots_remain_after_default_parent_is_cleared | Clearing the default parent does not change roots already saved on a task.
     def test_task_roots_remain_after_default_parent_is_cleared(self):
@@ -1098,7 +1103,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(history["activities"], activities)
         self.assertTrue(any("subagent inspected" in message["text"].lower() for message in history["messages"]))
 
-    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; Markdown headings and lists render as distinct conversation elements after reopening, and bridge history preserves the assistant's exact Markdown source.
+    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; a completed <proposed_plan> is automatically rendered as Markdown without exposing its wrapper tags, including after reopening, while bridge history preserves the exact source.
     def test_plan_mode_renders_markdown_in_conversation(self):
         task_id = self.create_task(title="Plan mode Markdown", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -1109,7 +1114,7 @@ class StationAIBridgeTests(unittest.TestCase):
             "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
-        markdown_reply = "## Implementation plan\n\nStart with the **workspace model**.\n\n- Add structured conversation rendering\n- Verify history after reopening"
+        markdown_reply = "<proposed_plan>\n## Implementation plan\n\nStart with the **workspace model**.\n\n- Add structured conversation rendering\n- Verify history after reopening\n</proposed_plan>"
         sent, _ = self.call_cli(
             "conversation", "send", task_id, "--message", "Plan the task.", "--mode", "plan",
             extra_environment=env,

@@ -821,7 +821,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("conversation-repository-merge-target").exists, "The merge-to value becomes editable only after selecting its pencil control.")
     }
 
-    // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives confirmation from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Diagnostics identify conversation failure phase and capture real deletion errors without task titles or conversation text, and failed deletion leaves the task and worktree available for retry.
+    // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Diagnostics identify the conversation failure phase and the persistent log captures a real deletion failure's task, thread, process, phase, and underlying error details without task titles or conversation text; the failed task and worktree remain available for retry.
     func test_task_delete_removes_task_and_later_lookup_is_not_found() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -1618,7 +1618,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Conversation shows a completed subagent delegation")
     }
 
-    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; Markdown headings and lists render as distinct conversation elements after reopening, and bridge history preserves the assistant's exact Markdown source.
+    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; a completed <proposed_plan> is automatically rendered as Markdown without exposing its wrapper tags, including after reopening, while bridge history preserves the exact source.
     func test_plan_mode_renders_markdown_in_conversation() throws {
         let fixtureRoot = URL(fileURLWithPath: "/tmp/stationai-bridge-workspaces", isDirectory: true)
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -1647,20 +1647,28 @@ final class StationAIUITests: XCTestCase {
         composer.typeText("Plan the task.")
         element("send-message-button").click()
         let taskID = try taskID(named: "Plan mode Markdown")
-        let markdownReply = "## Implementation plan\n\nStart with the **workspace model**.\n\n- Add structured conversation rendering\n- Verify history after reopening"
+        let markdownReply = "<proposed_plan>\n## Implementation plan\n\nStart with the **workspace model**.\n\n- Add structured conversation rendering\n- Verify history after reopening\n</proposed_plan>"
         let assistantMarkdown = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", "Implementation plan"))
             .firstMatch
         XCTAssertTrue(assistantMarkdown.waitForExistence(timeout: 30), "The Plan mode response should appear in the conversation.")
+        XCTAssertFalse(assistantMarkdown.label.contains("<proposed_plan>"), "The plan should be shown automatically without its protocol wrapper.")
+        XCTAssertFalse(assistantMarkdown.label.contains("</proposed_plan>"), "The closing protocol wrapper should not be visible.")
 
         element("back-to-board-button").click()
         openTask(named: "Plan mode Markdown")
         let reloadedHistory = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
         let reloadedMessages = reloadedHistory?["messages"] as? [[String: Any]] ?? []
         XCTAssertTrue(reloadedMessages.contains { $0["role"] as? String == "assistant" && $0["text"] as? String == markdownReply }, "The exact Markdown source should persist after reopening the plan conversation.")
-        let heading = app.descendants(matching: .any).matching(identifier: "assistant-markdown-heading-0").firstMatch
-        let firstListItem = app.descendants(matching: .any).matching(identifier: "assistant-markdown-list-item-4").firstMatch
-        let secondListItem = app.descendants(matching: .any).matching(identifier: "assistant-markdown-list-item-5").firstMatch
+        let reloadedAssistant = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", "Implementation plan"))
+            .firstMatch
+        XCTAssertTrue(reloadedAssistant.waitForExistence(timeout: 10), "The completed plan should appear automatically after reopening.")
+        XCTAssertFalse(reloadedAssistant.label.contains("<proposed_plan>"), "The reloaded plan should hide its opening protocol wrapper.")
+        XCTAssertFalse(reloadedAssistant.label.contains("</proposed_plan>"), "The reloaded plan should hide its closing protocol wrapper.")
+        let heading = app.descendants(matching: .any).matching(identifier: "assistant-markdown-heading-1").firstMatch
+        let firstListItem = app.descendants(matching: .any).matching(identifier: "assistant-markdown-list-item-5").firstMatch
+        let secondListItem = app.descendants(matching: .any).matching(identifier: "assistant-markdown-list-item-6").firstMatch
         XCTAssertTrue(heading.waitForExistence(timeout: 10), "Plan headings should render as distinct elements after reopening.")
         XCTAssertTrue(heading.label.contains("Implementation plan"), "The rendered heading should retain the plan title after reopening.")
         XCTAssertTrue(firstListItem.waitForExistence(timeout: 5), "The first plan list entry should render after reopening.")

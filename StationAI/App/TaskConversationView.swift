@@ -14,7 +14,6 @@ private struct AssistantMarkdownBlock: Identifiable {
     let kind: Kind
     let text: String
 }
-
 struct TaskConversationView: View {
     private struct PendingImage: Identifiable {
         let id = UUID()
@@ -1020,17 +1019,18 @@ struct TaskConversationView: View {
     }
 
     private func assistantBubble(_ message: CodexChatMessage) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let displayText = Self.displayableAssistantText(message.text)
+        return VStack(alignment: .leading, spacing: 6) {
             Text("Codex · Luna")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
 
             Group {
-                if message.text.isEmpty && isResponding {
+                if displayText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && isResponding {
                     ProgressView()
                         .controlSize(.small)
                 } else {
-                    assistantMarkdownContent(message.text)
+                    assistantMarkdownContent(displayText)
                 }
             }
             .font(.system(size: 14))
@@ -1041,7 +1041,7 @@ struct TaskConversationView: View {
                 WorkspaceTheme.panelBackground,
                 in: RoundedRectangle(cornerRadius: 17, style: .continuous)
             )
-            .accessibilityLabel(message.text.isEmpty ? "Waiting for Codex response" : String(Self.markdownAttributedText(message.text).characters))
+            .accessibilityLabel(displayText.isEmpty ? "Waiting for Codex response" : String(Self.markdownAttributedText(displayText).characters))
             .accessibilityIdentifier("assistant-message-\(message.id)")
         }
         .frame(maxWidth: 620, alignment: .leading)
@@ -1071,6 +1071,13 @@ struct TaskConversationView: View {
     private static func markdownAttributedText(_ markdown: String) -> AttributedString {
         (try? AttributedString(markdown: markdown, options: .init(interpretedSyntax: .full)))
             ?? AttributedString(markdown)
+    }
+
+    private static func displayableAssistantText(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "<proposed_plan>", with: "")
+            .replacingOccurrences(of: "</proposed_plan>", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func assistantMarkdownContent(_ markdown: String) -> some View {

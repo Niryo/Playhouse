@@ -298,7 +298,7 @@ def main():
                 saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
                 contents = [
                     {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": saved_history.get("userMessage", "Plan the task.")} ]},
-                    {"id": "item_assistant_fixture", "type": "agentMessage", "text": "## Implementation plan\n\nStart with the **workspace model**.\n\n- Add structured conversation rendering\n- Verify history after reopening"},
+                    {"id": "item_assistant_fixture", "type": "agentMessage", "text": "<proposed_plan>\n## Implementation plan\n\nStart with the **workspace model**.\n\n- Add structured conversation rendering\n- Verify history after reopening\n</proposed_plan>"},
                 ]
             write({"jsonrpc": "2.0", "id": message["id"], "result": {
                 "data": [{"item": item, "turnId": TURN_ID} for item in contents],
