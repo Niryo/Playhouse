@@ -1034,8 +1034,8 @@ struct TaskConversationView: View {
                     assistantMarkdownContent(displayText)
                 }
             }
-            .font(.system(size: 14))
-            .foregroundStyle(.primary)
+            .font(.system(size: 16, weight: .regular))
+            .foregroundStyle(WorkspaceTheme.conversationText)
             .padding(.horizontal, 15)
             .padding(.vertical, 11)
             .background(
@@ -1059,7 +1059,7 @@ struct TaskConversationView: View {
             }
             if !message.text.isEmpty {
                 Text(message.text)
-                    .font(.system(size: 14)).foregroundStyle(.white)
+                    .font(.system(size: 16, weight: .regular)).foregroundStyle(.white)
                     .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                     .padding(.horizontal, 16).padding(.vertical, 11)
                     .background(WorkspaceTheme.accent, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
@@ -1104,6 +1104,7 @@ struct TaskConversationView: View {
                 }
             }
         }
+        .lineSpacing(4)
         .textSelection(.enabled)
         .fixedSize(horizontal: false, vertical: true)
     }
