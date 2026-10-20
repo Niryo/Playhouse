@@ -6,6 +6,10 @@ if [[ "${STATIONAI_RUN_CODEX_INTEGRATION:-}" != "1" ]]; then
   printf 'Set STATIONAI_RUN_CODEX_INTEGRATION=1 to run live Codex turns.\n' >&2
   exit 2
 fi
+if [[ "${STATIONAI_UI_TESTS_CONFIRMED:-0}" != "1" ]]; then
+  bash "${repository_root}/scripts/confirm-ui-tests.sh"
+fi
+export STATIONAI_UI_TESTS_CONFIRMED=1
 
 "${repository_root}/scripts/with-e2e-lock.sh" -- bash -c '
   set -euo pipefail
@@ -28,5 +32,6 @@ fi
   test -x "${app_bundle}/Contents/MacOS/stationai-cli"
   python3 "${repository_root}/scripts/prepare-e2e-fixture.py"
   python3 "${repository_root}/scripts/test-codex-integration.py"
-  "${repository_root}/scripts/test-ui.sh" --locked --case test_conversation_composer_rejects_blank_and_supports_live_turn_controls
+  STATIONAI_UI_TESTS_CONFIRMED=1 "${repository_root}/scripts/test-ui.sh" --locked --case test_conversation_composer_rejects_blank_and_supports_live_turn_controls
+  STATIONAI_UI_TESTS_CONFIRMED=1 "${repository_root}/scripts/test-ui.sh" --locked --case test_task_worktree_preparation_serializes_auto_branch_claims
 ' -- "${repository_root}"
