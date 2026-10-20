@@ -33,6 +33,7 @@ enum WorkspaceTheme {
     static let windowBackground = adaptive(dark: (0x1E, 0x1E, 0x1E), light: .windowBackgroundColor)
     static let panelBackground = adaptive(dark: (0x25, 0x25, 0x26), light: .controlBackgroundColor)
     static let inputBackground = adaptive(dark: (0x3C, 0x3C, 0x3C), light: .textBackgroundColor)
+    static let conversationText = adaptive(dark: (0xC5, 0xC5, 0xC5), light: .labelColor)
     static let accent = Color(nsColor: NSColor(srgbRed: 0, green: 122.0 / 255.0, blue: 204.0 / 255.0, alpha: 1))
 
     private static func adaptive(dark: (UInt8, UInt8, UInt8), light: NSColor) -> Color {
