@@ -46,6 +46,8 @@ struct NewTaskSheet: View {
                         Label("Browse…", systemImage: "folder")
                             .font(.system(size: 11, weight: .medium))
                     }
+                    .buttonHoverPointer()
+                    .help("Browse folders to add repositories or context folders")
                     .buttonStyle(.bordered)
                     .accessibilityIdentifier("browse-workspace-roots-button")
                 }
@@ -55,11 +57,15 @@ struct NewTaskSheet: View {
                         Text("Suggestions from \(parentFolderURL.path)")
                             .lineLimit(1).help(parentFolderURL.path)
                         Spacer(minLength: 0)
-                        Button("Change…", action: chooseInitialParent).buttonStyle(.link)
+                        Button("Change…", action: chooseInitialParent)
+                        .buttonHoverPointer()
+                        .help("Change suggestion folder").buttonStyle(.link)
                     }
                     .font(.system(size: 10)).foregroundStyle(.secondary)
                 } else {
                     Button("Choose a suggestion folder…", action: chooseInitialParent)
+                    .buttonHoverPointer()
+                    .help("Choose a suggestion folder")
                         .buttonStyle(.link)
                 }
 
@@ -100,6 +106,8 @@ struct NewTaskSheet: View {
                             minimumWidth: 110
                         )
                         Button { repositories.remove(at: index) } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonHoverPointer()
+                        .help("Remove repository")
                             .buttonStyle(.plain).accessibilityLabel("Remove repository")
                     }
                     .padding(.horizontal, 9).padding(.vertical, 7)
@@ -112,6 +120,8 @@ struct NewTaskSheet: View {
                         Text(folder.path).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
                         Spacer()
                         Button { contextFolders.removeAll { $0.standardizedFileURL.path == folder.standardizedFileURL.path } } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonHoverPointer()
+                        .help("Remove \(folder.lastPathComponent)")
                             .buttonStyle(.plain).accessibilityLabel("Remove \(folder.lastPathComponent)")
                     }
                 }
@@ -170,6 +180,8 @@ struct NewTaskSheet: View {
                                         .background(keyboardHighlightedRepositoryPath == repository.path ? Color.accentColor.opacity(0.16) : .clear)
                                         .contentShape(Rectangle())
                                     }
+                                    .buttonHoverPointer()
+                                    .help("Select repository")
                                     .buttonStyle(.plain)
                                     .accessibilityIdentifier("repository-suggestion-\(repository.lastPathComponent)")
                                 }
@@ -198,6 +210,8 @@ struct NewTaskSheet: View {
                 Button("Cancel") {
                     dismiss()
                 }
+                .buttonHoverPointer()
+                .help("Cancel task creation")
                 .keyboardShortcut(.cancelAction)
                 .accessibilityIdentifier("cancel-task-button")
 
@@ -210,6 +224,8 @@ struct NewTaskSheet: View {
                         createError = error.localizedDescription
                     }
                 }
+                .buttonHoverPointer()
+                .help("Done")
                 .buttonStyle(.borderedProminent)
                 .tint(WorkspaceTheme.accent)
                 .keyboardShortcut(.defaultAction)
@@ -373,6 +389,7 @@ struct NewTaskSheet: View {
                 .background(WorkspaceTheme.panelBackground, in: Capsule())
                 .contentShape(Capsule())
             }
+            .buttonHoverPointer()
             .buttonStyle(.plain)
             .onHover { isHovering in hoveredRepositoryTag = isHovering ? identifier : nil }
             .help("Edit \(label == "from" ? "branch starting point" : "branch name")")
@@ -450,11 +467,15 @@ struct WorkspaceRootsEditor: View {
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
+                .buttonHoverPointer()
+                .help("Cancel workspace folder changes")
                     .keyboardShortcut(.cancelAction)
                 Button("Save folders") {
                     onSave(roots)
                     dismiss()
                 }
+                .buttonHoverPointer()
+                .help("Save workspace folders")
                 .buttonStyle(.borderedProminent)
                 .disabled(roots.isEmpty)
                 .accessibilityIdentifier("save-workspace-roots-button")
