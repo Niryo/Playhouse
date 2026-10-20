@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 
 if "-title-" in Path(sys.argv[0]).name:
@@ -77,12 +78,24 @@ def subagent_item(status):
 
 
 def main():
+    global THREAD_ID, TURN_ID
     mode = os.path.basename(sys.argv[0])
     answers = None
     saw_question = False
     saw_turn = False
     turn_message = None
     history_path = Path(str(sys.argv[0]) + ".history")
+    serial_mode = mode.endswith("-serial-success-wait")
+    if serial_mode:
+        saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
+        THREAD_ID = saved_history.get("threadID")
+        TURN_ID = f"turn-{uuid.uuid4()}"
+
+    def serial_history():
+        if history_path.is_file():
+            return json.loads(history_path.read_text(encoding="utf-8"))
+        return {"threadID": None, "events": [], "messages": []}
+
     for line in sys.stdin:
         try:
             message = json.loads(line)
@@ -95,13 +108,45 @@ def main():
         if message.get("method") == "initialize":
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"serverInfo": {"name": "stationai-fixture", "version": "1"}}})
         elif message.get("method") == "thread/start":
+            if serial_mode:
+                history = serial_history()
+                if history.get("threadID") is not None:
+                    write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32001, "message": "This fixture thread already exists; resume it instead of starting another."}})
+                    continue
+                THREAD_ID = f"stationai-serial-{uuid.uuid4()}"
+                history["threadID"] = THREAD_ID
+                history["events"].append({"method": "thread/start", "threadID": THREAD_ID})
+                history_path.write_text(json.dumps(history), encoding="utf-8")
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": "gpt-6-luna"}})
         elif message.get("method") == "thread/resume":
+            if serial_mode:
+                requested_thread_id = message.get("params", {}).get("threadId")
+                history = serial_history()
+                if not history.get("threadID") or requested_thread_id != history["threadID"]:
+                    write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32002, "message": "The requested thread does not match the fixture's existing thread."}})
+                    continue
+                THREAD_ID = history["threadID"]
+                history["events"].append({"method": "thread/resume", "threadID": THREAD_ID})
+                history_path.write_text(json.dumps(history), encoding="utf-8")
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": "gpt-6-luna"}})
         elif message.get("method") == "turn/start":
             saw_turn = True
             saw_question = True
+            serial_first_turn = False
+            if serial_mode:
+                first_turn_marker = Path(str(sys.argv[0]) + ".serial-first-turn")
+                try:
+                    descriptor = os.open(first_turn_marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                except FileExistsError:
+                    Path(str(sys.argv[0]) + ".serial-second-turn-started").touch()
+                else:
+                    os.close(descriptor)
+                    serial_first_turn = True
             turn_input = message.get("params", {}).get("input", [])
+            turn_thread_id = message.get("params", {}).get("threadId")
+            if serial_mode and turn_thread_id != THREAD_ID:
+                write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32003, "message": "The turn must use the active fixture thread."}})
+                continue
             turn_message = next((item.get("text") for item in turn_input if item.get("type") == "text"), None)
             is_title_request = (turn_message or "").startswith("Write a concise task title of at most 8 words")
             if is_title_request:
@@ -133,12 +178,23 @@ def main():
                 }})
                 continue
             image_inputs = [item for item in turn_input if item.get("type") == "image"]
-            history_path.write_text(json.dumps({
+            turn_history = {
                 "userMessage": turn_message,
+                "turnID": TURN_ID,
                 "images": [item.get("url") for item in image_inputs],
                 "imageInputs": image_inputs,
                 "developerInstructions": message.get("params", {}).get("collaborationMode", {}).get("settings", {}).get("developerInstructions"),
-            }), encoding="utf-8")
+            }
+            if serial_mode:
+                saved_history = serial_history()
+                messages = saved_history["messages"]
+                turn_history["threadID"] = THREAD_ID
+                messages.append(turn_history)
+                saved_history["messages"] = messages
+                saved_history["events"].append({"method": "turn/start", "threadID": THREAD_ID, "turnID": TURN_ID, "userMessage": turn_message})
+                history_path.write_text(json.dumps(saved_history), encoding="utf-8")
+            else:
+                history_path.write_text(json.dumps(turn_history), encoding="utf-8")
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": TURN_ID, "status": "inProgress"}}})
             if mode.endswith("-abort"):
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
@@ -151,6 +207,26 @@ def main():
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
             elif mode.endswith("-title-failure"):
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": THREAD_ID,
+                    "turn": {"id": TURN_ID, "status": "completed"},
+                }})
+            elif serial_mode and serial_first_turn:
+                ready = Path(str(sys.argv[0]) + ".resolve-ready")
+                resume = Path(str(sys.argv[0]) + ".resolve-continue")
+                ready.write_text("The first serialized fixture turn is active.\n", encoding="utf-8")
+                deadline = time.monotonic() + 30
+                while not resume.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                if not resume.exists():
+                    return 3
+                ready.unlink(missing_ok=True)
+                resume.unlink(missing_ok=True)
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": THREAD_ID,
+                    "turn": {"id": TURN_ID, "status": "completed"},
+                }})
+            elif serial_mode:
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
@@ -186,47 +262,11 @@ def main():
                     "threadId": "00000000-0000-0000-0000-000000000001",
                     "turn": {"id": "turn_stationai_fixture", "status": "completed"},
                 }})
-            elif mode.endswith("-markdown"):
-                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
-                    "threadId": "00000000-0000-0000-0000-000000000001",
-                    "turn": {"id": "turn_stationai_fixture", "status": "completed"},
-                }})
             elif mode.endswith("-hold"):
                 time.sleep(30)
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
-                }})
-            elif mode.endswith("-question"):
-                active = Path(str(sys.argv[0]) + ".turn-active")
-                release = Path(str(sys.argv[0]) + ".turn-release")
-                active.write_text("The progress report fixture turn is active.\n", encoding="utf-8")
-                deadline = time.monotonic() + 30
-                while not release.exists() and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                was_released = release.exists()
-                active.unlink(missing_ok=True)
-                release.unlink(missing_ok=True)
-                if not was_released:
-                    return 3
-                question_request(901)
-            elif "-hold-release" in mode:
-                active = Path(str(sys.argv[0]) + ".turn-active")
-                release = Path(str(sys.argv[0]) + ".turn-release")
-                active.write_text("The progress report fixture turn is active.\n", encoding="utf-8")
-                deadline = time.monotonic() + 30
-                while not release.exists() and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                was_released = release.exists()
-                active.unlink(missing_ok=True)
-                release.unlink(missing_ok=True)
-                if not was_released:
-                    return 3
-                turn_status = "interrupted" if "-interrupted" in mode else ("failed" if "-failed" in mode else "completed")
-                turn_error = {"error": {"message": "Codex interrupted this turn." if turn_status == "interrupted" else "Codex failed this turn."}} if turn_status != "completed" else {}
-                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
-                    "threadId": "00000000-0000-0000-0000-000000000001",
-                    "turn": {"id": "turn_stationai_fixture", "status": turn_status, **turn_error},
                 }})
             elif mode.endswith("-question"):
                 active = Path(str(sys.argv[0]) + ".turn-active")
@@ -279,15 +319,32 @@ def main():
             }})
         elif message.get("method") == "thread/items/list":
             saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
-            user_message = saved_history.get("userMessage") or (turn_message if answers else None)
-            user_images = saved_history.get("images", [])
-            user_content = ([{"type": "text", "text": user_message}] if user_message else []) + [
-                {"type": "image", "image_url": image_url} for image_url in user_images
-            ]
-            contents = ([
-                {"id": "item_user_fixture", "type": "userMessage", "content": user_content},
-                {"id": "item_assistant_fixture", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."},
-            ] if user_content and not mode.endswith("-empty") else [])
+            if serial_mode and message.get("params", {}).get("threadId") != saved_history.get("threadID"):
+                write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32004, "message": "History can only be read from the persisted fixture thread."}})
+                continue
+            if serial_mode and saved_history.get("messages"):
+                contents = []
+                for index, saved_turn in enumerate(saved_history["messages"], start=1):
+                    user_message = saved_turn.get("userMessage")
+                    user_images = saved_turn.get("images", [])
+                    user_content = ([{"type": "text", "text": user_message}] if user_message else []) + [
+                        {"type": "image", "image_url": image_url} for image_url in user_images
+                    ]
+                    if user_content:
+                        contents.extend([
+                            {"id": f"item_user_fixture_{index}", "type": "userMessage", "content": user_content},
+                            {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."},
+                        ])
+            else:
+                user_message = saved_history.get("userMessage") or (turn_message if answers else None)
+                user_images = saved_history.get("images", [])
+                user_content = ([{"type": "text", "text": user_message}] if user_message else []) + [
+                    {"type": "image", "image_url": image_url} for image_url in user_images
+                ]
+                contents = ([
+                    {"id": "item_user_fixture", "type": "userMessage", "content": user_content},
+                    {"id": "item_assistant_fixture", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."},
+                ] if user_content and not mode.endswith("-empty") else [])
             if mode.endswith("-subagent"):
                 contents = [
                     {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": "Delegate this task."}]},

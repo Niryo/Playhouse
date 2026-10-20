@@ -115,6 +115,9 @@ def prepare(workspace_changes: bool = False) -> None:
             "syntax.json": '{"value":"baseline"}\n',
         },
     )
+    empty_git_repository = FIXTURE_ROOT / "empty-git-repo"
+    empty_git_repository.mkdir(parents=True)
+    run_git(empty_git_repository, "init", "--initial-branch=main")
     if workspace_changes:
         prepare_workspace_changes(changes)
     custom.mkdir(parents=True)

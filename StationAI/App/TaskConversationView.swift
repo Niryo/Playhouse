@@ -76,8 +76,11 @@ struct TaskConversationView: View {
     @State private var actionNotice: String?
     @State private var isShowingWorkspaceEditor = false
     @State private var isShowingRepositoryPicker = false
+    @State private var isChoosingRepositoryParent = false
     @State private var repositorySearch = ""
     @State private var repositorySuggestionIndex = 0
+    @State private var lastSelectedRepositoryPaths: [String] = []
+    @State private var didOverrideRepositoryDefault = false
     @State private var suggestedRepositories: [URL] = []
     @State private var expandedRepositoryPath: String?
     @State private var repositoryBeingEdited: RepositoryWorktreeRecord?
@@ -85,7 +88,6 @@ struct TaskConversationView: View {
     @State private var editedBranchFrom = ""
     @State private var editedMergeTarget = ""
     @State private var editingRepositoryField: String?
-    @State private var isShowingDiscardConfirmation = false
     @FocusState private var isComposerFocused: Bool
     @FocusState private var isRepositorySearchFocused: Bool
 
@@ -114,6 +116,7 @@ struct TaskConversationView: View {
         .onAppear {
             guard isNewTask else { return }
             isShowingRepositoryPicker = true
+            lastSelectedRepositoryPaths = WorkspaceSettingsManager().lastSelectedRepositories
             loadSuggestedRepositories()
         }
         .sheet(isPresented: $isShowingWorkspaceEditor) {
@@ -131,7 +134,7 @@ struct TaskConversationView: View {
         }
         .task {
             if !isReadOnly {
-                _ = try? BoardTaskManager(modelContext: modelContext)
+                _ = try? await BoardTaskManager(modelContext: modelContext)
                     .reconcileLifecycleStatusOnOpen(task.id, client: codexClient)
             }
             if !isReadOnly, let request = codexClient.pendingUserInputRequest, request.threadID == task.codexThreadID {
@@ -146,16 +149,6 @@ struct TaskConversationView: View {
                 return
             }
             isResponding = isTurnActive && codexClient.isTurnActive(threadID: taskThreadID)
-        }
-        .onChange(of: codexClient.pendingUserInputRequest) { _, request in
-            guard !isReadOnly else { return }
-            guard let request, request.threadID == task.codexThreadID else { return }
-            userInputRequest = request
-            userInputAnswers = [:]
-            userInputOther = [:]
-            if request.isBlocking {
-                _ = try? BoardTaskManager(modelContext: modelContext).setLifecycleStatus(task, to: .waitingResponse)
-            }
         }
         .task(id: task.workspaceRootPaths) {
             let watchPaths = await WorkspaceChangeWatcher.watchPaths(workspaceRoots: task.workspaceRootPaths)
@@ -739,16 +732,23 @@ struct TaskConversationView: View {
                 )) { _ in
                     VStack(alignment: .leading, spacing: 8) {
                         Text(name).font(.system(size: 12, weight: .semibold))
-                        repositoryDetailRow("Branch name", value: $editedBranch, field: "branch", placeholder: "auto", identifier: "conversation-repository-branch")
-                        repositoryDetailRow("Branch from", value: $editedBranchFrom, field: "from", placeholder: "default", identifier: "conversation-repository-branch-from")
-                        repositoryDetailRow("Merge to", value: $editedMergeTarget, field: "to", placeholder: "default", identifier: "conversation-repository-merge-target")
+                        repositoryDetailRow("Branch name", value: $editedBranch, field: "branch", placeholder: "auto", identifier: "conversation-repository-branch", editable: repository.isPending)
+                        repositoryDetailRow("Branch from", value: $editedBranchFrom, field: "from", placeholder: "default", identifier: "conversation-repository-branch-from", editable: repository.isPending)
+                        repositoryDetailRow("Merge to", value: $editedMergeTarget, field: "to", placeholder: "default", identifier: "conversation-repository-merge-target", editable: repository.isPending)
                         HStack {
                             Button("Remove Repository", role: .destructive) { removeConversationRepository(repository) }
                                 .accessibilityIdentifier("remove-conversation-repository-button")
                             Spacer()
-                            Button("Save") { saveConversationRepository(repository) }
-                                .buttonStyle(.borderedProminent)
-                                .accessibilityIdentifier("save-conversation-repository-button")
+                            if repository.isPending {
+                                Button("Save") { saveConversationRepository(repository) }
+                                    .buttonStyle(.borderedProminent)
+                                    .accessibilityIdentifier("save-conversation-repository-button")
+                            } else {
+                                Text("Settings are locked after the task starts.")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("conversation-repository-settings-locked")
+                            }
                         }
                     }
                     .font(.system(size: 11)).padding(12).frame(minWidth: 270, alignment: .leading)
@@ -771,22 +771,59 @@ struct TaskConversationView: View {
 
     private var repositoryPicker: some View {
         VStack(alignment: .leading, spacing: 8) {
-            TextField("Search repositories…", text: $repositorySearch)
+            if let parentFolderURL = WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) {
+                HStack(spacing: 5) {
+                    Text("Suggestions from \(parentFolderURL.path)")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(parentFolderURL.path)
+                    Spacer(minLength: 0)
+                    Button("Change…", action: chooseRepositoryParentFolder)
+                        .disabled(isChoosingRepositoryParent)
+                        .accessibilityIdentifier("choose-repository-suggestion-parent-button")
+                }
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+            } else {
+                Text("Choose a parent folder to find Git repositories.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                Button("Choose suggestion folder…", action: chooseRepositoryParentFolder)
+                    .disabled(isChoosingRepositoryParent)
+                    .accessibilityIdentifier("choose-repository-suggestion-parent-button")
+            }
+            TextField(repositorySearchPlaceholder, text: $repositorySearch)
                 .textFieldStyle(.roundedBorder)
                 .focused($isRepositorySearchFocused)
-                .onChange(of: repositorySearch) { _, _ in repositorySuggestionIndex = 0 }
+                .onChange(of: repositorySearch) { _, value in
+                    repositorySuggestionIndex = 0
+                    if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        didOverrideRepositoryDefault = true
+                    }
+                }
                 .onKeyPress { press in
                     let available = availableRepositorySuggestions
-                    guard !available.isEmpty else { return .ignored }
                     switch press.key {
                     case .downArrow:
+                        guard !available.isEmpty else { return .ignored }
+                        didOverrideRepositoryDefault = true
                         repositorySuggestionIndex = min(repositorySuggestionIndex + 1, available.count - 1)
                         return .handled
                     case .upArrow:
+                        guard !available.isEmpty else { return .ignored }
+                        didOverrideRepositoryDefault = true
                         repositorySuggestionIndex = max(repositorySuggestionIndex - 1, 0)
                         return .handled
                     case .return:
-                        selectRepositorySuggestion(available[repositorySuggestionIndex])
+                        if isUsingSavedRepositoryDefault {
+                            let savedRepositories = validLastSelectedRepositoryURLs
+                            guard !savedRepositories.isEmpty else { return .handled }
+                            selectRepositories(savedRepositories)
+                        } else if available.indices.contains(repositorySuggestionIndex) {
+                            selectRepositorySuggestion(available[repositorySuggestionIndex])
+                        } else {
+                            return .ignored
+                        }
                         return .handled
                     default:
                         return .ignored
@@ -794,7 +831,9 @@ struct TaskConversationView: View {
                 }
                 .accessibilityIdentifier("conversation-repository-search")
             let available = availableRepositorySuggestions
-            if available.isEmpty {
+            if WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) == nil {
+                EmptyView()
+            } else if available.isEmpty {
                 Text("No matching repositories.").font(.system(size: 10)).foregroundStyle(.secondary)
             } else {
                 ScrollView {
@@ -818,10 +857,26 @@ struct TaskConversationView: View {
         }
         .padding(12)
         .frame(width: 304)
-        .onAppear {
-            if isNewTask {
-                DispatchQueue.main.async { isRepositorySearchFocused = true }
-            }
+        .defaultFocus($isRepositorySearchFocused, isNewTask)
+    }
+
+    private var repositorySearchPlaceholder: String {
+        guard isNewTask, !lastSelectedRepositoryPaths.isEmpty else { return "Search repositories…" }
+        let names = lastSelectedRepositoryPaths.map { URL(fileURLWithPath: $0).lastPathComponent }
+        return "Last used: \(names.joined(separator: ", ")) — press Return to reuse"
+    }
+
+    private var isUsingSavedRepositoryDefault: Bool {
+        isNewTask && task.repositoryWorktrees.isEmpty &&
+        repositorySearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !didOverrideRepositoryDefault && !lastSelectedRepositoryPaths.isEmpty
+    }
+
+    private var validLastSelectedRepositoryURLs: [URL] {
+        lastSelectedRepositoryPaths.compactMap { path in
+            let repository = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+            let gitMarker = repository.appendingPathComponent(".git")
+            return FileManager.default.fileExists(atPath: gitMarker.path) ? repository : nil
         }
     }
 
@@ -833,9 +888,37 @@ struct TaskConversationView: View {
     }
 
     private func selectRepositorySuggestion(_ repository: URL) {
-        addConversationRepository(repository)
-        repositorySearch = ""
+        didOverrideRepositoryDefault = true
+        selectRepositories([repository])
+    }
+
+    private func selectRepositories(_ repositories: [URL]) {
         isShowingRepositoryPicker = false
+        repositorySearch = ""
+        Task { @MainActor in
+            do {
+                var selectedPaths = task.repositoryWorktrees.map { $0.repositoryPath }
+                var repositoriesToAdd: [String] = []
+                let manager = BoardTaskManager(modelContext: modelContext)
+                for repository in repositories {
+                    let path = repository.standardizedFileURL.path
+                    guard !selectedPaths.contains(path) else { continue }
+                    selectedPaths.append(path)
+                    repositoriesToAdd.append(path)
+                }
+                if !repositoriesToAdd.isEmpty {
+                    _ = try await manager.addRepositories(task.id, repositoryPaths: repositoriesToAdd)
+                }
+                let availablePaths = selectedPaths.filter { path in
+                    FileManager.default.fileExists(atPath: URL(fileURLWithPath: path).appendingPathComponent(".git").path)
+                }
+                try WorkspaceSettingsManager().setLastSelectedRepositories(availablePaths)
+                await refreshWorkspaceChanges()
+            } catch {
+                errorMessage = "Couldn't add repository: \(error.localizedDescription)"
+                isShowingRepositoryPicker = true
+            }
+        }
     }
 
     private func loadSuggestedRepositories() {
@@ -844,6 +927,39 @@ struct TaskConversationView: View {
             suggestedRepositories = (try? await WorkspaceManager().suggestedRepositories(parentPath: parent.path).map {
                 URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL
             }) ?? []
+        }
+    }
+
+    private func chooseRepositoryParentFolder() {
+        guard !isChoosingRepositoryParent else { return }
+        isShowingRepositoryPicker = false
+        let panel = NSOpenPanel()
+        panel.title = "Choose default parent folder"
+        panel.message = "StationAI will suggest Git repositories found under this folder."
+        panel.prompt = "Use This Folder"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+        isChoosingRepositoryParent = true
+        panel.begin { response in
+            DispatchQueue.main.async {
+                isChoosingRepositoryParent = false
+                guard response == .OK, let selected = panel.url else {
+                    isShowingRepositoryPicker = true
+                    return
+                }
+                let path = selected.standardizedFileURL.path
+                do {
+                    try WorkspaceSettingsManager().setDefaultParentFolder(path)
+                    defaultParentFolderPath = path
+                    loadSuggestedRepositories()
+                    isShowingRepositoryPicker = true
+                } catch {
+                    errorMessage = "Couldn't set the repository suggestion folder: \(error.localizedDescription)"
+                    isShowingRepositoryPicker = true
+                }
+            }
         }
     }
 
@@ -1042,6 +1158,7 @@ struct TaskConversationView: View {
                 WorkspaceTheme.panelBackground,
                 in: RoundedRectangle(cornerRadius: 17, style: .continuous)
             )
+            .accessibilityElement(children: .contain)
             .accessibilityLabel(displayText.isEmpty ? "Waiting for Codex response" : String(Self.markdownAttributedText(displayText).characters))
             .accessibilityIdentifier("assistant-message-\(message.id)")
         }
@@ -1271,7 +1388,9 @@ struct TaskConversationView: View {
                         .accessibilityLabel("Continue response")
                         .accessibilityIdentifier("continue-response-button")
                     } else {
-                        Button("Save") { saveDraftAndGenerateTitle(status: nil, then: onBack) }
+                        Button("Save") {
+                            Task { @MainActor in _ = await saveDraftAndGenerateTitle(status: nil, then: onBack) }
+                        }
                             .disabled(isResponding || isLoadingHistory || draft.isEmpty)
                             .accessibilityIdentifier("save-task-prompt-button")
                         Button { sendMessage() } label: {
@@ -1349,7 +1468,9 @@ struct TaskConversationView: View {
                     }
                 }
             }
-            Button("Submit answers") { submitUserInput(request) }
+            Button("Submit answers") {
+                Task { @MainActor in await submitUserInput(request) }
+            }
                 .buttonStyle(.borderedProminent)
                 .disabled(request.questions.contains { question in
                     let selections = userInputAnswers[question.id] ?? []
@@ -1363,19 +1484,27 @@ struct TaskConversationView: View {
         .accessibilityElement(children: .contain)
     }
 
-    private func submitUserInput(_ request: CodexUserInputRequest) {
+    private func submitUserInput(_ request: CodexUserInputRequest) async {
         var answers: [String: [String]] = [:]
         for question in request.questions {
             var values = userInputAnswers[question.id] ?? []
             if let other = userInputOther[question.id]?.trimmingCharacters(in: .whitespacesAndNewlines), !other.isEmpty { values.append(other) }
             answers[question.id] = values
         }
+        if request.isBlocking {
+            do {
+                _ = try await BoardTaskManager(modelContext: modelContext).setLifecycleStatus(task.id, to: .inProgress)
+            } catch {
+                errorMessage = error.localizedDescription
+                return
+            }
+        }
         guard codexClient.answerUserInput(requestID: request.id, threadID: request.threadID, answers: answers) else {
+            if request.isBlocking {
+                _ = try? await BoardTaskManager(modelContext: modelContext).setLifecycleStatus(task.id, to: .waitingResponse)
+            }
             errorMessage = "Codex couldn't accept those answers. Please check the responses and try again."
             return
-        }
-        if request.isBlocking {
-            _ = try? BoardTaskManager(modelContext: modelContext).setLifecycleStatus(task.id, to: .inProgress)
         }
         userInputRequest = nil
         userInputAnswers = [:]
@@ -1428,8 +1557,6 @@ struct TaskConversationView: View {
             activatePlanMode()
             return
         }
-        saveDraftAndGenerateTitle(status: .inProgress, prompt: text, generateTitle: false)
-
         let userMessageID = UUID().uuidString
         let assistantMessageID = UUID().uuidString
         messages.append(CodexChatMessage(id: userMessageID, role: .user, text: text, imageDataURLs: pendingImages.map(\.dataURL)))
@@ -1445,6 +1572,16 @@ struct TaskConversationView: View {
         activities = []
 
         Task { @MainActor in
+            guard await saveDraftAndGenerateTitle(status: .inProgress, prompt: text, generateTitle: false) else {
+                messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
+                draft = text
+                pendingImages = imageDataURLs.compactMap { dataURL in
+                    guard let image = Self.image(fromDataURL: dataURL) else { return nil }
+                    return PendingImage(dataURL: dataURL, image: image)
+                }
+                isResponding = false
+                return
+            }
             do {
                 _ = try await conversationManager.send(taskID: task.id, text: text, imageDataURLs: imageDataURLs, mode: conversationMode, modelID: selectedModelID, onTurnStarting: {
                     isResponding = true
@@ -1483,10 +1620,6 @@ struct TaskConversationView: View {
                     userInputRequest = request
                     userInputAnswers = [:]
                     userInputOther = [:]
-                    if request.isBlocking {
-                        _ = try? BoardTaskManager(modelContext: modelContext)
-                            .setLifecycleStatus(task, to: .waitingResponse)
-                    }
                 })
 
                 if messages.first(where: { $0.id == assistantMessageID })?.text.isEmpty == true {
@@ -1532,67 +1665,72 @@ struct TaskConversationView: View {
         if isReadOnly { onBack(); return }
         if isNewTask, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            messages.isEmpty, activities.isEmpty, !isLoadingHistory {
-            do {
-                try BoardTaskManager(modelContext: modelContext).delete(task.id)
-                onBack()
-            } catch {
-                errorMessage = error.localizedDescription
+            Task { @MainActor in
+                do {
+                    try await BoardTaskManager(modelContext: modelContext).delete(task.id)
+                    onBack()
+                } catch {
+                    errorMessage = error.localizedDescription
+                }
             }
             return
         }
-        saveDraftAndGenerateTitle(status: nil, then: onBack)
+        Task { @MainActor in _ = await saveDraftAndGenerateTitle(status: nil, then: onBack) }
     }
 
-    private func saveDraftAndGenerateTitle(status: TaskStatus?, prompt submittedPrompt: String? = nil, generateTitle: Bool = true, then completion: (() -> Void)? = nil) {
+    @discardableResult
+    private func saveDraftAndGenerateTitle(status: TaskStatus?, prompt submittedPrompt: String? = nil, generateTitle: Bool = true, then completion: (() -> Void)? = nil) async -> Bool {
         let prompt = (submittedPrompt ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else {
             if task.title == "Generating title…" {
-                _ = try? BoardTaskManager(modelContext: modelContext).rename(task.id, title: "Untitled task")
+                _ = try? await BoardTaskManager(modelContext: modelContext).renameIfTitleMatches(
+                    task.id,
+                    expectedTitle: "Generating title…",
+                    title: "Untitled task"
+                )
             }
             completion?()
-            return
+            return true
         }
-        let shouldGenerateTitle = generateTitle && (task.title == "Generating title…" || task.title == "Untitled task")
+        let taskManager = BoardTaskManager(modelContext: modelContext)
+        var shouldGenerateTitle = false
         do {
-            _ = try BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: prompt, status: status)
-            if shouldGenerateTitle {
-                _ = try BoardTaskManager(modelContext: modelContext).rename(task.id, title: "Generating title…")
+            let savedTask = try await taskManager.savePrompt(task.id, prompt: prompt, status: status)
+            if generateTitle, ["Generating title…", "Untitled task"].contains(savedTask.title) {
+                shouldGenerateTitle = try await taskManager.renameIfTitleMatches(
+                    task.id,
+                    expectedTitle: savedTask.title,
+                    title: "Generating title…"
+                ) != nil
             }
         } catch {
             errorMessage = error.localizedDescription
-            return
+            return false
         }
         completion?()
-        guard shouldGenerateTitle else { return }
+        guard shouldGenerateTitle else { return true }
         isGeneratingTitle = true
         Task { @MainActor in
             let title = await generateTaskTitle(from: prompt)
             let fallback = prompt.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
             let taskManager = BoardTaskManager(modelContext: modelContext)
-            let latestTask: BoardTask
-            do {
-                latestTask = try taskManager.taskModel(task.id)
-            } catch {
-                var fields = StationAIDiagnostics.errorFields(error)
-                fields["taskID"] = task.id.uuidString
-                fields["titleSource"] = title == nil ? "prompt-fallback" : "codex"
-                StationAIDiagnostics.record("task.title_apply.skipped", fields: fields.merging(["reason": "task_unavailable"]) { _, new in new })
-                isGeneratingTitle = false
-                return
-            }
-            guard latestTask.title == "Generating title…" else {
-                StationAIDiagnostics.record("task.title_apply.skipped", fields: [
-                    "taskID": task.id.uuidString,
-                    "reason": "title_changed",
-                    "currentTitleState": StationAITaskTitleDiagnostics.state(of: latestTask.title),
-                    "titleSource": title == nil ? "prompt-fallback" : "codex"
-                ])
-                isGeneratingTitle = false
-                return
-            }
             let resolvedTitle = title.flatMap { $0.isEmpty ? nil : $0 } ?? fallback
             do {
-                _ = try taskManager.rename(task.id, title: resolvedTitle)
+                guard try await taskManager.renameIfTitleMatches(
+                    task.id,
+                    expectedTitle: "Generating title…",
+                    title: resolvedTitle
+                ) != nil else {
+                    let currentTitle = (try? taskManager.taskModel(task.id).title) ?? ""
+                    StationAIDiagnostics.record("task.title_apply.skipped", fields: [
+                        "taskID": task.id.uuidString,
+                        "reason": "title_changed",
+                        "currentTitleState": StationAITaskTitleDiagnostics.state(of: currentTitle),
+                        "titleSource": title == nil ? "prompt-fallback" : "codex"
+                    ])
+                    isGeneratingTitle = false
+                    return
+                }
                 StationAIDiagnostics.record("task.title_apply.succeeded", fields: [
                     "taskID": task.id.uuidString,
                     "titleSource": title == nil ? "prompt-fallback" : "codex",
@@ -1606,6 +1744,7 @@ struct TaskConversationView: View {
             }
             isGeneratingTitle = false
         }
+        return true
     }
 
     private func generateTaskTitle(from prompt: String) async -> String? {
@@ -1665,24 +1804,14 @@ struct TaskConversationView: View {
     }
 
     private func updateWorkspaceRoots(_ roots: [URL]) {
-        do {
-            _ = try WorkspaceManager(taskManager: BoardTaskManager(modelContext: modelContext))
-                .setRoots(roots.map { $0.standardizedFileURL.path }, for: task.id)
-            Task { await refreshWorkspaceChanges() }
-        } catch {
-            errorMessage = "Couldn't save working folders: \(error.localizedDescription)"
-        }
-    }
-
-    private func addConversationRepository(_ repository: URL) {
-        do {
-            _ = try BoardTaskManager(modelContext: modelContext).addRepository(
-                task.id,
-                repositoryPath: repository.standardizedFileURL.path
-            )
-            Task { await refreshWorkspaceChanges() }
-        } catch {
-            errorMessage = "Couldn't add repository: \(error.localizedDescription)"
+        Task { @MainActor in
+            do {
+                _ = try await WorkspaceManager(taskManager: BoardTaskManager(modelContext: modelContext))
+                    .setRoots(roots.map { $0.standardizedFileURL.path }, for: task.id)
+                await refreshWorkspaceChanges()
+            } catch {
+                errorMessage = "Couldn't save working folders: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -1694,50 +1823,68 @@ struct TaskConversationView: View {
             errorMessage = "Branch and merge-from values can't be empty."
             return
         }
-        var repositories = task.repositoryWorktrees
-        guard let index = repositories.firstIndex(where: { $0.repositoryPath == original.repositoryPath }) else { return }
-        repositories[index].branch = branch
-        repositories[index].branchFrom = branchFrom
-        repositories[index].mergeTarget = mergeTarget.isEmpty ? nil : mergeTarget
-        task.repositoryWorktrees = repositories
-        try? modelContext.save()
-        repositoryBeingEdited = nil
+        Task { @MainActor in
+            do {
+                _ = try await BoardTaskManager(modelContext: modelContext).updateRepository(
+                    task.id,
+                    repositoryPath: original.repositoryPath,
+                    branch: branch,
+                    branchFrom: branchFrom,
+                    mergeTarget: mergeTarget.isEmpty ? nil : mergeTarget
+                )
+                repositoryBeingEdited = nil
+                errorMessage = nil
+            } catch {
+                errorMessage = "Couldn't save repository settings: \(error.localizedDescription)"
+            }
+        }
     }
 
     @ViewBuilder
-    private func repositoryDetailRow(_ title: String, value: Binding<String>, field: String, placeholder: String, identifier: String) -> some View {
+    private func repositoryDetailRow(
+        _ title: String,
+        value: Binding<String>,
+        field: String,
+        placeholder: String,
+        identifier: String,
+        editable: Bool
+    ) -> some View {
         HStack(spacing: 8) {
             Text(title).foregroundStyle(.secondary).frame(width: 82, alignment: .leading)
-            if editingRepositoryField == field {
+            if editable, editingRepositoryField == field {
                 TextField(placeholder, text: value).textFieldStyle(.roundedBorder).accessibilityIdentifier(identifier)
             } else {
-                Text(value.wrappedValue.isEmpty ? placeholder : value.wrappedValue)
+                let displayValue = value.wrappedValue.isEmpty ? placeholder : value.wrappedValue
+                Text(displayValue)
                     .lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityLabel(displayValue)
                     .accessibilityIdentifier("\(identifier)-value")
-                Button {
-                    editingRepositoryField = field
-                } label: {
-                    Image(systemName: "pencil").font(.system(size: 10, weight: .medium))
+                if editable {
+                    Button {
+                        editingRepositoryField = field
+                    } label: {
+                        Image(systemName: "pencil").font(.system(size: 10, weight: .medium))
+                    }
+                    .buttonStyle(.plain).help("Edit \(title)").accessibilityLabel("Edit \(title)")
+                    .accessibilityIdentifier("\(identifier)-edit")
                 }
-                .buttonStyle(.plain).help("Edit \(title)").accessibilityLabel("Edit \(title)")
-                .accessibilityIdentifier("\(identifier)-edit")
             }
         }
     }
 
     private func removeConversationRepository(_ repository: RepositoryWorktreeRecord) {
-        do {
-            if repository.createdByStationAI,
-               FileManager.default.fileExists(atPath: repository.worktreePath) {
-                try StationAIWorktreeManager.remove(repository)
+        Task { @MainActor in
+            do {
+                _ = try await BoardTaskManager(modelContext: modelContext).removeRepository(
+                    task.id,
+                    repositoryPath: repository.repositoryPath
+                )
+                repositoryBeingEdited = nil
+                errorMessage = nil
+                await refreshWorkspaceChanges()
+            } catch {
+                errorMessage = "Couldn't remove repository: \(error.localizedDescription)"
             }
-            task.repositoryWorktrees.removeAll { $0.repositoryPath == repository.repositoryPath }
-            task.workspaceRootPaths.removeAll { URL(fileURLWithPath: $0).standardizedFileURL.path == URL(fileURLWithPath: repository.worktreePath).standardizedFileURL.path }
-            try modelContext.save()
-            repositoryBeingEdited = nil
-            Task { await refreshWorkspaceChanges() }
-        } catch {
-            errorMessage = "Couldn't remove repository: \(error.localizedDescription)"
         }
     }
 
