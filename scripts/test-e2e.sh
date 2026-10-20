@@ -45,6 +45,7 @@ fi
 
 test_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/stationai-bridge.XXXXXX")"
 architecture="$(uname -m)"
+e2e_bundle_identifier="com.stationai.app.e2e.$$.${RANDOM}"
 xcode_version="$(xcodebuild -version | awk '/^Xcode / {print $2}')"
 repository_cache_key="$(printf '%s' "${repository_root}" | shasum -a 256 | cut -c 1-12)"
 derived_data_dir="${TMPDIR:-/tmp}/stationai-bridge-derived-data-${xcode_version}-${architecture}-${repository_cache_key}"
@@ -60,7 +61,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-python3 "${repository_root}/scripts/prepare-e2e-fixture.py"
 python3 "${repository_root}/scripts/check-test-parity.py"
 
 xcodebuild build -quiet \
@@ -73,7 +73,8 @@ xcodebuild build -quiet \
   CODE_SIGN_IDENTITY=- \
   ARCHS="${architecture}" \
   ONLY_ACTIVE_ARCH=YES \
-  STATIONAI_APP_BUNDLE_IDENTIFIER=com.stationai.app.e2e
+  STATIONAI_APP_BUNDLE_IDENTIFIER="${e2e_bundle_identifier}"
+python3 "${repository_root}/scripts/prepare-e2e-fixture.py"
 if [[ ! -x "${cli_path}" ]]; then
   printf 'The app build did not produce its bundled CLI at %s.\n' "${cli_path}" >&2
   exit 1

@@ -761,7 +761,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Done preserves the task worktree without merging")
     }
 
-    // case-contract: test_task_pr_create_reports_real_gh_failure | For a repository configured to merge into main, CLI and archive PR actions preserve that target, wait for the per-task operation lock before the real gh lookup, and after release a real local-repository gh failure creates no partial PR link or changes the Done status.
+    // case-contract: test_task_pr_create_reports_real_gh_failure | A repository-backed Done task exposes an archive PR action; it preserves the configured merge target, waits for the task operation lock, commits and publishes the branch before GitHub lookup, and reports publication failure without saving a PR link or changing Done status when no usable remote exists.
     func test_task_pr_create_reports_real_gh_failure() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -801,7 +801,7 @@ final class StationAIUITests: XCTestCase {
         operationLockReleased = true
         let alertSheet = app.sheets.firstMatch
         XCTAssertTrue(alertSheet.waitForExistence(timeout: 20), "The archived task should report gh's inability to create a PR.")
-        XCTAssertTrue(element(containingAccessibilityText: "GitHub CLI").waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(element(containingAccessibilityText: "publish the task branch").waitForExistence(timeout: 5), app.debugDescription)
         alertSheet.buttons["OK"].click()
         let current = try XCTUnwrap(taskRecord(id: taskID))
         let record = try XCTUnwrap((current["repositoryWorktrees"] as? [[String: Any]])?.first)

@@ -654,7 +654,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), branch_head)
         self.assertTrue(self.branch_exists(self.primary, branch))
 
-    # case-contract: test_task_pr_create_reports_real_gh_failure | For a repository configured to merge into main, CLI and archive PR actions preserve that target, wait for the per-task operation lock before the real gh lookup, and after release a real local-repository gh failure creates no partial PR link or changes the Done status.
+    # case-contract: test_task_pr_create_reports_real_gh_failure | A repository-backed Done task exposes an archive PR action; it preserves the configured merge target, waits for the task operation lock, commits and publishes the branch before GitHub lookup, and reports publication failure without saving a PR link or changing Done status when no usable remote exists.
     def test_task_pr_create_reports_real_gh_failure(self):
         task = self.create_repo_task(
             "PR failure", [self.primary], merge_targets={self.primary: "main"}, materialize=True
@@ -682,7 +682,7 @@ class StationAIBridgeTests(unittest.TestCase):
             operation_lock.release()
         response, _ = self.finish_cli(process, command, expected_status=1)
         self.assert_failure(response, "operation_failed")
-        self.assertIn("GitHub CLI", response["error"]["message"])
+        self.assertIn("couldn't publish the task branch", response["error"]["message"])
         current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         record = current["repositoryWorktrees"][0]
         self.assertEqual(record["mergeTarget"], "main")

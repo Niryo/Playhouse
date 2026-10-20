@@ -899,6 +899,14 @@ final class BoardTaskManager {
             }
             var records = originalRecords
             for index in records.indices where records[index].pullRequestNumber == nil || records[index].pullRequestURL == nil {
+                do {
+                    // `--head` skips gh's push flow, and `gh pr list` also needs a
+                    // published branch. Commit and publish before either GH request.
+                    try await worktreeService.commitChanges(records[index], message: "Complete task: \(initialTask.title)")
+                    try await worktreeService.publishBranch(records[index])
+                } catch {
+                    throw BridgeCommandError(code: "operation_failed", message: "GitHub CLI couldn't publish the task branch. \(error.localizedDescription)")
+                }
                 if let existing = try await pullRequestService.findOpen(records[index], executable: gh) {
                     records[index].pullRequestNumber = existing.number
                     records[index].pullRequestURL = existing.url
@@ -965,7 +973,12 @@ final class BoardTaskManager {
                 if let existing = try await pullRequestService.findOpen(record, executable: gh) {
                     pullRequest = existing
                 } else {
-                    try await worktreeService.commitChanges(record, message: "Complete task: \(currentTitle)")
+                    do {
+                        try await worktreeService.commitChanges(record, message: "Complete task: \(currentTitle)")
+                        try await worktreeService.publishBranch(record)
+                    } catch {
+                        throw BridgeCommandError(code: "operation_failed", message: "GitHub CLI couldn't publish the task branch. \(error.localizedDescription)")
+                    }
                     pullRequest = try await pullRequestService.create(record, title: currentTitle, body: summary, executable: gh)
                 }
                 updatedRecords[index].pullRequestNumber = pullRequest.number
