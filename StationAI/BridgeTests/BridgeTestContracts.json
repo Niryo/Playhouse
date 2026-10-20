@@ -137,7 +137,7 @@
   },
   {
     "id": "test_task_pr_create_reports_real_gh_failure",
-    "expectation": "A repository-backed Done task exposes a PR action in the archive; when the real gh CLI cannot create one for a local repository without a usable GitHub remote, it reports the failure, persists no partial PR link, and preserves Done status."
+    "expectation": "A repository-backed Done task exposes a PR action in the archive; when its branch cannot be published because the local repository has no usable GitHub remote, it reports the failure, persists no partial PR link, and preserves Done status."
   },
   {
     "id": "test_done_archive_displays_existing_pull_request_link",

@@ -418,7 +418,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), branch_head)
         self.assertTrue(self.branch_exists(self.primary, branch))
 
-    # case-contract: test_task_pr_create_reports_real_gh_failure | A repository-backed Done task exposes a PR action in the archive; when the real gh CLI cannot create one for a local repository without a usable GitHub remote, it reports the failure, persists no partial PR link, and preserves Done status.
+    # case-contract: test_task_pr_create_reports_real_gh_failure | A repository-backed Done task exposes a PR action in the archive; when its branch cannot be published because the local repository has no usable GitHub remote, it reports the failure, persists no partial PR link, and preserves Done status.
     def test_task_pr_create_reports_real_gh_failure(self):
         task = self.create_repo_task("PR failure", [self.primary], materialize=True)
         completed, _ = self.call_cli("task", "move", task["id"], "Done")
@@ -426,7 +426,7 @@ class StationAIBridgeTests(unittest.TestCase):
 
         response, _ = self.call_cli("task", "pr", "create", task["id"], expected_status=1)
         self.assert_failure(response, "operation_failed")
-        self.assertIn("GitHub CLI", response["error"]["message"])
+        self.assertIn("couldn't publish the task branch", response["error"]["message"])
         current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         record = current["repositoryWorktrees"][0]
         self.assertIsNone(record.get("pullRequestNumber"))

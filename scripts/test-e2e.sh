@@ -45,6 +45,7 @@ fi
 
 test_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/stationai-bridge.XXXXXX")"
 architecture="$(uname -m)"
+e2e_bundle_identifier="com.stationai.app.e2e.$$.${RANDOM}"
 result_bundle="${test_output_dir}/StationAI.xcresult"
 cleanup() {
   if [[ "$(head -n 1 "${selection_file}" 2>/dev/null || true)" == "${selection_owner}" ]]; then
@@ -70,7 +71,7 @@ xcodebuild test -quiet \
   CODE_SIGN_IDENTITY=- \
   ARCHS="${architecture}" \
   ONLY_ACTIVE_ARCH=YES \
-  STATIONAI_APP_BUNDLE_IDENTIFIER=com.stationai.app.e2e
+  STATIONAI_APP_BUNDLE_IDENTIFIER="${e2e_bundle_identifier}"
 xcodebuild_status=$?
 set -e
 

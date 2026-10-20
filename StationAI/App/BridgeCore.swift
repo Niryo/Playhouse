@@ -421,6 +421,15 @@ final class BoardTaskManager {
         }
         var records = task.repositoryWorktrees
         for index in records.indices where records[index].pullRequestNumber == nil || records[index].pullRequestURL == nil {
+            let record = records[index]
+            do {
+                // Supplying --head to gh pr create skips its normal push behavior, and
+                // gh pr list also needs a usable remote. Publish before either request.
+                try StationAIWorktreeManager.commitChanges(record, message: "Complete task: \(task.title)")
+                try StationAIWorktreeManager.publishBranch(record)
+            } catch {
+                throw BridgeCommandError(code: "operation_failed", message: "GitHub CLI couldn't publish the task branch. \(error.localizedDescription)")
+            }
             if let existing = try GitHubPullRequestManager.findOpen(records[index], executable: gh) {
                 records[index].pullRequestNumber = existing.number
                 records[index].pullRequestURL = existing.url
@@ -462,7 +471,6 @@ final class BoardTaskManager {
 
         for index in records.indices where records[index].pullRequestNumber == nil || records[index].pullRequestURL == nil {
             let record = records[index]
-            try StationAIWorktreeManager.commitChanges(record, message: "Complete task: \(task.title)")
             let created = try GitHubPullRequestManager.create(record, title: task.title, body: summary, executable: gh)
             records[index].pullRequestNumber = created.number
             records[index].pullRequestURL = created.url

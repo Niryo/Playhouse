@@ -524,6 +524,18 @@ enum StationAIWorktreeManager {
         _ = try git(record.worktreePath, ["commit", "-m", message])
     }
 
+    static func publishBranch(_ record: RepositoryWorktreeRecord) throws {
+        let configuredRemote = try git(record.worktreePath, ["config", "--get", "branch.\(record.branch).remote"], allowFailure: true)
+        let remotes = Set(try git(record.worktreePath, ["remote"]).output
+            .split(whereSeparator: \.isNewline).map(String.init))
+        let configuredName = configuredRemote.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let remote = remotes.contains(configuredName) ? configuredName : (remotes.contains("origin") ? "origin" : nil)
+        guard let remote else {
+            throw BridgeCommandError(code: "operation_failed", message: "The task branch has no Git remote configured for publishing.")
+        }
+        _ = try git(record.worktreePath, ["push", "--set-upstream", remote, record.branch])
+    }
+
     static func hasChanges(_ record: RepositoryWorktreeRecord) throws -> Bool {
         let status = try git(record.worktreePath, ["status", "--porcelain", "--untracked-files=all"]).output
         return !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
