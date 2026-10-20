@@ -6,9 +6,7 @@ struct KanbanBoardView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var codexClient: CodexAppServerClient
     @Query(sort: \BoardTask.createdAt, order: .reverse) private var tasks: [BoardTask]
-    @State private var isShowingNewTask = false
-    @State private var pendingConversationTaskID: UUID?
-    @State private var isChoosingDefaultParent = false
+    @State private var isCreatingNewTask = false
     @State private var saveError: String?
     @State private var lifecycleResetNotice: String?
     @State private var draggedTaskID: UUID?
@@ -49,19 +47,18 @@ struct KanbanBoardView: View {
                 lifecycleResetNotice = "Existing tasks were cleared. These dirty managed worktrees were kept:\n\n" + retained.joined(separator: "\n")
             }
         }
-        .sheet(isPresented: $isShowingNewTask, onDismiss: openPendingCreatedTask) {
-            NewTaskSheet(onCreate: createTask)
-        }
         .sheet(isPresented: Binding(
             get: { taskBeingRenamed != nil },
             set: { if !$0 { taskBeingRenamed = nil } }
         )) {
             if let taskBeingRenamed {
                 RenameTaskSheet(title: taskBeingRenamed.title) { title in
-                    do {
-                        _ = try BoardTaskManager(modelContext: modelContext).rename(taskBeingRenamed.id, title: title)
-                    } catch {
-                        saveError = error.localizedDescription
+                    Task { @MainActor in
+                        do {
+                            _ = try await BoardTaskManager(modelContext: modelContext).rename(taskBeingRenamed.id, title: title)
+                        } catch {
+                            saveError = error.localizedDescription
+                        }
                     }
                     self.taskBeingRenamed = nil
                 }
@@ -74,15 +71,17 @@ struct KanbanBoardView: View {
         ) {
             Button("Delete Task", role: .destructive) {
                 guard let taskBeingDeleted else { return }
-                do {
-                    try BoardTaskManager(modelContext: modelContext).delete(
-                        taskBeingDeleted.id,
-                        diagnostics: codexClient.diagnosticFields()
-                    )
-                } catch {
-                    saveError = "\(error.localizedDescription)\n\nDiagnostic log: \(StationAIDiagnostics.logURL.path)"
+                Task { @MainActor in
+                    do {
+                        try await BoardTaskManager(modelContext: modelContext).delete(
+                            taskBeingDeleted.id,
+                            diagnostics: codexClient.diagnosticFields()
+                        )
+                    } catch {
+                        saveError = "\(error.localizedDescription)\n\nDiagnostic log: \(StationAIDiagnostics.logURL.path)"
+                    }
+                    self.taskBeingDeleted = nil
                 }
-                self.taskBeingDeleted = nil
             }
             .accessibilityIdentifier("confirm-delete-task-button")
             Button("Cancel", role: .cancel) {
@@ -132,14 +131,6 @@ struct KanbanBoardView: View {
         } message: {
             Text("The pull request hasn't been merged. Marking this task Done will keep its worktree and branch as they are.")
         }
-        .alert("Some task worktrees were kept", isPresented: Binding(
-            get: { lifecycleResetNotice != nil },
-            set: { if !$0 { lifecycleResetNotice = nil } }
-        )) {
-            Button("OK", role: .cancel) { lifecycleResetNotice = nil }
-        } message: {
-            Text(lifecycleResetNotice ?? "")
-        }
     }
 
     private var boardContent: some View {
@@ -149,6 +140,31 @@ struct KanbanBoardView: View {
             Rectangle()
                 .fill(Color.primary.opacity(0.07))
                 .frame(height: 1)
+
+            if let lifecycleResetNotice {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Some task worktrees were kept")
+                            .font(.system(size: 12, weight: .semibold))
+                            .accessibilityIdentifier("task-lifecycle-reset-title")
+                        Text(lifecycleResetNotice)
+                            .font(.system(size: 11))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("task-lifecycle-reset-details")
+                    }
+                    Spacer(minLength: 8)
+                    Button("OK") { self.lifecycleResetNotice = nil }
+                        .accessibilityIdentifier("dismiss-task-lifecycle-reset-notice")
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(WorkspaceTheme.panelBackground)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("task-lifecycle-reset-notice")
+            }
 
             ScrollView(.horizontal) {
                 HStack(alignment: .top, spacing: 16) {
@@ -186,6 +202,7 @@ struct KanbanBoardView: View {
                 .padding(.bottom, 28)
             }
             .scrollIndicators(.visible)
+            .background(WorkspaceTheme.windowBackground)
             .accessibilityIdentifier("board-columns-scroll-view")
             .overlay(alignment: .trailing) {
                 if draggedTaskID != nil {
@@ -211,6 +228,7 @@ struct KanbanBoardView: View {
                     .overlay(alignment: .leading) { Rectangle().fill(Color.primary.opacity(0.10)).frame(width: 1) }
                     .shadow(color: .black.opacity(0.16), radius: 18, x: -6, y: 0)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("done-archive-panel")
             }
         }
@@ -301,6 +319,7 @@ struct KanbanBoardView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(WorkspaceTheme.accent)
+                .disabled(isCreatingNewTask)
                 .accessibilityIdentifier("new-task-button")
             }
         }
@@ -443,43 +462,23 @@ struct KanbanBoardView: View {
     }
 
     private func openNewTask() {
-        guard !isChoosingDefaultParent else { return }
-        do {
-            let created = try BoardTaskManager(modelContext: modelContext).create(
-                title: "Untitled task",
-                repositories: [],
-                contextFolders: []
-            )
-            selectedTask = try BoardTaskManager(modelContext: modelContext).taskModel(created.id)
-            isSelectedTaskNew = true
-        } catch {
-            saveError = error.localizedDescription
+        guard !isCreatingNewTask else { return }
+        isCreatingNewTask = true
+        Task { @MainActor in
+            defer { isCreatingNewTask = false }
+            do {
+                let manager = BoardTaskManager(modelContext: modelContext)
+                let created = try await manager.create(
+                    title: "Untitled task",
+                    repositories: [],
+                    contextFolders: []
+                )
+                selectedTask = try manager.taskModel(created.id)
+                isSelectedTaskNew = true
+            } catch {
+                saveError = error.localizedDescription
+            }
         }
-    }
-
-    private func createTask(repositories: [RepositoryWorktreeSpec], contextFolders: [URL]) throws {
-        let branchName = "task-\(UUID().uuidString.prefix(8).lowercased())"
-        let branchSpecs = repositories.map { spec -> RepositoryWorktreeSpec in
-            var spec = spec
-            if spec.branch == nil { spec.branch = branchName }
-            return spec
-        }
-        let created = try BoardTaskManager(modelContext: modelContext).create(
-            title: "Untitled task",
-            repositories: branchSpecs,
-            contextFolders: contextFolders.map { $0.standardizedFileURL.path }
-        )
-        pendingConversationTaskID = created.id
-    }
-
-    private func openPendingCreatedTask() {
-        guard let taskID = pendingConversationTaskID else { return }
-        pendingConversationTaskID = nil
-        selectedTask = tasks.first(where: { $0.id == taskID })
-        if selectedTask == nil {
-            selectedTask = try? BoardTaskManager(modelContext: modelContext).taskModel(taskID)
-        }
-        isSelectedTaskNew = selectedTask != nil
     }
 
     private func moveTask(id: UUID, to status: TaskStatus, allowUnmergedPullRequests: Bool = false) {
@@ -490,8 +489,6 @@ struct KanbanBoardView: View {
                 _ = try await BoardTaskManager(modelContext: modelContext).move(
                     id,
                     to: status.rawValue,
-                    client: codexClient,
-                    onConflictResolutionStart: { selectedTask = task },
                     allowUnmergedPullRequests: allowUnmergedPullRequests
                 )
             } catch StationAIManagerError.unmergedPullRequests {
@@ -587,6 +584,9 @@ private struct DoneDropTarget: View {
             }
             return true
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Move task to Done")
+        .accessibilityHint("Drop a reviewed task here to move it to Done.")
     }
 }
 
@@ -864,87 +864,96 @@ private struct TaskCardView: View {
     let onMoveToDone: (() -> Void)?
 
     var body: some View {
-        Button(action: onOpen) {
-            VStack(alignment: .leading, spacing: 13) {
-                HStack(spacing: 6) {
-                    Image(systemName: "circle.inset.filled")
-                        .font(.system(size: 9))
-                        .foregroundStyle(task.status.accent)
-                    Text(task.status.rawValue)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 0)
-                    Spacer(minLength: 0)
-                }
+        VStack(alignment: .leading, spacing: 13) {
+            HStack(spacing: 6) {
+                Image(systemName: "circle.inset.filled")
+                    .font(.system(size: 9))
+                    .foregroundStyle(task.status.accent)
+                Text(task.status.rawValue)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Spacer(minLength: 0)
+            }
 
-                if let progressLabel = task.progressLabel, !progressLabel.isEmpty {
-                    HStack(alignment: .top, spacing: 6) {
-                        let progressType = TaskProgressType(rawValue: task.progressTypeRawValue ?? "")
-                        Image(systemName: progressType?.symbol ?? "sparkle")
+            if let progressLabel = task.progressLabel, !progressLabel.isEmpty {
+                HStack(alignment: .top, spacing: 6) {
+                    let progressType = TaskProgressType(rawValue: task.progressTypeRawValue ?? "")
+                    Image(systemName: progressType?.symbol ?? "sparkle")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .accessibilityLabel(progressType?.symbol ?? "sparkle")
+                        .accessibilityIdentifier("task-progress-icon-\(task.id.uuidString)")
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(progressLabel)
                             .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(Color.accentColor)
-                            .accessibilityLabel(progressType?.symbol ?? "sparkle")
-                            .accessibilityIdentifier("task-progress-icon-\(task.id.uuidString)")
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(progressLabel)
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(.primary)
-                                .accessibilityIdentifier("task-progress-label-\(task.id.uuidString)")
-                            if let progressDetail = task.progressDetail, !progressDetail.isEmpty {
-                                Text(progressDetail)
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
-                                    .accessibilityIdentifier("task-progress-detail-\(task.id.uuidString)")
-                            }
+                            .foregroundStyle(.primary)
+                            .accessibilityIdentifier("task-progress-label-\(task.id.uuidString)")
+                        if let progressDetail = task.progressDetail, !progressDetail.isEmpty {
+                            Text(progressDetail)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .accessibilityIdentifier("task-progress-detail-\(task.id.uuidString)")
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("task-progress-report-\(task.id.uuidString)")
-                    .accessibilityValue("Progress icon: \(TaskProgressType(rawValue: task.progressTypeRawValue ?? "")?.symbol ?? "sparkle")")
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("task-progress-report-\(task.id.uuidString)")
+                .accessibilityLabel([progressLabel, task.progressDetail].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", "))
+                .accessibilityValue("Progress icon: \(TaskProgressType(rawValue: task.progressTypeRawValue ?? "")?.symbol ?? "sparkle")")
+            }
 
-                if let statusMessage = task.statusMessage, !statusMessage.isEmpty {
-                    Text(statusMessage)
-                        .font(.system(size: 10))
-                        .foregroundStyle(task.status == .blocked ? Color.red : Color.secondary)
-                        .lineLimit(3)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .accessibilityIdentifier("task-status-message-\(task.id.uuidString)")
-                }
+            if let statusMessage = task.statusMessage, !statusMessage.isEmpty {
+                Text(statusMessage)
+                    .font(.system(size: 10))
+                    .foregroundStyle(task.status == .blocked ? Color.red : Color.secondary)
+                    .lineLimit(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("task-status-message-\(task.id.uuidString)")
+            }
 
-        HStack(spacing: 6) {
-            if task.title == "Generating title…" { ProgressView().controlSize(.small) }
-            Text(task.title)
+            HStack(spacing: 6) {
+                if task.title == "Generating title…" { ProgressView().controlSize(.small) }
+                Text(task.title)
+            }
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("task-title-\(task.id.uuidString)")
+
+            HStack(spacing: 6) {
+                Image(systemName: "clock")
+                    .font(.system(size: 10))
+                Text(task.createdAt.formatted(date: .abbreviated, time: .omitted))
+                    .font(.system(size: 10))
+            }
+            .foregroundStyle(.tertiary)
         }
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("task-title-\(task.id.uuidString)")
-
-                HStack(spacing: 6) {
-                    Image(systemName: "clock")
-                        .font(.system(size: 10))
-                    Text(task.createdAt.formatted(date: .abbreviated, time: .omitted))
-                        .font(.system(size: 10))
-                }
-                .foregroundStyle(.tertiary)
-            }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(WorkspaceTheme.windowBackground)
-                    .shadow(color: .black.opacity(0.035), radius: 5, x: 0, y: 2)
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(WorkspaceTheme.windowBackground)
+                .shadow(color: .black.opacity(0.035), radius: 5, x: 0, y: 2)
         }
-        .buttonStyle(.plain)
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            Button(action: onOpen) {
+                Color.clear
+                    .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(task.title)
+            .accessibilityHint("Open task")
+            .accessibilityIdentifier("task-card-\(task.id.uuidString)")
+        }
+        .accessibilityElement(children: .contain)
         .overlay(alignment: .topTrailing) {
             if !task.repositoryWorktrees.isEmpty {
                 HStack(spacing: 5) {
@@ -974,9 +983,6 @@ private struct TaskCardView: View {
                 .padding(.top, 12)
             }
         }
-        .accessibilityLabel(task.title)
-        .accessibilityHint("Open task")
-        .accessibilityIdentifier("task-card-\(task.id.uuidString)")
         .contextMenu {
             if let onMoveToDone {
                 Button("Move to Done", systemImage: "checkmark.circle", action: onMoveToDone)

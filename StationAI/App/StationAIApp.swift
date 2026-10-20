@@ -37,11 +37,8 @@ struct StationAIApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
-            MainWindowView()
-                .modelContainer(modelContainer)
-                .environmentObject(codexClient)
-                .defaultAppStorage(appPreferences)
+        Window("StationAI", id: "main") {
+            mainWindowContent
         }
         .defaultSize(width: 1280, height: 820)
         .windowResizability(.contentSize)
@@ -51,14 +48,49 @@ struct StationAIApp: App {
                 .defaultAppStorage(appPreferences)
         }
     }
+
+    private var mainWindowContent: some View {
+        MainWindowView()
+            .modelContainer(modelContainer)
+            .environmentObject(codexClient)
+            .defaultAppStorage(appPreferences)
+    }
 }
 
 private struct MainWindowView: View {
     @AppStorage(WorkspaceSettings.appearanceKey, store: WorkspaceSettings.preferencesStore) private var appearance = "dark"
+    @Environment(\.modelContext) private var modelContext
+    @State private var lifecycleError: String?
+    @State private var isLifecycleReady = false
 
     var body: some View {
-        KanbanBoardView()
-            .tint(WorkspaceTheme.accent)
-            .preferredColorScheme(appearance == "light" ? .light : .dark)
+        Group {
+            if isLifecycleReady {
+                KanbanBoardView()
+            } else if let lifecycleError {
+                ContentUnavailableView(
+                    "Couldn't prepare StationAI",
+                    systemImage: "externaldrive.badge.exclamationmark",
+                    description: Text(lifecycleError)
+                )
+            } else {
+                ProgressView("Preparing StationAI…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .tint(WorkspaceTheme.accent)
+        .preferredColorScheme(appearance == "light" ? .light : .dark)
+        .task {
+            guard !isLifecycleReady else { return }
+            do {
+                try await StationAIStore.prepareLifecycle(
+                    container: modelContext.container,
+                    dataDirectory: ProcessInfo.processInfo.environment["STATIONAI_DATA_DIRECTORY"]
+                )
+                isLifecycleReady = true
+            } catch {
+                lifecycleError = error.localizedDescription
+            }
+        }
     }
 }

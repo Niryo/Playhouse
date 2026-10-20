@@ -33,6 +33,7 @@ enum WorkspaceTheme {
     static let windowBackground = adaptive(dark: (0x1E, 0x1E, 0x1E), light: .windowBackgroundColor)
     static let panelBackground = adaptive(dark: (0x25, 0x25, 0x26), light: .controlBackgroundColor)
     static let inputBackground = adaptive(dark: (0x3C, 0x3C, 0x3C), light: .textBackgroundColor)
+    static let conversationText = adaptive(dark: (0xC5, 0xC5, 0xC5), light: .labelColor)
     static let accent = Color(nsColor: NSColor(srgbRed: 0, green: 122.0 / 255.0, blue: 204.0 / 255.0, alpha: 1))
 
     private static func adaptive(dark: (UInt8, UInt8, UInt8), light: NSColor) -> Color {
@@ -319,24 +320,12 @@ enum StationAIWorktreeManager {
 
     static func defaultBranchFrom(repositoryPath: String) throws -> String {
         let repository = try repositoryRoot(repositoryPath)
-        return try resolveBase(repository: repository, requested: nil)
+        return try defaultBranches(repository: repository).branchFrom
     }
 
     static func defaultLocalBranch(repositoryPath: String) throws -> String {
         let repository = try repositoryRoot(repositoryPath)
-        if let remoteHead = try? git(repository, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]).output
-            .trimmingCharacters(in: .whitespacesAndNewlines) {
-            let candidate = remoteHead.replacingOccurrences(of: "refs/remotes/origin/", with: "")
-            if try git(repository, ["show-ref", "--verify", "--quiet", "refs/heads/\(candidate)"], allowFailure: true).status == 0 {
-                return candidate
-            }
-        }
-        for candidate in ["main", "master"] {
-            if try git(repository, ["show-ref", "--verify", "--quiet", "refs/heads/\(candidate)"], allowFailure: true).status == 0 {
-                return candidate
-            }
-        }
-        let current = try git(repository, ["branch", "--show-current"]).output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let current = try defaultBranches(repository: repository).mergeTarget
         guard !current.isEmpty else {
             throw BridgeCommandError(code: "operation_failed", message: "Choose a local branch as the merge target for \(repository).")
         }
@@ -353,10 +342,11 @@ enum StationAIWorktreeManager {
         }
         let branchCheck = try git(repository, ["check-ref-format", "--branch", branch], allowFailure: true)
         guard branchCheck.status == 0 else {
-            throw BridgeCommandError(code: "invalid_argument", message: "'(branch)' isn't a valid Git branch name.")
+            throw BridgeCommandError(code: "invalid_argument", message: "'\(branch)' isn't a valid Git branch name.")
         }
-        let branchFrom = try resolveBase(repository: repository, requested: spec.branchFrom)
-        let mergeTarget = try resolveMergeTarget(repository: repository, requested: spec.mergeTarget)
+        let defaults = try defaultBranchOptionsIfNeeded(repository: repository, spec: spec)
+        let branchFrom = try resolveBase(repository: repository, requested: spec.branchFrom, defaults: defaults)
+        let mergeTarget = try resolveMergeTarget(repository: repository, requested: spec.mergeTarget, defaults: defaults)
         guard branch != mergeTarget else {
             throw BridgeCommandError(code: "invalid_argument", message: "A task branch can't also be its merge target: \(branch).")
         }
@@ -380,12 +370,13 @@ enum StationAIWorktreeManager {
 
     static func pendingRecord(spec: RepositoryWorktreeSpec) throws -> RepositoryWorktreeRecord {
         let repository = try repositoryRoot(spec.repositoryPath)
-        let branchFrom = try resolveBase(repository: repository, requested: spec.branchFrom)
-        let mergeTarget = try resolveMergeTarget(repository: repository, requested: spec.mergeTarget)
+        let defaults = try defaultBranchOptionsIfNeeded(repository: repository, spec: spec)
+        let branchFrom = try resolveBase(repository: repository, requested: spec.branchFrom, defaults: defaults)
+        let mergeTarget = try resolveMergeTarget(repository: repository, requested: spec.mergeTarget, defaults: defaults)
         let branch = spec.branch?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let branch, !branch.isEmpty {
             guard !branch.hasPrefix("-"), try git(repository, ["check-ref-format", "--branch", branch], allowFailure: true).status == 0 else {
-                throw BridgeCommandError(code: "invalid_argument", message: "'(branch)' isn't a valid Git branch name.")
+                throw BridgeCommandError(code: "invalid_argument", message: "'\(branch)' isn't a valid Git branch name.")
             }
             guard branch != mergeTarget else {
                 throw BridgeCommandError(code: "invalid_argument", message: "A task branch can't also be its merge target: \(branch).")
@@ -400,114 +391,6 @@ enum StationAIWorktreeManager {
             mergeTarget: mergeTarget,
             isPending: true
         )
-    }
-
-    static func preflightMerge(_ record: RepositoryWorktreeRecord) throws -> Bool {
-        try preflightRemoval(record)
-        guard let target = record.mergeTarget,
-              try git(record.repositoryPath, ["check-ref-format", "--branch", target], allowFailure: true).status == 0,
-              try git(record.repositoryPath, ["show-ref", "--verify", "--quiet", "refs/heads/\(target)"], allowFailure: true).status == 0 else {
-            throw BridgeCommandError(code: "operation_failed", message: "The merge target for \(URL(fileURLWithPath: record.repositoryPath).lastPathComponent) isn't an available local branch.")
-        }
-        guard target != record.branch else {
-            throw BridgeCommandError(code: "operation_failed", message: "The task branch and merge target are both '\(target)'.")
-        }
-        let targetWorktrees = try worktrees(repository: record.repositoryPath).filter { $0.branch == target }
-        if let targetWorktree = targetWorktrees.first {
-            guard URL(fileURLWithPath: targetWorktree.path).standardizedFileURL == URL(fileURLWithPath: record.repositoryPath).standardizedFileURL else {
-                throw BridgeCommandError(code: "operation_failed", message: "The merge target '\(target)' is checked out in another worktree: \(targetWorktree.path).")
-            }
-            let targetStatus = try git(targetWorktree.path, ["status", "--porcelain", "--untracked-files=all"]).output
-            guard targetStatus.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw BridgeCommandError(code: "operation_failed", message: "The merge target '\(target)' has uncommitted changes in \(targetWorktree.path).")
-            }
-        }
-        let mergeTree = try git(record.repositoryPath, ["merge-tree", "--write-tree", target, record.branch], allowFailure: true)
-        if mergeTree.status == 0 { return false }
-        if mergeTree.output.contains("CONFLICT") || mergeTree.output.contains("changed in both") { return true }
-        throw BridgeCommandError(code: "operation_failed", message: "Couldn't check whether '\(record.branch)' can merge into '\(target)': \(mergeTree.output.trimmingCharacters(in: .whitespacesAndNewlines))")
-    }
-
-    static func beginConflictResolution(_ record: RepositoryWorktreeRecord) throws {
-        guard let target = record.mergeTarget else {
-            throw BridgeCommandError(code: "operation_failed", message: "This task has no merge target branch.")
-        }
-        let result = try git(record.worktreePath, ["merge", "--no-commit", "--no-ff", target], allowFailure: true)
-        guard result.status != 0 else {
-            throw BridgeCommandError(code: "operation_failed", message: "The merge changed while preparing conflict resolution. Try moving the task to Done again.")
-        }
-        let unmerged = try git(record.worktreePath, ["ls-files", "-u"]).output
-        guard !unmerged.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            _ = try? git(record.worktreePath, ["merge", "--abort"])
-            throw BridgeCommandError(code: "operation_failed", message: result.output.trimmingCharacters(in: .whitespacesAndNewlines))
-        }
-    }
-
-    static func finishConflictResolution(_ record: RepositoryWorktreeRecord) throws {
-        guard FileManager.default.fileExists(atPath: URL(fileURLWithPath: record.worktreePath).appendingPathComponent(".git").path) else {
-            throw BridgeCommandError(code: "operation_failed", message: "The conflict-resolution worktree is unavailable: \(record.worktreePath)")
-        }
-        let unmerged = try git(record.worktreePath, ["ls-files", "-u"]).output
-        guard unmerged.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw BridgeCommandError(code: "operation_failed", message: "Codex finished with unresolved merge conflicts in \(record.worktreePath).")
-        }
-        let mergeHead = try git(record.worktreePath, ["rev-parse", "--verify", "--quiet", "MERGE_HEAD"], allowFailure: true)
-        guard mergeHead.status == 0 else { return }
-        _ = try git(record.worktreePath, ["add", "-A"])
-        _ = try git(record.worktreePath, ["commit", "--no-edit"])
-    }
-
-    static func mergeIntoTarget(_ record: RepositoryWorktreeRecord) throws {
-        guard let target = record.mergeTarget else {
-            throw BridgeCommandError(code: "operation_failed", message: "This task has no merge target branch.")
-        }
-        let currentBranch = try git(record.repositoryPath, ["branch", "--show-current"]).output.trimmingCharacters(in: .whitespacesAndNewlines)
-        let targetWorktree: String
-        var temporaryWorktree: String?
-        if currentBranch == target {
-            targetWorktree = record.repositoryPath
-        } else {
-            let worktrees = try worktrees(repository: record.repositoryPath)
-            guard !worktrees.contains(where: { $0.branch == target }) else {
-                throw BridgeCommandError(code: "operation_failed", message: "The merge target '\(target)' is checked out in another worktree.")
-            }
-            let tempPath = URL(fileURLWithPath: record.worktreePath)
-                .deletingLastPathComponent()
-                .appendingPathComponent("merge-\(UUID().uuidString)", isDirectory: true).path
-            _ = try git(record.repositoryPath, ["worktree", "add", tempPath, target])
-            targetWorktree = tempPath
-            temporaryWorktree = tempPath
-        }
-        defer {
-            if let temporaryWorktree {
-                _ = try? git(record.repositoryPath, ["worktree", "remove", "--force", temporaryWorktree])
-            }
-        }
-        let status = try git(targetWorktree, ["status", "--porcelain", "--untracked-files=all"]).output
-        guard status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw BridgeCommandError(code: "operation_failed", message: "The merge target '\(target)' has uncommitted changes in \(targetWorktree).")
-        }
-        let ancestry = try git(targetWorktree, ["merge-base", "--is-ancestor", record.branch, target], allowFailure: true)
-        guard ancestry.status == 0 || ancestry.status == 1 else {
-            throw BridgeCommandError(code: "operation_failed", message: "Couldn't check whether task branch '\(record.branch)' is already contained in merge target '\(target)': \(ancestry.output.trimmingCharacters(in: .whitespacesAndNewlines))")
-        }
-        guard ancestry.status != 0 else { return }
-        let changes = try git(targetWorktree, ["diff", "--quiet", target, record.branch], allowFailure: true)
-        guard changes.status == 0 || changes.status == 1 else {
-            throw BridgeCommandError(code: "operation_failed", message: "Couldn't compare task branch '\(record.branch)' with merge target '\(target)': \(changes.output.trimmingCharacters(in: .whitespacesAndNewlines))")
-        }
-        guard changes.status != 0 else { return }
-        let targetHead = try git(targetWorktree, ["rev-parse", "HEAD"]).output.trimmingCharacters(in: .whitespacesAndNewlines)
-        do {
-            _ = try git(targetWorktree, ["merge", "--squash", record.branch])
-            _ = try git(targetWorktree, ["commit", "-m", branchTitle(record.branch)])
-        } catch {
-            let currentHead = try? git(targetWorktree, ["rev-parse", "HEAD"]).output.trimmingCharacters(in: .whitespacesAndNewlines)
-            if currentHead == targetHead {
-                _ = try? git(targetWorktree, ["reset", "--hard", targetHead])
-            }
-            throw BridgeCommandError(code: "operation_failed", message: "Squash merge failed: \(error.localizedDescription)")
-        }
     }
 
     static func preflightRemoval(_ record: RepositoryWorktreeRecord) throws {
@@ -573,26 +456,93 @@ enum StationAIWorktreeManager {
         return result
     }
 
-    private static func resolveBase(repository: String, requested: String?) throws -> String {
+    private struct DefaultBranches {
+        let branchFrom: String
+        let mergeTarget: String
+        let hasLocalMergeTarget: Bool
+    }
+
+    private static func defaultBranchOptionsIfNeeded(
+        repository: String,
+        spec: RepositoryWorktreeSpec
+    ) throws -> DefaultBranches? {
+        let needsBranchFrom = spec.branchFrom?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
+        let needsMergeTarget = spec.mergeTarget?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
+        guard needsBranchFrom || needsMergeTarget else { return nil }
+        return try defaultBranches(repository: repository)
+    }
+
+    private static func defaultBranches(repository: String) throws -> DefaultBranches {
+        let output = try git(repository, ["for-each-ref", "--format=%(refname:short)", "refs/heads"]).output
+        let localBranches = Set(output.split(whereSeparator: \.isNewline).map(String.init))
+        let remoteHead = try? git(repository, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]).output
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let remoteBranch = remoteHead?.replacingOccurrences(of: "refs/remotes/origin/", with: "")
+
+        let branchFrom: String
+        if localBranches.contains("master") {
+            branchFrom = "master"
+        } else if let remoteBranch, !remoteBranch.isEmpty {
+            branchFrom = remoteBranch
+        } else {
+            branchFrom = try currentBranch(repository: repository)
+        }
+
+        let mergeTarget: String
+        if let remoteBranch, localBranches.contains(remoteBranch) {
+            mergeTarget = remoteBranch
+        } else if localBranches.contains("main") {
+            mergeTarget = "main"
+        } else if localBranches.contains("master") {
+            mergeTarget = "master"
+        } else {
+            mergeTarget = try currentBranch(repository: repository)
+        }
+        return DefaultBranches(
+            branchFrom: branchFrom,
+            mergeTarget: mergeTarget,
+            hasLocalMergeTarget: localBranches.contains(mergeTarget)
+        )
+    }
+
+    private static func currentBranch(repository: String) throws -> String {
+        try git(repository, ["branch", "--show-current"]).output
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func resolveBase(
+        repository: String,
+        requested: String?,
+        defaults: DefaultBranches? = nil
+    ) throws -> String {
         if let requested, !requested.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let base = requested.trimmingCharacters(in: .whitespacesAndNewlines)
             guard try git(repository, ["rev-parse", "--verify", "--quiet", "\(base)^{commit}"], allowFailure: true).status == 0 else {
-                throw BridgeCommandError(code: "invalid_argument", message: "Branch-from '(base)' doesn't exist in \(repository).")
+                throw BridgeCommandError(code: "invalid_argument", message: "Branch-from '\(base)' doesn't exist in \(repository).")
             }
             return base
         }
-        if try git(repository, ["show-ref", "--verify", "--quiet", "refs/heads/master"], allowFailure: true).status == 0 { return "master" }
-        if let remoteHead = try? git(repository, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]).output
-            .trimmingCharacters(in: .whitespacesAndNewlines), !remoteHead.isEmpty {
-            return remoteHead.replacingOccurrences(of: "refs/remotes/origin/", with: "")
-        }
-        return try git(repository, ["branch", "--show-current"]).output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return try (defaults ?? defaultBranches(repository: repository)).branchFrom
     }
 
-    private static func resolveMergeTarget(repository: String, requested: String?) throws -> String {
-        let candidate = (requested?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
-            ? requested!.trimmingCharacters(in: .whitespacesAndNewlines)
-            : try defaultLocalBranch(repositoryPath: repository)
+    private static func resolveMergeTarget(
+        repository: String,
+        requested: String?,
+        defaults: DefaultBranches? = nil
+    ) throws -> String {
+        guard let requested,
+              !requested.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            let branchOptions = try defaults ?? defaultBranches(repository: repository)
+            let candidate = branchOptions.mergeTarget
+            guard !candidate.isEmpty else {
+                throw BridgeCommandError(code: "operation_failed", message: "Choose a local branch as the merge target for \(repository).")
+            }
+            guard branchOptions.hasLocalMergeTarget else {
+                throw BridgeCommandError(code: "invalid_argument", message: "Merge target '\(candidate)' must name an existing local branch.")
+            }
+            return candidate
+        }
+        let candidate = requested.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !candidate.hasPrefix("-") else {
             throw BridgeCommandError(code: "invalid_argument", message: "Merge target names can't begin with a hyphen.")
         }
@@ -621,23 +571,145 @@ enum StationAIWorktreeManager {
         guard let executable = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
             throw BridgeCommandError(code: "operation_failed", message: "Git couldn't be found. Install Git and try again.")
         }
+        let result = try StationAIProcessRunner.run(
+            executable: executable,
+            arguments: ["-C", path] + arguments
+        )
+        let text = String(data: result.stdout, encoding: .utf8) ?? ""
+        guard result.status == 0 || allowFailure else {
+            let detail = String(data: result.stderr, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            throw BridgeCommandError(code: "operation_failed", message: detail.isEmpty ? "Git command failed." : detail)
+        }
+        return GitResult(status: result.status, output: text)
+    }
+}
+
+struct StationAIProcessResult {
+    let status: Int32
+    let stdout: Data
+    let stderr: Data
+}
+
+enum StationAIProcessRunner {
+    private final class OutputBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var outputData = Data()
+        private var errorData = Data()
+
+        func setOutput(_ data: Data) {
+            lock.lock()
+            outputData = data
+            lock.unlock()
+        }
+
+        func setError(_ data: Data) {
+            lock.lock()
+            errorData = data
+            lock.unlock()
+        }
+
+        func values() -> (Data, Data) {
+            lock.lock()
+            defer { lock.unlock() }
+            return (outputData, errorData)
+        }
+    }
+
+    static func run(
+        executable: String,
+        arguments: [String],
+        directory: String? = nil
+    ) throws -> StationAIProcessResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = ["-C", path] + arguments
+        process.arguments = arguments
+        if let directory {
+            process.currentDirectoryURL = URL(fileURLWithPath: directory, isDirectory: true)
+        }
         let output = Pipe()
         let error = Pipe()
         process.standardOutput = output
         process.standardError = error
         try process.run()
-        let out = output.fileHandleForReading.readDataToEndOfFile()
-        let err = error.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        let text = String(data: out, encoding: .utf8) ?? ""
-        guard process.terminationStatus == 0 || allowFailure else {
-            let detail = String(data: err, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            throw BridgeCommandError(code: "operation_failed", message: detail.isEmpty ? "Git command failed." : detail)
+        try? output.fileHandleForWriting.close()
+        try? error.fileHandleForWriting.close()
+
+        let box = OutputBox()
+        let readers = DispatchGroup()
+        readers.enter()
+        DispatchQueue.global(qos: .utility).async {
+            box.setOutput(output.fileHandleForReading.readDataToEndOfFile())
+            readers.leave()
         }
-        return GitResult(status: process.terminationStatus, output: text)
+        readers.enter()
+        DispatchQueue.global(qos: .utility).async {
+            box.setError(error.fileHandleForReading.readDataToEndOfFile())
+            readers.leave()
+        }
+        readers.wait()
+        process.waitUntilExit()
+        let (stdout, stderr) = box.values()
+        return StationAIProcessResult(status: process.terminationStatus, stdout: stdout, stderr: stderr)
+    }
+}
+
+enum StationAIBackgroundOperation {
+    static func run<Value: Sendable>(
+        priority: TaskPriority = .utility,
+        _ operation: @escaping @Sendable () throws -> Value
+    ) async throws -> Value {
+        try await Task.detached(priority: priority) {
+            try operation()
+        }.value
+    }
+}
+
+struct StationAIWorktreeService {
+
+    func pendingRecord(spec: RepositoryWorktreeSpec) async throws -> RepositoryWorktreeRecord {
+        try await StationAIBackgroundOperation.run {
+            try StationAIWorktreeManager.pendingRecord(spec: spec)
+        }
+    }
+
+    func resolve(
+        spec: RepositoryWorktreeSpec,
+        title: String,
+        root: URL
+    ) async throws -> RepositoryWorktreeRecord {
+        try await StationAIBackgroundOperation.run {
+            try StationAIWorktreeManager.resolve(spec: spec, title: title, root: root)
+        }
+    }
+
+    func hasChanges(_ record: RepositoryWorktreeRecord) async throws -> Bool {
+        try await StationAIBackgroundOperation.run {
+            try StationAIWorktreeManager.hasChanges(record)
+        }
+    }
+
+    func remove(_ record: RepositoryWorktreeRecord) async throws {
+        try await StationAIBackgroundOperation.run {
+            try StationAIWorktreeManager.remove(record)
+        }
+    }
+
+    func removeAfterConfirmation(_ record: RepositoryWorktreeRecord) async throws {
+        try await StationAIBackgroundOperation.run {
+            try StationAIWorktreeManager.removeAfterConfirmation(record)
+        }
+    }
+
+    func commitChanges(_ record: RepositoryWorktreeRecord, message: String) async throws {
+        try await StationAIBackgroundOperation.run {
+            try StationAIWorktreeManager.commitChanges(record, message: message)
+        }
+    }
+
+    func publishBranch(_ record: RepositoryWorktreeRecord) async throws {
+        try await StationAIBackgroundOperation.run {
+            try StationAIWorktreeManager.publishBranch(record)
+        }
     }
 }
 

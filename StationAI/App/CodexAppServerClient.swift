@@ -128,7 +128,7 @@ final class CodexAppServerClient: ObservableObject {
     private var activeDiffHandler: ((CodexTurnDiff) -> Void)?
     private var activeActivities: [String: CodexActivity] = [:]
     private var actionRequestHandler: (() -> Void)?
-    private var userInputHandler: ((CodexUserInputRequest) -> Void)?
+    private var userInputHandler: ((CodexUserInputRequest) async -> Void)?
     private var pendingUserInputRequestID: Any?
     private var pendingUserInputThreadID: String?
     private var pendingUserInputQuestions: [String: CodexUserQuestion] = [:]
@@ -232,7 +232,7 @@ final class CodexAppServerClient: ObservableObject {
         onDiff: @escaping (CodexTurnDiff) -> Void,
         onHistory: @escaping (CodexThreadHistory) -> Void,
         onActionRequest: @escaping () -> Void,
-        onUserInput: @escaping (CodexUserInputRequest) -> Void
+        onUserInput: @escaping (CodexUserInputRequest) async -> Void
     ) async throws {
         actionRequestHandler = onActionRequest
         userInputHandler = onUserInput
@@ -447,9 +447,12 @@ final class CodexAppServerClient: ObservableObject {
             stdoutQueue.async { [weak self] in
                 let data = handle.availableData
                 guard !data.isEmpty else { return }
+                let consumed = DispatchSemaphore(value: 0)
                 Task { @MainActor [weak self] in
-                    self?.consumeOutput(data)
+                    await self?.consumeOutput(data)
+                    consumed.signal()
                 }
+                consumed.wait()
             }
         }
         stderr.fileHandleForReading.readabilityHandler = { handle in
@@ -602,17 +605,17 @@ final class CodexAppServerClient: ObservableObject {
         }
     }
 
-    private func consumeOutput(_ data: Data) {
+    private func consumeOutput(_ data: Data) async {
         stdoutBuffer.append(data)
         let newline = Data([0x0A])
         while let range = stdoutBuffer.range(of: newline) {
             let line = stdoutBuffer.subdata(in: stdoutBuffer.startIndex..<range.lowerBound)
             stdoutBuffer.removeSubrange(stdoutBuffer.startIndex..<range.upperBound)
-            consume(line: line)
+            await consume(line: line)
         }
     }
 
-    private func consume(line: Data) {
+    private func consume(line: Data) async {
         guard !line.isEmpty,
               let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else {
             return
@@ -620,7 +623,7 @@ final class CodexAppServerClient: ObservableObject {
 
         if let method = message["method"] as? String {
             if let requestID = message["id"] {
-                handleServerRequest(method: method, params: message["params"] as? [String: Any] ?? [:], requestID: requestID)
+                await handleServerRequest(method: method, params: message["params"] as? [String: Any] ?? [:], requestID: requestID)
             } else {
                 handleNotification(method: method, params: message["params"] as? [String: Any] ?? [:])
             }
@@ -720,7 +723,7 @@ final class CodexAppServerClient: ObservableObject {
         }
     }
 
-    private func handleServerRequest(method: String, params: [String: Any], requestID: Any) {
+    private func handleServerRequest(method: String, params: [String: Any], requestID: Any) async {
         let normalizedMethod = method.lowercased()
         if normalizedMethod.contains("approval") || normalizedMethod.contains("item/tool/") ||
             normalizedMethod.contains("elicitation"), method != "item/tool/requestUserInput" {
@@ -764,7 +767,7 @@ final class CodexAppServerClient: ObservableObject {
                 isBlocking: activeConversationMode == .plan || (params["isBlocking"] as? Bool ?? true)
             )
             pendingUserInputRequest = request
-            userInputHandler?(request)
+            await userInputHandler?(request)
             return
         case "item/commandExecution/requestApproval", "item/fileChange/requestApproval":
             result = ["decision": "decline"]

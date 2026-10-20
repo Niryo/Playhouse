@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 
 import argparse
+import errno
+import fcntl
 import json
 import os
 import shutil
+import stat
 import subprocess
 import time
 import unittest
@@ -21,6 +24,126 @@ arguments = parser.parse_args()
 CONTRACT_PATH = Path(__file__).resolve().parent.parent / "StationAI/BridgeTests/BridgeTestContracts.json"
 
 
+class GitConfigReadBarrier:
+    """Hold a real Git config read open so a second XPC request can update task state."""
+
+    def __init__(self, repository):
+        self.config = Path(repository) / ".git" / "config"
+        self.backup = self.config.with_name(f"config.stationai-test-{uuid.uuid4()}")
+        self.contents = self.config.read_bytes()
+        self.writer = None
+        os.replace(self.config, self.backup)
+        try:
+            os.mkfifo(self.config)
+        except BaseException:
+            os.replace(self.backup, self.config)
+            raise
+
+    def wait_for_reader(self, timeout=15):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                self.writer = os.open(self.config, os.O_WRONLY | os.O_NONBLOCK)
+                return
+            except OSError as error:
+                if error.errno != errno.ENXIO:
+                    raise
+                time.sleep(0.005)
+        raise TimeoutError(f"Git did not open the owned config FIFO: {self.config}")
+
+    def release(self):
+        if self.writer is None and self.config.exists() and stat.S_ISFIFO(self.config.stat().st_mode):
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    self.writer = os.open(self.config, os.O_WRONLY | os.O_NONBLOCK)
+                    break
+                except OSError as error:
+                    if error.errno != errno.ENXIO:
+                        raise
+                    time.sleep(0.005)
+        if self.config.exists() and stat.S_ISFIFO(self.config.stat().st_mode):
+            self.config.unlink()
+        if self.backup.exists():
+            os.replace(self.backup, self.config)
+        if self.writer is not None:
+            try:
+                os.write(self.writer, self.contents)
+            finally:
+                os.close(self.writer)
+                self.writer = None
+
+
+class TaskOperationLockBarrier:
+    """Hold the real per-task advisory lock while another XPC operation runs."""
+
+    def __init__(self, data_directory, task_id):
+        directory = Path(data_directory) / "task-operation-locks"
+        directory.mkdir(parents=True, exist_ok=True)
+        self.descriptor = os.open(directory / f"{task_id}.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.lockf(self.descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB, 0, 0, os.SEEK_SET)
+        except BaseException:
+            os.close(self.descriptor)
+            self.descriptor = None
+            raise
+
+    def release(self):
+        if self.descriptor is None:
+            return
+        fcntl.lockf(self.descriptor, fcntl.LOCK_UN, 0, 0, os.SEEK_SET)
+        os.close(self.descriptor)
+        self.descriptor = None
+
+
+class ConversationTurnLockBarrier:
+    """Hold the real per-task conversation-turn reservation across XPC requests."""
+
+    def __init__(self, data_directory, task_id):
+        directory = Path(data_directory) / "conversation-turn-locks"
+        directory.mkdir(parents=True, exist_ok=True)
+        self.descriptor = os.open(directory / f"{task_id}.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.lockf(self.descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB, 0, 0, os.SEEK_SET)
+        except BaseException:
+            os.close(self.descriptor)
+            self.descriptor = None
+            raise
+
+    def release(self):
+        if self.descriptor is None:
+            return
+        fcntl.lockf(self.descriptor, fcntl.LOCK_UN, 0, 0, os.SEEK_SET)
+        os.close(self.descriptor)
+        self.descriptor = None
+
+
+class RepositoryAllocationLockBarrier:
+    """Hold the real repository-wide allocation lock across concurrent XPC requests."""
+
+    def __init__(self, data_directory, repository):
+        canonical_path = os.path.abspath(os.path.normpath(repository))
+        lock_hash = 14695981039346656037
+        for byte in os.fsencode(canonical_path):
+            lock_hash = ((lock_hash ^ byte) * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+        directory = Path(data_directory) / "repository-allocation-locks"
+        directory.mkdir(parents=True, exist_ok=True)
+        self.descriptor = os.open(directory / f"{lock_hash:016x}.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.lockf(self.descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB, 0, 0, os.SEEK_SET)
+        except BaseException:
+            os.close(self.descriptor)
+            self.descriptor = None
+            raise
+
+    def release(self):
+        if self.descriptor is None:
+            return
+        fcntl.lockf(self.descriptor, fcntl.LOCK_UN, 0, 0, os.SEEK_SET)
+        os.close(self.descriptor)
+        self.descriptor = None
+
+
 class StationAIBridgeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -34,11 +157,14 @@ class StationAIBridgeTests(unittest.TestCase):
         cls.alternate = cls.fixture / "suggested-parent" / "alternate-parent" / "alternate"
         cls.custom = cls.fixture / "suggested-parent" / "custom-folder"
         cls.changes = cls.fixture / "suggested-parent" / "changes"
+        cls.empty_git_repository = cls.fixture / "empty-git-repo"
         cls.nested = cls.primary / "nested"
         cls.external = cls.fixture / "outside-parent" / "linked-outside"
-        for path in [cls.primary, cls.secondary, cls.alternate, cls.custom, cls.nested, cls.external]:
+        for path in [cls.primary, cls.secondary, cls.alternate, cls.custom, cls.nested, cls.external, cls.empty_git_repository]:
             if not path.is_dir():
                 raise RuntimeError(f"Missing expected Git repository fixture: {path}")
+        if not (cls.empty_git_repository / ".git").is_dir():
+            raise RuntimeError(f"Missing empty Git repository metadata: {cls.empty_git_repository}")
 
     def setUp(self):
         self.test_id = f"{self._testMethodName}-{uuid.uuid4()}"
@@ -84,6 +210,35 @@ class StationAIBridgeTests(unittest.TestCase):
             response = json.loads(lines[-1])
         except json.JSONDecodeError as error:
             self.fail(f"CLI final output was not JSON for {command}: {error}; {lines[-1]!r}")
+        self.assertEqual(response.get("version"), 1)
+        self.assertIn("id", response)
+        return response, [json.loads(line) for line in lines[:-1]]
+
+    def start_cli(self, *command, extra_environment=None):
+        environment = os.environ.copy()
+        environment["STATIONAI_DATA_DIRECTORY"] = str(self.data_directory)
+        environment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = str(self.worktree_directory)
+        environment["STATIONAI_E2E_DEFAULTS_SUITE"] = self.defaults_suite
+        environment["STATIONAI_BRIDGE_SERVICE_NAME"] = arguments.service_name
+        environment.update(extra_environment or {})
+        return subprocess.Popen(
+            [str(self.cli), *map(str, command)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+        )
+
+    def finish_cli(self, process, command, expected_status=0, timeout=90):
+        stdout, stderr = process.communicate(timeout=timeout)
+        self.assertEqual(
+            process.returncode,
+            expected_status,
+            f"CLI exit mismatch for {command}: stdout={stdout!r}; stderr={stderr!r}",
+        )
+        lines = [line for line in stdout.splitlines() if line.strip()]
+        self.assertTrue(lines, f"CLI returned no JSON output for {command}: {stderr}")
+        response = json.loads(lines[-1])
         self.assertEqual(response.get("version"), 1)
         self.assertIn("id", response)
         return response, [json.loads(line) for line in lines[:-1]]
@@ -242,12 +397,12 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         return response
 
-    # case-contract: test_service_reports_bridge_version | The real app window opens and the bridge reports StationAI API version 1.
+    # case-contract: test_service_reports_bridge_version | StationAI opens one main board window and the bridge reports API version 1.
     def test_service_reports_bridge_version(self):
         response, _ = self.call_cli("status")
         self.assertEqual(self.assert_success(response), {"bridgeVersion": 1, "service": "StationAI"})
 
-    # case-contract: test_task_creation_rejects_invalid_title_roots_and_missing_folder | Blank titles, missing roots, unavailable roots, and nonexistent merge targets cannot create a task.
+    # case-contract: test_task_creation_rejects_invalid_title_roots_and_missing_folder | New Task immediately opens an empty conversation with the repository picker focused; sending stays disabled until a working folder is added. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets.
     def test_task_creation_rejects_invalid_title_roots_and_missing_folder(self):
         response, _ = self.call_cli(
             "task", "create", "--title", "   ", "--root", self.primary,
@@ -266,6 +421,8 @@ class StationAIBridgeTests(unittest.TestCase):
         empty_task = self.assert_success(response)
         self.assertEqual(empty_task["workspaceRoots"], [])
         self.assertEqual(empty_task["repositoryWorktrees"], [])
+        deleted, _ = self.call_cli("task", "delete", empty_task["id"])
+        self.assertTrue(self.assert_success(deleted)["deleted"])
 
         response, _ = self.call_cli(
             "task", "create", "--title", "Missing folder", "--root", self.fixture / "missing",
@@ -273,7 +430,7 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assert_failure(response, "invalid_argument")
 
-    # case-contract: test_task_creation_persists_ordered_roots_across_fresh_connections | Creating a repository task persists its selected branch settings as pending, shows auto when no branch is chosen, and creates no Git branch or worktree until the first conversation send.
+    # case-contract: test_task_creation_persists_ordered_roots_across_fresh_connections | A directly created conversation can add repositories in order, edit pending branch settings, and add a context folder; these settings persist across fresh connections without creating branches or worktrees before the first send.
     def test_task_creation_persists_ordered_roots_across_fresh_connections(self):
         branch_token = uuid.uuid4().hex[:8]
         title = f"Bridge task {branch_token}"
@@ -317,7 +474,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(task["repositoryWorktrees"][0]["worktreePath"], str(existing))
         self.assertFalse(task["repositoryWorktrees"][0]["createdByStationAI"])
 
-    # case-contract: test_task_creation_creates_worktrees_in_multiple_repositories | Selecting multiple repositories persists pending auto branch records without creating branches or worktrees before the task starts.
+    # case-contract: test_task_creation_creates_worktrees_in_multiple_repositories | The conversation picker can add multiple repositories; unset branch settings display defaults and persist pending auto records resolved to local main without creating branches or worktrees before the first send.
     def test_task_creation_creates_worktrees_in_multiple_repositories(self):
         branch_token = uuid.uuid4().hex[:8]
         title = f"Multi repository {branch_token}"
@@ -342,7 +499,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(completed)["status"], "Done")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["contextFolders"], [str(self.custom)])
 
-    # case-contract: test_task_creation_rejects_worktree_assigned_to_active_task | A worktree already assigned to another active task is rejected without creating another task.
+    # case-contract: test_task_creation_rejects_worktree_assigned_to_active_task | Adding a repository branch already assigned to another active task is rejected in the new conversation, and the existing task and repository reservation remain unchanged.
     def test_task_creation_rejects_worktree_assigned_to_active_task(self):
         first = self.create_repo_task("First owner", [self.primary], branches={str(self.primary): "active-shared"}, materialize=True)
         response, _ = self.call_cli(
@@ -354,7 +511,76 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(len(self.assert_success(self.call_cli("task", "list")[0])["tasks"]), 1)
         self.assertTrue(Path(first["repositoryWorktrees"][0]["worktreePath"]).is_dir())
 
-    # case-contract: test_task_done_preserves_worktree_and_branch | Moving a reviewed task to Done preserves its source branch and worktree without merging into the local target, while retaining conversation history and exposing the task in the searchable read-only archive.
+    # case-contract: test_task_creation_serializes_repository_branch_reservations | Two concurrent CLI/XPC creates targeting the same explicit branch in one repository serialize through a shared cross-process lock, leaving exactly one persisted active task and rejecting the other.
+    def test_task_creation_serializes_repository_branch_reservations(self):
+        branch = f"concurrent-reservation-{uuid.uuid4().hex[:8]}"
+        barrier = RepositoryAllocationLockBarrier(self.data_directory, self.primary)
+        processes = []
+        commands = []
+        try:
+            for title in ["Reservation contender one", "Reservation contender two"]:
+                command = [
+                    "task", "create", "--title", title,
+                    "--repo", self.primary,
+                    "--branch", f"{self.primary}={branch}",
+                ]
+                commands.append(command)
+                processes.append(self.start_cli(*command))
+            time.sleep(1)
+            for process, command in zip(processes, commands):
+                if process.poll() is not None:
+                    stdout, stderr = process.communicate()
+                    self.fail(f"Create exited before the repository lock was released: {command}; stdout={stdout!r}; stderr={stderr!r}")
+        finally:
+            barrier.release()
+            for process in processes:
+                if process.poll() is None:
+                    try:
+                        process.wait(timeout=90)
+                    except subprocess.TimeoutExpired:
+                        process.terminate()
+                        process.wait(timeout=20)
+
+        outcomes = []
+        for process, command in zip(processes, commands):
+            stdout, stderr = process.communicate(timeout=20)
+            lines = [line for line in stdout.splitlines() if line.strip()]
+            self.assertTrue(lines, f"CLI returned no JSON for {command}: {stderr}")
+            response = json.loads(lines[-1])
+            self.assertEqual(response.get("version"), 1)
+            outcomes.append((process.returncode, response))
+
+        self.assertEqual(sorted(status for status, _ in outcomes), [0, 2])
+        successful = [response for _, response in outcomes if response.get("ok")]
+        rejected = [response for _, response in outcomes if not response.get("ok")]
+        self.assertEqual(len(successful), 1)
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0].get("error", {}).get("code"), "invalid_argument")
+        self.assertIn("already assigned", rejected[0]["error"]["message"])
+
+        tasks = self.assert_success(self.call_cli("task", "list")[0])["tasks"]
+        self.assertEqual(len(tasks), 1)
+        task = self.assert_success(self.call_cli("task", "get", tasks[0]["id"])[0])
+        record = task["repositoryWorktrees"][0]
+        self.assertEqual(record["branch"], branch)
+        self.assertTrue(record["isPending"])
+
+    # case-contract: test_task_worktree_preparation_serializes_auto_branch_claims | Tasks with the same automatic branch choice remain pending without creating a worktree before conversation start; the opt-in live Codex integration sends both turns concurrently and confirms only one task claims the generated branch.
+    def test_task_worktree_preparation_serializes_auto_branch_claims(self):
+        title = f"Concurrent auto branch {uuid.uuid4().hex[:8]}"
+        existing_worktree_count = self.run_git(self.primary, "worktree", "list", "--porcelain").count("worktree ")
+        tasks = [
+            self.create_repo_task(title, [self.primary]),
+            self.create_repo_task(title, [self.primary]),
+        ]
+        self.assertEqual(self.run_git(self.primary, "worktree", "list", "--porcelain").count("worktree "), existing_worktree_count)
+        records = [self.assert_success(self.call_cli("task", "get", task["id"])[0]) for task in tasks]
+        self.assertTrue(all(record["repositoryWorktrees"][0]["isPending"] for record in records))
+        self.assertTrue(all(record["repositoryWorktrees"][0]["branch"] == "auto" for record in records))
+        self.assertTrue(all(record["repositoryWorktrees"][0]["worktreePath"] == str(self.primary) for record in records))
+        self.assertTrue(all(record["status"] == "Backlog" for record in records))
+
+    # case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Moving a reviewed task to Done waits for active per-task operations and persists against refreshed state; it preserves that source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive.
     def test_task_done_preserves_worktree_and_branch(self):
         task = self.create_repo_task("Untitled task", [self.primary])
         draft = "Please update the README and add concise setup steps for first time contributors tomorrow."
@@ -367,7 +593,7 @@ class StationAIBridgeTests(unittest.TestCase):
         started = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         record = started["repositoryWorktrees"][0]
         self.assertFalse(record["isPending"])
-        self.assertEqual(record["branch"], "please-update-the-readme-and-add-concise-setup")
+        self.assertEqual(record["branch"], "generated-fixture-title")
         worktree = Path(record["worktreePath"])
         target_head = self.run_git(self.primary, "rev-parse", "main")
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), target_head)
@@ -377,10 +603,20 @@ class StationAIBridgeTests(unittest.TestCase):
         self.run_git(self.primary, "add", "target-only.txt")
         self.run_git(self.primary, "commit", "-m", "Advance merge target while task is under review")
         target_head = self.run_git(self.primary, "rev-parse", "main")
-        response, _ = self.call_cli("task", "move", task["id"], "Done")
+        move_lock = TaskOperationLockBarrier(self.data_directory, task["id"])
+        move_command = ["task", "move", task["id"], "Done"]
+        move_process = self.start_cli(*move_command)
+        try:
+            time.sleep(0.25)
+            self.assertIsNone(move_process.poll(), "Moving a task to Done must wait for an active per-task operation.")
+            current, _ = self.call_cli("task", "get", task["id"])
+            self.assertEqual(self.assert_success(current)["status"], "Review")
+        finally:
+            move_lock.release()
+        response, _ = self.finish_cli(move_process, move_command)
         self.assertEqual(self.assert_success(response)["status"], "Done")
         self.assertTrue(worktree.exists(), "Moving a task to Done must preserve its worktree.")
-        self.assertTrue(self.branch_exists(self.primary, "please-update-the-readme-and-add-concise-setup"))
+        self.assertTrue(self.branch_exists(self.primary, "generated-fixture-title"))
         self.assertEqual(self.run_git(self.primary, "rev-parse", "main"), target_head, "Moving a task to Done must not merge into the local target.")
         self.assertEqual((self.primary / "target-only.txt").read_text(encoding="utf-8"), "Master advanced after this task branch was created.\n")
         self.assertFalse((self.primary / "task-result.txt").exists())
@@ -418,17 +654,38 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), branch_head)
         self.assertTrue(self.branch_exists(self.primary, branch))
 
-    # case-contract: test_task_pr_create_reports_real_gh_failure | A repository-backed Done task exposes a PR action in the archive; when its branch cannot be published because the local repository has no usable GitHub remote, it reports the failure, persists no partial PR link, and preserves Done status.
+    # case-contract: test_task_pr_create_reports_real_gh_failure | A repository-backed Done task exposes an archive PR action; it preserves the configured merge target, waits for the task operation lock, commits and publishes the branch before GitHub lookup, and reports publication failure without saving a PR link or changing Done status when no usable remote exists.
     def test_task_pr_create_reports_real_gh_failure(self):
-        task = self.create_repo_task("PR failure", [self.primary], materialize=True)
+        task = self.create_repo_task(
+            "PR failure", [self.primary], merge_targets={self.primary: "main"}, materialize=True
+        )
+        self.assertEqual(task["repositoryWorktrees"][0]["mergeTarget"], "main")
         completed, _ = self.call_cli("task", "move", task["id"], "Done")
         self.assertEqual(self.assert_success(completed)["status"], "Done")
 
-        response, _ = self.call_cli("task", "pr", "create", task["id"], expected_status=1)
+        command = ["task", "pr", "create", task["id"]]
+        operation_lock = TaskOperationLockBarrier(self.data_directory, task["id"])
+        process = self.start_cli(*command)
+        try:
+            time.sleep(0.25)
+            self.assertIsNone(process.poll(), "PR creation should wait on the active per-task operation lock before calling gh.")
+            current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+            self.assertEqual(current["status"], "Done")
+            self.assertIsNone(current["repositoryWorktrees"][0].get("pullRequestNumber"))
+            self.assertIsNone(current["repositoryWorktrees"][0].get("pullRequestURL"))
+        except BaseException:
+            if process.poll() is None:
+                process.terminate()
+                process.communicate()
+            raise
+        finally:
+            operation_lock.release()
+        response, _ = self.finish_cli(process, command, expected_status=1)
         self.assert_failure(response, "operation_failed")
         self.assertIn("couldn't publish the task branch", response["error"]["message"])
         current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         record = current["repositoryWorktrees"][0]
+        self.assertEqual(record["mergeTarget"], "main")
         self.assertIsNone(record.get("pullRequestNumber"))
         self.assertIsNone(record.get("pullRequestURL"))
         self.assertEqual(current["status"], "Done")
@@ -458,19 +715,20 @@ class StationAIBridgeTests(unittest.TestCase):
         dirty_record = dirty["repositoryWorktrees"][0]
         clean_path = Path(clean_record["worktreePath"])
         dirty_path = Path(dirty_record["worktreePath"])
-        (dirty_path / "keep-dirty.txt").write_text("Keep this worktree.\n", encoding="utf-8")
+        retained_file = dirty_path / "stationai-secondary.txt"
+        retained_file.write_text("Secondary baseline.\nKeep this worktree.\n", encoding="utf-8")
         (self.data_directory / "task-lifecycle-v2-reset").unlink()
 
         listed, _ = self.call_cli("task", "list")
         self.assertEqual(self.assert_success(listed)["tasks"], [])
         self.assertFalse(clean_path.exists())
-        self.assertTrue((dirty_path / "keep-dirty.txt").is_file())
+        self.assertEqual(retained_file.read_text(encoding="utf-8"), "Secondary baseline.\nKeep this worktree.\n")
         self.assertEqual(self.run_git(self.primary, "show-ref", "--verify", "--quiet", f"refs/heads/{clean_record['branch']}"), "")
         self.assertEqual(self.run_git(self.secondary, "show-ref", "--verify", "--quiet", f"refs/heads/{dirty_record['branch']}"), "")
         notice = json.loads((self.data_directory / "task-lifecycle-v2-notice.json").read_text(encoding="utf-8"))
         self.assertEqual(notice, [str(dirty_path)])
 
-    # case-contract: test_task_status_transitions_and_rejects_unknown_status | The board keeps stacked Blocked/Backlog and conditional Waiting Response/In Progress sections fully visible, leaves Review as its own column, removes Done from the columns, hides empty status sections, and preserves Codex-owned task status behavior.
+    # case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress fully within the viewport, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status.
     def test_task_status_transitions_and_rejects_unknown_status(self):
         task_id = self.create_task()["id"]
         response, _ = self.call_cli("task", "move", task_id, "Unknown", expected_status=2)
@@ -484,6 +742,48 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIn("Only a task in Review", response["error"]["message"])
         response, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(response)["status"], "Backlog")
+
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        blocked_id = self.create_task("Blocked layout", roots=[self.secondary])["id"]
+        empty_fixture = self.data_directory / "codex-fixture-status-empty"
+        shutil.copyfile(fixture, empty_fixture)
+        empty_fixture.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        blocked_response, _ = self.call_cli(
+            "conversation", "send", blocked_id, "--message", "Please ask your questions.",
+            expected_status=1,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(empty_fixture)},
+        )
+        self.assert_failure(blocked_response, "operation_failed")
+        blocked = self.assert_success(self.call_cli("task", "get", blocked_id)[0])
+        self.assertEqual(blocked["status"], "Blocked")
+        self.assertIn("question response", blocked["statusMessage"].lower())
+
+        waiting_id = self.create_task("Waiting layout", roots=[self.primary])["id"]
+        question_fixture = self.data_directory / "codex-fixture-status-question-flow"
+        shutil.copyfile(fixture, question_fixture)
+        question_fixture.chmod(0o755)
+        question_response, question_events = self.call_cli(
+            "conversation", "send", waiting_id, "--message", "Please ask your questions.",
+            "--mode", "plan", "--answer", "color=Blue", "--answer", "token=fixture-secret",
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(question_fixture)},
+        )
+        self.assert_success(question_response)
+        self.assertTrue(any(
+            event.get("type") == "started" and event.get("payload", {}).get("taskStatus") == "In Progress"
+            for event in question_events
+        ), "Starting the question turn should move the task into In Progress.")
+        input_event = next(event for event in question_events if event.get("type") == "user_input")
+        self.assertEqual(input_event["payload"].get("taskStatus"), "Waiting Response")
+        self.assertTrue(any(
+            event.get("type") == "task_status" and event.get("payload", {}).get("taskStatus") == "In Progress"
+            for event in question_events
+        ), "Answering the question should resume the task into In Progress.")
+        waiting = self.assert_success(self.call_cli("task", "get", waiting_id)[0])
+        self.assertEqual(waiting["status"], "Review")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", blocked_id)[0])["status"], "Blocked")
 
     # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, clears explicitly and at turn completion, and the board card shows the built-in icon, label, and detail without changing lifecycle status; each turn receives hidden CLI usage instructions.
     def test_task_progress_reports_publish_persist_and_clear(self):
@@ -614,17 +914,25 @@ class StationAIBridgeTests(unittest.TestCase):
             active.unlink(missing_ok=True)
             release.unlink(missing_ok=True)
 
-    # case-contract: test_task_rename_persists_and_rejects_blank_title | A rename persists; rejecting a blank rename preserves the last valid title.
+    # case-contract: test_task_rename_persists_and_rejects_blank_title | A rename waits for the real per-task operation lock, then persists across fresh CLI/XPC reads; rejecting a blank rename preserves the last valid title.
     def test_task_rename_persists_and_rejects_blank_title(self):
         task_id = self.create_task()["id"]
-        response, _ = self.call_cli("task", "rename", task_id, "--title", "Renamed through XPC")
+        barrier = TaskOperationLockBarrier(self.data_directory, task_id)
+        process = self.start_cli("task", "rename", task_id, "--title", "Renamed through XPC")
+        try:
+            time.sleep(0.25)
+            waited_for_lock = process.poll() is None
+        finally:
+            barrier.release()
+        response, _ = self.finish_cli(process, ("task", "rename", task_id, "--title", "Renamed through XPC"))
+        self.assertTrue(waited_for_lock, "Rename should wait while another process holds the real task-operation lock.")
         self.assertEqual(self.assert_success(response)["title"], "Renamed through XPC")
         response, _ = self.call_cli("task", "rename", task_id, "--title", " ", expected_status=2)
         self.assert_failure(response, "invalid_argument")
         response, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(response)["title"], "Renamed through XPC")
 
-    # case-contract: test_task_roots_set_get_order_deduplication_and_validation | Root editing preserves order, removes duplicates, and rejects an empty list.
+    # case-contract: test_task_roots_set_get_order_deduplication_and_validation | Root editing preserves order, removes duplicates, rejects an empty list, and waits for an active conversation turn; a stale Git-folder validation is rejected after a newer folder edit, and the newer roots remain saved.
     def test_task_roots_set_get_order_deduplication_and_validation(self):
         task_id = self.create_task()["id"]
         response, _ = self.call_cli(
@@ -638,18 +946,100 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(response)["workspaceRoots"], expected_roots)
         response, _ = self.call_cli("task", "roots", "get", task_id)
         self.assertEqual(self.assert_success(response)["roots"], expected_roots)
+
+        reservation_task = self.create_task("Conversation reservation for roots", [self.primary])
+        reservation_id = reservation_task["id"]
+        reservation = ConversationTurnLockBarrier(self.data_directory, reservation_id)
+        roots_command = ["task", "roots", "set", reservation_id, "--root", self.custom]
+        roots_process = None
+        continue_roots_process = False
+        try:
+            roots_process = self.start_cli(*roots_command)
+            time.sleep(0.25)
+            self.assertIsNone(roots_process.poll(), "Workspace-root edits should wait for the active conversation-turn reservation.")
+            unchanged, _ = self.call_cli("task", "get", reservation_id)
+            self.assertEqual(self.assert_success(unchanged)["workspaceRoots"], [str(self.primary)])
+            continue_roots_process = True
+        finally:
+            reservation.release()
+            if not continue_roots_process and roots_process is not None and roots_process.poll() is None:
+                roots_process.terminate()
+                try:
+                    roots_process.communicate(timeout=20)
+                except subprocess.TimeoutExpired:
+                    roots_process.kill()
+                    roots_process.communicate()
+        self.assertIsNotNone(roots_process)
+        roots_response, _ = self.finish_cli(roots_process, roots_command)
+        self.assertEqual(self.assert_success(roots_response)["workspaceRoots"], [str(self.custom)])
+
+        concurrent_task = self.create_repo_task("Concurrent root edit", [self.primary])
+        concurrent_id = concurrent_task["id"]
+        barrier = GitConfigReadBarrier(self.secondary)
+        stale_command = [
+            "task", "roots", "set", concurrent_id,
+            "--root", self.secondary,
+        ]
+        stale_process = None
+        continue_stale_process = False
+        try:
+            stale_process = self.start_cli(*stale_command)
+            barrier.wait_for_reader()
+            newer, _ = self.call_cli("task", "roots", "set", concurrent_id, "--root", self.custom)
+            newer_record = self.assert_success(newer)
+            self.assertEqual(newer_record["workspaceRoots"], [str(self.custom)])
+            self.assertEqual(newer_record["repositoryWorktrees"], [])
+            continue_stale_process = True
+        finally:
+            barrier.release()
+            if not continue_stale_process and stale_process is not None and stale_process.poll() is None:
+                stale_process.terminate()
+                try:
+                    stale_process.communicate(timeout=20)
+                except subprocess.TimeoutExpired:
+                    stale_process.kill()
+                    stale_process.communicate()
+        self.assertIsNotNone(stale_process)
+        stale, _ = self.finish_cli(stale_process, stale_command, expected_status=1)
+        self.assert_failure(stale, "invalid_transition")
+        final, _ = self.call_cli("task", "get", concurrent_id)
+        final_record = self.assert_success(final)
+        self.assertEqual(final_record["workspaceRoots"], [str(self.custom)])
+        self.assertEqual(final_record["contextFolders"], [str(self.custom)])
+        self.assertEqual(final_record["repositoryWorktrees"], [])
         response, _ = self.call_cli("task", "roots", "set", task_id, expected_status=2)
         self.assert_failure(response, "invalid_argument")
         response, _ = self.call_cli("task", "roots", "get", task_id)
         self.assertEqual(self.assert_success(response)["roots"], expected_roots)
 
-    # case-contract: test_conversation_repository_picker_adds_repository_worktree | Repository suggestions can be filtered and navigated with Up/Down, and Enter selects the highlighted repository; adding it persists a pending auto branch with labeled read-only branch, merge-from, and merge-to values, and no worktree exists before the first send.
+    # case-contract: test_conversation_repository_picker_adds_repository_worktree | Repository suggestions can be filtered and navigated with Up/Down, and Enter selects the highlighted repository; adding it waits for an active conversation turn, then persists a pending auto branch with labeled branch, merge-from, and merge-to values, and no worktree exists before the first send.
     def test_conversation_repository_picker_adds_repository_worktree(self):
         task = self.create_task("Add repository in conversation", [self.primary])
         task_id = task["id"]
         self.assertEqual(task["repositoryWorktrees"], [])
         self.assertEqual(task["workspaceRoots"], [str(self.primary)])
-        response, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.primary)
+        reservation = ConversationTurnLockBarrier(self.data_directory, task_id)
+        add_command = ["task", "repository", "add", task_id, "--repo", self.primary]
+        add_process = None
+        continue_add_process = False
+        try:
+            add_process = self.start_cli(*add_command)
+            time.sleep(0.25)
+            self.assertIsNone(add_process.poll(), "Adding a repository should wait for the active conversation-turn reservation.")
+            unchanged, _ = self.call_cli("task", "get", task_id)
+            self.assertEqual(self.assert_success(unchanged)["repositoryWorktrees"], [])
+            continue_add_process = True
+        finally:
+            reservation.release()
+            if not continue_add_process and add_process is not None and add_process.poll() is None:
+                add_process.terminate()
+                try:
+                    add_process.communicate(timeout=20)
+                except subprocess.TimeoutExpired:
+                    add_process.kill()
+                    add_process.communicate()
+        self.assertIsNotNone(add_process)
+        response, _ = self.finish_cli(add_process, add_command)
         updated = self.assert_success(response)
         self.assertEqual(len(updated["repositoryWorktrees"]), 1)
         added = updated["repositoryWorktrees"][0]
@@ -667,7 +1057,198 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assert_failure(invalid, "operation_failed")
         fresh, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"], updated["repositoryWorktrees"])
-    # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives and reports the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Diagnostics identify the conversation failure phase and the persistent log captures a real deletion failure's task, thread, process, phase, and underlying error details without task titles or conversation text; the failed task and worktree remain available for retry.
+
+    # case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation.
+    def test_task_repository_settings_validate_persist_and_lock_after_start(self):
+        task = self.create_repo_task("Repository settings", [self.primary])
+        task_id = task["id"]
+        initial = task["repositoryWorktrees"][0]
+        edit_command = [
+            "task", "repository", "edit", task_id,
+            "--repo", self.primary,
+            "--branch", "settings-edited",
+            "--branch-from", "branch-source",
+            "--merge-target", "branch-source",
+        ]
+        reservation = ConversationTurnLockBarrier(self.data_directory, task_id)
+        edit_process = None
+        continue_edit_process = False
+        try:
+            edit_process = self.start_cli(*edit_command)
+            time.sleep(0.25)
+            self.assertIsNone(edit_process.poll(), "Repository settings should wait for the active conversation-turn reservation.")
+            unchanged, _ = self.call_cli("task", "get", task_id)
+            self.assertEqual(self.assert_success(unchanged)["repositoryWorktrees"][0]["branch"], initial["branch"])
+            continue_edit_process = True
+        finally:
+            reservation.release()
+            if not continue_edit_process and edit_process is not None and edit_process.poll() is None:
+                edit_process.terminate()
+                try:
+                    edit_process.communicate(timeout=20)
+                except subprocess.TimeoutExpired:
+                    edit_process.kill()
+                    edit_process.communicate()
+        self.assertIsNotNone(edit_process)
+        changed, _ = self.finish_cli(edit_process, edit_command)
+        edited = self.assert_success(changed)["repositoryWorktrees"][0]
+        self.assertEqual(edited["branch"], "settings-edited")
+        self.assertEqual(edited["branchFrom"], "branch-source")
+        self.assertEqual(edited["mergeTarget"], "branch-source")
+        self.assertTrue(edited["isPending"])
+        self.assertEqual(edited["worktreePath"], self.primary.as_posix())
+
+        invalid, _ = self.call_cli(
+            "task", "repository", "edit", task_id,
+            "--repo", self.primary,
+            "--branch", "invalid branch",
+            "--branch-from", "branch-source",
+            "--merge-target", "branch-source",
+            expected_status=2,
+        )
+        self.assert_failure(invalid, "invalid_argument")
+        invalid_target, _ = self.call_cli(
+            "task", "repository", "edit", task_id,
+            "--repo", self.primary,
+            "--branch", "settings-edited",
+            "--branch-from", "branch-source",
+            "--merge-target", "missing-local-branch",
+            expected_status=2,
+        )
+        self.assert_failure(invalid_target, "invalid_argument")
+        fresh, _ = self.call_cli("task", "get", task_id)
+        unchanged = self.assert_success(fresh)["repositoryWorktrees"][0]
+        self.assertEqual(unchanged["branch"], edited["branch"])
+        self.assertEqual(unchanged["branchFrom"], edited["branchFrom"])
+        self.assertEqual(unchanged["mergeTarget"], edited["mergeTarget"])
+        self.assertNotEqual(initial["branch"], unchanged["branch"])
+
+        self.complete_fixture_turn(task_id)
+        started, _ = self.call_cli("task", "get", task_id)
+        started_record = self.assert_success(started)["repositoryWorktrees"][0]
+        self.assertFalse(started_record["isPending"])
+        self.assertEqual(started_record["branch"], "settings-edited")
+        self.assertTrue(Path(started_record["worktreePath"]).is_dir())
+        locked, _ = self.call_cli(
+            "task", "repository", "edit", task_id,
+            "--repo", self.primary,
+            "--branch", "changed-after-start",
+            "--branch-from", "branch-source",
+            "--merge-target", "branch-source",
+            expected_status=1,
+        )
+        self.assert_failure(locked, "invalid_transition")
+        final, _ = self.call_cli("task", "get", task_id)
+        final_record = self.assert_success(final)["repositoryWorktrees"][0]
+        self.assertEqual(final_record["branch"], "settings-edited")
+        self.assertEqual(final_record["branchFrom"], "branch-source")
+        self.assertEqual(final_record["mergeTarget"], "branch-source")
+
+    # case-contract: test_task_repository_edit_rejects_stale_validation_after_removal | If a pending repository is removed while its settings are being validated, the stale edit is rejected and the newer repository removal and context root remain saved.
+    def test_task_repository_edit_rejects_stale_validation_after_removal(self):
+        task = self.create_repo_task("Concurrent repository edit", [self.primary], roots=[str(self.custom)])
+        task_id = task["id"]
+        initial = task["repositoryWorktrees"][0]
+        command = [
+            "task", "repository", "edit", task_id,
+            "--repo", self.primary,
+            "--branch", "stale-edit",
+            "--branch-from", initial["branchFrom"],
+            "--merge-target", initial["mergeTarget"],
+        ]
+        barrier = GitConfigReadBarrier(self.primary)
+        stale_process = None
+        continue_stale_process = False
+        try:
+            stale_process = self.start_cli(*command)
+            barrier.wait_for_reader()
+            removed, _ = self.call_cli("task", "repository", "remove", task_id, "--repo", self.primary)
+            removed_record = self.assert_success(removed)
+            self.assertEqual(removed_record["repositoryWorktrees"], [])
+            self.assertEqual(removed_record["workspaceRoots"], [str(self.custom)])
+            self.assertEqual(removed_record["contextFolders"], [str(self.custom)])
+            continue_stale_process = True
+        finally:
+            barrier.release()
+            if not continue_stale_process and stale_process is not None and stale_process.poll() is None:
+                stale_process.terminate()
+                try:
+                    stale_process.communicate(timeout=20)
+                except subprocess.TimeoutExpired:
+                    stale_process.kill()
+                    stale_process.communicate()
+        self.assertIsNotNone(stale_process)
+        stale, _ = self.finish_cli(stale_process, command, expected_status=1)
+        self.assert_failure(stale, "invalid_transition")
+        fresh, _ = self.call_cli("task", "get", task_id)
+        fresh_record = self.assert_success(fresh)
+        self.assertEqual(fresh_record["repositoryWorktrees"], [])
+        self.assertEqual(fresh_record["workspaceRoots"], [str(self.custom)])
+        self.assertEqual(fresh_record["contextFolders"], [str(self.custom)])
+
+    # case-contract: test_task_repository_removal_preserves_state_on_dirty_worktree | Removing a pending repository preserves the source repository and other context folders; removing a clean managed worktree waits for an active conversation turn and then succeeds, while a dirty worktree rejects removal and preserves its task record and files.
+    def test_task_repository_removal_preserves_state_on_dirty_worktree(self):
+        pending = self.create_repo_task("Pending repository removal", [self.primary], roots=[self.custom])
+        pending_id = pending["id"]
+        removed_pending, _ = self.call_cli("task", "repository", "remove", pending_id, "--repo", self.primary)
+        pending_result = self.assert_success(removed_pending)
+        self.assertEqual(pending_result["repositoryWorktrees"], [])
+        self.assertEqual(pending_result["contextFolders"], [str(self.custom)])
+        self.assertEqual(pending_result["workspaceRoots"], [str(self.custom)])
+        self.assertTrue(self.primary.is_dir(), "Removing a pending repository must preserve its source repository.")
+
+        active = self.create_repo_task("Started repository removal", [self.secondary], roots=[self.custom])
+        active_id = active["id"]
+        self.complete_fixture_turn(active_id)
+        active, _ = self.call_cli("task", "get", active_id)
+        record = self.assert_success(active)["repositoryWorktrees"][0]
+        worktree = Path(record["worktreePath"])
+        dirty_file = worktree / "repository-removal-dirty.txt"
+        dirty_file.write_text("keep this worktree intact\n", encoding="utf-8")
+
+        rejected, _ = self.call_cli(
+            "task", "repository", "remove", active_id, "--repo", self.secondary,
+            expected_status=1,
+        )
+        self.assert_failure(rejected, "operation_failed")
+        retained, _ = self.call_cli("task", "get", active_id)
+        retained_result = self.assert_success(retained)
+        self.assertEqual(len(retained_result["repositoryWorktrees"]), 1)
+        self.assertEqual(retained_result["repositoryWorktrees"][0]["worktreePath"], str(worktree))
+        self.assertEqual(retained_result["workspaceRoots"], [str(worktree), str(self.custom)])
+        self.assertTrue(dirty_file.is_file())
+
+        dirty_file.unlink()
+        lock_barrier = ConversationTurnLockBarrier(self.data_directory, active_id)
+        remove_command = ["task", "repository", "remove", active_id, "--repo", self.secondary]
+        remove_process = None
+        continue_remove_process = False
+        try:
+            remove_process = self.start_cli(*remove_command)
+            time.sleep(0.25)
+            self.assertIsNone(remove_process.poll(), "Repository removal should wait for the active conversation-turn reservation.")
+            still_attached, _ = self.call_cli("task", "get", active_id)
+            still_attached_record = self.assert_success(still_attached)
+            self.assertEqual(len(still_attached_record["repositoryWorktrees"]), 1)
+            self.assertTrue(worktree.exists())
+            continue_remove_process = True
+        finally:
+            lock_barrier.release()
+            if not continue_remove_process and remove_process is not None and remove_process.poll() is None:
+                remove_process.terminate()
+                try:
+                    remove_process.communicate(timeout=20)
+                except subprocess.TimeoutExpired:
+                    remove_process.kill()
+                    remove_process.communicate()
+        self.assertIsNotNone(remove_process)
+        removed_active, _ = self.finish_cli(remove_process, remove_command)
+        active_result = self.assert_success(removed_active)
+        self.assertEqual(active_result["repositoryWorktrees"], [])
+        self.assertEqual(active_result["contextFolders"], [str(self.custom)])
+        self.assertEqual(active_result["workspaceRoots"], [str(self.custom)])
+        self.assertFalse(worktree.exists())
+    # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; confirmed deletion waits for an active conversation turn; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives and reports the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree.
     def test_task_delete_removes_task_and_later_lookup_is_not_found(self):
         pending = self.create_repo_task("Pending delete", [self.primary])
         pending_id = pending["id"]
@@ -676,7 +1257,28 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(pending_path, str(self.primary))
         response, _ = self.call_cli("task", "delete-check", pending_id)
         self.assertFalse(self.assert_success(response)["requiresConfirmation"])
-        response, _ = self.call_cli("task", "delete", pending_id)
+        lock_barrier = ConversationTurnLockBarrier(self.data_directory, pending_id)
+        delete_command = ["task", "delete", pending_id]
+        delete_process = None
+        continue_delete_process = False
+        try:
+            delete_process = self.start_cli(*delete_command)
+            time.sleep(0.25)
+            self.assertIsNone(delete_process.poll(), "Task deletion should wait for the active conversation-turn reservation.")
+            retained, _ = self.call_cli("task", "get", pending_id)
+            self.assertEqual(self.assert_success(retained)["id"], pending_id)
+            continue_delete_process = True
+        finally:
+            lock_barrier.release()
+            if not continue_delete_process and delete_process is not None and delete_process.poll() is None:
+                delete_process.terminate()
+                try:
+                    delete_process.communicate(timeout=20)
+                except subprocess.TimeoutExpired:
+                    delete_process.kill()
+                    delete_process.communicate()
+        self.assertIsNotNone(delete_process)
+        response, _ = self.finish_cli(delete_process, delete_command)
         self.assertTrue(self.assert_success(response)["deleted"])
         diagnostic_lines = [
             json.loads(line)
@@ -734,6 +1336,11 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "get", dirty_id, expected_status=3)
         self.assert_failure(response, "not_found")
 
+        response, _ = self.call_cli("board", "list")
+        self.assertEqual(self.assert_success(response)["tasks"], [])
+
+    # case-contract: test_task_delete_reports_real_worktree_failure_and_allows_retry | A real worktree-removal failure records task, thread, process, phase, and underlying error details without recording task titles or conversation text; the failed task and worktree remain available and deletion succeeds after the repository is restored.
+    def test_task_delete_reports_real_worktree_failure_and_allows_retry(self):
         broken_repository = self.data_directory / "delete-failure-repository"
         broken_repository.mkdir()
         self.run_git(broken_repository, "init", "--initial-branch=main")
@@ -778,10 +1385,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(self.assert_success(response)["deleted"])
         self.assertFalse(broken_worktree.exists())
 
-        response, _ = self.call_cli("board", "list")
-        self.assertEqual(self.assert_success(response)["tasks"], [])
-
-    # case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; the ordered last-used repository list persists across fresh CLI/XPC connections and rejects unavailable repositories; Dark and Light appearance choices persist, and Dark renders the workspace canvas as #1E1E1E in the VS Code Dark+ palette.
+    # case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. In the UI, the conversation picker keeps a Change parent affordance visible after a valid parent is selected, and choosing another folder refreshes suggestions and persists the new parent. Dark and Light appearance choices persist, and Dark renders the workspace canvas as #1E1E1E in the VS Code Dark+ palette.
     def test_default_parent_settings_read_write_clear_and_validation(self):
         response, _ = self.call_cli("settings", "get")
         self.assertIsNone(self.assert_success(response)["defaultParentFolder"])
@@ -795,42 +1399,124 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("settings", "set-parent", self.fixture / "suggested-parent")
         self.assertEqual(self.assert_success(response)["defaultParentFolder"], str(self.fixture / "suggested-parent"))
         response, _ = self.call_cli("settings", "get")
-        self.assertEqual(self.assert_success(response)["defaultParentFolder"], str(self.fixture / "suggested-parent"))
+        persisted_parent = self.assert_success(response)["defaultParentFolder"]
+        self.assertEqual(persisted_parent, str(self.fixture / "suggested-parent"))
+        response, _ = self.call_cli("workspace", "suggest", "--parent", persisted_parent)
+        self.assertEqual(
+            self.assert_success(response)["repositories"],
+            sorted([str(self.primary), str(self.secondary), str(self.alternate), str(self.changes)]),
+            "A fresh bridge request should discover repositories under the persisted default parent.",
+        )
+        alternate_parent = self.alternate.parent
+        response, _ = self.call_cli("settings", "set-parent", alternate_parent)
+        self.assertEqual(self.assert_success(response)["defaultParentFolder"], str(alternate_parent))
+        response, _ = self.call_cli("settings", "get")
+        persisted_parent = self.assert_success(response)["defaultParentFolder"]
+        self.assertEqual(persisted_parent, str(alternate_parent))
+        response, _ = self.call_cli("workspace", "suggest", "--parent", persisted_parent)
+        self.assertEqual(self.assert_success(response)["repositories"], [str(self.alternate)])
         response, _ = self.call_cli("settings", "set-parent", self.fixture / "absent", expected_status=2)
         self.assert_failure(response, "invalid_argument")
         response, _ = self.call_cli("settings", "get")
-        self.assertEqual(self.assert_success(response)["defaultParentFolder"], str(self.fixture / "suggested-parent"))
+        self.assertEqual(self.assert_success(response)["defaultParentFolder"], str(alternate_parent))
         response, _ = self.call_cli("settings", "clear-parent")
         self.assertIsNone(self.assert_success(response)["defaultParentFolder"])
 
-        response, _ = self.call_cli("settings", "set-last-repositories", "--repo", self.secondary, "--repo", self.primary, "--repo", self.secondary)
-        self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.secondary), str(self.primary)])
-        response, _ = self.call_cli("settings", "get")
-        self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.secondary), str(self.primary)])
-        response, _ = self.call_cli("settings", "set-last-repositories", "--repo", self.fixture / "absent", expected_status=2)
-        self.assert_failure(response, "invalid_argument")
-        response, _ = self.call_cli("settings", "get")
-        self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.secondary), str(self.primary)])
-
-    # case-contract: test_repository_suggestions_skip_nested_repositories_and_symlinks | Suggestions include top-level Git roots and skip nested repositories and symlink targets; the picker placeholder shows saved repositories with a Return arrow, and blank Return reuses them in order with auto/default/default branch fields even after a task used custom branch details, while typing and arrow-key selection overrides that default and persists after task creation.
+    # case-contract: test_repository_suggestions_skip_nested_repositories_and_symlinks | The CLI returns top-level Git repository suggestions while excluding nested repositories and symlink targets. The conversation picker shows those suggestions, filters by repository name or parent path, and reports no matches for non-repository folders.
     def test_repository_suggestions_skip_nested_repositories_and_symlinks(self):
         response, _ = self.call_cli("workspace", "suggest", "--parent", self.fixture / "suggested-parent")
         repositories = self.assert_success(response)["repositories"]
         self.assertEqual(repositories, sorted([str(self.primary), str(self.secondary), str(self.alternate), str(self.changes)]))
         self.assertNotIn(str(self.nested), repositories)
         self.assertNotIn(str(self.external), repositories)
-        response, _ = self.call_cli(
-            "settings", "set-last-repositories", "--repo", self.secondary, "--repo", self.primary
-        )
-        self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.secondary), str(self.primary)])
-        response, _ = self.call_cli("settings", "get")
-        self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.secondary), str(self.primary)])
 
-
+    # case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections and applies them to empty tasks through repository batches with ordered roots and default auto/main/main branch settings; a newly saved list applies to a fresh task and remains saved. Invalid repository paths are rejected without changing the saved preference. In the UI, blank Return restores saved repositories in order, while typing and arrow selection replaces and persists the list for the next conversation.
+    def test_new_task_remembers_last_selected_repositories(self):
         response, _ = self.call_cli("settings", "set-last-repositories", "--repo", self.secondary, "--repo", self.primary)
         self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.secondary), str(self.primary)])
         response, _ = self.call_cli("settings", "get")
         self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.secondary), str(self.primary)])
+
+        created, _ = self.call_cli("task", "create", "--title", "Apply remembered repositories")
+        first_task_id = self.assert_success(created)["id"]
+        restored, _ = self.call_cli(
+            "task", "repository", "add-batch", first_task_id,
+            "--repo", self.secondary,
+            "--repo", self.primary,
+        )
+        restored_task = self.assert_success(restored)
+        expected_repositories = [str(self.secondary), str(self.primary)]
+        self.assertEqual(restored_task["workspaceRoots"], expected_repositories)
+        first_repositories = restored_task["repositoryWorktrees"]
+        self.assertEqual([item["repositoryPath"] for item in first_repositories], expected_repositories)
+        self.assertEqual([item["branch"] for item in first_repositories], ["auto", "auto"])
+        self.assertEqual([item["branchFrom"] for item in first_repositories], ["main", "main"])
+        self.assertEqual([item["mergeTarget"] for item in first_repositories], ["main", "main"])
+
+        response, _ = self.call_cli("settings", "set-last-repositories", "--repo", self.alternate)
+        self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.alternate)])
+        response, _ = self.call_cli("settings", "get")
+        self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.alternate)])
+
+        created, _ = self.call_cli("task", "create", "--title", "Apply updated remembered repository")
+        second_task_id = self.assert_success(created)["id"]
+        restored, _ = self.call_cli(
+            "task", "repository", "add-batch", second_task_id,
+            "--repo", self.alternate,
+        )
+        restored_task = self.assert_success(restored)
+        self.assertEqual(restored_task["workspaceRoots"], [str(self.alternate)])
+        second_repositories = restored_task["repositoryWorktrees"]
+        self.assertEqual([item["repositoryPath"] for item in second_repositories], [str(self.alternate)])
+        self.assertEqual([item["branch"] for item in second_repositories], ["auto"])
+        self.assertEqual([item["branchFrom"] for item in second_repositories], ["main"])
+        self.assertEqual([item["mergeTarget"] for item in second_repositories], ["main"])
+        response, _ = self.call_cli("settings", "get")
+        self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.alternate)])
+
+        response, _ = self.call_cli("settings", "set-last-repositories", "--repo", self.fixture / "absent", expected_status=2)
+        self.assert_failure(response, "invalid_argument")
+        response, _ = self.call_cli("settings", "get")
+        self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.alternate)])
+
+    # case-contract: test_new_task_repository_restore_is_atomic_on_invalid_default | Applying an ordered repository batch with a valid repository followed by an empty Git repository fails without mutation: the CLI reports invalid_argument and fresh reads show no repository attachments or workspace roots; New Task blank Return keeps the picker open, shows an error, attaches neither repository, keeps roots empty, and preserves the saved repository order.
+    def test_new_task_repository_restore_is_atomic_on_invalid_default(self):
+        created, _ = self.call_cli("task", "create", "--title", "Atomic repository restore")
+        task_id = self.assert_success(created)["id"]
+        initial, _ = self.call_cli("task", "get", task_id)
+        initial_task = self.assert_success(initial)
+        self.assertEqual(initial_task["workspaceRoots"], [])
+        self.assertEqual(initial_task["repositoryWorktrees"], [])
+        saved_defaults, _ = self.call_cli(
+            "settings", "set-last-repositories",
+            "--repo", self.primary,
+            "--repo", self.empty_git_repository,
+        )
+        self.assertEqual(
+            self.assert_success(saved_defaults)["lastSelectedRepositories"],
+            [str(self.primary), str(self.empty_git_repository)],
+        )
+
+        response, _ = self.call_cli(
+            "task", "repository", "add-batch", task_id,
+            "--repo", self.primary,
+            "--repo", self.empty_git_repository,
+            expected_status=2,
+        )
+        self.assert_failure(response, "invalid_argument")
+
+        fresh, _ = self.call_cli("task", "get", task_id)
+        fresh_task = self.assert_success(fresh)
+        self.assertEqual(fresh_task["workspaceRoots"], [], "A failed batch must not persist any roots.")
+        self.assertEqual(fresh_task["repositoryWorktrees"], [], "A failed batch must not persist a partial repository attachment.")
+        roots, _ = self.call_cli("task", "roots", "get", task_id)
+        self.assertEqual(self.assert_success(roots)["roots"], [])
+        settings, _ = self.call_cli("settings", "get")
+        self.assertEqual(
+            self.assert_success(settings)["lastSelectedRepositories"],
+            [str(self.primary), str(self.empty_git_repository)],
+            "A failed restore must preserve the ordered repository defaults.",
+        )
 
     # case-contract: test_task_roots_remain_after_default_parent_is_cleared | Clearing the default parent does not change roots already saved on a task.
     def test_task_roots_remain_after_default_parent_is_cleared(self):
@@ -842,12 +1528,16 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "roots", "get", task_id)
         self.assertEqual(self.assert_success(response)["roots"], [str(self.primary)])
 
-    # case-contract: test_new_task_has_empty_conversation_history | Creating a task opens its empty conversation with the repository picker search focused and shows Untitled task until a first prompt starts title generation; the task has no stored messages or activity, and backing out immediately deletes it without a confirmation.
+    # case-contract: test_new_task_has_empty_conversation_history | The CLI creates an Untitled task with no roots, verifies empty history, and deletes it cleanly. New Task opens one empty conversation with its repository picker focused and no create sheet. Adding folder-only context leaves history empty, and backing out deletes the pending task without confirmation.
     def test_new_task_has_empty_conversation_history(self):
         response, _ = self.call_cli("task", "create", "--title", "Untitled task")
         task_id = self.assert_success(response)["id"]
         response, _ = self.call_cli("task", "get", task_id)
-        self.assertEqual(self.assert_success(response)["title"], "Untitled task")
+        task = self.assert_success(response)
+        self.assertEqual(task["title"], "Untitled task")
+        self.assertEqual(task["contextFolders"], [])
+        self.assertEqual(task["workspaceRoots"], [])
+        self.assertEqual(task["repositoryWorktrees"], [])
         response, _ = self.call_cli("conversation", "history", task_id)
         history = self.assert_success(response)
         self.assertEqual(history["activities"], [])
@@ -939,7 +1629,7 @@ class StationAIBridgeTests(unittest.TestCase):
         serialized_title_events = json.dumps(title_events)
         self.assertNotIn("Explain the delayed title result.", serialized_title_events)
         self.assertNotIn("Generated fixture title", serialized_title_events)
-    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and sending to an Untitled task persists either the Codex-generated title or a prompt-based fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text.
+    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text.
     def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
         task_id = self.create_task(title="Blank conversation send", roots=[self.primary])["id"]
         response, _ = self.call_cli("conversation", "send", task_id, "--message", " ", expected_status=2)
@@ -961,7 +1651,7 @@ class StationAIBridgeTests(unittest.TestCase):
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["savedPrompt"], prompt)
 
-        title_task = self.create_task("Untitled task", [self.primary])
+        title_task = self.create_repo_task("Untitled task", [self.primary])
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-title-success"
         shutil.copyfile(fixture, executable)
@@ -976,6 +1666,11 @@ class StationAIBridgeTests(unittest.TestCase):
         titled_record = self.assert_success(titled)
         self.assertEqual(titled_record["savedPrompt"], title_prompt)
         self.assertEqual(titled_record["title"], "Generated fixture title")
+        generated_title_worktree = titled_record["repositoryWorktrees"][0]
+        self.assertEqual(generated_title_worktree["branch"], "generated-fixture-title")
+        self.assertFalse(generated_title_worktree["isPending"])
+        self.assertTrue(Path(generated_title_worktree["worktreePath"]).is_dir())
+        self.assertTrue(self.branch_exists(self.primary, "generated-fixture-title"))
         title_events = [
             json.loads(line)
             for line in (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8").splitlines()
@@ -995,7 +1690,7 @@ class StationAIBridgeTests(unittest.TestCase):
         shutil.copyfile(fixture, failure_executable)
         failure_executable.chmod(0o755)
         failure_prompt = "Explain how repository setup works for new contributors"
-        failed_title_task = self.create_task("Untitled task", [self.primary])
+        failed_title_task = self.create_repo_task("Untitled task", [self.primary])
         sent, _ = self.call_cli(
             "conversation", "send", failed_title_task["id"], "--message", failure_prompt,
             extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(failure_executable)},
@@ -1005,6 +1700,12 @@ class StationAIBridgeTests(unittest.TestCase):
         failed_title_record = self.assert_success(failed_title)
         self.assertEqual(failed_title_record["savedPrompt"], failure_prompt)
         self.assertEqual(failed_title_record["title"], failure_prompt)
+        fallback_worktree = failed_title_record["repositoryWorktrees"][0]
+        fallback_branch = "explain-how-repository-setup-works-for-new-contributors"
+        self.assertEqual(fallback_worktree["branch"], fallback_branch)
+        self.assertFalse(fallback_worktree["isPending"])
+        self.assertTrue(Path(fallback_worktree["worktreePath"]).is_dir())
+        self.assertTrue(self.branch_exists(self.primary, fallback_branch))
         self.assertNotEqual(failed_title_record["title"], "Generating title…")
         failure_events = [
             json.loads(line)
@@ -1023,6 +1724,102 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertNotIn(title_prompt, title_log)
         self.assertNotIn("Generated fixture title", title_log)
         self.assertNotIn(failure_prompt, title_log)
+
+    # case-contract: test_conversation_serializes_concurrent_sends | Two concurrent sends for the same task are serialized across the app and CLI/XPC paths against the local Codex app-server fixture; the second waits for the first, both complete on the persisted thread, and the task remains In Progress while a send is active.
+    def test_conversation_serializes_concurrent_sends(self):
+        task = self.create_repo_task("Concurrent conversation sends", [self.primary])
+        task_id = task["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-concurrent-serial-success-wait"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+
+        first_prompt = "First serialized message."
+        second_prompt = "Second serialized message."
+        first_command = ["conversation", "send", task_id, "--message", first_prompt]
+        second_command = ["conversation", "send", task_id, "--message", second_prompt]
+        first_process = self.start_cli(
+            *first_command,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        second_process = None
+        release_marker = Path(str(executable) + ".resolve-continue")
+        first_ready = Path(str(executable) + ".resolve-ready")
+        second_started = Path(str(executable) + ".serial-second-turn-started")
+        try:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and not first_ready.exists() and first_process.poll() is None:
+                time.sleep(0.02)
+            if not first_ready.exists():
+                release_marker.write_text("Release the first serialized turn.\n", encoding="utf-8")
+                try:
+                    output, error_output = first_process.communicate(timeout=20)
+                except subprocess.TimeoutExpired:
+                    first_process.kill()
+                    output, error_output = first_process.communicate()
+                self.fail(
+                    "The first fixture send did not reach its pause before starting the second send: "
+                    f"exit={first_process.returncode}; stdout={output}; stderr={error_output}"
+                )
+
+            second_process = self.start_cli(
+                *second_command,
+                extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            )
+            time.sleep(0.25)
+            self.assertIsNone(second_process.poll(), "The second send should wait for the conversation-turn reservation held by the first send.")
+            self.assertFalse(
+                second_started.exists(),
+                "The shared app-server fixture must not receive the second turn until the first send releases its reservation.",
+            )
+            active = self.assert_success(self.call_cli("task", "get", task_id)[0])
+            self.assertEqual(active["status"], "In Progress", "A queued send must not mark the task Blocked.")
+
+            release_marker.write_text("Release the first serialized turn.\n", encoding="utf-8")
+            first_response, _ = self.finish_cli(first_process, first_command)
+            self.assert_success(first_response)
+            second_response, _ = self.finish_cli(second_process, second_command)
+            self.assert_success(second_response)
+        finally:
+            if first_process.poll() is None:
+                release_marker.write_text("Release the first serialized turn.\n", encoding="utf-8")
+                try:
+                    first_process.communicate(timeout=20)
+                except subprocess.TimeoutExpired:
+                    first_process.kill()
+                    first_process.communicate()
+            if second_process is not None and second_process.poll() is None:
+                try:
+                    second_process.communicate(timeout=20)
+                except subprocess.TimeoutExpired:
+                    second_process.kill()
+                    second_process.communicate()
+
+        saved_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        self.assertEqual(
+            [turn["userMessage"] for turn in saved_history["messages"]],
+            [first_prompt, second_prompt],
+            "Both sequential turns should persist in the same Codex thread history.",
+        )
+        thread_id = saved_history["threadID"]
+        thread_events = [event for event in saved_history["events"] if event["method"].startswith("thread/")]
+        self.assertEqual([event["method"] for event in thread_events].count("thread/start"), 1)
+        self.assertGreaterEqual([event["method"] for event in thread_events].count("thread/resume"), 1)
+        self.assertTrue(all(event["threadID"] == thread_id for event in saved_history["events"]))
+        self.assertTrue(all(turn["threadID"] == thread_id for turn in saved_history["messages"]))
+        turn_ids = [turn["turnID"] for turn in saved_history["messages"]]
+        self.assertEqual(len(turn_ids), 2)
+        self.assertEqual(len(set(turn_ids)), 2, "Each serialized send should have its own Codex turn ID.")
+        self.assertEqual(
+            [event["turnID"] for event in saved_history["events"] if event["method"] == "turn/start"],
+            turn_ids,
+        )
+        completed = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertEqual(completed["codexThreadID"], thread_id)
+        self.assertEqual(completed["status"], "Review")
 
     # case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history.
     def test_conversation_sends_image_attachments(self):

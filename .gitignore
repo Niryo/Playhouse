@@ -6,3 +6,5 @@ build/
 node_modules/
 .idea
 scripts/monaco-diff/dist/
+__pycache__/
+*.py[cod]

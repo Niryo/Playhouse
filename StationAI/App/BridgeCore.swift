@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import Darwin
 
 @MainActor
 struct CodexTaskTitleGenerator {
@@ -69,6 +70,9 @@ enum StationAITaskTitleDiagnostics {
 
 @MainActor
 enum StationAIStore {
+    private static var lifecycleGateHeld = false
+    private static var lifecycleGateWaiters: [CheckedContinuation<Void, Never>] = []
+
     static func storeURL(dataDirectory: String? = nil) throws -> URL {
         if let dataDirectory {
             return URL(fileURLWithPath: dataDirectory, isDirectory: true).appendingPathComponent("StationAI.store")
@@ -94,18 +98,68 @@ enum StationAIStore {
             url: storeURL,
             cloudKitDatabase: .none
         )
-        let container = try ModelContainer(for: schema, configurations: [configuration])
-        let migrationMarker = storeURL.deletingLastPathComponent().appendingPathComponent("task-lifecycle-v2-reset")
-        if !FileManager.default.fileExists(atPath: migrationMarker.path) {
-            let context = ModelContext(container)
-            let dirtyWorktrees = try BoardTaskManager(modelContext: context).resetAllTasksForLifecycle()
-            if !dirtyWorktrees.isEmpty {
-                let notice = storeURL.deletingLastPathComponent().appendingPathComponent("task-lifecycle-v2-notice.json")
-                try JSONEncoder().encode(dirtyWorktrees).write(to: notice, options: .atomic)
-            }
-            try Data("1\n".utf8).write(to: migrationMarker, options: .atomic)
+        return try ModelContainer(for: schema, configurations: [configuration])
+    }
+
+    @MainActor
+    static func prepareLifecycle(container: ModelContainer, dataDirectory: String? = nil) async throws {
+        await Self.acquireLifecycleGate()
+        defer { Self.releaseLifecycleGate() }
+        let storeURL = try Self.storeURL(dataDirectory: dataDirectory)
+        let directory = storeURL.deletingLastPathComponent()
+        let marker = directory.appendingPathComponent("task-lifecycle-v2-reset")
+        let lockURL = directory.appendingPathComponent("task-lifecycle-v2-reset.lock")
+        let lockDescriptor = try await Self.acquireLifecycleLock(at: lockURL)
+        defer { _ = Darwin.close(lockDescriptor) }
+        guard !FileManager.default.fileExists(atPath: marker.path) else { return }
+
+        let context = ModelContext(container)
+        let dirtyWorktrees = try await BoardTaskManager(modelContext: context).resetAllTasksForLifecycle()
+        if !dirtyWorktrees.isEmpty {
+            let notice = directory.appendingPathComponent("task-lifecycle-v2-notice.json")
+            try JSONEncoder().encode(dirtyWorktrees).write(to: notice, options: .atomic)
         }
-        return container
+        try Data("1\n".utf8).write(to: marker, options: .atomic)
+    }
+
+    private static func acquireLifecycleGate() async {
+        guard lifecycleGateHeld else {
+            lifecycleGateHeld = true
+            return
+        }
+        await withCheckedContinuation { continuation in
+            lifecycleGateWaiters.append(continuation)
+        }
+    }
+
+    private static func releaseLifecycleGate() {
+        guard !lifecycleGateWaiters.isEmpty else {
+            lifecycleGateHeld = false
+            return
+        }
+        lifecycleGateWaiters.removeFirst().resume()
+    }
+
+    private static func acquireLifecycleLock(at url: URL) async throws -> Int32 {
+        try await Task.detached(priority: .utility) {
+            let descriptor = Darwin.open(url.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+            guard descriptor >= 0 else {
+                throw StoreLifecycleLockError(message: "Couldn't open the task-store lifecycle lock (errno \(errno)).")
+            }
+            var lock = flock()
+            lock.l_type = Int16(F_WRLCK)
+            lock.l_whence = Int16(SEEK_SET)
+            while Darwin.fcntl(descriptor, F_SETLK, &lock) != 0 {
+                if errno == EACCES || errno == EAGAIN {
+                    usleep(50_000)
+                    continue
+                }
+                let code = errno
+                _ = Darwin.close(descriptor)
+                throw StoreLifecycleLockError(message: "Couldn't acquire the task-store lifecycle lock (errno \(code)).")
+            }
+            return descriptor
+        }.value
     }
 
     static func takeLifecycleResetNotice(dataDirectory: String? = nil) -> [String] {
@@ -127,6 +181,59 @@ enum StationAIStore {
               let paths = try? JSONDecoder().decode([String].self, from: data) else { return [] }
         try? FileManager.default.removeItem(at: notice)
         return paths
+    }
+}
+
+private struct StoreLifecycleLockError: Error, LocalizedError, Sendable {
+    let message: String
+    var errorDescription: String? { message }
+}
+
+private struct BridgeFileLockError: Error, LocalizedError, Sendable {
+    let message: String
+    var errorDescription: String? { message }
+}
+
+private enum RepositoryAllocationLock {
+    static func fileName(for repositoryPath: String) -> String {
+        let canonicalPath = URL(fileURLWithPath: repositoryPath)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL.path
+        var hash: UInt64 = 14695981039346656037
+        for byte in canonicalPath.utf8 {
+            hash = (hash ^ UInt64(byte)) &* 1099511628211
+        }
+        return String(format: "%016llx.lock", hash)
+    }
+}
+
+@MainActor
+private enum TaskOperationLockGate {
+    private static var heldKeys: Set<String> = []
+    private static var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+    static func acquire(_ key: String) async {
+        guard !heldKeys.contains(key) else {
+            await withCheckedContinuation { continuation in
+                waiters[key, default: []].append(continuation)
+            }
+            return
+        }
+        heldKeys.insert(key)
+    }
+
+    static func isHeld(_ key: String) -> Bool {
+        heldKeys.contains(key)
+    }
+
+    static func release(_ key: String) {
+        guard var pending = waiters[key], !pending.isEmpty else {
+            heldKeys.remove(key)
+            return
+        }
+        let next = pending.removeFirst()
+        waiters[key] = pending.isEmpty ? nil : pending
+        next.resume()
     }
 }
 
@@ -163,9 +270,10 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
 }
 
 enum GitHubPullRequestManager {
-    struct PullRequest: Decodable {
+    struct PullRequest: Decodable, Sendable {
         let number: Int
         let url: String
+        let baseRefName: String?
     }
 
     private struct PullRequestState: Decodable {
@@ -183,18 +291,47 @@ enum GitHubPullRequestManager {
     }
 
     static func findOpen(_ record: RepositoryWorktreeRecord, executable: String) throws -> PullRequest? {
-        let result = try run(executable, ["pr", "list", "--head", record.branch, "--state", "open", "--json", "number,url", "--limit", "1"], directory: record.worktreePath)
-        return try JSONDecoder().decode([PullRequest].self, from: Data(result.utf8)).first
+        let result = try run(executable, ["pr", "list", "--head", record.branch, "--state", "open", "--json", "number,url,baseRefName", "--limit", "1"], directory: record.worktreePath)
+        guard let pullRequest = try JSONDecoder().decode([PullRequest].self, from: Data(result.utf8)).first else {
+            return nil
+        }
+        if let mergeTarget = configuredMergeTarget(for: record) {
+            guard let baseRefName = pullRequest.baseRefName else {
+                throw BridgeCommandError(
+                    code: "operation_failed",
+                    message: "GitHub couldn't confirm the base branch of the existing pull request for \(record.branch). Its configured merge target is \(mergeTarget)."
+                )
+            }
+            guard baseRefName == mergeTarget else {
+                throw BridgeCommandError(
+                    code: "invalid_transition",
+                    message: "An open pull request for \(record.branch) targets \(baseRefName), but this repository is configured to merge into \(mergeTarget). The existing pull request was left unchanged."
+                )
+            }
+        }
+        return pullRequest
     }
 
     static func create(_ record: RepositoryWorktreeRecord, title: String, body: String, executable: String) throws -> PullRequest {
-        let result = try run(executable, ["pr", "create", "--title", title, "--body", body, "--head", record.branch], directory: record.worktreePath)
+        var arguments = ["pr", "create", "--title", title, "--body", body, "--head", record.branch]
+        if let mergeTarget = configuredMergeTarget(for: record) {
+            arguments += ["--base", mergeTarget]
+        }
+        let result = try run(executable, arguments, directory: record.worktreePath)
         guard let url = result.split(whereSeparator: \.isNewline).last.map(String.init),
               URL(string: url)?.host != nil,
               let number = URL(string: url)?.pathComponents.last.flatMap(Int.init) else {
             throw BridgeCommandError(code: "operation_failed", message: "GitHub CLI created a pull request but did not return its number and URL.")
         }
-        return PullRequest(number: number, url: url)
+        return PullRequest(number: number, url: url, baseRefName: nil)
+    }
+
+    private static func configuredMergeTarget(for record: RepositoryWorktreeRecord) -> String? {
+        guard let mergeTarget = record.mergeTarget?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !mergeTarget.isEmpty else {
+            return nil
+        }
+        return mergeTarget
     }
 
     static func isMerged(_ record: RepositoryWorktreeRecord, executable: String) throws -> Bool {
@@ -204,29 +341,55 @@ enum GitHubPullRequestManager {
     }
 
     private static func run(_ executable: String, _ arguments: [String], directory: String) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        process.currentDirectoryURL = URL(fileURLWithPath: directory, isDirectory: true)
-        let output = Pipe()
-        let error = Pipe()
-        process.standardOutput = output
-        process.standardError = error
-        do { try process.run() } catch {
+        let result: StationAIProcessResult
+        do {
+            result = try StationAIProcessRunner.run(
+                executable: executable,
+                arguments: arguments,
+                directory: directory
+            )
+        } catch {
             throw BridgeCommandError(code: "operation_failed", message: "Couldn't start GitHub CLI: \(error.localizedDescription)")
         }
-        let stdout = output.fileHandleForReading.readDataToEndOfFile()
-        let stderr = error.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        let text = String(data: stdout, encoding: .utf8) ?? ""
-        guard process.terminationStatus == 0 else {
-            let detail = String(data: stderr, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let text = String(data: result.stdout, encoding: .utf8) ?? ""
+        guard result.status == 0 else {
+            let detail = String(data: result.stderr, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let guidance = detail.localizedCaseInsensitiveContains("auth") || detail.localizedCaseInsensitiveContains("login")
                 ? "GitHub CLI isn't authorized. Run `gh auth login` in Terminal, then try again. "
                 : "GitHub CLI couldn't complete the request. "
-            throw BridgeCommandError(code: "operation_failed", message: guidance + (detail.isEmpty ? "Exit status \(process.terminationStatus)." : detail))
+            throw BridgeCommandError(code: "operation_failed", message: guidance + (detail.isEmpty ? "Exit status \(result.status)." : detail))
         }
         return text
+    }
+}
+
+struct StationAIPullRequestService {
+
+    func resolveExecutable() throws -> String {
+        try GitHubPullRequestManager.resolveExecutable()
+    }
+
+    func findOpen(_ record: RepositoryWorktreeRecord, executable: String) async throws -> GitHubPullRequestManager.PullRequest? {
+        try await StationAIBackgroundOperation.run {
+            try GitHubPullRequestManager.findOpen(record, executable: executable)
+        }
+    }
+
+    func create(
+        _ record: RepositoryWorktreeRecord,
+        title: String,
+        body: String,
+        executable: String
+    ) async throws -> GitHubPullRequestManager.PullRequest {
+        try await StationAIBackgroundOperation.run {
+            try GitHubPullRequestManager.create(record, title: title, body: body, executable: executable)
+        }
+    }
+
+    func isMerged(_ record: RepositoryWorktreeRecord, executable: String) async throws -> Bool {
+        try await StationAIBackgroundOperation.run {
+            try GitHubPullRequestManager.isMerged(record, executable: executable)
+        }
     }
 }
 
@@ -272,10 +435,163 @@ enum StationAIManagerError: LocalizedError {
 final class BoardTaskManager {
     private let modelContext: ModelContext
     private let worktreeRoot: URL
+    private let taskOperationLockDirectory: URL?
+    private let repositoryAllocationLockDirectory: URL?
+    private let conversationTurnLockDirectory: URL?
+    private let worktreeService = StationAIWorktreeService()
+    private let pullRequestService = StationAIPullRequestService()
 
     init(modelContext: ModelContext, worktreeRoot: URL = StationAIWorktreeManager.defaultRoot()) {
         self.modelContext = modelContext
         self.worktreeRoot = worktreeRoot
+        self.taskOperationLockDirectory = modelContext.container.configurations.first?.url
+            .deletingLastPathComponent()
+            .appendingPathComponent("task-operation-locks", isDirectory: true)
+        self.repositoryAllocationLockDirectory = modelContext.container.configurations.first?.url
+            .deletingLastPathComponent()
+            .appendingPathComponent("repository-allocation-locks", isDirectory: true)
+        self.conversationTurnLockDirectory = modelContext.container.configurations.first?.url
+            .deletingLastPathComponent()
+            .appendingPathComponent("conversation-turn-locks", isDirectory: true)
+    }
+
+    private func withTaskOperationLock<T>(
+        _ id: UUID,
+        operation: @MainActor () async throws -> T
+    ) async throws -> T {
+        guard let taskOperationLockDirectory else {
+            throw BridgeFileLockError(message: "Couldn't determine the task-store location for an operation lock.")
+        }
+        let lockURL = taskOperationLockDirectory.appendingPathComponent("\(id.uuidString).lock")
+        return try await withExclusiveFileLocks(at: [lockURL], purpose: "task-operation") {
+            try await operation()
+        }
+    }
+
+    /// Reserves a task's whole conversation send across app/XPC processes.
+    /// Workspace and repository changes, plus task deletion, use this same
+    /// reservation so they cannot change a worktree while a turn is using it.
+    /// This lock deliberately uses a separate file namespace from the short
+    /// task-operation locks: streamed-turn callbacks must still acquire those
+    /// locks to save lifecycle, progress, and thread state while this reservation
+    /// remains held. Never hold a task-operation lock across the Codex turn.
+    func withConversationTurnReservation<T>(
+        _ id: UUID,
+        operation: @MainActor () async throws -> T
+    ) async throws -> T {
+        guard let conversationTurnLockDirectory else {
+            throw BridgeFileLockError(message: "Couldn't determine the task-store location for the conversation-turn reservation.")
+        }
+        let lockURL = conversationTurnLockDirectory.appendingPathComponent("\(id.uuidString).lock")
+        return try await withExclusiveFileLocks(at: [lockURL], purpose: "conversation-turn") {
+            try await operation()
+        }
+    }
+
+    func hasConversationTurnReservation(_ id: UUID) throws -> Bool {
+        guard let conversationTurnLockDirectory else {
+            throw BridgeFileLockError(message: "Couldn't determine the task-store location for the conversation-turn reservation.")
+        }
+        let lockURL = conversationTurnLockDirectory
+            .appendingPathComponent("\(id.uuidString).lock")
+            .standardizedFileURL
+        let key = lockURL.path
+        guard !TaskOperationLockGate.isHeld(key) else { return true }
+
+        let descriptor = Darwin.open(lockURL.path, O_RDWR | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            if errno == ENOENT { return false }
+            throw BridgeFileLockError(message: "Couldn't inspect the conversation-turn reservation (errno \(errno)).")
+        }
+        defer { _ = Darwin.close(descriptor) }
+
+        var lock = flock()
+        lock.l_type = Int16(F_WRLCK)
+        lock.l_whence = Int16(SEEK_SET)
+        guard Darwin.fcntl(descriptor, F_GETLK, &lock) == 0 else {
+            throw BridgeFileLockError(message: "Couldn't inspect the conversation-turn reservation (errno \(errno)).")
+        }
+        return lock.l_type != Int16(F_UNLCK)
+    }
+
+    private func withRepositoryAllocationLocks<T>(
+        _ repositoryPaths: [String],
+        operation: @MainActor () async throws -> T
+    ) async throws -> T {
+        guard !repositoryPaths.isEmpty else { return try await operation() }
+        guard let repositoryAllocationLockDirectory else {
+            throw BridgeFileLockError(message: "Couldn't determine the task-store location for repository allocation locks.")
+        }
+        let lockURLs = Set(repositoryPaths.map { repositoryPath in
+            repositoryAllocationLockDirectory.appendingPathComponent(
+                RepositoryAllocationLock.fileName(for: repositoryPath)
+            )
+        }).sorted { $0.path < $1.path }
+        return try await withExclusiveFileLocks(at: lockURLs, purpose: "repository-allocation") {
+            try await operation()
+        }
+    }
+
+    private func withExclusiveFileLocks<T>(
+        at lockURLs: [URL],
+        purpose: String,
+        operation: @MainActor () async throws -> T
+    ) async throws -> T {
+        let orderedURLs = Array(Set(lockURLs.map { $0.standardizedFileURL }))
+            .sorted { $0.path < $1.path }
+        var acquiredKeys: [String] = []
+        var descriptors: [Int32] = []
+
+        do {
+            for lockURL in orderedURLs {
+                let key = lockURL.path
+                await TaskOperationLockGate.acquire(key)
+                do {
+                    let descriptor = try await Task.detached(priority: .utility) {
+                        do {
+                            try FileManager.default.createDirectory(
+                                at: lockURL.deletingLastPathComponent(),
+                                withIntermediateDirectories: true
+                            )
+                        } catch {
+                            throw BridgeFileLockError(message: "Couldn't create the \(purpose) lock directory: \(error.localizedDescription)")
+                        }
+                        let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR)
+                        guard descriptor >= 0 else {
+                            throw BridgeFileLockError(message: "Couldn't open the \(purpose) lock (errno \(errno)).")
+                        }
+                        var lock = flock()
+                        lock.l_type = Int16(F_WRLCK)
+                        lock.l_whence = Int16(SEEK_SET)
+                        while Darwin.fcntl(descriptor, F_SETLK, &lock) != 0 {
+                            if errno == EACCES || errno == EAGAIN {
+                                usleep(50_000)
+                                continue
+                            }
+                            let code = errno
+                            _ = Darwin.close(descriptor)
+                            throw BridgeFileLockError(message: "Couldn't acquire the \(purpose) lock (errno \(code)).")
+                        }
+                        return descriptor
+                    }.value
+                    acquiredKeys.append(key)
+                    descriptors.append(descriptor)
+                } catch {
+                    TaskOperationLockGate.release(key)
+                    throw error
+                }
+            }
+        } catch {
+            for descriptor in descriptors.reversed() { _ = Darwin.close(descriptor) }
+            for key in acquiredKeys.reversed() { TaskOperationLockGate.release(key) }
+            throw error
+        }
+
+        defer {
+            for descriptor in descriptors.reversed() { _ = Darwin.close(descriptor) }
+            for key in acquiredKeys.reversed() { TaskOperationLockGate.release(key) }
+        }
+        return try await operation()
     }
 
     func list() throws -> [BoardTaskRecord] {
@@ -299,79 +615,227 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String]) throws -> BoardTaskRecord {
+    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String]) async throws -> BoardTaskRecord {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty else { throw StationAIManagerError.invalidTitle }
         let folders = try Self.normalizeOptionalRoots(contextFolders)
         var worktrees: [RepositoryWorktreeRecord] = []
-        do {
-            for spec in repositories {
-                let record = try StationAIWorktreeManager.pendingRecord(spec: spec)
-                let normalizedWorktree = URL(fileURLWithPath: record.repositoryPath).standardizedFileURL.path
-                guard !worktrees.contains(where: { $0.repositoryPath == record.repositoryPath }) else {
-                    throw BridgeCommandError(code: "invalid_argument", message: "A repository can be selected only once per task: \(record.repositoryPath)")
-                }
-                for other in try listModels() where other.status != .done {
-                    if record.branch != "auto", other.repositoryWorktrees.contains(where: {
-                        $0.repositoryPath == record.repositoryPath && $0.branch == record.branch
-                    }) {
-                        throw StationAIManagerError.repositoryAssigned(record.repositoryPath)
-                    }
-                    if other.repositoryWorktrees.contains(where: { !$0.isPending && URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == normalizedWorktree }) {
-                        throw StationAIManagerError.repositoryAssigned(normalizedWorktree)
-                    }
-                }
-                worktrees.append(record)
-            }
-        } catch {
-            throw error
+        for spec in repositories {
+            worktrees.append(try await worktreeService.pendingRecord(spec: spec))
+        }
+        let duplicate = worktrees.first { record in
+            worktrees.filter { $0.repositoryPath == record.repositoryPath }.count > 1
+        }
+        if let duplicate {
+            throw BridgeCommandError(code: "invalid_argument", message: "A repository can be selected only once per task: \(duplicate.repositoryPath)")
         }
         let roots = try Self.normalizeOptionalRoots(worktrees.map(\.repositoryPath) + folders)
         let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: roots)
         task.repositoryWorktrees = worktrees
         task.contextFolderPaths = folders
-        modelContext.insert(task)
-        try modelContext.save()
-        return BoardTaskRecord(task: task)
+        return try await withRepositoryAllocationLocks(worktrees.map(\.repositoryPath)) {
+            try validateRepositoryAssignments(worktrees, excludingTaskID: nil)
+            modelContext.insert(task)
+            try modelContext.save()
+            return BoardTaskRecord(task: task)
+        }
     }
 
     @discardableResult
-    func addRepository(_ id: UUID, repositoryPath: String) throws -> BoardTaskRecord {
-        let task = try requireTask(id)
-        let repository = try StationAIWorktreeManager.repositoryRoot(repositoryPath)
-        guard !task.repositoryWorktrees.contains(where: {
-            URL(fileURLWithPath: $0.repositoryPath).standardizedFileURL.path == repository
-        }) else {
-            throw BridgeCommandError(code: "invalid_argument", message: "This repository is already attached to the task: \(repository)")
+    func addRepository(_ id: UUID, repositoryPath: String) async throws -> BoardTaskRecord {
+        return try await addRepositories(id, repositoryPaths: [repositoryPath])
+    }
+
+    @discardableResult
+    func addRepositories(_ id: UUID, repositoryPaths: [String]) async throws -> BoardTaskRecord {
+        guard !repositoryPaths.isEmpty else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Add at least one repository.")
         }
 
-        let record = try StationAIWorktreeManager.pendingRecord(spec: RepositoryWorktreeSpec(repositoryPath: repository, branch: nil, branchFrom: nil))
-        let worktreePath = URL(fileURLWithPath: record.repositoryPath).standardizedFileURL.path
-        do {
-            for other in try listModels() where other.id != id && other.status != .done {
-                if other.repositoryWorktrees.contains(where: {
-                    !$0.isPending && URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == worktreePath
-                }) {
-                    throw StationAIManagerError.repositoryAssigned(worktreePath)
+        let initialTask = try requireTask(id)
+        guard initialTask.status != .done else {
+            throw BridgeCommandError(code: "invalid_transition", message: "Repositories can't be changed on a completed task.")
+        }
+
+        var records: [RepositoryWorktreeRecord] = []
+        records.reserveCapacity(repositoryPaths.count)
+        for path in repositoryPaths {
+            records.append(try await worktreeService.pendingRecord(
+                spec: RepositoryWorktreeSpec(repositoryPath: path, branch: nil, branchFrom: nil)
+            ))
+        }
+
+        var seenRepositories = Set<String>()
+        for record in records {
+            let repository = Self.canonicalPath(record.repositoryPath)
+            guard seenRepositories.insert(repository).inserted else {
+                throw BridgeCommandError(
+                    code: "invalid_argument",
+                    message: "A repository can be selected only once per task: \(record.repositoryPath)"
+                )
+            }
+        }
+
+        let attachedRepositories = Set(initialTask.repositoryWorktrees.map { Self.canonicalPath($0.repositoryPath) })
+        if let duplicate = records.first(where: { attachedRepositories.contains(Self.canonicalPath($0.repositoryPath)) }) {
+            throw BridgeCommandError(
+                code: "invalid_argument",
+                message: "This repository is already attached to the task: \(duplicate.repositoryPath)"
+            )
+        }
+
+        return try await withConversationTurnReservation(id) {
+            return try await withTaskOperationLock(id) {
+                return try await withRepositoryAllocationLocks(records.map(\.repositoryPath)) {
+                    let task = try requireTask(id)
+                    guard task.status != .done else {
+                        throw BridgeCommandError(code: "invalid_transition", message: "Repositories can't be changed on a completed task.")
+                    }
+
+                    let currentRepositories = Set(task.repositoryWorktrees.map { Self.canonicalPath($0.repositoryPath) })
+                    if let duplicate = records.first(where: { currentRepositories.contains(Self.canonicalPath($0.repositoryPath)) }) {
+                        throw BridgeCommandError(
+                            code: "invalid_argument",
+                            message: "This repository is already attached to the task: \(duplicate.repositoryPath)"
+                        )
+                    }
+                    try validateRepositoryAssignments(records, excludingTaskID: id)
+
+                    let repositories = task.repositoryWorktrees + records
+                    let contextFolders = try Self.normalizeOptionalRoots(
+                        task.contextFolderPaths.filter {
+                            !seenRepositories.contains(Self.canonicalPath($0))
+                        }
+                    )
+                    let roots = try Self.normalizeOptionalRoots(repositories.map { $0.isPending ? $0.repositoryPath : $0.worktreePath } + contextFolders)
+                    task.repositoryWorktrees = repositories
+                    task.contextFolderPaths = contextFolders
+                    task.workspaceRootPaths = roots
+                    try modelContext.save()
+                    return BoardTaskRecord(task: task)
                 }
             }
+        }
+    }
 
-            var repositories = task.repositoryWorktrees
-            repositories.append(record)
-            let contextFolders = try Self.normalizeOptionalRoots(
-                task.contextFolderPaths.filter {
-                    URL(fileURLWithPath: $0).standardizedFileURL.path != repository
-                }
+    @discardableResult
+    func updateRepository(
+        _ id: UUID,
+        repositoryPath: String,
+        branch: String,
+        branchFrom: String,
+        mergeTarget: String?
+    ) async throws -> BoardTaskRecord {
+        let initialTask = try requireTask(id)
+        guard initialTask.status != .done else {
+            throw BridgeCommandError(code: "invalid_transition", message: "Repositories can't be changed on a completed task.")
+        }
+        guard !branch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !branchFrom.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Branch and merge-from values can't be empty.")
+        }
+        let initialRecord = try repositoryRecord(repositoryPath, in: initialTask)
+        guard initialRecord.isPending else {
+            throw BridgeCommandError(code: "invalid_transition", message: "Repository settings are locked after the task starts.")
+        }
+        let validated = try await worktreeService.pendingRecord(
+            spec: RepositoryWorktreeSpec(
+                repositoryPath: initialRecord.repositoryPath,
+                branch: branch,
+                branchFrom: branchFrom,
+                mergeTarget: mergeTarget
             )
-            let roots = try Self.normalizeOptionalRoots(repositories.map { $0.isPending ? $0.repositoryPath : $0.worktreePath } + contextFolders)
-            task.repositoryWorktrees = repositories
-            task.contextFolderPaths = contextFolders
-            task.workspaceRootPaths = roots
-            try modelContext.save()
-            return BoardTaskRecord(task: task)
-        } catch {
-            if record.createdByStationAI { try? StationAIWorktreeManager.remove(record) }
-            throw error
+        )
+
+        return try await withConversationTurnReservation(id) {
+            try await withTaskOperationLock(id) {
+                try await withRepositoryAllocationLocks([validated.repositoryPath]) {
+                    let task = try requireTask(id)
+                    guard task.status != .done,
+                          let index = task.repositoryWorktrees.firstIndex(where: { $0.repositoryPath == initialRecord.repositoryPath }),
+                          task.repositoryWorktrees[index] == initialRecord else {
+                        throw BridgeCommandError(code: "invalid_transition", message: "Repository settings changed while they were being validated. Try again.")
+                    }
+                    try validateRepositoryAssignments([validated], excludingTaskID: id)
+                    var repositories = task.repositoryWorktrees
+                    repositories[index] = validated
+                    task.repositoryWorktrees = repositories
+                    try modelContext.save()
+                    return BoardTaskRecord(task: task)
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    func removeRepository(_ id: UUID, repositoryPath: String) async throws -> BoardTaskRecord {
+        return try await withConversationTurnReservation(id) {
+            try await self.removeRepositoryWhileTurnReserved(id, repositoryPath: repositoryPath)
+        }
+    }
+
+    private func removeRepositoryWhileTurnReserved(
+        _ id: UUID,
+        repositoryPath: String
+    ) async throws -> BoardTaskRecord {
+        return try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.status != .done else {
+                throw BridgeCommandError(code: "invalid_transition", message: "Repositories can't be changed on a completed task.")
+            }
+            let record = try repositoryRecord(repositoryPath, in: task)
+            let originalRepositories = task.repositoryWorktrees
+            let originalRoots = task.workspaceRootPaths
+            let updatedRepositories = originalRepositories.filter { $0.repositoryPath != record.repositoryPath }
+            let roots = try Self.normalizeOptionalRoots(updatedRepositories.map(\.worktreePath) + task.contextFolderPaths)
+            guard !roots.isEmpty else { throw StationAIManagerError.noWorkspaceRoots }
+
+            let shouldRemoveWorktree = record.createdByStationAI && !record.isPending
+                && FileManager.default.fileExists(atPath: record.worktreePath)
+
+            return try await withRepositoryAllocationLocks([record.repositoryPath]) {
+                let currentTask = try requireTask(id)
+                guard currentTask.status != .done,
+                      currentTask.repositoryWorktrees == originalRepositories,
+                      currentTask.workspaceRootPaths == originalRoots else {
+                    throw BridgeCommandError(code: "invalid_transition", message: "The task changed while its repository was being checked. Try again.")
+                }
+                if shouldRemoveWorktree, try await worktreeService.hasChanges(record) {
+                    throw BridgeCommandError(
+                        code: "operation_failed",
+                        message: "Can't remove this repository because its worktree has uncommitted changes: \(record.worktreePath)"
+                    )
+                }
+
+                currentTask.repositoryWorktrees = updatedRepositories
+                currentTask.workspaceRootPaths = roots
+                try modelContext.save()
+
+                if shouldRemoveWorktree {
+                    do {
+                        try await worktreeService.remove(record)
+                    } catch {
+                        let removalError = error
+                        guard let current = try? requireTask(id),
+                              current.repositoryWorktrees == updatedRepositories,
+                              current.workspaceRootPaths == roots else {
+                            throw removalError
+                        }
+                        current.repositoryWorktrees = originalRepositories
+                        current.workspaceRootPaths = originalRoots
+                        do {
+                            try modelContext.save()
+                        } catch {
+                            throw BridgeCommandError(
+                                code: "operation_failed",
+                                message: "Couldn't remove the repository worktree (\(removalError.localizedDescription)) or restore its task record (\(error.localizedDescription))."
+                            )
+                        }
+                        throw removalError
+                    }
+                }
+                return try get(id)
+            }
         }
     }
 
@@ -379,70 +843,91 @@ final class BoardTaskManager {
     func move(
         _ id: UUID,
         to statusName: String,
-        client: CodexAppServerClient? = nil,
-        onConflictResolutionStart: (() -> Void)? = nil,
         allowUnmergedPullRequests: Bool = false
     ) async throws -> BoardTaskRecord {
         guard let status = TaskStatus(rawValue: statusName) else {
             throw StationAIManagerError.invalidStatus(statusName)
         }
-        let task = try requireTask(id)
         guard status == .done else {
             throw StationAIManagerError.invalidTransition("Task status is controlled by Codex. Start or continue a conversation to update it.")
         }
-        guard task.status != .done else { return BoardTaskRecord(task: task) }
-        guard task.status == .review else {
-            throw StationAIManagerError.invalidTransition("Only a task in Review can move to Done.")
-        }
-
-        let linkedRecords = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil }
-        if !linkedRecords.isEmpty && !allowUnmergedPullRequests {
-            let executable = try GitHubPullRequestManager.resolveExecutable()
-            let unmerged = try linkedRecords.filter { try !GitHubPullRequestManager.isMerged($0, executable: executable) }
-            if !unmerged.isEmpty {
-                throw StationAIManagerError.unmergedPullRequests(unmerged.compactMap(\.pullRequestNumber))
+        return try await withTaskOperationLock(id) {
+            let initialTask = try requireTask(id)
+            guard initialTask.status != .done else { return BoardTaskRecord(task: initialTask) }
+            guard initialTask.status == .review else {
+                throw StationAIManagerError.invalidTransition("Only a task in Review can move to Done.")
             }
+
+            let originalRepositories = initialTask.repositoryWorktrees
+            let linkedRecords = originalRepositories.filter { $0.pullRequestNumber != nil }
+            if !linkedRecords.isEmpty && !allowUnmergedPullRequests {
+                let executable = try pullRequestService.resolveExecutable()
+                var unmerged: [RepositoryWorktreeRecord] = []
+                for record in linkedRecords {
+                    let isMerged = try await pullRequestService.isMerged(record, executable: executable)
+                    if !isMerged { unmerged.append(record) }
+                }
+                if !unmerged.isEmpty {
+                    throw StationAIManagerError.unmergedPullRequests(unmerged.compactMap(\.pullRequestNumber))
+                }
+            }
+            let task = try requireTask(id)
+            guard task.status == .review else {
+                throw StationAIManagerError.invalidTransition("Only a task in Review can move to Done.")
+            }
+            guard task.repositoryWorktrees == originalRepositories else {
+                throw BridgeCommandError(code: "invalid_transition", message: "The task's pull request links changed while they were being checked. Try again.")
+            }
+            task.status = .done
+            task.statusMessage = nil
+            clearProgressReport(task)
+            try modelContext.save()
+            return BoardTaskRecord(task: task)
         }
-        task.status = .done
-        task.statusMessage = nil
-        clearProgressReport(task)
-        try modelContext.save()
-        return BoardTaskRecord(task: task)
     }
 
     func createPullRequests(_ id: UUID, client: CodexAppServerClient) async throws -> BoardTaskRecord {
-        let task = try requireTask(id)
-        guard !task.repositoryWorktrees.isEmpty else {
-            throw BridgeCommandError(code: "invalid_transition", message: "This task has no repository for a pull request.")
-        }
-        let gh = try GitHubPullRequestManager.resolveExecutable()
-        guard !task.repositoryWorktrees.contains(where: \.isPending) else {
-            throw BridgeCommandError(code: "invalid_transition", message: "Start the task conversation before creating a pull request so its repository worktree is ready.")
-        }
-        var records = task.repositoryWorktrees
-        for index in records.indices where records[index].pullRequestNumber == nil || records[index].pullRequestURL == nil {
-            let record = records[index]
-            do {
-                // Supplying --head to gh pr create skips its normal push behavior, and
-                // gh pr list also needs a usable remote. Publish before either request.
-                try StationAIWorktreeManager.commitChanges(record, message: "Complete task: \(task.title)")
-                try StationAIWorktreeManager.publishBranch(record)
-            } catch {
-                throw BridgeCommandError(code: "operation_failed", message: "GitHub CLI couldn't publish the task branch. \(error.localizedDescription)")
+        let lookup = try await withTaskOperationLock(id) {
+            let initialTask = try requireTask(id)
+            let originalRecords = initialTask.repositoryWorktrees
+            guard !originalRecords.isEmpty else {
+                throw BridgeCommandError(code: "invalid_transition", message: "This task has no repository for a pull request.")
             }
-            if let existing = try GitHubPullRequestManager.findOpen(records[index], executable: gh) {
-                records[index].pullRequestNumber = existing.number
-                records[index].pullRequestURL = existing.url
+            let gh = try pullRequestService.resolveExecutable()
+            guard !originalRecords.contains(where: \.isPending) else {
+                throw BridgeCommandError(code: "invalid_transition", message: "Start the task conversation before creating a pull request so its repository worktree is ready.")
             }
+            var records = originalRecords
+            for index in records.indices where records[index].pullRequestNumber == nil || records[index].pullRequestURL == nil {
+                do {
+                    // `--head` skips gh's push flow, and `gh pr list` also needs a
+                    // published branch. Commit and publish before either GH request.
+                    try await worktreeService.commitChanges(records[index], message: "Complete task: \(initialTask.title)")
+                    try await worktreeService.publishBranch(records[index])
+                } catch {
+                    throw BridgeCommandError(code: "operation_failed", message: "GitHub CLI couldn't publish the task branch. \(error.localizedDescription)")
+                }
+                if let existing = try await pullRequestService.findOpen(records[index], executable: gh) {
+                    records[index].pullRequestNumber = existing.number
+                    records[index].pullRequestURL = existing.url
+                }
+            }
+            let taskAfterLookup = try requireTask(id)
+            guard taskAfterLookup.repositoryWorktrees == originalRecords else {
+                throw BridgeCommandError(code: "invalid_transition", message: "The task repositories changed while pull requests were being checked. Try again.")
+            }
+            taskAfterLookup.repositoryWorktrees = records
+            try modelContext.save()
+            return (gh, records, BoardTaskRecord(task: taskAfterLookup))
         }
-        task.repositoryWorktrees = records
-        try modelContext.save()
+        let (gh, records, lookedUpRecords) = lookup
         guard records.contains(where: { $0.pullRequestNumber == nil || $0.pullRequestURL == nil }) else {
-            return BoardTaskRecord(task: task)
+            return lookedUpRecords
         }
 
         let conversation = try await CodexConversationManager(tasks: self, client: client).history(taskID: id)
         let conversationText = conversation.messages.map { "\($0.role.rawValue): \($0.text)" }.joined(separator: "\n\n")
+        let currentTitle = try requireTask(id).title
         let summary: String
         if !conversationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let roots = records.map { URL(fileURLWithPath: $0.worktreePath, isDirectory: true) }
@@ -450,7 +935,7 @@ final class BoardTaskManager {
             let summaryThread = try await client.startThread(workspace: workspace, modelID: CodexAppServerClient.modelID)
             var generated = ""
             try await client.sendMessage(
-                "Write a very concise GitHub pull request description. Explain what problem this change solves, how it solves it, and briefly mention any special issue or caveat from the conversation. Use Markdown, no more than three short sections, and return only the description.\n\nTask: \(task.title)\n\nConversation:\n\(conversationText)",
+                "Write a very concise GitHub pull request description. Explain what problem this change solves, how it solves it, and briefly mention any special issue or caveat from the conversation. Use Markdown, no more than three short sections, and return only the description.\n\nTask: \(currentTitle)\n\nConversation:\n\(conversationText)",
                 mode: .plan,
                 modelID: CodexAppServerClient.modelID,
                 threadID: summaryThread,
@@ -466,40 +951,64 @@ final class BoardTaskManager {
             }
             summary = generated
         } else {
-            summary = "Implements: \(task.title)."
+            summary = "Implements: \(currentTitle)."
         }
 
-        for index in records.indices where records[index].pullRequestNumber == nil || records[index].pullRequestURL == nil {
-            let record = records[index]
-            let created = try GitHubPullRequestManager.create(record, title: task.title, body: summary, executable: gh)
-            records[index].pullRequestNumber = created.number
-            records[index].pullRequestURL = created.url
-            task.repositoryWorktrees = records
+        let taskBeforeCreation = try requireTask(id)
+        guard taskBeforeCreation.repositoryWorktrees == records,
+              taskBeforeCreation.title == currentTitle else {
+            throw BridgeCommandError(code: "invalid_transition", message: "The task changed while its pull request summary was being prepared. Try again.")
+        }
+        return try await withTaskOperationLock(id) {
+            let taskAtCreation = try requireTask(id)
+            guard taskAtCreation.repositoryWorktrees == records,
+                  taskAtCreation.title == currentTitle else {
+                throw BridgeCommandError(code: "invalid_transition", message: "The task changed while its pull request summary was being prepared. Try again.")
+            }
+            var updatedRecords = records
+            var expectedRecords = records
+            for index in updatedRecords.indices where updatedRecords[index].pullRequestNumber == nil || updatedRecords[index].pullRequestURL == nil {
+                let record = updatedRecords[index]
+                let pullRequest: GitHubPullRequestManager.PullRequest
+                if let existing = try await pullRequestService.findOpen(record, executable: gh) {
+                    pullRequest = existing
+                } else {
+                    do {
+                        try await worktreeService.commitChanges(record, message: "Complete task: \(currentTitle)")
+                        try await worktreeService.publishBranch(record)
+                    } catch {
+                        throw BridgeCommandError(code: "operation_failed", message: "GitHub CLI couldn't publish the task branch. \(error.localizedDescription)")
+                    }
+                    pullRequest = try await pullRequestService.create(record, title: currentTitle, body: summary, executable: gh)
+                }
+                updatedRecords[index].pullRequestNumber = pullRequest.number
+                updatedRecords[index].pullRequestURL = pullRequest.url
+                let currentTask = try requireTask(id)
+                guard currentTask.repositoryWorktrees == expectedRecords else {
+                    throw BridgeCommandError(code: "invalid_transition", message: "The task repositories changed while the pull request was being created.")
+                }
+                currentTask.repositoryWorktrees = updatedRecords
+                try modelContext.save()
+                expectedRecords = updatedRecords
+            }
+            return try get(id)
+        }
+    }
+
+    func setLifecycleStatus(_ id: UUID, to status: TaskStatus, message: String? = nil) async throws -> BoardTaskRecord {
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.status != .done else { return BoardTaskRecord(task: task) }
+            task.status = status
+            task.statusMessage = message
+            if status != .inProgress { clearProgressReport(task) }
             try modelContext.save()
+            return BoardTaskRecord(task: task)
         }
-        return BoardTaskRecord(task: task)
-    }
-
-    func setLifecycleStatus(_ id: UUID, to status: TaskStatus, message: String? = nil) throws -> BoardTaskRecord {
-        let task = try requireTask(id)
-        return try setLifecycleStatus(task, to: status, message: message)
-    }
-
-    func setLifecycleStatus(_ task: BoardTask, to status: TaskStatus, message: String? = nil) throws -> BoardTaskRecord {
-        guard task.status != .done else { return BoardTaskRecord(task: task) }
-        task.status = status
-        task.statusMessage = message
-        if status != .inProgress { clearProgressReport(task) }
-        try modelContext.save()
-        return BoardTaskRecord(task: task)
     }
 
     @discardableResult
-    func publishProgressReport(_ id: UUID, type: TaskProgressType?, customLabel: String? = nil, detail: String? = nil) throws -> BoardTaskRecord {
-        let task = try requireTask(id)
-        guard task.status == .inProgress else {
-            throw BridgeCommandError(code: "invalid_transition", message: "Progress reports can only be published while a task is In Progress.")
-        }
+    func publishProgressReport(_ id: UUID, type: TaskProgressType?, customLabel: String? = nil, detail: String? = nil) async throws -> BoardTaskRecord {
         let label = type?.label ?? customLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !label.isEmpty, label.count <= 60 else {
             throw BridgeCommandError(code: "invalid_argument", message: "Progress labels must contain 1 to 60 characters.")
@@ -508,19 +1017,27 @@ final class BoardTaskManager {
         guard (normalizedDetail?.count ?? 0) <= 200 else {
             throw BridgeCommandError(code: "invalid_argument", message: "Progress details must be 200 characters or fewer.")
         }
-        task.progressTypeRawValue = type?.rawValue
-        task.progressLabel = label
-        task.progressDetail = normalizedDetail?.isEmpty == true ? nil : normalizedDetail
-        try modelContext.save()
-        return BoardTaskRecord(task: task)
+        return try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.status == .inProgress else {
+                throw BridgeCommandError(code: "invalid_transition", message: "Progress reports can only be published while a task is In Progress.")
+            }
+            task.progressTypeRawValue = type?.rawValue
+            task.progressLabel = label
+            task.progressDetail = normalizedDetail?.isEmpty == true ? nil : normalizedDetail
+            try modelContext.save()
+            return BoardTaskRecord(task: task)
+        }
     }
 
     @discardableResult
-    func clearProgressReport(_ id: UUID) throws -> BoardTaskRecord {
-        let task = try requireTask(id)
-        clearProgressReport(task)
-        try modelContext.save()
-        return BoardTaskRecord(task: task)
+    func clearProgressReport(_ id: UUID) async throws -> BoardTaskRecord {
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            clearProgressReport(task)
+            try modelContext.save()
+            return BoardTaskRecord(task: task)
+        }
     }
 
     private func clearProgressReport(_ task: BoardTask) {
@@ -529,106 +1046,211 @@ final class BoardTaskManager {
         task.progressDetail = nil
     }
 
-    func reconcileLifecycleStatusOnOpen(_ id: UUID, client: CodexAppServerClient) throws -> BoardTaskRecord {
-        let task = try requireTask(id)
-        guard let threadID = task.codexThreadID,
-              !client.isTurnActive(threadID: threadID),
-              !CodexAppServerClient.isTurnActiveInProcess(threadID: threadID) else {
-            return BoardTaskRecord(task: task)
-        }
-        switch task.status {
-        case .inProgress:
-            return try setLifecycleStatus(id, to: .blocked, message: "StationAI reopened before Codex reported that this turn finished. Review the conversation and send a prompt to retry.")
-        case .waitingResponse:
-            return try setLifecycleStatus(id, to: .blocked, message: "StationAI reopened before the pending question was answered. Review the conversation and send a prompt to continue.")
-        default:
+    func reconcileLifecycleStatusOnOpen(_ id: UUID, client: CodexAppServerClient) async throws -> BoardTaskRecord {
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard let threadID = task.codexThreadID else {
+                return BoardTaskRecord(task: task)
+            }
+            let hasActiveReservation = try hasConversationTurnReservation(id)
+            guard !client.isTurnActive(threadID: threadID),
+                  !CodexAppServerClient.isTurnActiveInProcess(threadID: threadID),
+                  !hasActiveReservation else {
+                return BoardTaskRecord(task: task)
+            }
+            let message: String
+            switch task.status {
+            case .inProgress:
+                message = "StationAI reopened before Codex reported that this turn finished. Review the conversation and send a prompt to retry."
+            case .waitingResponse:
+                message = "StationAI reopened before the pending question was answered. Review the conversation and send a prompt to continue."
+            default:
+                return BoardTaskRecord(task: task)
+            }
+            task.status = .blocked
+            task.statusMessage = message
+            clearProgressReport(task)
+            try modelContext.save()
             return BoardTaskRecord(task: task)
         }
     }
 
-    func resetAllTasksForLifecycle() throws -> [String] {
+    func resetAllTasksForLifecycle() async throws -> [String] {
         let all = try listModels()
         var dirtyManagedWorktrees: [String] = []
-        for task in all {
-            for record in task.repositoryWorktrees where record.createdByStationAI {
-                guard FileManager.default.fileExists(atPath: record.worktreePath) else { continue }
-                if (try? StationAIWorktreeManager.hasChanges(record)) != false {
-                    dirtyManagedWorktrees.append(record.worktreePath)
-                } else {
-                    try StationAIWorktreeManager.remove(record)
+        for snapshot in all {
+            let dirtyForTask = try await withTaskOperationLock(snapshot.id) { () async throws -> [String] in
+                let task: BoardTask
+                do {
+                    task = try requireTask(snapshot.id)
+                } catch let error as StationAIManagerError {
+                    if case .taskNotFound = error { return [] }
+                    throw error
                 }
+                var dirtyPaths: [String] = []
+                for record in task.repositoryWorktrees where record.createdByStationAI {
+                    guard FileManager.default.fileExists(atPath: record.worktreePath) else { continue }
+                    if (try? await worktreeService.hasChanges(record)) != false {
+                        dirtyPaths.append(record.worktreePath)
+                    } else {
+                        try await worktreeService.remove(record)
+                    }
+                }
+                modelContext.delete(task)
+                try modelContext.save()
+                return dirtyPaths
             }
-            modelContext.delete(task)
+            dirtyManagedWorktrees.append(contentsOf: dirtyForTask)
         }
-        try modelContext.save()
         return dirtyManagedWorktrees
     }
 
     @discardableResult
-    func rename(_ id: UUID, title: String) throws -> BoardTaskRecord {
+    func rename(_ id: UUID, title: String) async throws -> BoardTaskRecord {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty else { throw StationAIManagerError.invalidTitle }
-        let task = try requireTask(id)
-        task.title = normalizedTitle
-        try modelContext.save()
-        return BoardTaskRecord(task: task)
+        return try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            task.title = normalizedTitle
+            try modelContext.save()
+            return BoardTaskRecord(task: task)
+        }
     }
 
     @discardableResult
-    func savePrompt(_ id: UUID, prompt: String, status: TaskStatus? = nil) throws -> BoardTaskRecord {
-        let task = try requireTask(id)
+    func renameIfTitleMatches(_ id: UUID, expectedTitle: String, title: String) async throws -> BoardTaskRecord? {
+        let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTitle.isEmpty else { throw StationAIManagerError.invalidTitle }
+        return try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.title == expectedTitle else { return nil }
+            let previousTitle = task.title
+            task.title = normalizedTitle
+            do {
+                try modelContext.save()
+            } catch {
+                task.title = previousTitle
+                throw error
+            }
+            return BoardTaskRecord(task: task)
+        }
+    }
+
+    @discardableResult
+    func savePrompt(_ id: UUID, prompt: String, status: TaskStatus? = nil) async throws -> BoardTaskRecord {
         if let status, status != .backlog && status != .inProgress {
             throw StationAIManagerError.invalidTransition("Saving a task prompt can only place it in Backlog or Progress.")
         }
-        task.savedPrompt = prompt
-        if let status {
-            task.status = status
-            if status != .inProgress { clearProgressReport(task) }
+        return try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            task.savedPrompt = prompt
+            if let status {
+                task.status = status
+                if status != .inProgress { clearProgressReport(task) }
+            }
+            try modelContext.save()
+            return BoardTaskRecord(task: task)
         }
-        try modelContext.save()
-        return BoardTaskRecord(task: task)
+    }
+
+    func persistCodexThreadID(_ id: UUID, threadID: String) async throws -> BoardTaskRecord {
+        guard !threadID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Codex returned an empty thread ID.")
+        }
+        return try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.codexThreadID == nil || task.codexThreadID == threadID else {
+                throw BridgeCommandError(code: "invalid_transition", message: "The task is already linked to a different Codex conversation.")
+            }
+            guard task.codexThreadID != threadID else { return BoardTaskRecord(task: task) }
+            task.codexThreadID = threadID
+            do {
+                try modelContext.save()
+            } catch {
+                task.codexThreadID = nil
+                throw error
+            }
+            return BoardTaskRecord(task: task)
+        }
     }
 
     @discardableResult
-    func setWorkspaceRoots(_ id: UUID, roots: [String]) throws -> BoardTaskRecord {
-        let task = try requireTask(id)
-        if task.repositoryWorktrees.isEmpty {
-            task.workspaceRootPaths = try Self.normalizeRoots(roots)
-            task.contextFolderPaths = task.workspaceRootPaths
+    func setWorkspaceRoots(_ id: UUID, roots: [String]) async throws -> BoardTaskRecord {
+        let initialTask = try requireTask(id)
+        let initialRepositories = initialTask.repositoryWorktrees
+        let initialWorkspaceRoots = initialTask.workspaceRootPaths
+        let initialContextFolders = initialTask.contextFolderPaths
+        if initialRepositories.isEmpty {
+            let normalizedRoots = try Self.normalizeRoots(roots)
+            return try await withConversationTurnReservation(id) {
+                try await withTaskOperationLock(id) {
+                    let task = try requireTask(id)
+                    guard task.repositoryWorktrees == initialRepositories,
+                          task.workspaceRootPaths == initialWorkspaceRoots,
+                          task.contextFolderPaths == initialContextFolders else {
+                        throw BridgeCommandError(code: "invalid_transition", message: "The task workspaces changed while folders were being validated. Try again.")
+                    }
+                    task.workspaceRootPaths = normalizedRoots
+                    task.contextFolderPaths = normalizedRoots
+                    try modelContext.save()
+                    return BoardTaskRecord(task: task)
+                }
+            }
         } else {
             let paths = try Self.normalizeOptionalRoots(roots)
-            let existingPaths = Set(task.repositoryWorktrees.map { URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path })
-            let retained = task.repositoryWorktrees.filter { existingPaths.contains(URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path) && paths.contains(URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path) }
+            let existingPaths = Set(initialRepositories.map { URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path })
+            let retained = initialRepositories.filter { existingPaths.contains(URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path) && paths.contains(URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path) }
             var worktrees = retained
             var folders: [String] = []
             for path in paths where !existingPaths.contains(path) {
                 if FileManager.default.fileExists(atPath: URL(fileURLWithPath: path).appendingPathComponent(".git").path) {
-                    let record = try StationAIWorktreeManager.pendingRecord(
+                    let record = try await worktreeService.pendingRecord(
                         spec: RepositoryWorktreeSpec(repositoryPath: path, branch: nil, branchFrom: nil)
                     )
-                    let worktreePath = URL(fileURLWithPath: record.repositoryPath).standardizedFileURL.path
-                    for other in try listModels() where other.id != id && other.status != .done {
-                        if other.repositoryWorktrees.contains(where: { !$0.isPending && URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == worktreePath }) {
-                            throw StationAIManagerError.repositoryAssigned(worktreePath)
-                        }
-                    }
                     worktrees.append(record)
                 } else {
                     folders.append(path)
                 }
             }
-            task.repositoryWorktrees = worktrees
-            task.contextFolderPaths = folders
-            let resolvedRoots = try Self.normalizeOptionalRoots(worktrees.map(\.worktreePath) + folders)
-            guard !resolvedRoots.isEmpty else { throw StationAIManagerError.noWorkspaceRoots }
-            task.workspaceRootPaths = resolvedRoots
+            return try await withConversationTurnReservation(id) {
+                try await withTaskOperationLock(id) {
+                    try await withRepositoryAllocationLocks(worktrees.map(\.repositoryPath)) {
+                        let task = try requireTask(id)
+                        guard task.repositoryWorktrees == initialRepositories,
+                              task.workspaceRootPaths == initialWorkspaceRoots,
+                              task.contextFolderPaths == initialContextFolders else {
+                            throw BridgeCommandError(code: "invalid_transition", message: "The task workspaces changed while folders were being validated. Try again.")
+                        }
+                        try validateRepositoryAssignments(worktrees, excludingTaskID: id)
+                        task.repositoryWorktrees = worktrees
+                        task.contextFolderPaths = folders
+                        let resolvedRoots = try Self.normalizeOptionalRoots(worktrees.map(\.worktreePath) + folders)
+                        guard !resolvedRoots.isEmpty else { throw StationAIManagerError.noWorkspaceRoots }
+                        task.workspaceRootPaths = resolvedRoots
+                        try modelContext.save()
+                        return BoardTaskRecord(task: task)
+                    }
+                }
+            }
         }
-        try modelContext.save()
-        return BoardTaskRecord(task: task)
     }
 
-    func delete(_ id: UUID, diagnostics: [String: String] = [:]) throws {
-        let task = try requireTask(id)
+    func delete(_ id: UUID, diagnostics: [String: String] = [:]) async throws {
+        try await withConversationTurnReservation(id) {
+            try await self.deleteWhileTurnReserved(id, diagnostics: diagnostics)
+        }
+    }
+
+    private func deleteWhileTurnReserved(_ id: UUID, diagnostics: [String: String]) async throws {
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            try await withRepositoryAllocationLocks(task.repositoryWorktrees.map(\.repositoryPath)) {
+                try await deleteTaskWhileLocked(task, diagnostics: diagnostics)
+            }
+        }
+    }
+
+    private func deleteTaskWhileLocked(_ task: BoardTask, diagnostics: [String: String]) async throws {
         var phase = "worktree-removal"
         var fields = [
             "taskID": task.id.uuidString,
@@ -644,7 +1266,7 @@ final class BoardTaskManager {
                 guard !worktree.isPending else { continue }
                 fields["worktreePath"] = worktree.worktreePath
                 StationAIDiagnostics.record("task.delete.worktree_removal_started", fields: fields)
-                try StationAIWorktreeManager.removeAfterConfirmation(worktree)
+                try await worktreeService.removeAfterConfirmation(worktree)
                 StationAIDiagnostics.record("task.delete.worktree_removal_succeeded", fields: fields)
             }
             phase = "swiftdata-save"
@@ -665,68 +1287,74 @@ final class BoardTaskManager {
         try requireTask(id)
     }
 
-    func prepareRepositoryWorktrees(_ id: UUID, fallbackPrompt: String? = nil) throws -> BoardTask {
-        let task = try requireTask(id)
-        let pending = task.repositoryWorktrees.filter(\.isPending)
-        guard !pending.isEmpty else { return task }
+    func prepareRepositoryWorktrees(_ id: UUID, fallbackPrompt: String? = nil) async throws -> BoardTask {
+        let initialTask = try requireTask(id)
+        let initialRecords = initialTask.repositoryWorktrees
+        let pending = initialRecords.filter(\.isPending)
+        guard !pending.isEmpty else { return initialTask }
         let branchTitle: String
-        if ["Generating title…", "Untitled task"].contains(task.title) {
-            let prompt = task.savedPrompt ?? fallbackPrompt ?? task.title
+        if ["Generating title…", "Untitled task"].contains(initialTask.title) {
+            let prompt = initialTask.savedPrompt ?? fallbackPrompt ?? initialTask.title
             branchTitle = prompt.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
         } else {
-            branchTitle = task.title
+            branchTitle = initialTask.title
         }
-        var resolved: [RepositoryWorktreeRecord] = []
-        do {
-            for item in pending {
-                let requestedBranch = item.branch == "auto" ? nil : item.branch
-                let record = try StationAIWorktreeManager.resolve(
-                    spec: RepositoryWorktreeSpec(
-                        repositoryPath: item.repositoryPath,
-                        branch: requestedBranch,
-                        branchFrom: item.branchFrom,
-                        mergeTarget: item.mergeTarget
-                    ),
-                    title: branchTitle,
-                    root: worktreeRoot
-                )
-                let path = URL(fileURLWithPath: record.worktreePath).standardizedFileURL.path
-                for other in try listModels() where other.id != id && other.status != .done {
-                    if other.repositoryWorktrees.contains(where: {
-                        !$0.isPending && URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == path
-                    }) {
-                        throw StationAIManagerError.repositoryAssigned(path)
+        return try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.repositoryWorktrees == initialRecords else {
+                throw BridgeCommandError(code: "invalid_transition", message: "The task repositories changed while worktrees were being prepared. Try again.")
+            }
+            return try await withRepositoryAllocationLocks(pending.map(\.repositoryPath)) {
+                var resolved: [RepositoryWorktreeRecord] = []
+                do {
+                    try validateRepositoryAssignments(pending, excludingTaskID: id)
+                    for item in pending {
+                        let requestedBranch = item.branch == "auto" ? nil : item.branch
+                        let record = try await worktreeService.resolve(
+                            spec: RepositoryWorktreeSpec(
+                                repositoryPath: item.repositoryPath,
+                                branch: requestedBranch,
+                                branchFrom: item.branchFrom,
+                                mergeTarget: item.mergeTarget
+                            ),
+                            title: branchTitle,
+                            root: worktreeRoot
+                        )
+                        resolved.append(record)
                     }
+                    let currentTask = try requireTask(id)
+                    guard currentTask.repositoryWorktrees == initialRecords else {
+                        throw BridgeCommandError(code: "invalid_transition", message: "The task repositories changed while worktrees were being prepared. Try again.")
+                    }
+                    try validateRepositoryAssignments(resolved, excludingTaskID: id)
+                    var iterator = resolved.makeIterator()
+                    currentTask.repositoryWorktrees = currentTask.repositoryWorktrees.map { $0.isPending ? (iterator.next() ?? $0) : $0 }
+                    currentTask.workspaceRootPaths = try Self.normalizeOptionalRoots(currentTask.repositoryWorktrees.map(\.worktreePath) + currentTask.contextFolderPaths)
+                    try modelContext.save()
+                    return currentTask
+                } catch {
+                    for record in resolved where record.createdByStationAI {
+                        try? await worktreeService.remove(record)
+                    }
+                    throw error
                 }
-                resolved.append(record)
             }
-            var iterator = resolved.makeIterator()
-            task.repositoryWorktrees = task.repositoryWorktrees.map { $0.isPending ? (iterator.next() ?? $0) : $0 }
-            task.workspaceRootPaths = try Self.normalizeOptionalRoots(task.repositoryWorktrees.map(\.worktreePath) + task.contextFolderPaths)
-            try modelContext.save()
-            return task
-        } catch {
-            for record in resolved where record.createdByStationAI {
-                try? StationAIWorktreeManager.remove(record)
-            }
-            throw error
         }
     }
 
-    func deleteRequiresConfirmation(_ id: UUID) throws -> Bool {
+    func deleteRequiresConfirmation(_ id: UUID) async throws -> Bool {
         let task = try requireTask(id)
-        let dirtyWorktree = try task.repositoryWorktrees.contains { record in
-            guard !record.isPending else { return false }
-            return try StationAIWorktreeManager.hasChanges(record)
+        var dirtyWorktree = false
+        for record in task.repositoryWorktrees where !record.isPending {
+            if try await worktreeService.hasChanges(record) {
+                dirtyWorktree = true
+                break
+            }
         }
         if dirtyWorktree { return true }
         let hasSavedConversation = task.codexThreadID != nil
             || !(task.savedPrompt?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         return dirtyWorktree || hasSavedConversation
-    }
-
-    func save() throws {
-        try modelContext.save()
     }
 
     private func requireTask(_ id: UUID) throws -> BoardTask {
@@ -736,6 +1364,46 @@ final class BoardTaskManager {
             throw StationAIManagerError.taskNotFound(id)
         }
         return task
+    }
+
+    private func validateRepositoryAssignments(
+        _ candidates: [RepositoryWorktreeRecord],
+        excludingTaskID: UUID?
+    ) throws {
+        for other in try listModels() where other.id != excludingTaskID && other.status != .done {
+            for candidate in candidates {
+                let repositoryPath = Self.canonicalPath(candidate.repositoryPath)
+                if candidate.branch != "auto",
+                   other.repositoryWorktrees.contains(where: {
+                       Self.canonicalPath($0.repositoryPath) == repositoryPath && $0.branch == candidate.branch
+                   }) {
+                    throw StationAIManagerError.repositoryAssigned(candidate.repositoryPath)
+                }
+
+                let candidateWorkspacePath = Self.canonicalPath(
+                    candidate.isPending ? candidate.repositoryPath : candidate.worktreePath
+                )
+                if other.repositoryWorktrees.contains(where: {
+                    !$0.isPending && Self.canonicalPath($0.worktreePath) == candidateWorkspacePath
+                }) {
+                    throw StationAIManagerError.repositoryAssigned(candidateWorkspacePath)
+                }
+            }
+        }
+    }
+
+    private static func canonicalPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
+    private func repositoryRecord(_ path: String, in task: BoardTask) throws -> RepositoryWorktreeRecord {
+        let normalizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
+        guard let record = task.repositoryWorktrees.first(where: {
+            URL(fileURLWithPath: $0.repositoryPath).standardizedFileURL.path == normalizedPath
+        }) else {
+            throw BridgeCommandError(code: "not_found", message: "This repository isn't attached to the task: \(normalizedPath)")
+        }
+        return record
     }
 
     private static func normalizeRoots(_ roots: [String]) throws -> [String] {
@@ -845,15 +1513,21 @@ final class WorkspaceManager {
     }
 
     @discardableResult
-    func setRoots(_ roots: [String], for taskID: UUID) throws -> BoardTaskRecord {
+    func setRoots(_ roots: [String], for taskID: UUID) async throws -> BoardTaskRecord {
         guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
-        return try taskManager.setWorkspaceRoots(taskID, roots: roots)
+        return try await taskManager.setWorkspaceRoots(taskID, roots: roots)
     }
 
     @discardableResult
-    func addRepository(_ repositoryPath: String, to taskID: UUID) throws -> BoardTaskRecord {
+    func addRepository(_ repositoryPath: String, to taskID: UUID) async throws -> BoardTaskRecord {
         guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
-        return try taskManager.addRepository(taskID, repositoryPath: repositoryPath)
+        return try await taskManager.addRepository(taskID, repositoryPath: repositoryPath)
+    }
+
+    @discardableResult
+    func addRepositories(_ repositoryPaths: [String], to taskID: UUID) async throws -> BoardTaskRecord {
+        guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
+        return try await taskManager.addRepositories(taskID, repositoryPaths: repositoryPaths)
     }
 
     func changes(for taskID: UUID) async throws -> WorkspaceChangeInventory {
@@ -964,7 +1638,33 @@ final class CodexConversationManager {
         userInputAnswers: [String: [String]] = [:],
         onTurnStarting: (() -> Void)? = nil,
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in },
-        onUserInput: @escaping (CodexUserInputRequest) -> Void = { _ in }
+        onUserInput: @escaping (CodexUserInputRequest) async -> Void = { _ in }
+    ) async throws -> CodexThreadHistory {
+        try await tasks.withConversationTurnReservation(taskID) {
+            try await self.sendReserved(
+                taskID: taskID,
+                text: text,
+                imageDataURLs: imageDataURLs,
+                mode: mode,
+                modelID: modelID,
+                userInputAnswers: userInputAnswers,
+                onTurnStarting: onTurnStarting,
+                onUpdate: onUpdate,
+                onUserInput: onUserInput
+            )
+        }
+    }
+
+    private func sendReserved(
+        taskID: UUID,
+        text: String,
+        imageDataURLs: [String],
+        mode: CodexConversationMode,
+        modelID: String,
+        userInputAnswers: [String: [String]],
+        onTurnStarting: (() -> Void)?,
+        onUpdate: @escaping (ConversationUpdate) -> Void,
+        onUserInput: @escaping (CodexUserInputRequest) async -> Void
     ) async throws -> CodexThreadHistory {
         let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedText.isEmpty || !imageDataURLs.isEmpty else { throw StationAIManagerError.invalidMessage }
@@ -975,6 +1675,7 @@ final class CodexConversationManager {
             throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
         }
         var task = try tasks.taskModel(taskID)
+        var persistedThreadID = task.codexThreadID
         StationAIDiagnostics.record("conversation.send.started", fields: client.diagnosticFields([
             "taskID": taskID.uuidString,
             "threadID": task.codexThreadID ?? "new",
@@ -982,72 +1683,86 @@ final class CodexConversationManager {
             "mode": mode.rawValue
         ]))
         defer {
-            if let threadID = task.codexThreadID {
+            if let threadID = persistedThreadID {
                 client.clearTurnStarting(threadID: threadID)
             }
         }
         guard task.status != .done else {
             throw StationAIManagerError.invalidTransition("Done tasks are closed. Create a new task for follow-up work.")
         }
-        task = try tasks.prepareRepositoryWorktrees(taskID, fallbackPrompt: normalizedText)
+        let shouldGenerateTitle = !normalizedText.isEmpty && ["Untitled task", "Generating title…"].contains(task.title)
+        let titleMustPrecedeAutoWorktree = task.repositoryWorktrees.contains {
+            $0.isPending && $0.branch == "auto"
+        }
+        let resolveTitleBeforeWorktree = shouldGenerateTitle && titleMustPrecedeAutoWorktree
+        if resolveTitleBeforeWorktree {
+            let reserved = try await tasks.renameIfTitleMatches(
+                taskID,
+                expectedTitle: task.title,
+                title: "Generating title…"
+            )
+            if reserved != nil {
+                let titleRoots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
+                let titleWorkspace = try CodexWorkspaceContext(roots: titleRoots)
+                let titleClient = CodexAppServerClient(
+                    codexExecutableOverride: client.executableOverrideForTitleGeneration
+                )
+                try await generateAndApplyTitle(
+                    taskID: taskID,
+                    prompt: normalizedText,
+                    workspace: titleWorkspace,
+                    client: titleClient
+                )
+            }
+            task = try tasks.taskModel(taskID)
+            if ["Untitled task", "Generating title…"].contains(task.title) {
+                throw BridgeCommandError(
+                    code: "invalid_transition",
+                    message: "The task title changed while it was being prepared. Try sending again."
+                )
+            }
+        }
+        task = try await tasks.prepareRepositoryWorktrees(taskID, fallbackPrompt: normalizedText)
         if !normalizedText.isEmpty {
-            _ = try tasks.savePrompt(taskID, prompt: normalizedText, status: .inProgress)
+            _ = try await tasks.savePrompt(taskID, prompt: normalizedText, status: .inProgress)
         }
         let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
         let workspace = try CodexWorkspaceContext(roots: roots)
-        _ = try tasks.clearProgressReport(taskID)
-        defer { _ = try? tasks.clearProgressReport(taskID) }
-        let shouldGenerateTitle = !normalizedText.isEmpty && ["Untitled task", "Generating title…"].contains(task.title)
+        _ = try await tasks.clearProgressReport(taskID)
         let titleGeneration: Task<Void, Never>?
-        if shouldGenerateTitle {
-            _ = try tasks.rename(taskID, title: "Generating title…")
-            titleGeneration = Task { @MainActor in
-                let titleClient = CodexAppServerClient(
-                    codexExecutableOverride: self.client.executableOverrideForTitleGeneration
-                )
-                let generated = await CodexTaskTitleGenerator(client: titleClient)
-                    .generateTitle(from: normalizedText, workspace: workspace, taskID: taskID)
-                let fallback = normalizedText.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
-                let latest: BoardTask
-                do {
-                    latest = try self.tasks.taskModel(taskID)
-                } catch {
-                    var fields = StationAIDiagnostics.errorFields(error)
-                    fields["taskID"] = taskID.uuidString
-                    fields["titleSource"] = generated == nil ? "prompt-fallback" : "codex"
-                    StationAIDiagnostics.record("task.title_apply.skipped", fields: fields.merging(["reason": "task_unavailable"]) { _, new in new })
-                    return
+        if shouldGenerateTitle && !resolveTitleBeforeWorktree {
+            let latest = try tasks.taskModel(taskID)
+            let titleReserved = ["Untitled task", "Generating title…"].contains(latest.title)
+                ? try await tasks.renameIfTitleMatches(
+                    taskID,
+                    expectedTitle: latest.title,
+                    title: "Generating title…"
+                ) != nil
+                : false
+            if titleReserved {
+                titleGeneration = Task { @MainActor in
+                    let titleClient = CodexAppServerClient(
+                        codexExecutableOverride: self.client.executableOverrideForTitleGeneration
+                    )
+                    do {
+                        try await self.generateAndApplyTitle(
+                            taskID: taskID,
+                            prompt: normalizedText,
+                            workspace: workspace,
+                            client: titleClient
+                        )
+                    } catch {
+                        // Background title generation has always been best-effort;
+                        // the helper records persistence failures before returning.
+                    }
                 }
-                guard latest.title == "Generating title…" else {
-                    StationAIDiagnostics.record("task.title_apply.skipped", fields: [
-                        "taskID": taskID.uuidString,
-                        "reason": "title_changed",
-                        "currentTitleState": StationAITaskTitleDiagnostics.state(of: latest.title),
-                        "titleSource": generated == nil ? "prompt-fallback" : "codex"
-                    ])
-                    return
-                }
-                let resolvedTitle = generated.flatMap { $0.isEmpty ? nil : $0 } ?? fallback
-                do {
-                    _ = try self.tasks.rename(taskID, title: resolvedTitle)
-                    StationAIDiagnostics.record("task.title_apply.succeeded", fields: [
-                        "taskID": taskID.uuidString,
-                        "titleSource": generated == nil ? "prompt-fallback" : "codex",
-                        "fallbackWordCount": generated == nil ? String(fallback.split(whereSeparator: \.isWhitespace).count) : "0"
-                    ])
-                } catch {
-                    var fields = StationAIDiagnostics.errorFields(error, redacting: [resolvedTitle, normalizedText])
-                    fields["taskID"] = taskID.uuidString
-                    fields["titleSource"] = generated == nil ? "prompt-fallback" : "codex"
-                    StationAIDiagnostics.record("task.title_apply.failed", fields: fields)
-                }
+            } else {
+                titleGeneration = nil
             }
         } else {
             titleGeneration = nil
         }
-        _ = try tasks.clearProgressReport(taskID)
-        defer { _ = try? tasks.clearProgressReport(taskID) }
-        let started = try tasks.setLifecycleStatus(taskID, to: .inProgress)
+        let started = try await tasks.setLifecycleStatus(taskID, to: .inProgress)
         onUpdate(ConversationUpdate(type: "started", taskStatus: started.status))
         var phase = "thread-start"
         do {
@@ -1056,14 +1771,9 @@ final class CodexConversationManager {
                 threadID = existing
             } else {
                 threadID = try await client.startThread(workspace: workspace, modelID: modelID)
-                task.codexThreadID = threadID
-                do {
-                    phase = "thread-persistence"
-                    try tasks.save()
-                } catch {
-                    task.codexThreadID = nil
-                    throw error
-                }
+                phase = "thread-persistence"
+                _ = try await tasks.persistCodexThreadID(taskID, threadID: threadID)
+                persistedThreadID = threadID
             }
             if onTurnStarting != nil {
                 client.markTurnStarting(threadID: threadID)
@@ -1087,11 +1797,13 @@ final class CodexConversationManager {
                     let message = "Codex requested an approval. StationAI denied it because approval prompts are disabled."
                     onUpdate(ConversationUpdate(type: "action_notice", message: message))
                 },
-                onUserInput: { request in
-                    _ = try? self.tasks.clearProgressReport(taskID)
-                    let status = request.isBlocking
-                        ? (try? self.tasks.setLifecycleStatus(taskID, to: .waitingResponse))
-                        : (try? self.tasks.get(taskID))
+                onUserInput: { request async in
+                    let status: BoardTaskRecord?
+                    if request.isBlocking {
+                        status = try? await self.tasks.setLifecycleStatus(taskID, to: .waitingResponse)
+                    } else {
+                        status = try? await self.tasks.clearProgressReport(taskID)
+                    }
                     onUpdate(ConversationUpdate(
                         type: "user_input",
                         userInputRequest: request,
@@ -1104,31 +1816,27 @@ final class CodexConversationManager {
                             answers: userInputAnswers
                         )
                         if answersAccepted, request.isBlocking {
-                            let resumed = try? self.tasks.setLifecycleStatus(taskID, to: .inProgress)
+                            let resumed = try? await self.tasks.setLifecycleStatus(taskID, to: .inProgress)
                             onUpdate(ConversationUpdate(type: "task_status", taskStatus: resumed?.status))
                         } else if !answersAccepted {
                             onUpdate(ConversationUpdate(type: "action_notice", message: "The supplied answers didn't match Codex's questions."))
                         }
                     }
-                    onUserInput(request)
+                    await onUserInput(request)
                 }
             )
             phase = "worktree-finalization"
-            let current = try tasks.taskModel(taskID)
-            for record in current.repositoryWorktrees where record.mergeError != nil {
-                try StationAIWorktreeManager.finishConflictResolution(record)
-            }
             phase = "review-status-persistence"
-            _ = try tasks.setLifecycleStatus(taskID, to: .review)
+            _ = try await tasks.setLifecycleStatus(taskID, to: .review)
         } catch {
             await titleGeneration?.value
             var fields = StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
             fields["taskID"] = taskID.uuidString
-            fields["threadID"] = task.codexThreadID ?? ""
+            fields["threadID"] = persistedThreadID ?? ""
             fields["phase"] = phase
             fields["storePath"] = StationAIDiagnostics.storeURL.path
             fields.merge(client.diagnosticFields()) { _, new in new }
-            _ = try? tasks.setLifecycleStatus(taskID, to: .blocked, message: error.localizedDescription)
+            _ = try? await tasks.setLifecycleStatus(taskID, to: .blocked, message: error.localizedDescription)
             StationAIDiagnostics.record("conversation.send.failed", fields: fields)
             throw error
         }
@@ -1141,6 +1849,96 @@ final class CodexConversationManager {
         }
         onUpdate(ConversationUpdate(type: "completed", history: finalHistory))
         return finalHistory
+    }
+
+    private func generateAndApplyTitle(
+        taskID: UUID,
+        prompt: String,
+        workspace: CodexWorkspaceContext,
+        client titleClient: CodexAppServerClient
+    ) async throws {
+        let generated = await CodexTaskTitleGenerator(client: titleClient)
+            .generateTitle(from: prompt, workspace: workspace, taskID: taskID)
+        let fallback = prompt.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
+        let titleSource = generated == nil ? "prompt-fallback" : "codex"
+        let latest: BoardTask
+        do {
+            latest = try tasks.taskModel(taskID)
+        } catch {
+            var fields = StationAIDiagnostics.errorFields(error)
+            fields["taskID"] = taskID.uuidString
+            fields["titleSource"] = titleSource
+            StationAIDiagnostics.record("task.title_apply.skipped", fields: fields.merging(["reason": "task_unavailable"]) { _, new in new })
+            return
+        }
+        guard latest.title == "Generating title…" else {
+            StationAIDiagnostics.record("task.title_apply.skipped", fields: [
+                "taskID": taskID.uuidString,
+                "reason": "title_changed",
+                "currentTitleState": StationAITaskTitleDiagnostics.state(of: latest.title),
+                "titleSource": titleSource
+            ])
+            return
+        }
+        let resolvedTitle = generated.flatMap { $0.isEmpty ? nil : $0 } ?? fallback
+        do {
+            guard try await tasks.renameIfTitleMatches(
+                taskID,
+                expectedTitle: "Generating title…",
+                title: resolvedTitle
+            ) != nil else {
+                let currentTitle = (try? tasks.taskModel(taskID).title) ?? ""
+                StationAIDiagnostics.record("task.title_apply.skipped", fields: [
+                    "taskID": taskID.uuidString,
+                    "reason": "title_changed",
+                    "currentTitleState": StationAITaskTitleDiagnostics.state(of: currentTitle),
+                    "titleSource": titleSource
+                ])
+                return
+            }
+            StationAIDiagnostics.record("task.title_apply.succeeded", fields: [
+                "taskID": taskID.uuidString,
+                "titleSource": titleSource,
+                "fallbackWordCount": generated == nil ? String(fallback.split(whereSeparator: \.isWhitespace).count) : "0"
+            ])
+        } catch {
+            var fields = StationAIDiagnostics.errorFields(error, redacting: [resolvedTitle, prompt])
+            fields["taskID"] = taskID.uuidString
+            fields["titleSource"] = titleSource
+            StationAIDiagnostics.record("task.title_apply.failed", fields: fields)
+            guard generated != nil else { throw error }
+
+            // A generated title is optional; recover with the deterministic prompt
+            // fallback before any auto-named worktree can be allocated.
+            do {
+                guard try await tasks.renameIfTitleMatches(
+                    taskID,
+                    expectedTitle: "Generating title…",
+                    title: fallback
+                ) != nil else {
+                    let currentTitle = (try? tasks.taskModel(taskID).title) ?? ""
+                    StationAIDiagnostics.record("task.title_apply.skipped", fields: [
+                        "taskID": taskID.uuidString,
+                        "reason": "title_changed",
+                        "currentTitleState": StationAITaskTitleDiagnostics.state(of: currentTitle),
+                        "titleSource": "prompt-fallback"
+                    ])
+                    return
+                }
+                StationAIDiagnostics.record("task.title_apply.succeeded", fields: [
+                    "taskID": taskID.uuidString,
+                    "titleSource": "prompt-fallback",
+                    "fallbackWordCount": String(fallback.split(whereSeparator: \.isWhitespace).count)
+                ])
+            } catch {
+                var recoveryFields = StationAIDiagnostics.errorFields(error, redacting: [fallback, prompt])
+                recoveryFields["taskID"] = taskID.uuidString
+                recoveryFields["titleSource"] = "prompt-fallback"
+                recoveryFields["recoveryAttempt"] = "true"
+                StationAIDiagnostics.record("task.title_apply.failed", fields: recoveryFields)
+                throw error
+            }
+        }
     }
 
     private static func isValidModelID(_ value: String) -> Bool {
@@ -1188,6 +1986,7 @@ final class StationAIBridgeRuntime {
             dataDirectory = nil
             #endif
             let container = try StationAIStore.makeContainer(dataDirectory: dataDirectory)
+            try await StationAIStore.prepareLifecycle(container: container, dataDirectory: dataDirectory)
             let context = ModelContext(container)
             let worktreeRoot: URL
             #if DEBUG
@@ -1223,7 +2022,7 @@ final class StationAIBridgeRuntime {
                 let title = try request.requiredString("title")
                 let roots = try request.requiredStrings("roots")
                 let repositories = try request.repositorySpecs("repositories")
-                result = try Self.value(taskManager.create(title: title, repositories: repositories, contextFolders: roots))
+                result = try Self.value(await taskManager.create(title: title, repositories: repositories, contextFolders: roots))
             case "task.get", "task.show":
                 let taskID = try request.requiredUUID("taskID")
                 result = try Self.value(taskManager.get(taskID))
@@ -1233,7 +2032,6 @@ final class StationAIBridgeRuntime {
                 result = try Self.value(await taskManager.move(
                     taskID,
                     to: status,
-                    client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string),
                     allowUnmergedPullRequests: request.arguments["allowUnmergedPullRequests"]?.bool ?? false
                 ))
             case "task.pr.create":
@@ -1247,43 +2045,61 @@ final class StationAIBridgeRuntime {
                     throw BridgeCommandError(code: "invalid_argument", message: "Unknown progress type '\(rawType)'. Valid types: \(TaskProgressType.allCases.map(\.rawValue).joined(separator: ", ")).")
                 }
                 let detail = request.arguments["detail"]?.string
-                result = try Self.value(taskManager.publishProgressReport(request.requiredUUID("taskID"), type: type, detail: detail))
+                result = try Self.value(try await taskManager.publishProgressReport(request.requiredUUID("taskID"), type: type, detail: detail))
             case "task.progress.custom":
-                result = try Self.value(taskManager.publishProgressReport(
+                result = try Self.value(try await taskManager.publishProgressReport(
                     request.requiredUUID("taskID"), type: nil,
                     customLabel: request.requiredString("label"),
                     detail: request.arguments["detail"]?.string
                 ))
             case "task.progress.clear":
-                result = try Self.value(taskManager.clearProgressReport(request.requiredUUID("taskID")))
+                result = try Self.value(try await taskManager.clearProgressReport(request.requiredUUID("taskID")))
             case "task.rename":
                 let taskID = try request.requiredUUID("taskID")
                 let title = try request.requiredString("title")
-                result = try Self.value(taskManager.rename(taskID, title: title))
+                result = try Self.value(try await taskManager.rename(taskID, title: title))
             case "task.repository.add":
-                result = try Self.value(workspaces.addRepository(
+                result = try Self.value(await workspaces.addRepository(
                     request.requiredString("repositoryPath"),
                     to: request.requiredUUID("taskID")
+                ))
+            case "task.repository.add-batch":
+                result = try Self.value(await workspaces.addRepositories(
+                    request.requiredStrings("repositoryPaths"),
+                    to: request.requiredUUID("taskID")
+                ))
+            case "task.repository.edit":
+                result = try Self.value(await taskManager.updateRepository(
+                    request.requiredUUID("taskID"),
+                    repositoryPath: request.requiredString("repositoryPath"),
+                    branch: request.requiredString("branch"),
+                    branchFrom: request.requiredString("branchFrom"),
+                    mergeTarget: request.arguments["mergeTarget"]?.string
+                ))
+            case "task.repository.remove":
+                result = try Self.value(await taskManager.removeRepository(
+                    request.requiredUUID("taskID"),
+                    repositoryPath: request.requiredString("repositoryPath")
                 ))
             case "task.prompt.save":
                 let status = try request.arguments["status"]?.string.map { value -> TaskStatus in
                     guard let status = TaskStatus(rawValue: value) else { throw StationAIManagerError.invalidStatus(value) }
                     return status
                 }
-                result = try Self.value(taskManager.savePrompt(
+                result = try Self.value(try await taskManager.savePrompt(
                     request.requiredUUID("taskID"), prompt: request.requiredString("prompt"), status: status
                 ))
             case "task.delete":
-                try taskManager.delete(request.requiredUUID("taskID"))
+                try await taskManager.delete(request.requiredUUID("taskID"))
                 result = .object(["deleted": .boolean(true)])
             case "task.delete.requires-confirmation":
-                let requiresConfirmation = try taskManager.deleteRequiresConfirmation(request.requiredUUID("taskID"))
+                let requiresConfirmation = try await taskManager.deleteRequiresConfirmation(request.requiredUUID("taskID"))
                 result = .object(["requiresConfirmation": .boolean(requiresConfirmation)])
             case "task.roots.get", "workspace.roots":
                 result = .object(["roots": .array(try workspaces.roots(for: request.requiredUUID("taskID")).map(BridgeValue.string))])
             case "task.roots.set":
                 let roots = try request.requiredStrings("roots")
-                result = try Self.value(workspaces.setRoots(roots, for: request.requiredUUID("taskID")))
+                result = try Self.value(await workspaces.setRoots(roots, for: request.requiredUUID("taskID")))
             case "task.changes.list":
                 result = try Self.value(await workspaces.changes(for: request.requiredUUID("taskID")))
             case "task.changes.diff":
