@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import base64
 import errno
 import fcntl
 import json
@@ -2439,7 +2440,7 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assertFalse(self.assert_success(stale_steer)["accepted"], "A completed turn must not be steered.")
 
-    # case-contract: test_conversation_steers_and_queues_active_turn | While a Codex turn is active, a stale steer response is shown as an error and preserves the draft for retry; CLI/XPC steering routes to a UI-owned active turn and appears in the visible conversation. The user can also persist a distinct follow-up for after completion; it dispatches once after a matching completed notification, survives fresh CLI/XPC reads, and is removed only after successful delivery.
+    # case-contract: test_conversation_steers_and_queues_active_turn | While a Codex turn is active, a stale steer response is shown as an error and preserves the draft for retry; CLI/XPC steering routes to a UI-owned active turn and appears in the visible conversation; a subsequent accepted UI Steer action uses the matching active turn ID, appears in the transcript, and clears its draft. The user can also persist a distinct follow-up for after completion; it dispatches once after a matching completed notification, survives fresh CLI/XPC reads, and is removed only after successful delivery.
     def test_conversation_steers_and_queues_active_turn(self):
         task = self.create_repo_task("Active turn message controls", [self.primary])
         task_id = task["id"]
@@ -2502,7 +2503,7 @@ class StationAIBridgeTests(unittest.TestCase):
         queue_after_completion, _ = self.call_cli("conversation", "queue-list", task_id)
         self.assertEqual(self.assert_success(queue_after_completion), [], "Successful dispatch must be durable and nonduplicating across reload.")
 
-    # case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history. Diagnostics record image MIME and encoded size without storing image payloads.
+    # case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history. Diagnostics record image MIME and encoded size without storing image payloads.
     def test_conversation_sends_image_attachments(self):
         task_id = self.create_task(title="Image conversation") ["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -2523,6 +2524,16 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(len(sent["images"]), 1)
         self.assertTrue(sent["images"][0].startswith("data:image/png;base64,"))
         self.assertEqual(sent["imageInputs"], [{"type": "image", "url": sent["images"][0]}])
+        jpeg = self.data_directory / "tiny.jpg"
+        subprocess.run(["sips", "-s", "format", "jpeg", str(image), "--out", str(jpeg)], check=True, capture_output=True)
+        jpeg_result, _ = self.call_cli(
+            "conversation", "send", task_id, "--image", str(jpeg),
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        self.assert_success(jpeg_result)
+        sent = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        self.assertTrue(sent["images"][0].startswith("data:image/jpeg;base64,"))
+        self.assertLessEqual(len(base64.b64decode(sent["images"][0].split(",", 1)[1])), 10_000_000)
         text_prompt = "Describe this screenshot."
         mixed, _ = self.call_cli(
             "conversation", "send", task_id, "--message", text_prompt, "--image", str(image),

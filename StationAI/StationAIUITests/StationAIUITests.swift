@@ -3202,7 +3202,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts[secondPrompt].waitForExistence(timeout: 10), "Reopening the task should load the completed second send from the real app-server thread.")
     }
 
-    // case-contract: test_conversation_steers_and_queues_active_turn | While a Codex turn is active, a stale steer response is shown as an error and preserves the draft for retry; CLI/XPC steering routes to a UI-owned active turn and appears in the visible conversation. The user can also persist a distinct follow-up for after completion; it dispatches once after a matching completed notification, survives fresh CLI/XPC reads, and is removed only after successful delivery.
+    // case-contract: test_conversation_steers_and_queues_active_turn | While a Codex turn is active, a stale steer response is shown as an error and preserves the draft for retry; CLI/XPC steering routes to a UI-owned active turn and appears in the visible conversation; a subsequent accepted UI Steer action uses the matching active turn ID, appears in the transcript, and clears its draft. The user can also persist a distinct follow-up for after completion; it dispatches once after a matching completed notification, survives fresh CLI/XPC reads, and is removed only after successful delivery.
     func test_conversation_steers_and_queues_active_turn() throws {
         let fixtureTemplate = try makeCodexFixture(emptyQuestions: false)
         let sharedFixture = dataDirectory.appendingPathComponent("codex-fixture-steer-queue-serial-success-wait")
@@ -3243,6 +3243,12 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(remoteSteer?["accepted"] as? Bool, true, "CLI/XPC steering should route to the UI-owned active turn.")
         XCTAssertTrue(app.staticTexts[steeringText].waitForExistence(timeout: 10))
         XCTAssertEqual(composer.value as? String, "", "A successful XPC steer should clear the matching draft in the visible composer.")
+        let uiSteeringText = "Make the final change concise and focused."
+        composer.click()
+        composer.typeText(uiSteeringText)
+        element("steer-current-turn-button").click()
+        XCTAssertTrue(app.staticTexts[uiSteeringText].waitForExistence(timeout: 10), "An accepted UI steer should appear in the visible transcript.")
+        XCTAssertEqual(composer.value as? String, "", "An accepted UI steer should clear the submitted draft.")
         composer.click()
         composer.typeText(queuedText)
         element("queue-message-after-turn-button").click()
@@ -3265,13 +3271,17 @@ final class StationAIUITests: XCTestCase {
         )
         let steerRequests = try XCTUnwrap(fixtureHistory["steerRequests"] as? [[String: Any]])
         XCTAssertEqual((fixtureHistory["rejectedSteerRequests"] as? [[String: Any]])?.count, 1)
-        XCTAssertEqual(steerRequests.count, 1)
-        XCTAssertEqual(steerRequests[0]["expectedTurnId"] as? String, (fixtureHistory["messages"] as? [[String: Any]])?.first?["turnID"] as? String)
+        XCTAssertEqual(steerRequests.count, 2)
+        let activeTurnID = (fixtureHistory["messages"] as? [[String: Any]])?.first?["turnID"] as? String
+        XCTAssertEqual(steerRequests[0]["expectedTurnId"] as? String, activeTurnID)
         XCTAssertEqual(steerRequests[0]["input"] as? [[String: String]], [["type": "text", "text": steeringText]])
+        XCTAssertEqual(steerRequests[1]["expectedTurnId"] as? String, activeTurnID, "The UI Steer action must include the current turn ID.")
+        XCTAssertEqual(steerRequests[1]["input"] as? [[String: String]], [["type": "text", "text": uiSteeringText]])
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 10))
     }
 
-    // case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history. Diagnostics record image MIME and encoded size without storing image payloads.
+    // case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history. Diagnostics record image MIME and encoded size without storing image payloads.
+
     func test_conversation_sends_image_attachments() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -3323,8 +3333,28 @@ final class StationAIUITests: XCTestCase {
         try createTaskFixture(title: "Pasted image conversation", roots: [fixture.primary.path])
         openTask(named: "Pasted image conversation")
 
+        let largeBitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 3000, pixelsHigh: 1500, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        let pixelBytes = try XCTUnwrap(largeBitmap.bitmapData)
+        var pixelState: UInt32 = 0x5EED1234
+        for y in 0..<1500 {
+            for x in 0..<3000 {
+                let offset = y * largeBitmap.bytesPerRow + x * 4
+                pixelState = pixelState &* 1_664_525 &+ 1_013_904_223
+                pixelBytes[offset] = UInt8(truncatingIfNeeded: pixelState >> 24)
+                pixelState = pixelState &* 1_664_525 &+ 1_013_904_223
+                pixelBytes[offset + 1] = UInt8(truncatingIfNeeded: pixelState >> 24)
+                pixelState = pixelState &* 1_664_525 &+ 1_013_904_223
+                pixelBytes[offset + 2] = UInt8(truncatingIfNeeded: pixelState >> 24)
+                pixelBytes[offset + 3] = 0xFF
+            }
+        }
+        let rawClipboardPNG = try XCTUnwrap(largeBitmap.representation(using: .png, properties: [:]))
+        XCTAssertGreaterThan(rawClipboardPNG.count, 10_000_000, "The clipboard source PNG should exceed the encoded payload limit.")
+        XCTAssertGreaterThan(try XCTUnwrap(largeBitmap.tiffRepresentation).count, 10_000_000, "The clipboard TIFF representation should exceed the raw limit that previously caused rejection.")
+        let largeImage = NSImage(size: NSSize(width: 3000, height: 1500))
+        largeImage.addRepresentation(largeBitmap)
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects([try XCTUnwrap(NSImage(contentsOf: image))])
+        NSPasteboard.general.writeObjects([largeImage])
         let pastedComposer = element("message-composer")
         pastedComposer.click()
         pastedComposer.typeKey("v", modifierFlags: .command)
@@ -3343,14 +3373,16 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(pastedTurn["userMessage"] is NSNull, "The fixture should receive no text for the pasted image-only turn.")
         XCTAssertEqual((pastedTurn["images"] as? [String])?.count, 1, "The fixture should receive the pasted image.")
         let pastedImage = try XCTUnwrap((pastedTurn["images"] as? [String])?.first)
-        XCTAssertTrue(pastedImage.hasPrefix("data:image/png;base64,"), "The pasted image should reach Codex as a data URL.")
+        XCTAssertTrue(pastedImage.hasPrefix("data:image/jpeg;base64,"), "An oversized clipboard image should be compressed and reach Codex as JPEG.")
+        let pastedPayload = try XCTUnwrap(Data(base64Encoded: String(pastedImage.split(separator: ",", maxSplits: 1)[1])))
+        XCTAssertLessThanOrEqual(pastedPayload.count, 10_000_000, "The full-size clipboard image should fit the 10 MB payload limit.")
         XCTAssertEqual(pastedTurn["imageInputs"] as? [[String: String]], [["type": "image", "url": pastedImage]], "Image-only requests should use the tagged image URL payload.")
         imageDiagnostics = try diagnosticEvents()
         XCTAssertTrue(imageDiagnostics.contains {
             $0["event"] as? String == "bridge.request.succeeded"
                 && $0["command"] as? String == "conversation.send"
-                && $0["argument.images.0.mime"] as? String == "image/png"
-        }, "The image-only request should retain MIME metadata in diagnostics.")
+                && $0["argument.images.0.mime"] as? String == "image/jpeg"
+        }, "The compressed image-only request should retain JPEG MIME metadata in diagnostics.")
         let serializedImageDiagnostics = String(data: try JSONSerialization.data(withJSONObject: imageDiagnostics), encoding: .utf8) ?? ""
         XCTAssertFalse(serializedImageDiagnostics.contains(pickedImage))
         XCTAssertFalse(serializedImageDiagnostics.contains(pastedImage))
