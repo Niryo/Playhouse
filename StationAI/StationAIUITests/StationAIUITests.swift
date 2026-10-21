@@ -262,7 +262,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "An assigned worktree conflict keeps task creation open with an explanation")
     }
 
-    // case-contract: test_task_done_preserves_worktree_and_branch | Moving a reviewed task to Done preserves its source branch and worktree without merging into the local target, while retaining conversation history and exposing the task in the searchable read-only archive.
+    // case-contract: test_task_done_preserves_worktree_and_branch | Moving a reviewed task to Done preserves its source branch and worktree without merging into the local target. The test advances the primary fixture by committing a change to its tracked baseline file after the task branch is created, then confirms Done leaves that target commit and content unchanged while retaining conversation history and exposing the task in the searchable read-only archive.
     func test_task_done_preserves_worktree_and_branch() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -303,10 +303,10 @@ final class StationAIUITests: XCTestCase {
         let taskBranchHead = try runGitOutput(URL(fileURLWithPath: path), "rev-parse", "HEAD")
         let originalTargetHead = try runGitOutput(fixture.primary, "rev-parse", "main")
         XCTAssertEqual(taskBranchHead, originalTargetHead)
-        try "Master advanced after this task branch was created.\n".write(
-            to: fixture.primary.appendingPathComponent("target-only.txt"), atomically: true, encoding: .utf8
-        )
-        try runGit(fixture.primary, "add", "target-only.txt")
+        XCTAssertEqual(try runGitOutput(fixture.primary, "status", "--porcelain"), "", "The primary fixture must be clean before advancing its target.")
+        let targetFile = fixture.primary.appendingPathComponent("stationai-primary.txt")
+        try "Master advanced after this task branch was created.\n".write(to: targetFile, atomically: true, encoding: .utf8)
+        try runGit(fixture.primary, "add", "stationai-primary.txt")
         try runGit(fixture.primary, "commit", "-m", "Advance merge target while task is under review")
         let targetHead = try runGitOutput(fixture.primary, "rev-parse", "main")
         element("back-to-board-button").click()
@@ -326,7 +326,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: path), "Moving a task to Done must preserve its worktree.")
         try runGit(fixture.primary, "show-ref", "--verify", "--quiet", "refs/heads/\(branch)")
         XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetHead, "Moving a task to Done must not merge into the local target.")
-        XCTAssertEqual(try String(contentsOf: fixture.primary.appendingPathComponent("target-only.txt"), encoding: .utf8), "Master advanced after this task branch was created.\n")
+        XCTAssertEqual(try String(contentsOf: targetFile, encoding: .utf8), "Master advanced after this task branch was created.\n")
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.primary.appendingPathComponent("task-result.txt").path))
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
 
@@ -389,7 +389,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Done preserves the task worktree without merging")
     }
 
-    // case-contract: test_task_pr_create_reports_real_gh_failure | A repository-backed Done task exposes a PR action in the archive; when the real gh CLI cannot create one for a local repository without a usable GitHub remote, it reports the failure, persists no partial PR link, and preserves Done status.
+    // case-contract: test_task_pr_create_reports_real_gh_failure | A repository-backed Done task exposes a PR action in the archive; when the real gh CLI cannot create one for a local repository without a usable GitHub remote, it reports the failure, persists no partial PR link, and preserves Done status. Diagnostics record each pull request attempt with its task and request details; the CLI failure also records its bridge error code.
     func test_task_pr_create_reports_real_gh_failure() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -410,11 +410,19 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(alert.waitForExistence(timeout: 20), "The archived task should report gh's inability to create a PR.")
         XCTAssertTrue(alert.staticTexts.containing(NSPredicate(format: "label CONTAINS[c] %@", "GitHub CLI")).firstMatch.exists)
         alert.buttons["OK"].click()
+        let guiPRAttempt = try XCTUnwrap(try diagnosticEvents().first {
+            $0["event"] as? String == "task.pull_requests.started" && $0["taskID"] as? String == taskID
+        })
+        XCTAssertEqual(guiPRAttempt["repositoryCount"] as? String, "1")
         let current = try XCTUnwrap(taskRecord(id: taskID))
         let record = try XCTUnwrap((current["repositoryWorktrees"] as? [[String: Any]])?.first)
         XCTAssertNil(record["pullRequestNumber"])
         XCTAssertNil(record["pullRequestURL"])
         XCTAssertEqual(current["status"] as? String, "Done")
+        assertCLIError(try runCLI(["task", "pr", "create", taskID], expectedStatus: 1), code: "operation_failed")
+        let prEvents = try diagnosticEvents().filter { $0["taskID"] as? String == taskID }
+        XCTAssertTrue(prEvents.contains { $0["event"] as? String == "task.pull_requests.started" })
+        XCTAssertTrue(prEvents.contains { $0["event"] as? String == "bridge.request.failed" && $0["command"] as? String == "task.pr.create" && $0["errorCode"] as? String == "operation_failed" })
     }
 
     // case-contract: test_done_archive_displays_existing_pull_request_link | A Done task's real SwiftData record can retain a linked PR number and URL across fresh CLI/XPC reads so the archive can render the existing PR link.
@@ -477,7 +485,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Lifecycle rollout clears tasks and reports a retained dirty worktree")
     }
 
-    // case-contract: test_task_status_transitions_and_rejects_unknown_status | The board keeps stacked Blocked/Backlog and conditional Waiting Response/In Progress sections fully visible, leaves Review as its own column, removes Done from the columns, hides empty status sections, and preserves Codex-owned task status behavior.
+    // case-contract: test_task_status_transitions_and_rejects_unknown_status | The board keeps stacked Blocked/Backlog and conditional Waiting Response/In Progress sections fully visible, leaves Review as its own column, removes Done from the columns, hides empty status sections, and preserves Codex-owned task status behavior. Diagnostics record rejected status commands with their validation code and no message text.
     func test_task_status_transitions_and_rejects_unknown_status() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Status transitions", roots: [fixture.primary.path])
@@ -503,10 +511,13 @@ final class StationAIUITests: XCTestCase {
         }
         XCTAssertEqual(try taskRecord(named: "Status transitions")?["status"] as? String, "Backlog")
         assertTaskVisible("Status transitions", inColumn: "Backlog")
+        XCTAssertTrue(try diagnosticEvents().contains { $0["event"] as? String == "bridge.request.failed" && $0["command"] as? String == "task.move" && $0["errorCode"] as? String == "invalid_argument" })
         attachScreenshot(named: "Waiting Response above In Progress with Review kept separate")
+        let rejectedMove = try XCTUnwrap(diagnosticEvents().first { $0["event"] as? String == "bridge.request.failed" && $0["command"] as? String == "task.move" && $0["errorCode"] as? String == "invalid_argument" })
+        XCTAssertNil(rejectedMove["message"])
     }
 
-    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, clears explicitly and at turn completion, and the board card shows the built-in icon, label, and detail without changing lifecycle status; each turn receives hidden CLI usage instructions.
+    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, clears explicitly and at turn completion, and the board card shows the built-in icon, label, and detail without changing lifecycle status; each turn receives hidden CLI usage instructions. The extended log records progress reports, conversation content, lifecycle transitions, turn metadata, and outcomes.
     func test_task_progress_reports_publish_persist_and_clear() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Progress reports", roots: [fixture.primary.path])
@@ -593,12 +604,22 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(instructions.contains(cliURL.path))
         XCTAssertTrue(instructions.contains("task progress publish"))
         XCTAssertTrue(instructions.contains("hidden from the conversation"))
+        let progressEvents = try diagnosticEvents().filter { $0["taskID"] as? String == taskID }
+        XCTAssertTrue(progressEvents.contains { $0["event"] as? String == "task.progress.published" })
+        XCTAssertTrue(progressEvents.contains { $0["event"] as? String == "task.progress.cleared" })
+        XCTAssertTrue(progressEvents.contains { $0["event"] as? String == "task.status.changed" })
+        XCTAssertTrue(progressEvents.contains { $0["event"] as? String == "conversation.send.succeeded" })
+        assertDiagnosticEventsContain(
+            progressEvents,
+            values: ["Compiling the app", "Reading the stored task data", "Work on this task."]
+        )
     }
 
-    // case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; the task card removes the report while lifecycle states remain Blocked or Waiting Response, and answering the question resumes the task successfully.
+    // case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; the task card removes the report while lifecycle states remain Blocked or Waiting Response, and answering the question resumes the task successfully. The extended log records progress details and conversation content across failed, interrupted, and question-answer turns.
     func test_task_progress_reports_clear_on_failed_turns_and_questions() throws {
         launchApp(defaultParent: fixture.parent.path)
         var heldTurns: [(Process, URL, URL)] = []
+        var failedProgressTaskIDs: [String] = []
         defer {
             for (process, activeMarker, releaseMarker) in heldTurns {
                 if process.isRunning {
@@ -616,6 +637,7 @@ final class StationAIUITests: XCTestCase {
             let title = "Progress \(expectedReason)"
             try createTaskFixture(title: title, roots: [fixture.primary.path])
             let taskID = try taskID(named: title)
+            failedProgressTaskIDs.append(taskID)
             let executable = URL(fileURLWithPath: "/tmp/stationai-bridge-workspaces/\(fixtureName)")
             let turn = try startProgressFixtureTurn(taskID: taskID, executable: executable)
             heldTurns.append((turn.process, turn.activeMarker, turn.releaseMarker))
@@ -685,9 +707,24 @@ final class StationAIUITests: XCTestCase {
         XCTAssertNil(try taskRecord(id: questionTaskID)?["progressLabel"] as? String)
         try? FileManager.default.removeItem(at: activeMarker)
         try? FileManager.default.removeItem(at: releaseMarker)
+        let progressEvents = try diagnosticEvents()
+        for taskID in failedProgressTaskIDs {
+            XCTAssertTrue(progressEvents.contains { $0["event"] as? String == "task.progress.published" && $0["taskID"] as? String == taskID })
+            XCTAssertTrue(progressEvents.contains { $0["event"] as? String == "task.progress.cleared" && $0["taskID"] as? String == taskID })
+            assertDiagnosticEventsContain(
+                progressEvents.filter { $0["taskID"] as? String == taskID },
+                values: ["Waiting for the result"]
+            )
+        }
+        XCTAssertTrue(progressEvents.contains { $0["event"] as? String == "task.progress.published" && $0["taskID"] as? String == questionTaskID })
+        XCTAssertTrue(progressEvents.contains { $0["event"] as? String == "task.progress.cleared" && $0["taskID"] as? String == questionTaskID })
+        assertDiagnosticEventsContain(
+            progressEvents.filter { $0["taskID"] as? String == questionTaskID },
+            values: ["Preparing a question", "Which color should I use?", "What is the private token?", "fixture-secret"]
+        )
     }
 
-    // case-contract: test_task_rename_persists_and_rejects_blank_title | A rename persists; rejecting a blank rename preserves the last valid title.
+    // case-contract: test_task_rename_persists_and_rejects_blank_title | A rename persists; rejecting a blank rename preserves the last valid title. Diagnostics record task renames by ID including the chosen title.
     func test_task_rename_persists_and_rejects_blank_title() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Before rename", roots: [fixture.primary.path])
@@ -714,9 +751,11 @@ final class StationAIUITests: XCTestCase {
         )
         XCTAssertEqual(try taskRecord(named: "After rename")?["title"] as? String, "After rename")
         attachScreenshot(named: "Renamed task remains unchanged after rejected blank rename")
+        let renameEvent = try XCTUnwrap(diagnosticEvents().first { $0["event"] as? String == "task.renamed" && $0["taskID"] as? String == taskID })
+        XCTAssertEqual(renameEvent["title"] as? String, "After rename")
     }
 
-    // case-contract: test_task_roots_set_get_order_deduplication_and_validation | Root editing preserves order, removes duplicates, and rejects an empty list.
+    // case-contract: test_task_roots_set_get_order_deduplication_and_validation | Root editing preserves order, removes duplicates, and rejects an empty list. The extended log records root updates by task ID, count, and path values.
     func test_task_roots_set_get_order_deduplication_and_validation() throws {
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["task", "create", "--title", "Edit roots", "--repo", fixture.primary.path])
@@ -744,6 +783,9 @@ final class StationAIUITests: XCTestCase {
         assertOrderedRoots(expectedRoots)
 
         let taskID = try taskID(named: "Edit roots")
+        let uiRootsEvent = try XCTUnwrap(diagnosticEvents().first { $0["event"] as? String == "task.workspace_roots.updated" && $0["taskID"] as? String == taskID })
+        XCTAssertEqual(uiRootsEvent["rootCount"] as? String, String(expectedRoots.count))
+        assertDiagnosticEventsContain([uiRootsEvent], values: [fixture.primary.path, fixture.secondary.path, fixture.custom.path])
         let duplicateRoots = try runCLI([
             "task", "roots", "set", taskID,
             "--root", fixture.secondary.path,
@@ -758,9 +800,12 @@ final class StationAIUITests: XCTestCase {
         let unchanged = try runCLI(["task", "roots", "get", taskID])["result"] as? [String: Any]
         XCTAssertEqual(unchanged?["roots"] as? [String], rootsAfterCliEdit)
         attachScreenshot(named: "Edited ordered folders in task conversation")
+        let rootsEvent = try XCTUnwrap(diagnosticEvents().first { $0["event"] as? String == "task.workspace_roots.updated" && $0["taskID"] as? String == taskID })
+        XCTAssertEqual(rootsEvent["roots"] as? String, expectedRoots.joined(separator: "\n"))
+        assertDiagnosticEventsContain([rootsEvent], values: [fixture.primary.path, fixture.secondary.path, fixture.custom.path])
     }
 
-    // case-contract: test_conversation_repository_picker_adds_repository_worktree | Repository suggestions can be filtered and navigated with Up/Down, and Enter selects the highlighted repository; adding it persists a pending auto branch with labeled read-only branch, merge-from, and merge-to values, and no worktree exists before the first send.
+    // case-contract: test_conversation_repository_picker_adds_repository_worktree | Repository suggestions can be filtered and navigated with Up/Down, and Enter selects the highlighted repository; adding it persists a pending auto branch with labeled read-only branch, merge-from, and merge-to values, and no worktree exists before the first send. The extended log records repository attachment including repository paths.
     func test_conversation_repository_picker_adds_repository_worktree() throws {
         launchApp(defaultParent: fixture.parent.path)
         let created = try runCLI(["task", "create", "--title", "Header repository picker", "--root", fixture.primary.path])["result"] as? [String: Any]
@@ -819,9 +864,12 @@ final class StationAIUITests: XCTestCase {
         badge.click()
         element("conversation-repository-merge-target-edit").click()
         XCTAssertTrue(element("conversation-repository-merge-target").exists, "The merge-to value becomes editable only after selecting its pencil control.")
+        let pickerTaskID = try taskID(named: "Header repository picker")
+        let repositoryEvent = try XCTUnwrap(diagnosticEvents().first { $0["event"] as? String == "task.repository.add.succeeded" && $0["taskID"] as? String == pickerTaskID })
+        assertDiagnosticEventsContain([repositoryEvent], values: [fixture.primary.path])
     }
 
-    // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives and reports the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Diagnostics identify the conversation failure phase and the persistent log captures a real deletion failure's task, thread, process, phase, and underlying error details without task titles or conversation text; the failed task and worktree remain available for retry.
+    // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives and reports the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. The extended log captures the conversation failure phase and a real deletion failure's task, thread, process, phase, and underlying error details including task titles, conversation text, repository paths, worktree paths, and data-directory paths. Shared managers also log successful task creation with task IDs and repository counts including titles. The visible deletion logs its shared-manager success, and the CLI failure records its bridge error code including request arguments and outcomes. The bounded session log also records command starts and outcomes including request payloads for CLI commands used during the visible workflow, and rotates at its half-cap boundary while retaining parseable JSONL files within the 10 MB total cap; the failed task and worktree remain available for retry.
     func test_task_delete_removes_task_and_later_lookup_is_not_found() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -841,10 +889,22 @@ final class StationAIUITests: XCTestCase {
         assertCLIError(try runCLI(["task", "get", pendingID], expectedStatus: 3), code: "not_found")
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.secondary.path), "Deleting a pending task must preserve its source repository.")
 
-        let diagnosticLog = try String(contentsOf: dataDirectory.appendingPathComponent("Diagnostics.jsonl"), encoding: .utf8)
-        let deleteEvents = try diagnosticLog.split(whereSeparator: \.isNewline).compactMap {
-            try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+        let deleteEvents = try diagnosticEvents()
+        let deleteRequestEvents = deleteEvents.filter {
+            $0["command"] as? String == "task.delete.requires-confirmation" && $0["requestID"] != nil
         }
+        let taskCreateEvent = try XCTUnwrap(deleteEvents.first {
+            $0["event"] as? String == "task.create.succeeded" && $0["taskID"] as? String == pendingID
+        })
+        XCTAssertEqual(taskCreateEvent["repositoryCount"] as? String, "1")
+        XCTAssertTrue(deleteRequestEvents.contains { $0["event"] as? String == "bridge.request.started" })
+        XCTAssertTrue(deleteRequestEvents.contains { $0["event"] as? String == "bridge.request.succeeded" })
+        XCTAssertTrue(deleteRequestEvents.allSatisfy { $0["title"] == nil && $0["message"] == nil })
+        let rotatedLogURL = dataDirectory.appendingPathComponent("Diagnostics.jsonl.1")
+        let currentLogBytes = (try FileManager.default.attributesOfItem(atPath: dataDirectory.appendingPathComponent("Diagnostics.jsonl").path)[.size] as? NSNumber)?.intValue ?? 0
+        let rotatedLogBytes = (try? FileManager.default.attributesOfItem(atPath: rotatedLogURL.path)[.size] as? NSNumber)?.intValue ?? 0
+        let logBytes = currentLogBytes + rotatedLogBytes
+        XCTAssertLessThanOrEqual(logBytes, 10 * 1024 * 1024)
         let pendingDeleteEvent = try XCTUnwrap(deleteEvents.first {
             $0["event"] as? String == "task.delete.succeeded" && $0["taskID"] as? String == pendingID
         }, "Deleting a task through the visible menu should leave a persistent diagnostic event.")
@@ -949,6 +1009,10 @@ final class StationAIUITests: XCTestCase {
         let failureWorktree = try XCTUnwrap(failureRecord["worktreePath"] as? String)
         let movedRepository = dataDirectory.appendingPathComponent("delete-failure-repository-restored-after-error", isDirectory: true)
         try FileManager.default.moveItem(at: brokenRepository, to: movedRepository)
+        assertCLIError(try runCLI(["task", "delete", failureID], expectedStatus: 1), code: "operation_failed")
+        let failedDeleteCountBeforeUI = try diagnosticEvents().filter {
+            $0["event"] as? String == "task.delete.failed" && $0["taskID"] as? String == failureID
+        }.count
         deleteTaskFromContextMenu(failureTitle)
         XCTAssertTrue(element("confirm-delete-task-button").waitForExistence(timeout: 5))
         element("confirm-delete-task-button").click()
@@ -958,13 +1022,12 @@ final class StationAIUITests: XCTestCase {
             saveErrorAlert.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Diagnostics.jsonl")).firstMatch.exists,
             "The failure alert should point to the persistent diagnostic log."
         )
-        let failureLog = try String(contentsOf: dataDirectory.appendingPathComponent("Diagnostics.jsonl"), encoding: .utf8)
-        let failureEvents = try failureLog.split(whereSeparator: \.isNewline).compactMap {
-            try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
-        }
-        let failedDelete = try XCTUnwrap(failureEvents.first {
+        let failureEvents = try diagnosticEvents()
+        let failedDeleteEvents = failureEvents.filter {
             $0["event"] as? String == "task.delete.failed" && $0["taskID"] as? String == failureID
-        })
+        }
+        XCTAssertGreaterThan(failedDeleteEvents.count, failedDeleteCountBeforeUI, "The visible confirmation action must emit its own task.delete.failed event.")
+        let failedDelete = try XCTUnwrap(failedDeleteEvents.last)
         XCTAssertEqual(failedDelete["phase"] as? String, "worktree-removal")
         XCTAssertEqual(failedDelete["taskStatus"] as? String, "Review")
         XCTAssertTrue((failedDelete["threadID"] as? String)?.isEmpty == false)
@@ -972,8 +1035,18 @@ final class StationAIUITests: XCTestCase {
         XCTAssertNotNil(failedDelete["codexPID"] as? String)
         XCTAssertNotNil(failedDelete["error0Domain"] as? String)
         XCTAssertNotNil(failedDelete["error0Code"] as? String)
-        XCTAssertFalse(failureLog.contains(failureTitle), "Diagnostics must not record task titles.")
-        XCTAssertFalse(failureLog.contains(failurePrompt), "Diagnostics must not record conversation text.")
+        assertDiagnosticEventsContain(
+            [failedDelete],
+            values: [failureTitle, failurePrompt, brokenRepository.path, failureWorktree, dataDirectory.path]
+        )
+        let failedBridgeDelete = try XCTUnwrap(failureEvents.first {
+            $0["event"] as? String == "bridge.request.failed" && $0["command"] as? String == "task.delete"
+        })
+        XCTAssertEqual(failedBridgeDelete["errorCode"] as? String, "operation_failed")
+        XCTAssertNotNil(failedBridgeDelete["errorMessage"] as? String)
+        let serializedFailureEvents = String(data: try JSONSerialization.data(withJSONObject: failureEvents), encoding: .utf8) ?? ""
+        XCTAssertTrue(serializedFailureEvents.contains(failureTitle), "The extended session log should record task titles.")
+        XCTAssertTrue(serializedFailureEvents.contains(failurePrompt), "The extended session log should record conversation text.")
         XCTAssertTrue(FileManager.default.fileExists(atPath: failureWorktree), "A failed deletion must preserve the worktree for retry.")
         XCTAssertEqual(try taskRecord(id: failureID)?["id"] as? String, failureID, "A failed deletion must preserve the task for retry.")
         saveErrorAlert.buttons["OK"].click()
@@ -985,10 +1058,32 @@ final class StationAIUITests: XCTestCase {
         assertCLIError(try runCLI(["task", "get", failureID], expectedStatus: 3), code: "not_found")
 
         XCTAssertEqual(try tasksFromBoardList().count, 0)
+        let currentLogURL = dataDirectory.appendingPathComponent("Diagnostics.jsonl")
+        let halfCap = (10 * 1024 * 1024) / 2
+        let seedPrefix = Data("{\"event\":\"rotation-seed\",\"padding\":\"".utf8)
+        let seedSuffix = Data("\"}\n".utf8)
+        let seedSize = halfCap - 32
+        var seed = seedPrefix
+        seed.append(Data(repeating: 120, count: seedSize - seedPrefix.count - seedSuffix.count))
+        seed.append(seedSuffix)
+        try seed.write(to: currentLogURL, options: .atomic)
+        _ = try runCLI(["board", "list"])
+        let boundaryRotatedLogURL = dataDirectory.appendingPathComponent("Diagnostics.jsonl.1")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: boundaryRotatedLogURL.path), "Crossing the half-cap boundary must rotate the active log.")
+        let currentEvents = try diagnosticEvents()
+        let rotatedData = try Data(contentsOf: boundaryRotatedLogURL)
+        let rotatedEvents = try String(decoding: rotatedData, as: UTF8.self).split(whereSeparator: \.isNewline).compactMap {
+            try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+        }
+        XCTAssertEqual(rotatedEvents.first?["event"] as? String, "rotation-seed")
+        XCTAssertTrue(currentEvents.contains { $0["event"] as? String == "bridge.request.succeeded" && $0["command"] as? String == "board.list" })
+        let currentSize = (try FileManager.default.attributesOfItem(atPath: currentLogURL.path)[.size] as? NSNumber)?.intValue ?? 0
+        let rotatedSize = (try FileManager.default.attributesOfItem(atPath: boundaryRotatedLogURL.path)[.size] as? NSNumber)?.intValue ?? 0
+        XCTAssertLessThanOrEqual(currentSize + rotatedSize, 10 * 1024 * 1024)
         attachScreenshot(named: "Deleted task removed from the board")
     }
 
-    // case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; the ordered last-used repository list persists across fresh CLI/XPC connections and rejects unavailable repositories; Dark and Light appearance choices persist, and Dark renders the workspace canvas as #1E1E1E in the VS Code Dark+ palette.
+    // case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; the ordered last-used repository list persists across fresh CLI/XPC connections and rejects unavailable repositories; Dark and Light appearance choices persist, and Dark renders the workspace canvas as #1E1E1E in the VS Code Dark+ palette. The extended log records appearance, parent-folder, and repository setting values. After a real filesystem write failure, the next successful UI log write records a diagnostics.writer.loss marker with a positive failed-write count.
     func test_default_parent_settings_read_write_clear_and_validation() throws {
         launchApp(defaultParent: nil)
         let initialSettings = try runCLI(["settings", "get"])["result"] as? [String: Any]
@@ -1064,18 +1159,60 @@ final class StationAIUITests: XCTestCase {
         let cleared = try runCLI(["settings", "get"])["result"] as? [String: Any]
         XCTAssertNil(cleared?["defaultParentFolder"] as? String)
         assertText("default-parent-folder-path", equals: "No default parent folder selected")
+        let repositories = try runCLI(["settings", "set-last-repositories", "--repo", fixture.secondary.path, "--repo", fixture.primary.path])["result"] as? [String: Any]
+        XCTAssertEqual(repositories?["lastSelectedRepositories"] as? [String], [fixture.secondary.path, fixture.primary.path])
         attachScreenshot(named: "Workspace settings can be changed and cleared")
+        let settingEvents = try diagnosticEvents()
+        XCTAssertTrue(settingEvents.contains { $0["event"] as? String == "settings.appearance.changed" })
+        XCTAssertTrue(settingEvents.contains { $0["event"] as? String == "settings.parent_folder.changed" })
+        XCTAssertTrue(settingEvents.contains { $0["event"] as? String == "settings.parent_folder.cleared" })
+        XCTAssertTrue(settingEvents.contains { $0["event"] as? String == "settings.repositories.changed" })
+        let privateSettingEvents = settingEvents.filter {
+            ["settings.parent_folder.changed", "settings.parent_folder.cleared", "settings.repositories.changed"].contains($0["event"] as? String ?? "")
+        }
+        assertDiagnosticEventsContain(privateSettingEvents, values: [fixture.parent.path, fixture.alternateParent.path, fixture.primary.path, fixture.secondary.path])
+        XCTAssertTrue(privateSettingEvents.contains { $0["path"] as? String == fixture.parent.path })
+
+        let logURL = dataDirectory.appendingPathComponent("Diagnostics.jsonl")
+        let backupURL = dataDirectory.appendingPathComponent("Diagnostics.jsonl.recovery-test")
+        try FileManager.default.moveItem(at: logURL, to: backupURL)
+        try FileManager.default.createDirectory(at: logURL, withIntermediateDirectories: false)
+        appearancePicker.click()
+        let failureLightChoice = preferencesWindow.menuItems["Light"]
+        if failureLightChoice.waitForExistence(timeout: 2) {
+            failureLightChoice.click()
+        } else {
+            preferencesWindow.buttons["Light"].click()
+        }
+        Thread.sleep(forTimeInterval: 0.3)
+        try FileManager.default.removeItem(at: logURL)
+        try FileManager.default.moveItem(at: backupURL, to: logURL)
+        appearancePicker.click()
+        let recoveryDarkChoice = preferencesWindow.menuItems["Dark"]
+        if recoveryDarkChoice.waitForExistence(timeout: 2) {
+            recoveryDarkChoice.click()
+        } else {
+            preferencesWindow.buttons["Dark"].click()
+        }
+        let lossMarker = try XCTUnwrap(diagnosticEvents().last { $0["event"] as? String == "diagnostics.writer.loss" })
+        XCTAssertGreaterThan(Int(lossMarker["failedWriteCount"] as? String ?? "0") ?? 0, 0)
     }
 
-    // case-contract: test_repository_suggestions_skip_nested_repositories_and_symlinks | Suggestions include top-level Git roots and skip nested repositories and symlink targets; the picker placeholder shows saved repositories with a Return arrow, and blank Return reuses them in order with auto/default/default branch fields even after a task used custom branch details, while typing and arrow-key selection overrides that default and persists after task creation.
+    // case-contract: test_repository_suggestions_skip_nested_repositories_and_symlinks | Suggestions include top-level Git roots and skip nested repositories and symlink targets; the picker placeholder shows saved repositories with a Return arrow, and blank Return reuses them in order with auto/default/default branch fields even after a task used custom branch details, while typing and arrow-key selection overrides that default and persists after task creation. The extended log records repository suggestion counts and discovered paths.
     func test_repository_suggestions_skip_nested_repositories_and_symlinks() throws {
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["settings", "set-last-repositories", "--repo", fixture.secondary.path, "--repo", fixture.primary.path])
+        let priorSuggestionCount = try diagnosticEvents().filter { $0["event"] as? String == "workspace.repositories.suggested" }.count
         openNewTaskSheet()
         let repositorySearch = element("workspace-repository-search")
         XCTAssertTrue(repositorySearch.waitForExistence(timeout: 5), "The create task sheet should let the user search by repository name.")
         XCTAssertTrue((repositorySearch.placeholderValue ?? "").contains("secondary, primary"), "The picker should show the saved two-repository default.")
         XCTAssertTrue((repositorySearch.placeholderValue ?? "").contains("↵"), "The placeholder should show a Return arrow to signal that Return applies the saved repositories.")
+        let uiSuggestionEvents = try diagnosticEvents().filter { $0["event"] as? String == "workspace.repositories.suggested" }
+        XCTAssertGreaterThan(uiSuggestionEvents.count, priorSuggestionCount, "Opening the picker must log its UI-originated repository scan before the CLI scan.")
+        let uiSuggestionEvent = try XCTUnwrap(uiSuggestionEvents.last)
+        XCTAssertEqual(uiSuggestionEvent["repositoryCount"] as? String, "4")
+        assertDiagnosticEventsContain([uiSuggestionEvent], values: [fixture.parent.path, fixture.primary.path, fixture.secondary.path, fixture.alternate.path])
         repositorySearch.click()
         repositorySearch.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(element("selected-repository-0").waitForExistence(timeout: 5), "Return on an empty search should restore the first saved repository.")
@@ -1170,9 +1307,14 @@ final class StationAIUITests: XCTestCase {
         )
         XCTAssertTrue(element("repository-suggestion-changes").exists)
         assertScreenshotIfVisible(named: "Repository suggestions exclude nested and symlinked folders")
+        let suggestionEvent = try XCTUnwrap(diagnosticEvents().first { $0["event"] as? String == "workspace.repositories.suggested" })
+        assertDiagnosticEventsContain(
+            [suggestionEvent],
+            values: [fixture.parent.path, fixture.primary.path, fixture.secondary.path, fixture.alternate.path]
+        )
     }
 
-    // case-contract: test_task_roots_remain_after_default_parent_is_cleared | Clearing the default parent does not change roots already saved on a task.
+    // case-contract: test_task_roots_remain_after_default_parent_is_cleared | Clearing the default parent does not change roots already saved on a task. The extended log records clearing the default parent including its previous path.
     func test_task_roots_remain_after_default_parent_is_cleared() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Roots survive settings", roots: [fixture.primary.path, fixture.secondary.path])
@@ -1200,6 +1342,8 @@ final class StationAIUITests: XCTestCase {
         let roots = try runCLI(["task", "roots", "get", try taskID(named: "Roots survive settings")])["result"] as? [String: Any]
         XCTAssertEqual(roots?["roots"] as? [String], [fixture.primary.path, fixture.secondary.path])
         attachScreenshot(named: "Existing task roots survive clearing the default parent")
+        let parentCleared = try XCTUnwrap(diagnosticEvents().first { $0["event"] as? String == "settings.parent_folder.cleared" })
+        assertDiagnosticEventsContain([parentCleared], values: [fixture.parent.path])
     }
 
     // case-contract: test_new_task_has_empty_conversation_history | Creating a task opens its empty conversation with the repository picker search focused and shows Untitled task until a first prompt starts title generation; the task has no stored messages or activity, and backing out immediately deletes it without a confirmation.
@@ -1232,7 +1376,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "New conversation shows its empty state")
     }
 
-    // case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while backing out saves an unsent prompt; reopening restores the draft without creating a branch or worktree, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
+    // case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while backing out saves an unsent prompt; reopening restores the draft without creating a branch or worktree, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason including prompt and title text. The extended log records prompts, titles, action parameters, and outcomes.
     func test_task_prompt_draft_persists_after_back() throws {
         codexFixtureExecutable = "/tmp/stationai-bridge-workspaces/codex-fixture-title-success-wait"
         launchApp(defaultParent: fixture.parent.path)
@@ -1285,17 +1429,23 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(skippedTitle["currentTitleState"] as? String, "custom")
         XCTAssertEqual(skippedTitle["titleSource"] as? String, "codex")
         let serializedTitleEvents = String(data: try JSONSerialization.data(withJSONObject: titleEvents), encoding: .utf8) ?? ""
-        XCTAssertFalse(serializedTitleEvents.contains(prompt), "Title diagnostics must not include conversation text.")
-        XCTAssertFalse(serializedTitleEvents.contains("Stable draft title"), "Title diagnostics must not include a user-renamed title.")
+        XCTAssertTrue(serializedTitleEvents.contains(prompt), "The extended log should include conversation text.")
+        XCTAssertTrue(serializedTitleEvents.contains("Stable draft title"), "The extended log should include a user-renamed title.")
         openTask(named: "Stable draft title")
         XCTAssertEqual(composer.value as? String, prompt, "Reopening should restore an unsent draft.")
         element("back-to-board-button").click()
         let stableTitle = try runCLI(["task", "get", taskID])["result"] as? [String: Any]
         XCTAssertEqual(stableTitle?["title"] as? String, "Stable draft title", "Returning with the saved draft should not restart title generation.")
         attachScreenshot(named: "Unsent task prompt is saved after returning to backlog")
+        let promptEvents = try diagnosticEvents().filter { $0["taskID"] as? String == taskID }
+        XCTAssertTrue(promptEvents.contains { $0["event"] as? String == "task.prompt.saved" })
+        XCTAssertTrue(promptEvents.contains { $0["event"] as? String == "task.renamed" })
+        XCTAssertTrue(promptEvents.contains { $0["prompt"] as? String == prompt })
+        XCTAssertTrue(promptEvents.contains { $0["title"] as? String == "Stable draft title" })
+        assertDiagnosticEventsContain(promptEvents, values: [prompt, "Stable draft title", fixture.primary.path])
     }
 
-    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and sending to an Untitled task persists either the Codex-generated title or a prompt-based fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text.
+    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and sending to an Untitled task persists either the Codex-generated title or a prompt-based fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, prompt text, and title text.
     func test_conversation_composer_rejects_blank_and_supports_live_turn_controls() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Blank message", roots: [fixture.primary.path])
@@ -1364,8 +1514,8 @@ final class StationAIUITests: XCTestCase {
             XCTAssertTrue((generationSucceeded["threadID"] as? String)?.isEmpty == false)
             XCTAssertEqual(titleApplied["titleSource"] as? String, "codex")
             let serializedTitleEvents = String(data: try JSONSerialization.data(withJSONObject: titleEvents), encoding: .utf8) ?? ""
-            XCTAssertFalse(serializedTitleEvents.contains(titlePrompt), "Title diagnostics must not include conversation text.")
-            XCTAssertFalse(serializedTitleEvents.contains("Generated fixture title"), "Title diagnostics must not include generated title text.")
+            XCTAssertTrue(serializedTitleEvents.contains(titlePrompt), "The extended log should include conversation text.")
+            XCTAssertTrue(serializedTitleEvents.contains("Generated fixture title"), "The extended log should include generated title text.")
             _ = try runCLI(["task", "rename", titleTaskID, "--title", "Generated title success"])
             element("back-to-board-button").click()
 
@@ -1397,7 +1547,7 @@ final class StationAIUITests: XCTestCase {
             XCTAssertTrue((titleGenerationFailure["errorDescription"] as? String)?.contains("Fixture rejected task-title generation.") == true)
             XCTAssertEqual(fallbackApplied["titleSource"] as? String, "prompt-fallback")
             let serializedFailureTitleEvents = String(data: try JSONSerialization.data(withJSONObject: failureTitleEvents), encoding: .utf8) ?? ""
-            XCTAssertFalse(serializedFailureTitleEvents.contains(failurePrompt), "Title diagnostics must not include conversation text.")
+            XCTAssertTrue(serializedFailureTitleEvents.contains(failurePrompt), "The extended log should include conversation text.")
             app.terminate()
             codexFixtureExecutable = nil
             launchApp(defaultParent: fixture.parent.path)
@@ -1477,11 +1627,12 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Blank composer leaves send disabled")
     }
 
-    // case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history.
+    // case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history. The extended log records image MIME type and encoded size while omitting the base64 payload.
     func test_conversation_sends_image_attachments() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Image conversation", roots: [fixture.primary.path])
+        let imageTaskID = try taskID(named: "Image conversation")
         openTask(named: "Image conversation")
         let image = dataDirectory.appendingPathComponent("chat-image.png")
         let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
@@ -1508,6 +1659,15 @@ final class StationAIUITests: XCTestCase {
         let pickedImage = try XCTUnwrap((pickedTurn["images"] as? [String])?.first)
         XCTAssertTrue(pickedImage.hasPrefix("data:image/png;base64,"), "The fixture should receive the image as a data URL.")
         XCTAssertEqual(pickedTurn["imageInputs"] as? [[String: String]], [["type": "image", "url": pickedImage]], "The Codex request should use the tagged image URL payload.")
+        let imageSendEvent = try XCTUnwrap(diagnosticEvents().last {
+            $0["event"] as? String == "conversation.send.started" && $0["taskID"] as? String == imageTaskID
+        })
+        XCTAssertEqual(imageSendEvent["imageMIMETypes"] as? String, "data:image/png;base64")
+        XCTAssertEqual(imageSendEvent["imageEncodedCharacterCounts"] as? String, String(pickedImage.count))
+        let serializedImageSend = String(data: try JSONSerialization.data(withJSONObject: imageSendEvent), encoding: .utf8) ?? ""
+        XCTAssertFalse(serializedImageSend.contains(String(pickedImage.split(separator: ",", maxSplits: 1)[1])))
+        let serializedSessionLog = String(data: try JSONSerialization.data(withJSONObject: diagnosticEvents(), options: [.withoutEscapingSlashes]), encoding: .utf8) ?? ""
+        XCTAssertFalse(serializedSessionLog.contains(String(pickedImage.split(separator: ",", maxSplits: 1)[1])), "No event or rotated log generation may contain the image's base64 payload.")
         app.buttons["Blue"].click()
         element("ai-question-answer-token").click()
         element("ai-question-answer-token").typeText("fixture-secret")
@@ -1573,7 +1733,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
     }
 
-    // case-contract: test_conversation_shows_subagent_delegation | When Codex delegates a task to a subagent, the conversation activity shows the delegated task and its completion status during the turn and after history reload.
+    // case-contract: test_conversation_shows_subagent_delegation | When Codex delegates a task to a subagent, the conversation activity shows the delegated task and its completion status during the turn and after history reload. The extended log records the completed Codex item as structured JSON including its item type and delegation prompt.
     func test_conversation_shows_subagent_delegation() throws {
         let fixtureRoot = URL(fileURLWithPath: "/tmp/stationai-bridge-workspaces", isDirectory: true)
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -1585,22 +1745,32 @@ final class StationAIUITests: XCTestCase {
         let fixtureCopy = fixtureRoot.appendingPathComponent("codex-fixture-subagent")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureCopy.path), "The UI runner must prepare the subagent fixture before launch.")
         codexFixtureExecutable = fixtureCopy.path
+        launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["task", "create", "--title", "Subagent delegation", "--root", fixture.primary.path])
         let taskID = try taskID(named: "Subagent delegation")
-        let sent = try runCLI(
-            ["conversation", "send", taskID, "--message", "Delegate this task."],
-            extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": fixtureCopy.path]
-        )
-        let sentResult = try XCTUnwrap(sent["result"] as? [String: Any])
-        let sentActivities = try XCTUnwrap(sentResult["activities"] as? [[String: Any]])
-        XCTAssertEqual(sentActivities.first?["title"] as? String, "Task delegated to subagent")
-        let previousApp = XCUIApplication()
-        if previousApp.state != .notRunning {
-            previousApp.terminate()
-        }
-        launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Subagent delegation")
-
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        composer.click()
+        composer.typeText("Delegate this task.")
+        let priorCompletedItems = try diagnosticEvents().filter {
+            $0["event"] as? String == "codex.item.completed" && $0["threadID"] as? String == "00000000-0000-0000-0000-000000000001"
+        }.count
+        element("send-message-button").click()
+        XCTAssertTrue(element("codex-activity-disclosure").waitForExistence(timeout: 20))
+        XCTAssertTrue(waitUntil({
+            guard let events = try? self.diagnosticEvents() else { return false }
+            return events.filter {
+                $0["event"] as? String == "codex.item.completed" && $0["threadID"] as? String == "00000000-0000-0000-0000-000000000001"
+            }.count > priorCompletedItems
+        }, timeout: 10), "The visible composer send should persist a completed Codex item.")
+        let itemEvent = try XCTUnwrap(try diagnosticEvents().last {
+            $0["event"] as? String == "codex.item.completed" && $0["threadID"] as? String == "00000000-0000-0000-0000-000000000001"
+        })
+        let loggedItemData = try XCTUnwrap((itemEvent["item"] as? String)?.data(using: .utf8))
+        let loggedItem = try XCTUnwrap(JSONSerialization.jsonObject(with: loggedItemData) as? [String: Any])
+        XCTAssertEqual(loggedItem["type"] as? String, "collabAgentToolCall")
+        XCTAssertTrue((loggedItem["prompt"] as? String ?? "").contains("Inspect the project structure"))
         app.activate()
         XCTAssertEqual(app.state, .runningForeground, "StationAI must be foreground before inspecting the conversation.")
 
@@ -1616,6 +1786,17 @@ final class StationAIUITests: XCTestCase {
         let detailDescription = "\(activityDetail.label) \(activityDetail.value as? String ?? "")"
         XCTAssertTrue(detailDescription.contains("Inspect the project structure and report relevant files."))
         attachScreenshot(named: "Conversation shows a completed subagent delegation")
+        element("back-to-board-button").click()
+        openTask(named: "Subagent delegation")
+        let reloadedDisclosure = element("codex-activity-disclosure")
+        XCTAssertTrue(reloadedDisclosure.waitForExistence(timeout: 20), "The completed delegation should remain in reloaded history.")
+        reloadedDisclosure.click()
+        let reloadedActivity = element("codex-activity-row-item_stationai_subagent")
+        XCTAssertTrue(reloadedActivity.waitForExistence(timeout: 10))
+        XCTAssertTrue(reloadedActivity.label.contains("Completed"))
+        let reloadedDetail = element("codex-activity-detail-item_stationai_subagent")
+        XCTAssertTrue(reloadedDetail.waitForExistence(timeout: 5))
+        XCTAssertTrue("\(reloadedDetail.label) \(reloadedDetail.value as? String ?? "")".contains("Inspect the project structure and report relevant files."))
     }
 
     // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; a completed <proposed_plan> is automatically rendered as Markdown without exposing its wrapper tags, including after reopening, while bridge history preserves the exact source.
@@ -1859,7 +2040,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(named: "Non-blocking question")?["status"] as? String, "Review")
     }
 
-    // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes persist Blocked across connections, and diagnostics identify the failed turn phase and store path; a new prompt can finish in Review.
+    // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes persist Blocked across connections, and diagnostics identify the failed turn phase and store filename including workspace paths; a new prompt can finish in Review.
     func test_codex_interrupted_turn_blocks_with_reason_and_can_retry() throws {
         _ = try runCLI(["task", "create", "--title", "Interrupted turn", "--root", fixture.primary.path])
         codexFixtureExecutable = URL(fileURLWithPath: "/tmp/stationai-bridge-workspaces/codex-fixture-interrupted").path
@@ -1883,7 +2064,9 @@ final class StationAIUITests: XCTestCase {
             $0["event"] as? String == "conversation.send.failed" && $0["taskID"] as? String == interruptedID
         })
         XCTAssertEqual(sendFailure["phase"] as? String, "codex-turn")
-        XCTAssertEqual(sendFailure["storePath"] as? String, dataDirectory.appendingPathComponent("StationAI.store").path)
+        XCTAssertEqual(sendFailure["storePath"] as? String, "StationAI.store")
+        let serializedSendFailure = String(data: try JSONSerialization.data(withJSONObject: sendFailure), encoding: .utf8) ?? ""
+        XCTAssertTrue(serializedSendFailure.contains(fixture.primary.path))
 
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         app.launchEnvironment["STATIONAI_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
@@ -1929,7 +2112,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Reopening StationAI recovers a stale In Progress task as Blocked")
     }
 
-    // case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation.
+    // case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation. The extended log records workspace change inventories, file paths, and diff contents.
     func test_task_workspace_changes_group_staged_and_unstaged_diffs() throws {
         _ = try runCLI([
             "task", "create", "--title", "Git changes", "--root", fixture.changes.path
@@ -1947,6 +2130,10 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("workspace-change-staged-staged-deleted.txt").exists)
 
         let taskID = try taskID(named: "Git changes")
+        let uiChangeEvents = try diagnosticEvents().filter { $0["event"] as? String == "workspace.changes.loaded" && $0["taskID"] as? String == taskID }
+        let uiChangeEvent = try XCTUnwrap(uiChangeEvents.last)
+        XCTAssertEqual(uiChangeEvent["changeCount"] as? String, "8")
+        assertDiagnosticEventsContain([uiChangeEvent], values: [fixture.changes.path, "shared.txt", "syntax.json"])
         let inventory = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
         XCTAssertEqual((inventory?["staged"] as? [[String: Any]])?.count, 3)
         XCTAssertEqual((inventory?["working"] as? [[String: Any]])?.count, 5)
@@ -1958,9 +2145,19 @@ final class StationAIUITests: XCTestCase {
         ])["result"] as? [String: Any]
         XCTAssertEqual(stagedDiff?["original"] as? String, "Shared baseline.\n")
         XCTAssertEqual(stagedDiff?["modified"] as? String, "Shared index version.\n")
+        let diffEventCountBeforeUI = try diagnosticEvents().filter { $0["event"] as? String == "workspace.change.diff.loaded" && $0["taskID"] as? String == taskID }.count
 
         element("workspace-change-staged-shared.txt").click()
         XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
+        let diffDeadline = Date().addingTimeInterval(5)
+        var uiDiffEvents = try diagnosticEvents().filter { $0["event"] as? String == "workspace.change.diff.loaded" && $0["taskID"] as? String == taskID }
+        while uiDiffEvents.count <= diffEventCountBeforeUI && Date() < diffDeadline {
+            Thread.sleep(forTimeInterval: 0.05)
+            uiDiffEvents = try diagnosticEvents().filter { $0["event"] as? String == "workspace.change.diff.loaded" && $0["taskID"] as? String == taskID }
+        }
+        XCTAssertGreaterThan(uiDiffEvents.count, diffEventCountBeforeUI, "Selecting the staged file in the UI must log its loaded diff.")
+        let stagedDiffEvent = try XCTUnwrap(uiDiffEvents.last)
+        assertDiagnosticEventsContain([stagedDiffEvent], values: ["Shared baseline.", "Shared index version."])
         assertText("workspace-diff-title", equals: "shared.txt")
         assertText("workspace-diff-source", equals: "suggested-parent/changes · Staged")
         assertText("workspace-diff-editor-status", equals: "Side-by-side")
@@ -1985,9 +2182,12 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(element("workspace-diff-overlay").waitForExistence(timeout: 2))
         XCTAssertTrue(element("empty-conversation").exists, "Closing the diff should reveal the conversation again.")
         attachScreenshot(named: "Conversation returns after closing the Monaco diff")
+        let changeEvents = try diagnosticEvents().filter { $0["event"] as? String == "workspace.changes.loaded" && $0["taskID"] as? String == taskID }
+        XCTAssertFalse(changeEvents.isEmpty)
+        assertDiagnosticEventsContain(changeEvents, values: [fixture.changes.path, "shared.txt", "syntax.json"])
     }
 
-    // case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | External file edits and Git commits update the open task's changes sidebar automatically, and fresh CLI connections report the same Git status.
+    // case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | External file edits and Git commits update the open task's changes sidebar automatically, and fresh CLI connections report the same Git status. The extended log records refreshed workspace inventories, file paths, and diff contents.
     func test_external_git_edits_and_commit_refresh_workspace_changes() throws {
         let repository = runDirectory.appendingPathComponent("external-git", isDirectory: true)
         try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
@@ -2005,20 +2205,40 @@ final class StationAIUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "External Git")
         XCTAssertTrue(element("workspace-changes-empty").waitForExistence(timeout: 10))
+        var uiChangeEvents = try diagnosticEvents().filter { $0["event"] as? String == "workspace.changes.loaded" && $0["taskID"] as? String == taskID }
+        XCTAssertEqual(uiChangeEvents.last?["changeCount"] as? String, "0")
 
         try "Edited externally.\n".write(to: trackedFile, atomically: true, encoding: .utf8)
         XCTAssertTrue(element("workspace-change-working-tracked.txt").waitForExistence(timeout: 10))
+        uiChangeEvents = try diagnosticEvents().filter { $0["event"] as? String == "workspace.changes.loaded" && $0["taskID"] as? String == taskID }
+        let editedEvent = try XCTUnwrap(uiChangeEvents.last { $0["changeCount"] as? String == "1" })
+        assertDiagnosticEventsContain([editedEvent], values: [repository.path, "tracked.txt"])
         let working = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
         XCTAssertEqual((working?["working"] as? [[String: Any]])?.map { $0["path"] as? String }, ["tracked.txt"])
+        let externalDiff = try runCLI([
+            "task", "changes", "diff", taskID,
+            "--repository", repository.path,
+            "--path", "tracked.txt",
+            "--group", "working"
+        ])["result"] as? [String: Any]
+        XCTAssertEqual(externalDiff?["modified"] as? String, "Edited externally.\n")
+        let externalDiffEvent = try XCTUnwrap(diagnosticEvents().last { $0["event"] as? String == "workspace.change.diff.loaded" && $0["taskID"] as? String == taskID })
+        assertDiagnosticEventsContain([externalDiffEvent], values: ["Edited externally."])
 
         try runGit(repository, "add", "tracked.txt")
         XCTAssertTrue(element("workspace-change-staged-tracked.txt").waitForExistence(timeout: 10))
         try runGit(repository, "commit", "-m", "External commit")
         XCTAssertTrue(element("workspace-changes-empty").waitForExistence(timeout: 10))
+        uiChangeEvents = try diagnosticEvents().filter { $0["event"] as? String == "workspace.changes.loaded" && $0["taskID"] as? String == taskID }
+        XCTAssertEqual(uiChangeEvents.last?["changeCount"] as? String, "0")
+        assertDiagnosticEventsContain([try XCTUnwrap(uiChangeEvents.last)], values: [repository.path, "tracked.txt"])
         let clean = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
         XCTAssertEqual((clean?["staged"] as? [Any])?.count, 0)
         XCTAssertEqual((clean?["working"] as? [Any])?.count, 0)
         attachScreenshot(named: "External Git commit clears the open changes sidebar")
+        let changeEvents = try diagnosticEvents().filter { $0["event"] as? String == "workspace.changes.loaded" && $0["taskID"] as? String == taskID }
+        XCTAssertFalse(changeEvents.isEmpty)
+        assertDiagnosticEventsContain(changeEvents, values: [repository.path, "tracked.txt"])
     }
 
     private func launchApp(defaultParent: String?) {
@@ -2339,9 +2559,27 @@ final class StationAIUITests: XCTestCase {
     }
 
     private func diagnosticEvents() throws -> [[String: Any]] {
-        let log = try String(contentsOf: dataDirectory.appendingPathComponent("Diagnostics.jsonl"), encoding: .utf8)
-        return try log.split(whereSeparator: \.isNewline).compactMap {
-            try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+        Thread.sleep(forTimeInterval: 0.3)
+        return try ["Diagnostics.jsonl.1", "Diagnostics.jsonl"].flatMap { name in
+            let url = dataDirectory.appendingPathComponent(name)
+            guard FileManager.default.fileExists(atPath: url.path) else { return [] as [[String: Any]] }
+            let log = try String(contentsOf: url, encoding: .utf8)
+            return try log.split(whereSeparator: \.isNewline).compactMap {
+                try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+            }
+        }
+    }
+
+    private func assertDiagnosticEventsContain(
+        _ events: [[String: Any]],
+        values: [String],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertFalse(events.isEmpty, "Expected at least one diagnostic event for the visible action.", file: file, line: line)
+        let serialized = String(data: (try? JSONSerialization.data(withJSONObject: events, options: [.withoutEscapingSlashes])) ?? Data(), encoding: .utf8) ?? ""
+        for value in values where !value.isEmpty {
+            XCTAssertTrue(serialized.contains(value), "Extended session log is missing action detail: \(value)", file: file, line: line)
         }
     }
 

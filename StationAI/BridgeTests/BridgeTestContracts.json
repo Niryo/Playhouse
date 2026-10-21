@@ -29,7 +29,7 @@
   },
   {
     "id": "test_task_done_preserves_worktree_and_branch",
-    "expectation": "Moving a reviewed task to Done preserves its source branch and worktree without merging into the local target, while retaining conversation history and exposing the task in the searchable read-only archive."
+    "expectation": "Moving a reviewed task to Done preserves its source branch and worktree without merging into the local target. The test advances the primary fixture by committing a change to its tracked baseline file after the task branch is created, then confirms Done leaves that target commit and content unchanged while retaining conversation history and exposing the task in the searchable read-only archive."
   },
   {
     "id": "test_task_done_preserves_dirty_worktree",
@@ -41,43 +41,43 @@
   },
   {
     "id": "test_task_status_transitions_and_rejects_unknown_status",
-    "expectation": "The board keeps stacked Blocked/Backlog and conditional Waiting Response/In Progress sections fully visible, leaves Review as its own column, removes Done from the columns, hides empty status sections, and preserves Codex-owned task status behavior."
+    "expectation": "The board keeps stacked Blocked/Backlog and conditional Waiting Response/In Progress sections fully visible, leaves Review as its own column, removes Done from the columns, hides empty status sections, and preserves Codex-owned task status behavior. Diagnostics record rejected status commands with their validation code and no message text."
   },
   {
     "id": "test_task_progress_reports_publish_persist_and_clear",
-    "expectation": "The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, clears explicitly and at turn completion, and the board card shows the built-in icon, label, and detail without changing lifecycle status; each turn receives hidden CLI usage instructions."
+    "expectation": "The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, clears explicitly and at turn completion, and the board card shows the built-in icon, label, and detail without changing lifecycle status; each turn receives hidden CLI usage instructions. The extended log records progress reports, conversation content, lifecycle transitions, turn metadata, and outcomes."
   },
   {
     "id": "test_task_progress_reports_clear_on_failed_turns_and_questions",
-    "expectation": "Progress reports clear when turns fail or are interrupted and when Codex requests user input; the task card removes the report while lifecycle states remain Blocked or Waiting Response, and answering the question resumes the task successfully."
+    "expectation": "Progress reports clear when turns fail or are interrupted and when Codex requests user input; the task card removes the report while lifecycle states remain Blocked or Waiting Response, and answering the question resumes the task successfully. The extended log records progress details and conversation content across failed, interrupted, and question-answer turns."
   },
   {
     "id": "test_task_rename_persists_and_rejects_blank_title",
-    "expectation": "A rename persists; rejecting a blank rename preserves the last valid title."
+    "expectation": "A rename persists; rejecting a blank rename preserves the last valid title. Diagnostics record task renames by ID including the chosen title."
   },
   {
     "id": "test_task_roots_set_get_order_deduplication_and_validation",
-    "expectation": "Root editing preserves order, removes duplicates, and rejects an empty list."
+    "expectation": "Root editing preserves order, removes duplicates, and rejects an empty list. The extended log records root updates by task ID, count, and path values."
   },
   {
     "id": "test_conversation_repository_picker_adds_repository_worktree",
-    "expectation": "Repository suggestions can be filtered and navigated with Up/Down, and Enter selects the highlighted repository; adding it persists a pending auto branch with labeled read-only branch, merge-from, and merge-to values, and no worktree exists before the first send."
+    "expectation": "Repository suggestions can be filtered and navigated with Up/Down, and Enter selects the highlighted repository; adding it persists a pending auto branch with labeled read-only branch, merge-from, and merge-to values, and no worktree exists before the first send. The extended log records repository attachment including repository paths."
   },
   {
     "id": "test_task_delete_removes_task_and_later_lookup_is_not_found",
-    "expectation": "The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives and reports the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Diagnostics identify the conversation failure phase and the persistent log captures a real deletion failure's task, thread, process, phase, and underlying error details without task titles or conversation text; the failed task and worktree remain available for retry."
+    "expectation": "The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives and reports the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. The extended log captures the conversation failure phase and a real deletion failure's task, thread, process, phase, and underlying error details including task titles, conversation text, repository paths, worktree paths, and data-directory paths. Shared managers also log successful task creation with task IDs and repository counts including titles. The visible deletion logs its shared-manager success, and the CLI failure records its bridge error code including request arguments and outcomes. The bounded session log also records command starts and outcomes including request payloads for CLI commands used during the visible workflow, and rotates at its half-cap boundary while retaining parseable JSONL files within the 10 MB total cap; the failed task and worktree remain available for retry."
   },
   {
     "id": "test_default_parent_settings_read_write_clear_and_validation",
-    "expectation": "The default parent can be read, changed, cleared, and an unavailable path is rejected; the ordered last-used repository list persists across fresh CLI/XPC connections and rejects unavailable repositories; Dark and Light appearance choices persist, and Dark renders the workspace canvas as #1E1E1E in the VS Code Dark+ palette."
+    "expectation": "The default parent can be read, changed, cleared, and an unavailable path is rejected; the ordered last-used repository list persists across fresh CLI/XPC connections and rejects unavailable repositories; Dark and Light appearance choices persist, and Dark renders the workspace canvas as #1E1E1E in the VS Code Dark+ palette. The extended log records appearance, parent-folder, and repository setting values. After a real filesystem write failure, the next successful UI log write records a diagnostics.writer.loss marker with a positive failed-write count."
   },
   {
     "id": "test_repository_suggestions_skip_nested_repositories_and_symlinks",
-    "expectation": "Suggestions include top-level Git roots and skip nested repositories and symlink targets; the picker placeholder shows saved repositories with a Return arrow, and blank Return reuses them in order with auto/default/default branch fields even after a task used custom branch details, while typing and arrow-key selection overrides that default and persists after task creation."
+    "expectation": "Suggestions include top-level Git roots and skip nested repositories and symlink targets; the picker placeholder shows saved repositories with a Return arrow, and blank Return reuses them in order with auto/default/default branch fields even after a task used custom branch details, while typing and arrow-key selection overrides that default and persists after task creation. The extended log records repository suggestion counts and discovered paths."
   },
   {
     "id": "test_task_roots_remain_after_default_parent_is_cleared",
-    "expectation": "Clearing the default parent does not change roots already saved on a task."
+    "expectation": "Clearing the default parent does not change roots already saved on a task. The extended log records clearing the default parent including its previous path."
   },
   {
     "id": "test_new_task_has_empty_conversation_history",
@@ -85,15 +85,15 @@
   },
   {
     "id": "test_task_prompt_draft_persists_after_back",
-    "expectation": "Creating a repository task leaves its selected branch pending while backing out saves an unsent prompt; reopening restores the draft without creating a branch or worktree, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text."
+    "expectation": "Creating a repository task leaves its selected branch pending while backing out saves an unsent prompt; reopening restores the draft without creating a branch or worktree, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason including prompt and title text. The extended log records prompts, titles, action parameters, and outcomes."
   },
   {
     "id": "test_conversation_composer_rejects_blank_and_supports_live_turn_controls",
-    "expectation": "Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and sending to an Untitled task persists either the Codex-generated title or a prompt-based fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text."
+    "expectation": "Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and sending to an Untitled task persists either the Codex-generated title or a prompt-based fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, prompt text, and title text."
   },
   {
     "id": "test_conversation_sends_image_attachments",
-    "expectation": "The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history."
+    "expectation": "The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history. The extended log records image MIME type and encoded size while omitting the base64 payload."
   },
   {
     "id": "test_conversation_rejects_invalid_image_attachments",
@@ -101,7 +101,7 @@
   },
   {
     "id": "test_conversation_shows_subagent_delegation",
-    "expectation": "When Codex delegates a task to a subagent, the conversation activity shows the delegated task and its completion status during the turn and after history reload."
+    "expectation": "When Codex delegates a task to a subagent, the conversation activity shows the delegated task and its completion status during the turn and after history reload. The extended log records the completed Codex item as structured JSON including its item type and delegation prompt."
   },
   {
     "id": "test_plan_mode_renders_markdown_in_conversation",
@@ -121,7 +121,7 @@
   },
   {
     "id": "test_codex_interrupted_turn_blocks_with_reason_and_can_retry",
-    "expectation": "Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes persist Blocked across connections, and diagnostics identify the failed turn phase and store path; a new prompt can finish in Review."
+    "expectation": "Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes persist Blocked across connections, and diagnostics identify the failed turn phase and store filename including workspace paths; a new prompt can finish in Review."
   },
   {
     "id": "test_codex_empty_question_request_is_rejected",
@@ -129,15 +129,15 @@
   },
   {
     "id": "test_task_workspace_changes_group_staged_and_unstaged_diffs",
-    "expectation": "The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation."
+    "expectation": "The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation. The extended log records workspace change inventories, file paths, and diff contents."
   },
   {
     "id": "test_external_git_edits_and_commit_refresh_workspace_changes",
-    "expectation": "External file edits and Git commits update the open task's changes sidebar automatically, and fresh CLI connections report the same Git status."
+    "expectation": "External file edits and Git commits update the open task's changes sidebar automatically, and fresh CLI connections report the same Git status. The extended log records refreshed workspace inventories, file paths, and diff contents."
   },
   {
     "id": "test_task_pr_create_reports_real_gh_failure",
-    "expectation": "A repository-backed Done task exposes a PR action in the archive; when the real gh CLI cannot create one for a local repository without a usable GitHub remote, it reports the failure, persists no partial PR link, and preserves Done status."
+    "expectation": "A repository-backed Done task exposes a PR action in the archive; when the real gh CLI cannot create one for a local repository without a usable GitHub remote, it reports the failure, persists no partial PR link, and preserves Done status. Diagnostics record each pull request attempt with its task and request details; the CLI failure also records its bridge error code."
   },
   {
     "id": "test_done_archive_displays_existing_pull_request_link",

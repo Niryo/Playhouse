@@ -294,6 +294,10 @@ final class CodexAppServerClient: ObservableObject {
             "threadID": threadID,
             "turnID": turnID,
             "turnStatus": turn["status"] as? String ?? "unknown",
+            "userMessage": text,
+            "model": modelID,
+            "mode": mode.rawValue,
+            "workspace": workspace.cwd.path,
             "workspaceRootCount": String(workspace.roots.count),
         ]))
 
@@ -664,6 +668,15 @@ final class CodexAppServerClient: ObservableObject {
                let text = item["text"] as? String,
                !text.isEmpty {
                 activeFinalMessageHandler?(text)
+                StationAIDiagnostics.record("codex.agent_message.completed", fields: [
+                    "threadID": activeThreadID ?? "",
+                    "message": text
+                ])
+            }
+            if method == "item/completed" {
+                StationAIDiagnostics.record("codex.item.completed", fields: [
+                    "threadID": activeThreadID ?? ""
+                ], structuredFields: ["item": item])
             }
             guard let activity = CodexActivity.from(item: item) else { return }
             activeActivities[activity.id] = activity
@@ -685,6 +698,10 @@ final class CodexAppServerClient: ObservableObject {
         case "turn/diff/updated":
             guard params["threadId"] as? String == activeThreadID,
                   let diff = params["diff"] as? String, !diff.isEmpty else { return }
+            StationAIDiagnostics.record("codex.turn.diff.updated", fields: [
+                "threadID": activeThreadID ?? "",
+                "diff": diff
+            ])
             activeDiffHandler?(CodexTurnDiff(unifiedDiff: diff))
         case "turn/completed":
             guard let threadID = params["threadId"] as? String,
@@ -718,6 +735,10 @@ final class CodexAppServerClient: ObservableObject {
         default:
             break
         }
+    }
+
+    private static func diagnosticJSON(_ value: Any) -> String {
+        StationAIDiagnostics.jsonString(value)
     }
 
     private func handleServerRequest(method: String, params: [String: Any], requestID: Any) {

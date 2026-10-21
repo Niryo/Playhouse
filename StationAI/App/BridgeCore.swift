@@ -13,7 +13,8 @@ struct CodexTaskTitleGenerator {
             StationAIDiagnostics.record("task.title_generation.started", fields: [
                 "taskID": taskID.uuidString,
                 "threadID": threadID,
-                "modelID": CodexAppServerClient.modelID
+                "modelID": CodexAppServerClient.modelID,
+                "prompt": prompt
             ])
             var generated: String?
             phase = "title-turn"
@@ -43,11 +44,12 @@ struct CodexTaskTitleGenerator {
                 "taskID": taskID.uuidString,
                 "threadID": threadID,
                 "phase": phase,
+                "title": title,
                 "titleWordCount": String(title.split(whereSeparator: \.isWhitespace).count)
             ])
             return title
         } catch {
-            var fields = StationAIDiagnostics.errorFields(error, redacting: [prompt])
+            var fields = StationAIDiagnostics.errorFields(error)
             fields["taskID"] = taskID.uuidString
             fields["threadID"] = threadID
             fields["phase"] = phase
@@ -295,6 +297,12 @@ final class BoardTaskManager {
         let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: normalizedRoots)
         modelContext.insert(task)
         try modelContext.save()
+        StationAIDiagnostics.record("task.create.succeeded", fields: [
+            "taskID": task.id.uuidString,
+            "title": normalizedTitle,
+            "workspaceRoots": normalizedRoots.joined(separator: "\n"),
+            "workspaceRootCount": String(normalizedRoots.count)
+        ])
         return BoardTaskRecord(task: task)
     }
 
@@ -332,6 +340,16 @@ final class BoardTaskManager {
         task.contextFolderPaths = folders
         modelContext.insert(task)
         try modelContext.save()
+        StationAIDiagnostics.record("task.create.succeeded", fields: [
+            "taskID": task.id.uuidString,
+            "title": normalizedTitle,
+            "repositories": worktrees.map(\.repositoryPath).joined(separator: "\n"),
+            "repositoryWorktrees": Self.diagnosticJSON(worktrees),
+            "workspaceRoots": roots.joined(separator: "\n"),
+            "savedPrompt": task.savedPrompt ?? "",
+            "repositoryCount": String(worktrees.count),
+            "contextFolderCount": String(folders.count)
+        ])
         return BoardTaskRecord(task: task)
     }
 
@@ -368,6 +386,12 @@ final class BoardTaskManager {
             task.contextFolderPaths = contextFolders
             task.workspaceRootPaths = roots
             try modelContext.save()
+            StationAIDiagnostics.record("task.repository.add.succeeded", fields: [
+                "taskID": id.uuidString,
+                "repositoryPaths": repositories.map(\.repositoryPath).joined(separator: "\n"),
+                "workspaceRoots": task.workspaceRootPaths.joined(separator: "\n"),
+                "repositoryCount": String(repositories.count)
+            ])
             return BoardTaskRecord(task: task)
         } catch {
             if record.createdByStationAI { try? StationAIWorktreeManager.remove(record) }
@@ -407,11 +431,18 @@ final class BoardTaskManager {
         task.statusMessage = nil
         clearProgressReport(task)
         try modelContext.save()
+        StationAIDiagnostics.record("task.status.changed", fields: ["taskID": id.uuidString, "title": task.title, "status": TaskStatus.done.rawValue])
         return BoardTaskRecord(task: task)
     }
 
     func createPullRequests(_ id: UUID, client: CodexAppServerClient) async throws -> BoardTaskRecord {
         let task = try requireTask(id)
+        StationAIDiagnostics.record("task.pull_requests.started", fields: [
+            "taskID": id.uuidString,
+            "title": task.title,
+            "repositoryPaths": task.repositoryWorktrees.map(\.repositoryPath).joined(separator: "\n"),
+            "repositoryCount": String(task.repositoryWorktrees.count)
+        ])
         guard !task.repositoryWorktrees.isEmpty else {
             throw BridgeCommandError(code: "invalid_transition", message: "This task has no repository for a pull request.")
         }
@@ -428,6 +459,11 @@ final class BoardTaskManager {
         }
         task.repositoryWorktrees = records
         try modelContext.save()
+        StationAIDiagnostics.record("task.pull_requests.prepared", fields: [
+            "taskID": id.uuidString,
+            "repositories": Self.diagnosticJSON(records),
+            "repositoryCount": String(records.filter { $0.pullRequestNumber != nil }.count)
+        ])
         guard records.contains(where: { $0.pullRequestNumber == nil || $0.pullRequestURL == nil }) else {
             return BoardTaskRecord(task: task)
         }
@@ -469,6 +505,13 @@ final class BoardTaskManager {
             task.repositoryWorktrees = records
             try modelContext.save()
         }
+        StationAIDiagnostics.record("task.pull_requests.created", fields: [
+            "taskID": id.uuidString,
+            "title": task.title,
+            "summary": summary,
+            "repositories": Self.diagnosticJSON(records),
+            "repositoryCount": String(records.filter { $0.pullRequestNumber != nil }.count)
+        ])
         return BoardTaskRecord(task: task)
     }
 
@@ -483,6 +526,12 @@ final class BoardTaskManager {
         task.statusMessage = message
         if status != .inProgress { clearProgressReport(task) }
         try modelContext.save()
+        StationAIDiagnostics.record("task.status.changed", fields: [
+            "taskID": task.id.uuidString,
+            "title": task.title,
+            "status": status.rawValue,
+            "statusMessage": message ?? ""
+        ])
         return BoardTaskRecord(task: task)
     }
 
@@ -504,6 +553,13 @@ final class BoardTaskManager {
         task.progressLabel = label
         task.progressDetail = normalizedDetail?.isEmpty == true ? nil : normalizedDetail
         try modelContext.save()
+        StationAIDiagnostics.record("task.progress.published", fields: [
+            "taskID": id.uuidString,
+            "progressType": type?.rawValue ?? "custom",
+            "label": label,
+            "detail": normalizedDetail ?? "",
+            "detailCharacterCount": String(normalizedDetail?.count ?? 0)
+        ])
         return BoardTaskRecord(task: task)
     }
 
@@ -512,10 +568,18 @@ final class BoardTaskManager {
         let task = try requireTask(id)
         clearProgressReport(task)
         try modelContext.save()
+        StationAIDiagnostics.record("task.progress.cleared", fields: ["taskID": id.uuidString])
         return BoardTaskRecord(task: task)
     }
 
     private func clearProgressReport(_ task: BoardTask) {
+        guard task.progressTypeRawValue != nil || task.progressLabel != nil || task.progressDetail != nil else { return }
+        StationAIDiagnostics.record("task.progress.cleared", fields: [
+            "taskID": task.id.uuidString,
+            "progressType": task.progressTypeRawValue ?? "custom",
+            "label": task.progressLabel ?? "",
+            "detail": task.progressDetail ?? ""
+        ])
         task.progressTypeRawValue = nil
         task.progressLabel = nil
         task.progressDetail = nil
@@ -563,6 +627,7 @@ final class BoardTaskManager {
         let task = try requireTask(id)
         task.title = normalizedTitle
         try modelContext.save()
+        StationAIDiagnostics.record("task.renamed", fields: ["taskID": id.uuidString, "title": normalizedTitle])
         return BoardTaskRecord(task: task)
     }
 
@@ -578,6 +643,12 @@ final class BoardTaskManager {
             if status != .inProgress { clearProgressReport(task) }
         }
         try modelContext.save()
+        StationAIDiagnostics.record("task.prompt.saved", fields: [
+            "taskID": id.uuidString,
+            "prompt": prompt,
+            "promptCharacterCount": String(prompt.count),
+            "status": task.status.rawValue
+        ])
         return BoardTaskRecord(task: task)
     }
 
@@ -616,6 +687,13 @@ final class BoardTaskManager {
             task.workspaceRootPaths = resolvedRoots
         }
         try modelContext.save()
+        StationAIDiagnostics.record("task.workspace_roots.updated", fields: [
+            "taskID": id.uuidString,
+            "roots": task.workspaceRootPaths.joined(separator: "\n"),
+            "repositoryPaths": task.repositoryWorktrees.map(\.repositoryPath).joined(separator: "\n"),
+            "rootCount": String(task.workspaceRootPaths.count),
+            "repositoryCount": String(task.repositoryWorktrees.count)
+        ])
         return BoardTaskRecord(task: task)
     }
 
@@ -624,17 +702,22 @@ final class BoardTaskManager {
         var phase = "worktree-removal"
         var fields = [
             "taskID": task.id.uuidString,
+            "title": task.title,
+            "savedPrompt": task.savedPrompt ?? "",
             "taskStatus": task.status.rawValue,
             "threadID": task.codexThreadID ?? "",
             "worktreeCount": String(task.repositoryWorktrees.count),
-            "storePath": StationAIDiagnostics.storeURL.path
+            "storePath": StationAIDiagnostics.storeURL.path,
+            "workspaceRoots": task.workspaceRootPaths.joined(separator: "\n"),
+            "repositoryPaths": task.repositoryWorktrees.map(\.repositoryPath).joined(separator: "\n"),
+            "worktreePaths": task.repositoryWorktrees.map(\.worktreePath).joined(separator: "\n")
         ]
         fields.merge(diagnostics) { _, new in new }
         StationAIDiagnostics.record("task.delete.started", fields: fields)
         do {
-            for worktree in task.repositoryWorktrees {
+            for (index, worktree) in task.repositoryWorktrees.enumerated() {
                 guard !worktree.isPending else { continue }
-                fields["worktreePath"] = worktree.worktreePath
+                fields["worktreeIndex"] = String(index)
                 StationAIDiagnostics.record("task.delete.worktree_removal_started", fields: fields)
                 try StationAIWorktreeManager.removeAfterConfirmation(worktree)
                 StationAIDiagnostics.record("task.delete.worktree_removal_succeeded", fields: fields)
@@ -646,7 +729,7 @@ final class BoardTaskManager {
         } catch {
             fields["phase"] = phase
             fields.merge(
-                StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
+                StationAIDiagnostics.errorFields(error)
             ) { _, new in new }
             StationAIDiagnostics.record("task.delete.failed", fields: fields)
             throw error
@@ -730,6 +813,10 @@ final class BoardTaskManager {
         return task
     }
 
+    private static func diagnosticJSON<T: Encodable>(_ value: T) -> String {
+        StationAIDiagnostics.jsonString(value)
+    }
+
     private static func normalizeRoots(_ roots: [String]) throws -> [String] {
         let paths = roots.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL.path }
         guard !paths.isEmpty else { throw StationAIManagerError.noWorkspaceRoots }
@@ -786,6 +873,7 @@ final class WorkspaceSettingsManager {
             throw BridgeCommandError(code: "invalid_argument", message: "Appearance must be 'dark' or 'light'.")
         }
         defaults.set(value, forKey: WorkspaceSettings.appearanceKey)
+        StationAIDiagnostics.record("settings.appearance.changed", fields: ["appearance": value])
     }
 
     var defaultParentFolderURL: URL? {
@@ -794,13 +882,16 @@ final class WorkspaceSettingsManager {
 
     func setDefaultParentFolder(_ path: String?) throws {
         guard let path, !path.isEmpty else {
+            let clearedPath = defaults.string(forKey: WorkspaceSettings.defaultParentFolderKey) ?? ""
             defaults.removeObject(forKey: WorkspaceSettings.defaultParentFolderKey)
+            StationAIDiagnostics.record("settings.parent_folder.cleared", fields: ["path": clearedPath])
             return
         }
         guard let url = WorkspaceSettings.validDirectoryURL(for: path) else {
             throw StationAIManagerError.invalidParentFolder(path)
         }
         defaults.set(url.path, forKey: WorkspaceSettings.defaultParentFolderKey)
+        StationAIDiagnostics.record("settings.parent_folder.changed", fields: ["path": url.path])
     }
 
     func setLastSelectedRepositories(_ paths: [String]) throws {
@@ -813,6 +904,10 @@ final class WorkspaceSettingsManager {
             if !normalized.contains(url.path) { normalized.append(url.path) }
         }
         defaults.set(normalized, forKey: WorkspaceSettings.lastSelectedRepositoriesKey)
+        StationAIDiagnostics.record("settings.repositories.changed", fields: [
+            "repositoryCount": String(normalized.count),
+            "repositoryPaths": normalized.joined(separator: "\n")
+        ])
     }
 }
 
@@ -828,7 +923,13 @@ final class WorkspaceManager {
         guard let parent = WorkspaceSettings.validDirectoryURL(for: parentPath) else {
             throw StationAIManagerError.invalidParentFolder(parentPath)
         }
-        return await RepositoryScanner.scan(parent: parent).map(\.path)
+        let repositories = await RepositoryScanner.scan(parent: parent).map(\.path)
+        StationAIDiagnostics.record("workspace.repositories.suggested", fields: [
+            "repositoryCount": String(repositories.count),
+            "parentPath": parent.path,
+            "repositoryPaths": repositories.joined(separator: "\n")
+        ])
+        return repositories
     }
 
     func roots(for taskID: UUID) throws -> [String] {
@@ -852,7 +953,14 @@ final class WorkspaceManager {
         guard taskManager != nil else {
             throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.")
         }
-        return try await WorkspaceChangeScanner.inventory(workspaceRoots: roots(for: taskID))
+        let inventory = try await WorkspaceChangeScanner.inventory(workspaceRoots: roots(for: taskID))
+        StationAIDiagnostics.record("workspace.changes.loaded", fields: [
+            "taskID": taskID.uuidString,
+            "changeCount": String(inventory.staged.count + inventory.working.count),
+            "staged": diagnosticJSON(inventory.staged),
+            "working": diagnosticJSON(inventory.working)
+        ])
+        return inventory
     }
 
     func diff(
@@ -867,12 +975,25 @@ final class WorkspaceManager {
         guard let changeGroup = WorkspaceChangeGroup(rawValue: group) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Change group must be 'staged' or 'working'.")
         }
-        return try await WorkspaceChangeScanner.diff(
+        let diff = try await WorkspaceChangeScanner.diff(
             workspaceRoots: roots(for: taskID),
             repositoryPath: repository,
             relativePath: path,
             group: changeGroup
         )
+        StationAIDiagnostics.record("workspace.change.diff.loaded", fields: [
+            "taskID": taskID.uuidString,
+            "repositoryPath": repository,
+            "relativePath": path,
+            "group": changeGroup.rawValue,
+            "original": diff.original ?? "",
+            "modified": diff.modified ?? ""
+        ])
+        return diff
+    }
+
+    private func diagnosticJSON<T: Encodable>(_ value: T) -> String {
+        StationAIDiagnostics.jsonString(value)
     }
 }
 
@@ -911,19 +1032,27 @@ final class CodexConversationManager {
         StationAIDiagnostics.record("conversation.history.started", fields: client.diagnosticFields([
             "taskID": taskID.uuidString,
             "threadID": threadID,
-            "taskStatus": task.status.rawValue
+            "taskStatus": task.status.rawValue,
+            "title": task.title,
+            "workspaceRoots": historyRoots.joined(separator: "\n")
         ]))
         do {
             let history = try await client.loadThread(id: threadID, workspace: workspace, onActionRequest: onActionRequest)
+            let messagesJSON = await StationAIDiagnostics.jsonStringOffMain(history.messages)
+            let activitiesJSON = await StationAIDiagnostics.jsonStringOffMain(history.activities)
+            let diffJSON = await StationAIDiagnostics.jsonStringOffMain(history.diff)
             StationAIDiagnostics.record("conversation.history.succeeded", fields: client.diagnosticFields([
                 "taskID": taskID.uuidString,
                 "threadID": threadID,
+                "messages": messagesJSON,
+                "activities": activitiesJSON,
+                "diff": diffJSON,
                 "messageCount": String(history.messages.count),
                 "activityCount": String(history.activities.count)
             ]))
             return history
         } catch {
-            var fields = StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
+            var fields = StationAIDiagnostics.errorFields(error)
             fields["taskID"] = taskID.uuidString
             fields["threadID"] = threadID
             fields["taskStatus"] = task.status.rawValue
@@ -967,11 +1096,19 @@ final class CodexConversationManager {
             throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
         }
         var task = try tasks.taskModel(taskID)
+        let answersJSON = await StationAIDiagnostics.jsonStringOffMain(userInputAnswers)
         StationAIDiagnostics.record("conversation.send.started", fields: client.diagnosticFields([
             "taskID": taskID.uuidString,
             "threadID": task.codexThreadID ?? "new",
             "taskStatus": task.status.rawValue,
-            "mode": mode.rawValue
+            "mode": mode.rawValue,
+            "model": modelID,
+            "message": normalizedText,
+            "workspaceRoots": task.workspaceRootPaths.joined(separator: "\n"),
+            "imageCount": String(imageDataURLs.count),
+            "imageMIMETypes": imageDataURLs.map { $0.split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? "unknown" }.joined(separator: ","),
+            "imageEncodedCharacterCounts": imageDataURLs.map { String($0.count) }.joined(separator: ","),
+            "userInputAnswers": answersJSON
         ]))
         defer {
             if let threadID = task.codexThreadID {
@@ -1024,11 +1161,12 @@ final class CodexConversationManager {
                     _ = try self.tasks.rename(taskID, title: resolvedTitle)
                     StationAIDiagnostics.record("task.title_apply.succeeded", fields: [
                         "taskID": taskID.uuidString,
+                        "title": resolvedTitle,
                         "titleSource": generated == nil ? "prompt-fallback" : "codex",
                         "fallbackWordCount": generated == nil ? String(fallback.split(whereSeparator: \.isWhitespace).count) : "0"
                     ])
                 } catch {
-                    var fields = StationAIDiagnostics.errorFields(error, redacting: [resolvedTitle, normalizedText])
+                    var fields = StationAIDiagnostics.errorFields(error)
                     fields["taskID"] = taskID.uuidString
                     fields["titleSource"] = generated == nil ? "prompt-fallback" : "codex"
                     StationAIDiagnostics.record("task.title_apply.failed", fields: fields)
@@ -1114,11 +1252,14 @@ final class CodexConversationManager {
             _ = try tasks.setLifecycleStatus(taskID, to: .review)
         } catch {
             await titleGeneration?.value
-            var fields = StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
+            var fields = StationAIDiagnostics.errorFields(error)
             fields["taskID"] = taskID.uuidString
             fields["threadID"] = task.codexThreadID ?? ""
             fields["phase"] = phase
             fields["storePath"] = StationAIDiagnostics.storeURL.path
+            fields["title"] = task.title
+            fields["savedPrompt"] = task.savedPrompt ?? ""
+            fields["workspaceRoots"] = task.workspaceRootPaths.joined(separator: "\n")
             fields.merge(client.diagnosticFields()) { _, new in new }
             _ = try? tasks.setLifecycleStatus(taskID, to: .blocked, message: error.localizedDescription)
             StationAIDiagnostics.record("conversation.send.failed", fields: fields)
@@ -1131,6 +1272,19 @@ final class CodexConversationManager {
                 message: "Codex requested an approval. StationAI denied it because approval prompts are disabled."
             ))
         }
+        StationAIDiagnostics.record("conversation.send.succeeded", fields: client.diagnosticFields([
+            "taskID": taskID.uuidString,
+            "threadID": task.codexThreadID ?? "",
+            "mode": mode.rawValue,
+            "model": modelID,
+            "message": normalizedText,
+            "workspaceRoots": task.workspaceRootPaths.joined(separator: "\n"),
+            "userInputAnswers": answersJSON,
+            "imageMIMETypes": imageDataURLs.map { $0.split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? "unknown" }.joined(separator: ","),
+            "imageCount": String(imageDataURLs.count),
+            "messageCount": String(finalHistory.messages.count),
+            "activityCount": String(finalHistory.activities.count)
+        ]))
         onUpdate(ConversationUpdate(type: "completed", history: finalHistory))
         return finalHistory
     }
@@ -1172,6 +1326,20 @@ final class StationAIBridgeRuntime {
             return .failure(request, code: "unsupported_version", message: "Unsupported bridge version \(request.version). This service supports version \(BridgeContract.currentVersion).")
         }
 
+        #if DEBUG
+        StationAIDiagnostics.useDataDirectory(request.dataDirectory)
+        #else
+        StationAIDiagnostics.useDataDirectory(nil)
+        #endif
+        let diagnosticRequestFields = [
+            "command": request.command,
+            "requestID": request.id,
+            "arguments": Self.diagnosticArguments(request.arguments),
+            "dataDirectory": request.dataDirectory ?? "",
+            "worktreeDirectory": request.worktreeDirectory ?? ""
+        ]
+        StationAIDiagnostics.record("bridge.request.started", fields: diagnosticRequestFields)
+        let response: BridgeResponse
         do {
             let dataDirectory: String?
             #if DEBUG
@@ -1336,6 +1504,11 @@ final class StationAIBridgeRuntime {
                 )
                 let history = try await conversations.send(taskID: taskID, text: message, imageDataURLs: imageDataURLs, mode: mode, modelID: modelID, userInputAnswers: answers, onUpdate: { update in
                     if let payload = try? Self.value(update) {
+                        StationAIDiagnostics.record("conversation.update", fields: [
+                            "requestID": request.id,
+                            "taskID": taskID.uuidString,
+                            "type": update.type
+                        ], structuredFields: ["payload": Self.foundationValue(payload)])
                         eventHandler(BridgeEvent(requestID: request.id, type: update.type, payload: payload))
                     }
                 })
@@ -1343,9 +1516,16 @@ final class StationAIBridgeRuntime {
             default:
                 throw BridgeCommandError(code: "unknown_command", message: "Unknown command '\(request.command)'. Run 'stationai help' to list commands.")
             }
-            return .success(request, result: result)
+            var successFields = diagnosticRequestFields
+            successFields["result"] = await StationAIDiagnostics.jsonStringOffMain(result)
+            StationAIDiagnostics.record("bridge.request.succeeded", fields: successFields)
+            response = .success(request, result: result)
         } catch let error as BridgeCommandError {
-            return .failure(request, code: error.code, message: error.message)
+            var fields = diagnosticRequestFields
+            fields["errorCode"] = error.code
+            fields["errorMessage"] = error.message
+            StationAIDiagnostics.record("bridge.request.failed", fields: fields)
+            response = .failure(request, code: error.code, message: error.message)
         } catch let error as StationAIManagerError {
             let code: String
             switch error {
@@ -1354,15 +1534,56 @@ final class StationAIBridgeRuntime {
             case .invalidTransition: code = "invalid_argument"
             case .unmergedPullRequests: code = "invalid_transition"
             }
-            return .failure(request, code: code, message: error.localizedDescription)
+            var fields = diagnosticRequestFields
+            fields["errorCode"] = code
+            fields["errorMessage"] = error.localizedDescription
+            StationAIDiagnostics.record("bridge.request.failed", fields: fields)
+            response = .failure(request, code: code, message: error.localizedDescription)
         } catch {
-            return .failure(request, code: "operation_failed", message: error.localizedDescription)
+            var fields = diagnosticRequestFields
+            fields["errorCode"] = "operation_failed"
+            fields["errorMessage"] = error.localizedDescription
+            StationAIDiagnostics.record("bridge.request.failed", fields: fields)
+            response = .failure(request, code: "operation_failed", message: error.localizedDescription)
         }
+        await StationAIDiagnostics.endBatch()
+        return response
     }
 
     private static func value<T: Encodable>(_ value: T) throws -> BridgeValue {
         let data = try JSONEncoder.bridge.encode(value)
         return try JSONDecoder().decode(BridgeValue.self, from: data)
+    }
+
+    private static func foundationValue(_ value: BridgeValue) -> Any {
+        switch value {
+        case .string(let value): value
+        case .integer(let value): value
+        case .decimal(let value): value
+        case .boolean(let value): value
+        case .array(let values): values.map(foundationValue)
+        case .object(let values): values.mapValues(foundationValue)
+        case .null: NSNull()
+        }
+    }
+
+    private static func diagnosticJSON<T: Encodable>(_ value: T) -> String {
+        StationAIDiagnostics.jsonString(value)
+    }
+
+    private static func diagnosticArguments(_ arguments: [String: BridgeValue]) -> String {
+        var detailedArguments = arguments
+        if case .array(let images)? = detailedArguments["images"] {
+            detailedArguments["images"] = .array(images.map { image in
+                guard let dataURL = image.string else { return image }
+                let components = dataURL.split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false)
+                return .object([
+                    "mime": .string(String(components.first ?? "")),
+                    "encodedCharacterCount": .integer(dataURL.count)
+                ])
+            })
+        }
+        return diagnosticJSON(detailedArguments)
     }
 
 }
