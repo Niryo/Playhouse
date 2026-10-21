@@ -904,7 +904,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Lifecycle rollout clears tasks and reports a retained dirty worktree")
     }
 
-    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress fully within the viewport, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status.
+    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status.
     func test_task_status_transitions_and_rejects_unknown_status() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -1018,6 +1018,15 @@ final class StationAIUITests: XCTestCase {
         let activeResponse = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(activeResponseLine.utf8)) as? [String: Any])
         XCTAssertTrue(activeResponse["ok"] as? Bool == true)
         XCTAssertEqual(try taskRecord(id: activeTaskID)?["status"] as? String, "Review")
+
+        for index in 1...12 {
+            try createTaskFixture(title: "Backlog scroll \(index)", roots: [fixture.primary.path])
+        }
+        let lowestTask = app.buttons["Backlog scroll 1"]
+        XCTAssertTrue(lowestTask.waitForExistence(timeout: 10))
+        XCTAssertFalse(lowestTask.isHittable, "The final backlog task should begin below the board viewport.")
+        boardViewport.scroll(byDeltaX: 0, deltaY: -1200)
+        XCTAssertTrue(waitUntil({ lowestTask.isHittable }, timeout: 5), "Vertical board scrolling should make lower backlog tasks reachable.")
     }
 
     // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, clears explicitly and at turn completion, and the board card shows the built-in icon, label, and detail without changing lifecycle status; each turn receives hidden CLI usage instructions.
