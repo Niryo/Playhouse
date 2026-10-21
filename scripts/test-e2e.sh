@@ -23,7 +23,8 @@ done
 
 test_output_dir="$(mktemp -d /tmp/stationai-bridge.XXXXXX)"
 architecture="$(uname -m)"
-e2e_bundle_identifier="com.stationai.app.e2e.$$.${RANDOM}"
+app_bundle_id="$("${repository_root}/scripts/app-profile.sh" "${repository_root}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["bundleID"])')"
+e2e_bundle_identifier="${app_bundle_id}.e2e.$$.${RANDOM}"
 derived_data_dir="${test_output_dir}/DerivedData"
 app_bundle="${derived_data_dir}/Build/Products/Debug/StationAI.app"
 cli_path="${app_bundle}/Contents/MacOS/stationai-cli"
