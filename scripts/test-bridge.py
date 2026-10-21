@@ -1659,8 +1659,16 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(fresh_record["workspaceRoots"], [str(self.custom)])
         self.assertEqual(fresh_record["contextFolders"], [str(self.custom)])
 
-    # case-contract: test_task_repository_removal_preserves_state_on_dirty_worktree | Removing a pending repository preserves the source repository and other context folders; removing a clean managed worktree waits for an active conversation turn and then succeeds, while a dirty worktree rejects removal and preserves its task record and files.
+    # case-contract: test_task_repository_removal_preserves_state_on_dirty_worktree | Removing the only pending repository leaves the task with no workspace and preserves the source repository; removing a pending repository preserves other context folders; removing a clean managed worktree waits for an active conversation turn and then succeeds, while a dirty worktree rejects removal and preserves its task record and files.
     def test_task_repository_removal_preserves_state_on_dirty_worktree(self):
+        sole = self.create_repo_task("Sole repository removal", [self.primary])
+        sole_removed, _ = self.call_cli("task", "repository", "remove", sole["id"], "--repo", self.primary)
+        sole_result = self.assert_success(sole_removed)
+        self.assertEqual(sole_result["repositoryWorktrees"], [])
+        self.assertEqual(sole_result["workspaceRoots"], [])
+        self.assertEqual(sole_result["contextFolders"], [])
+        self.assertTrue(self.primary.is_dir(), "Removing a pending repository must preserve its source repository.")
+
         pending = self.create_repo_task("Pending repository removal", [self.primary], roots=[self.custom])
         pending_id = pending["id"]
         removed_pending, _ = self.call_cli("task", "repository", "remove", pending_id, "--repo", self.primary)

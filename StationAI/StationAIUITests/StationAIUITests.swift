@@ -2136,11 +2136,26 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Concurrent repository removal rejects a stale settings save")
     }
 
-    // case-contract: test_task_repository_removal_preserves_state_on_dirty_worktree | Removing a pending repository preserves the source repository and other context folders; removing a clean managed worktree waits for an active conversation turn and then succeeds, while a dirty worktree rejects removal and preserves its task record and files.
+    // case-contract: test_task_repository_removal_preserves_state_on_dirty_worktree | Removing the only pending repository leaves the task with no workspace and preserves the source repository; removing a pending repository preserves other context folders; removing a clean managed worktree waits for an active conversation turn and then succeeds, while a dirty worktree rejects removal and preserves its task record and files.
     func test_task_repository_removal_preserves_state_on_dirty_worktree() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
 
+        let soleTitle = "Sole repository removal through UI"
+        let sole = try runCLI(["task", "create", "--title", soleTitle, "--repo", fixture.primary.path])["result"] as? [String: Any]
+        let soleID = try XCTUnwrap(sole?["id"] as? String)
+        openTask(named: soleTitle)
+        element("conversation-repository-badge-primary").click()
+        element("remove-conversation-repository-button").click()
+        XCTAssertTrue(waitUntil({
+            guard let result = try? self.taskRecord(id: soleID),
+                  let records = result["repositoryWorktrees"] as? [Any] else { return false }
+            return records.isEmpty
+        }, timeout: 10), "Removing the only pending repository should leave the task without a workspace.")
+        XCTAssertEqual(try taskRecord(id: soleID)?["workspaceRoots"] as? [String], [])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.primary.path))
+
+        element("back-to-board-button").click()
         let pendingTitle = "Pending repository removal through UI"
         let pending = try runCLI([
             "task", "create", "--title", pendingTitle,
