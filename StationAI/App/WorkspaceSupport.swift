@@ -1120,7 +1120,7 @@ enum StationAIDiagnostics {
     private static var directoryOverride: URL?
     private static var ingressPendingBytes = 0
     private static var ingressDroppedEvents = 0
-    nonisolated(unsafe) private static let writeLock = NSLock()
+    nonisolated private static let writeLock = NSLock()
     nonisolated(unsafe) private static var logDescriptor: Int32 = -1
     nonisolated(unsafe) private static var lockDescriptor: Int32 = -1
     nonisolated(unsafe) private static var openedLockPath: String?
@@ -1137,7 +1137,7 @@ enum StationAIDiagnostics {
     nonisolated private static let eventLimit = 512 * 1024
     nonisolated private static let batchLimit = 128 * 1024
     nonisolated private static let pendingWriterLimit = 2 * 1024 * 1024
-    nonisolated(unsafe) private static let logger = Logger(subsystem: "com.stationai.app", category: "diagnostics")
+    nonisolated private static let logger = Logger(subsystem: "com.stationai.app", category: "diagnostics")
     nonisolated private static let writerQueue = DispatchQueue(label: "com.stationai.diagnostics.writer", qos: .utility)
 
     static func useDataDirectory(_ path: String?) {
@@ -1374,7 +1374,7 @@ enum StationAIDiagnostics {
             }
             for (index, chunk) in chunks.enumerated() {
                 let chunkEntry: [String: String] = [
-                    "timestamp": entry["timestamp"] as? String ?? ISO8601DateFormatter().string(from: Date()),
+                    "timestamp": entry["timestamp"] ?? ISO8601DateFormatter().string(from: Date()),
                     "event": "session.payload.chunk",
                     "payloadEvent": originalEntry["event"] ?? "diagnostics.event",
                     "payloadEncoding": "base64-json",
