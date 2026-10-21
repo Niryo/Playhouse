@@ -296,6 +296,7 @@
 			);
 			inputPaths = (
 				"$(SRCROOT)/scripts/build-bridge.sh",
+				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Info.plist",
 				"$(SRCROOT)/StationAI/Bridge/BridgeContract.swift",
 				"$(SRCROOT)/StationAI/Bridge/XPCServiceMain.swift",
 				"$(SRCROOT)/StationAI/CLI/BridgeClient.swift",

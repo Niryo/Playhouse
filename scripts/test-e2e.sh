@@ -45,7 +45,9 @@ fi
 
 test_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/stationai-bridge.XXXXXX")"
 architecture="$(uname -m)"
-e2e_bundle_identifier="com.stationai.app.e2e.$$.${RANDOM}"
+app_profile_json="$(bash "${repository_root}/scripts/app-profile.sh" "${repository_root}")"
+app_profile_bundle_identifier="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["bundleID"])' <<<"${app_profile_json}")"
+e2e_bundle_identifier="${app_profile_bundle_identifier}.e2e.$$.${RANDOM}"
 xcode_version="$(xcodebuild -version | awk '/^Xcode / {print $2}')"
 repository_cache_key="$(printf '%s' "${repository_root}" | shasum -a 256 | cut -c 1-12)"
 derived_data_dir="${TMPDIR:-/tmp}/stationai-bridge-derived-data-${xcode_version}-${architecture}-${repository_cache_key}"

@@ -412,13 +412,20 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(diagnostics.contains(try XCTUnwrap(primary["dataDirectory"])), "The linked-profile log must not route to the primary store.")
     }
 
-    // case-contract: test_task_creation_rejects_invalid_title_roots_and_missing_folder | New Task immediately opens an empty conversation with the repository picker focused; sending stays disabled until a working folder is added. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets.
+    // case-contract: test_task_creation_rejects_invalid_title_roots_and_missing_folder | New Task immediately opens an empty conversation with the repository picker focused and a visible red missing-working-folder warning; sending stays disabled until a working folder is added. A persisted empty-root task shows the same red warning when its conversation is reopened. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets.
     func test_task_creation_rejects_invalid_title_roots_and_missing_folder() throws {
         launchApp(defaultParent: fixture.parent.path)
         openNewTaskConversation()
         XCTAssertTrue(element("empty-conversation").waitForExistence(timeout: 10))
         let repositorySearch = element("conversation-repository-search")
         XCTAssertTrue(repositorySearch.waitForExistence(timeout: 10), "New Task should open the repository picker immediately.")
+        let composer = element("chat-composer")
+        XCTAssertTrue(composer.waitForExistence(timeout: 10), "The chat composer should be visible.")
+        let missingFolderError = composer.descendants(matching: .any)
+            .matching(identifier: "no-working-folders-error").firstMatch
+        XCTAssertTrue(missingFolderError.waitForExistence(timeout: 10), "A task without a repository should show its error in red.")
+        XCTAssertEqual(missingFolderError.label, "Choose at least one working folder before sending a message.")
+        assertContainsRedForeground(in: missingFolderError)
         repositorySearch.typeText("primary")
         XCTAssertEqual(repositorySearch.value as? String, "primary", "Typing after New Task should go directly to the focused repository search.")
         XCTAssertFalse(element("send-message-button").isEnabled, "An empty task without a working folder cannot send a message.")
@@ -433,10 +440,6 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(emptyRootTask["workspaceRoots"] as? [String], [])
         XCTAssertTrue(try XCTUnwrap(emptyRootTask["repositoryWorktrees"] as? [[String: Any]]).isEmpty)
         let emptyRootTaskID = try XCTUnwrap(emptyRootTask["id"] as? String)
-        let deletedEmptyRootTask = try XCTUnwrap(
-            try runCLI(["task", "delete", emptyRootTaskID])["result"] as? [String: Any]
-        )
-        XCTAssertEqual(deletedEmptyRootTask["deleted"] as? Bool, true)
         assertCLIError(
             try runCLI(
                 ["task", "create", "--title", "Missing folder", "--root", fixture.missing.path],
@@ -454,8 +457,20 @@ final class StationAIUITests: XCTestCase {
         closeConversationRepositoryPicker()
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
-        XCTAssertEqual(try tasksFromBoardList().count, 0, "Backing out of an empty direct-created task should discard it.")
-        attachScreenshot(named: "New Task opens an empty conversation with the repository picker focused")
+        XCTAssertEqual(try tasksFromBoardList().map { $0["id"] as? String }, [emptyRootTaskID])
+        relaunchApp()
+        openTask(named: "No roots")
+        let reopenedComposer = element("chat-composer")
+        XCTAssertTrue(reopenedComposer.waitForExistence(timeout: 10), "The reopened task should show its chat composer.")
+        let reopenedMissingFolderError = reopenedComposer.descendants(matching: .any)
+            .matching(identifier: "no-working-folders-error").firstMatch
+        XCTAssertTrue(reopenedMissingFolderError.waitForExistence(timeout: 10), "Opening the saved task should show the missing-folder error in the conversation too.")
+        assertContainsRedForeground(in: reopenedMissingFolderError)
+        let deletedEmptyRootTask = try XCTUnwrap(
+            try runCLI(["task", "delete", emptyRootTaskID])["result"] as? [String: Any]
+        )
+        XCTAssertEqual(deletedEmptyRootTask["deleted"] as? Bool, true)
+        attachScreenshot(named: "Conversation shows the missing working folder warning")
     }
 
     // case-contract: test_task_creation_persists_ordered_roots_across_fresh_connections | A directly created conversation can add repositories in order, edit pending branch settings, and add a context folder; these settings persist across fresh connections without creating branches or worktrees before the first send. Saving an unsent prompt records task creation, prompt save, and subsequent reads with safe argument metadata, result state, and outcome while excluding prompt text.
@@ -4032,6 +4047,24 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(Int((color.redComponent * 255).rounded()), expected.0, accuracy: accuracy, file: file, line: line)
         XCTAssertEqual(Int((color.greenComponent * 255).rounded()), expected.1, accuracy: accuracy, file: file, line: line)
         XCTAssertEqual(Int((color.blueComponent * 255).rounded()), expected.2, accuracy: accuracy, file: file, line: line)
+    }
+
+    private func assertContainsRedForeground(in element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        guard let cgImage = element.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            XCTFail("Could not read the missing-folder warning screenshot.", file: file, line: line)
+            return
+        }
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        var redPixels = 0
+        for x in stride(from: 0, to: cgImage.width, by: 2) {
+            for y in stride(from: 0, to: cgImage.height, by: 2) {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                if color.redComponent > 0.65 && color.greenComponent < 0.4 && color.blueComponent < 0.4 {
+                    redPixels += 1
+                }
+            }
+        }
+        XCTAssertGreaterThan(redPixels, 3, "The missing-folder warning should render red foreground pixels.", file: file, line: line)
     }
 
     private func deleteTaskFromContextMenu(_ title: String) {
