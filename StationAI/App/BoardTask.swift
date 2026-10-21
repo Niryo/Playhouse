@@ -70,6 +70,7 @@ final class BoardTask {
     var createdAt: Date
     var codexThreadID: String?
     var savedPrompt: String?
+    var pendingSubmittedPrompt: String?
     var workspaceRootPathsData: Data?
     var repositoryWorktreesData: Data?
     var contextFolderPathsData: Data?
@@ -110,6 +111,7 @@ final class BoardTask {
         createdAt = .now
         codexThreadID = nil
         savedPrompt = nil
+        pendingSubmittedPrompt = nil
         workspaceRootPathsData = try? JSONEncoder().encode(workspaceRootPaths)
         repositoryWorktreesData = nil
         contextFolderPathsData = nil

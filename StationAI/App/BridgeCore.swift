@@ -248,6 +248,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let createdAt: Date
     let codexThreadID: String?
     let savedPrompt: String?
+    let pendingSubmittedPrompt: String?
     let workspaceRoots: [String]
     let repositoryWorktrees: [RepositoryWorktreeRecord]
     let contextFolders: [String]
@@ -263,6 +264,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         createdAt = task.createdAt
         codexThreadID = task.codexThreadID
         savedPrompt = task.savedPrompt
+        pendingSubmittedPrompt = task.pendingSubmittedPrompt
         workspaceRoots = task.workspaceRootPaths
         repositoryWorktrees = task.repositoryWorktrees
         contextFolders = task.contextFolderPaths
@@ -1050,6 +1052,14 @@ final class BoardTaskManager {
         try await withTaskOperationLock(id) {
             let task = try requireTask(id)
             guard let threadID = task.codexThreadID else {
+                if task.pendingSubmittedPrompt != nil, !(try hasConversationTurnReservation(id)) {
+                    if task.status == .inProgress {
+                        task.status = .blocked
+                        task.statusMessage = "StationAI reopened before Codex started this turn. Review the prompt and retry."
+                    }
+                    task.pendingSubmittedPrompt = nil
+                    try modelContext.save()
+                }
                 return BoardTaskRecord(task: task)
             }
             let hasActiveReservation = try hasConversationTurnReservation(id)
@@ -1069,6 +1079,7 @@ final class BoardTaskManager {
             }
             task.status = .blocked
             task.statusMessage = message
+            task.pendingSubmittedPrompt = nil
             clearProgressReport(task)
             try modelContext.save()
             return BoardTaskRecord(task: task)
@@ -1137,19 +1148,32 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func savePrompt(_ id: UUID, prompt: String, status: TaskStatus? = nil) async throws -> BoardTaskRecord {
+    func savePrompt(_ id: UUID, prompt: String, status: TaskStatus? = nil, submitted: Bool = false) async throws -> BoardTaskRecord {
         if let status, status != .backlog && status != .inProgress {
             throw StationAIManagerError.invalidTransition("Saving a task prompt can only place it in Backlog or Progress.")
+        }
+        if submitted, status != .inProgress {
+            throw StationAIManagerError.invalidTransition("A submitted prompt must place the task in Progress.")
         }
         return try await withTaskOperationLock(id) {
             let task = try requireTask(id)
             task.savedPrompt = prompt
+            task.pendingSubmittedPrompt = submitted ? prompt : nil
             if let status {
                 task.status = status
                 if status != .inProgress { clearProgressReport(task) }
             }
             try modelContext.save()
             return BoardTaskRecord(task: task)
+        }
+    }
+
+    func clearPendingSubmittedPrompt(_ id: UUID) async throws {
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.pendingSubmittedPrompt != nil else { return }
+            task.pendingSubmittedPrompt = nil
+            try modelContext.save()
         }
     }
 
@@ -1640,18 +1664,25 @@ final class CodexConversationManager {
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in },
         onUserInput: @escaping (CodexUserInputRequest) async -> Void = { _ in }
     ) async throws -> CodexThreadHistory {
-        try await tasks.withConversationTurnReservation(taskID) {
-            try await self.sendReserved(
-                taskID: taskID,
-                text: text,
-                imageDataURLs: imageDataURLs,
-                mode: mode,
-                modelID: modelID,
-                userInputAnswers: userInputAnswers,
-                onTurnStarting: onTurnStarting,
-                onUpdate: onUpdate,
-                onUserInput: onUserInput
-            )
+        return try await tasks.withConversationTurnReservation(taskID) {
+            do {
+                let history = try await self.sendReserved(
+                    taskID: taskID,
+                    text: text,
+                    imageDataURLs: imageDataURLs,
+                    mode: mode,
+                    modelID: modelID,
+                    userInputAnswers: userInputAnswers,
+                    onTurnStarting: onTurnStarting,
+                    onUpdate: onUpdate,
+                    onUserInput: onUserInput
+                )
+                try? await self.tasks.clearPendingSubmittedPrompt(taskID)
+                return history
+            } catch {
+                try? await self.tasks.clearPendingSubmittedPrompt(taskID)
+                throw error
+            }
         }
     }
 
@@ -1691,6 +1722,7 @@ final class CodexConversationManager {
             throw StationAIManagerError.invalidTransition("Done tasks are closed. Create a new task for follow-up work.")
         }
         let shouldGenerateTitle = !normalizedText.isEmpty && ["Untitled task", "Generating title…"].contains(task.title)
+        _ = try await tasks.savePrompt(taskID, prompt: normalizedText, status: .inProgress, submitted: true)
         let titleMustPrecedeAutoWorktree = task.repositoryWorktrees.contains {
             $0.isPending && $0.branch == "auto"
         }
@@ -1724,7 +1756,7 @@ final class CodexConversationManager {
         }
         task = try await tasks.prepareRepositoryWorktrees(taskID, fallbackPrompt: normalizedText)
         if !normalizedText.isEmpty {
-            _ = try await tasks.savePrompt(taskID, prompt: normalizedText, status: .inProgress)
+            _ = try await tasks.savePrompt(taskID, prompt: normalizedText, status: .inProgress, submitted: true)
         }
         let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
         let workspace = try CodexWorkspaceContext(roots: roots)
@@ -2086,8 +2118,16 @@ final class StationAIBridgeRuntime {
                     guard let status = TaskStatus(rawValue: value) else { throw StationAIManagerError.invalidStatus(value) }
                     return status
                 }
+                let prompt = try request.requiredString("prompt")
+                let submitted = request.arguments["submitted"]?.bool ?? false
+                if submitted && prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    throw BridgeCommandError(code: "invalid_argument", message: "A submitted prompt must contain text.")
+                }
                 result = try Self.value(try await taskManager.savePrompt(
-                    request.requiredUUID("taskID"), prompt: request.requiredString("prompt"), status: status
+                    request.requiredUUID("taskID"),
+                    prompt: prompt,
+                    status: status,
+                    submitted: submitted
                 ))
             case "task.delete":
                 try await taskManager.delete(request.requiredUUID("taskID"))
@@ -2133,11 +2173,14 @@ final class StationAIBridgeRuntime {
                 try settings.setLastSelectedRepositories(repositories)
                 result = .object(["lastSelectedRepositories": .array(settings.lastSelectedRepositories.map(BridgeValue.string))])
             case "conversation.history":
+                let taskID = try request.requiredUUID("taskID")
+                let codexClient = CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
+                _ = try await taskManager.reconcileLifecycleStatusOnOpen(taskID, client: codexClient)
                 let conversations = CodexConversationManager(
                     tasks: taskManager,
-                    client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
+                    client: codexClient
                 )
-                result = try Self.value(await conversations.history(taskID: request.requiredUUID("taskID")))
+                result = try Self.value(await conversations.history(taskID: taskID))
             case "conversation.models":
                 let conversations = CodexConversationManager(tasks: taskManager, client: CodexAppServerClient())
                 result = .object(["models": .array(try await conversations.models(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })])

@@ -67,6 +67,7 @@ struct TaskConversationView: View {
     @State private var diffChangeCount: Int?
     @State private var isLoadingHistory = false
     @State private var isResponding = false
+    @State private var isPreparingSubmittedMessage = false
     @State private var hasPausedResponse = false
     @State private var isPausingResponse = false
     @State private var userInputRequest: CodexUserInputRequest?
@@ -144,11 +145,13 @@ struct TaskConversationView: View {
             if !isReadOnly { await loadModels() }
         }
         .onChange(of: codexClient.isTurnActive) { _, isTurnActive in
+            let submittedTurnIsPending = task.pendingSubmittedPrompt != nil
+                && (task.status == .inProgress || task.status == .waitingResponse)
             guard let taskThreadID = task.codexThreadID else {
-                isResponding = false
+                isResponding = submittedTurnIsPending
                 return
             }
-            isResponding = isTurnActive && codexClient.isTurnActive(threadID: taskThreadID)
+            isResponding = submittedTurnIsPending || (isTurnActive && codexClient.isTurnActive(threadID: taskThreadID))
         }
         .task(id: task.workspaceRootPaths) {
             let watchPaths = await WorkspaceChangeWatcher.watchPaths(workspaceRoots: task.workspaceRootPaths)
@@ -657,6 +660,7 @@ struct TaskConversationView: View {
             .help("Back to Kanban")
             .accessibilityLabel("Back to Kanban board")
             .accessibilityIdentifier("back-to-board-button")
+            .disabled(isPreparingSubmittedMessage)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
@@ -1570,9 +1574,18 @@ struct TaskConversationView: View {
             let promptWasSent = task.savedPrompt.map { prompt in
                 history.messages.contains { $0.role == .user && $0.text == prompt }
             } ?? false
-            draft = promptWasSent ? "" : (task.savedPrompt ?? "")
+            let hasPendingSubmittedPrompt = task.pendingSubmittedPrompt != nil
+            if hasPendingSubmittedPrompt,
+               !promptWasSent,
+               let submittedPrompt = task.pendingSubmittedPrompt,
+               !submittedPrompt.isEmpty {
+                messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: submittedPrompt))
+            }
+            draft = promptWasSent || hasPendingSubmittedPrompt ? "" : (task.savedPrompt ?? "")
+            isResponding = hasPendingSubmittedPrompt
+                && (task.status == .inProgress || task.status == .waitingResponse)
             if let threadID = task.codexThreadID {
-                isResponding = codexClient.isTurnActive(threadID: threadID)
+                isResponding = isResponding || codexClient.isTurnActive(threadID: threadID)
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -1615,9 +1628,17 @@ struct TaskConversationView: View {
         errorMessage = nil
         actionNotice = nil
         activities = []
+        isPreparingSubmittedMessage = true
 
         Task { @MainActor in
-            guard await saveDraftAndGenerateTitle(status: .inProgress, prompt: text, generateTitle: false) else {
+            let saved = await saveDraftAndGenerateTitle(
+                status: .inProgress,
+                prompt: text,
+                generateTitle: false,
+                reserveTitleForSend: true
+            )
+            isPreparingSubmittedMessage = false
+            guard saved else {
                 messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
                 draft = text
                 pendingImages = imageDataURLs.compactMap { dataURL in
@@ -1708,6 +1729,7 @@ struct TaskConversationView: View {
 
     private func saveAndBack() {
         if isReadOnly { onBack(); return }
+        if isResponding { onBack(); return }
         if isNewTask, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            messages.isEmpty, activities.isEmpty, !isLoadingHistory {
             Task { @MainActor in
@@ -1724,10 +1746,16 @@ struct TaskConversationView: View {
     }
 
     @discardableResult
-    private func saveDraftAndGenerateTitle(status: TaskStatus?, prompt submittedPrompt: String? = nil, generateTitle: Bool = true, then completion: (() -> Void)? = nil) async -> Bool {
+    private func saveDraftAndGenerateTitle(
+        status: TaskStatus?,
+        prompt submittedPrompt: String? = nil,
+        generateTitle: Bool = true,
+        reserveTitleForSend: Bool = false,
+        then completion: (() -> Void)? = nil
+    ) async -> Bool {
         let prompt = (submittedPrompt ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else {
-            if task.title == "Generating title…" {
+            if task.title == "Generating title…", task.pendingSubmittedPrompt == nil {
                 _ = try? await BoardTaskManager(modelContext: modelContext).renameIfTitleMatches(
                     task.id,
                     expectedTitle: "Generating title…",
@@ -1740,13 +1768,21 @@ struct TaskConversationView: View {
         let taskManager = BoardTaskManager(modelContext: modelContext)
         var shouldGenerateTitle = false
         do {
-            let savedTask = try await taskManager.savePrompt(task.id, prompt: prompt, status: status)
-            if generateTitle, ["Generating title…", "Untitled task"].contains(savedTask.title) {
+            let savedTask = try await taskManager.savePrompt(
+                task.id,
+                prompt: prompt,
+                status: status,
+                submitted: reserveTitleForSend
+            )
+            if (generateTitle || reserveTitleForSend), ["Generating title…", "Untitled task"].contains(savedTask.title) {
                 shouldGenerateTitle = try await taskManager.renameIfTitleMatches(
                     task.id,
                     expectedTitle: savedTask.title,
                     title: "Generating title…"
                 ) != nil
+                if reserveTitleForSend {
+                    shouldGenerateTitle = false
+                }
             }
         } catch {
             errorMessage = error.localizedDescription
