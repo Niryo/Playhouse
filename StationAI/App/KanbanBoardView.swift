@@ -192,7 +192,7 @@ struct KanbanBoardView: View {
                 .accessibilityIdentifier("task-lifecycle-reset-notice")
             }
 
-            ScrollView(.horizontal) {
+            ScrollView([.horizontal, .vertical]) {
                 HStack(alignment: .top, spacing: 16) {
                     ForEach(TaskStatus.allCases.filter { $0 != .blocked && $0 != .waitingResponse && $0 != .done }) { status in
                         if status == .backlog {
