@@ -436,7 +436,16 @@ class StationAIBridgeTests(unittest.TestCase):
         task = self.assert_success(self.call_cli("task", "create", "--title", "Protected store", "--root", self.primary)[0])
         self.assert_success(self.call_cli("task", "prompt", task["id"], "--text", "Protected draft", "--status", "Backlog")[0])
         root = Path(__file__).resolve().parent.parent
-        subprocess.run(["python3", str(root / "scripts/check-app-launch-contract.py"), str(self.cli.parent.parent.parent), str(root), str(self.data_directory)], check=True, capture_output=True, text=True)
+        launch_check = subprocess.run(
+            ["python3", str(root / "scripts/check-app-launch-contract.py"), str(self.cli.parent.parent.parent), str(root), str(self.data_directory)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            launch_check.returncode,
+            0,
+            f"App launch contract check failed: {launch_check.stdout}\n{launch_check.stderr}",
+        )
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["savedPrompt"], "Protected draft")
 
     # case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots; a saved conversation remains visible after an app restart.
@@ -1328,6 +1337,10 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assertIn(str(self.cli), instructions)
             self.assertIn("task progress publish", instructions)
             self.assertIn("hidden from the conversation", instructions)
+            self.assertIn("periodically during substantial work", instructions)
+            self.assertIn("active test and position", instructions)
+            self.assertIn("Test 3/8", instructions)
+            self.assertIn("under 80 characters", instructions)
             self.assertIsNone(turn_data["developerInstructions"])
         finally:
             if turn.poll() is None:

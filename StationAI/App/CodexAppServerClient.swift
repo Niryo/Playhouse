@@ -1097,7 +1097,7 @@ enum TaskProgressReportInstructions {
         let quotedExecutable = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
         let id = taskID.uuidString
         return """
-        Report your current work on the StationAI task board using the StationAI CLI. At meaningful phase changes and while substantial work is underway, publish a concise progress report; do not report every small step. Use these commands for this task:
+        Report your current work on the StationAI task board using the StationAI CLI. Publish at phase changes and periodically during substantial work so the card stays current, without reporting every small step. During tests, identify the active test and position when known (for example, "Test 3/8: task progress persistence"); during other work, name the current concrete activity. Keep each detail to a short subtitle, ideally under 80 characters, and update it as the work moves on. Use these commands for this task:
         \(quotedExecutable) task progress publish \(id) --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail \"short detail\"]
         \(quotedExecutable) task progress custom \(id) --label \"short label\" [--detail \"short detail\"]
         \(quotedExecutable) task progress clear \(id)
