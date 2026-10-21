@@ -885,7 +885,7 @@ struct TaskConversationView: View {
     private var repositorySearchPlaceholder: String {
         guard isNewTask, !lastSelectedRepositoryPaths.isEmpty else { return "Search repositories…" }
         let names = lastSelectedRepositoryPaths.map { URL(fileURLWithPath: $0).lastPathComponent }
-        return "Last used: \(names.joined(separator: ", ")) — press Return to reuse"
+        return "\(names.joined(separator: ", ")) ↵"
     }
 
     private var isUsingSavedRepositoryDefault: Bool {
