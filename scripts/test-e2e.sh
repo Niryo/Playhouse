@@ -25,36 +25,26 @@ done
 
 test_output_dir="$(mktemp -d /tmp/stationai-bridge.XXXXXX)"
 architecture="$(uname -m)"
-e2e_bundle_identifier="${STATIONAI_PROFILE_BUNDLE_ID}.e2e.$$.${RANDOM}"
-derived_data_dir="${test_output_dir}/DerivedData"
+python3 "${repository_root}/scripts/check-test-parity.py"
+python3 "${repository_root}/scripts/check-button-feedback.py"
+build_info="$(python3 "${repository_root}/scripts/prepare-e2e-build.py" \
+  --root "${repository_root}" \
+  --profile-bundle-id "${STATIONAI_PROFILE_BUNDLE_ID}" \
+  --architecture "${architecture}")"
+derived_data_dir="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["derivedData"])' "${build_info}")"
+e2e_bundle_identifier="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["bundleID"])' "${build_info}")"
 app_bundle="${derived_data_dir}/Build/Products/Debug/StationAI.app"
 cli_path="${app_bundle}/Contents/MacOS/stationai-cli"
 data_root="${test_output_dir}/data"
 fixture_root="${test_output_dir}/fixtures"
 bridge_log="${test_output_dir}/bridge-tests.log"
 cleanup() {
-  rm -rf -- "${derived_data_dir}"
   printf 'Bridge test artifacts: %s\n' "${test_output_dir}"
 }
 trap cleanup EXIT
 
-python3 "${repository_root}/scripts/check-test-parity.py"
-python3 "${repository_root}/scripts/check-button-feedback.py"
-
-# Compile the paired UI test target without launching the app so UI-only source
-# errors are caught by the fast verification path.
-xcodebuild build-for-testing -quiet \
-  -project "${repository_root}/StationAI.xcodeproj" \
-  -scheme StationAI \
-  -configuration Debug \
-  -destination "platform=macOS,arch=${architecture}" \
-  -derivedDataPath "${derived_data_dir}" \
-  -only-testing:StationAIUITests/StationAIUITests \
-  CODE_SIGNING_ALLOWED=YES \
-  CODE_SIGN_IDENTITY=- \
-  ARCHS="${architecture}" \
-  ONLY_ACTIVE_ARCH=YES \
-  STATIONAI_APP_BUNDLE_IDENTIFIER="${e2e_bundle_identifier}"
+# The build helper also compiles the paired UI test target and reuses this
+# content-matched DerivedData for focused retries and final full verification.
 python3 "${repository_root}/scripts/prepare-e2e-fixture.py" --fixture-root "${fixture_root}"
 legacy_store_seeder="${fixture_root}/seed-legacy-task-store"
 xcrun swiftc -parse-as-library -swift-version 5 -O \

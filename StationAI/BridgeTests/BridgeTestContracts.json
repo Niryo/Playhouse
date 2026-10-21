@@ -205,7 +205,7 @@
   },
   {
     "id": "test_app_override_rejects_incompatible_bundles",
-    "expectation": "Explicit app overrides reject obsolete compatibility metadata, foreign worktree or bridge identities, and nonisolated test data before launching; the current app preserves a saved draft across restart."
+    "expectation": "Explicit app overrides reject obsolete compatibility metadata, foreign worktree or bridge identities, test IDs that do not match the current worktree, and nonisolated test data before launching; the current app preserves a saved draft across restart."
   },
   {
     "id": "test_legacy_store_import_failure_preserves_original",

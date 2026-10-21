@@ -432,7 +432,7 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("status")
         self.assertEqual(self.assert_success(response), {"bridgeVersion": 1, "service": "StationAI"})
 
-    # case-contract: test_app_override_rejects_incompatible_bundles | Explicit app overrides reject obsolete compatibility metadata, foreign worktree or bridge identities, and nonisolated test data before launching; the current app preserves a saved draft across restart.
+    # case-contract: test_app_override_rejects_incompatible_bundles | Explicit app overrides reject obsolete compatibility metadata, foreign worktree or bridge identities, test IDs that do not match the current worktree, and nonisolated test data before launching; the current app preserves a saved draft across restart.
     def test_app_override_rejects_incompatible_bundles(self):
         task = self.assert_success(self.call_cli("task", "create", "--title", "Protected store", "--root", self.primary)[0])
         self.assert_success(self.call_cli("task", "prompt", task["id"], "--text", "Protected draft", "--status", "Backlog")[0])
@@ -487,7 +487,7 @@ class StationAIBridgeTests(unittest.TestCase):
             ["bash", "-c", verify_build, "profile-check", str(script), str(linked), primary_profile["bundleID"]],
             capture_output=True, text=True,
         ).returncode, 0)
-        self.assertEqual(subprocess.run(
+        self.assertNotEqual(subprocess.run(
             ["bash", "-c", verify_build, "profile-check", str(script), str(self.primary), linked_profile["bundleID"] + ".e2e.fixture"],
             capture_output=True, text=True,
         ).returncode, 0)

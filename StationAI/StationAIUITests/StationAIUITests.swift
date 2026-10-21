@@ -333,7 +333,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "StationAI board opened with a healthy bridge")
     }
 
-    // case-contract: test_app_override_rejects_incompatible_bundles | Explicit app overrides reject obsolete compatibility metadata, foreign worktree or bridge identities, and nonisolated test data before launching; the current app preserves a saved draft across restart.
+    // case-contract: test_app_override_rejects_incompatible_bundles | Explicit app overrides reject obsolete compatibility metadata, foreign worktree or bridge identities, test IDs that do not match the current worktree, and nonisolated test data before launching; the current app preserves a saved draft across restart.
     func test_app_override_rejects_incompatible_bundles() throws {
         let root = try XCTUnwrap(ProcessInfo.processInfo.environment["STATIONAI_REPOSITORY_ROOT"])
         launchApp(defaultParent: fixture.parent.path)

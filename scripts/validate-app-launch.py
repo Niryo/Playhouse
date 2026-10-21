@@ -31,8 +31,6 @@ def validate():
             raise ValueError('A test app requires an explicit isolated temporary data directory.')
         if not (
             identifier.startswith(expected_id + '.e2e.')
-            or identifier.startswith('com.stationai.app.e2e.')
-            or identifier.startswith('com.stationai.app.worktree.') and '.e2e.' in identifier
         ):
             raise ValueError('Unexpected test app identity.')
     elif identifier != expected_id or data != expected_data:
