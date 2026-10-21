@@ -43,6 +43,8 @@ struct TaskConversationView: View {
     let onBack: () -> Void
 
     @State private var draft = ""
+    @State private var draftAutosaveTask: Task<Void, Never>?
+    @State private var draftNeedsAutosave = false
     @State private var pendingImages: [PendingImage] = []
     @State private var isShowingImagePicker = false
     @State private var isGeneratingTitle = false
@@ -1360,6 +1362,10 @@ struct TaskConversationView: View {
                         if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/plan" {
                             activatePlanMode()
                         }
+                        if !isReadOnly, !isResponding, !isLoadingHistory {
+                            draftNeedsAutosave = true
+                        }
+                        scheduleDraftAutosave(newValue)
                     }
                     .disabled(isReadOnly || isResponding || isLoadingHistory)
                     .accessibilityIdentifier("message-composer")
@@ -1448,13 +1454,6 @@ struct TaskConversationView: View {
                         .accessibilityLabel("Continue response")
                         .accessibilityIdentifier("continue-response-button")
                     } else {
-                        Button("Save") {
-                            Task { @MainActor in _ = await saveDraftAndGenerateTitle(status: nil, then: onBack) }
-                        }
-                        .buttonHoverPointer()
-                        .help("Save draft and return to the board")
-                            .disabled(isResponding || isLoadingHistory || draft.isEmpty)
-                            .accessibilityIdentifier("save-task-prompt-button")
                         Button { sendMessage() } label: {
                             Image(systemName: "arrow.up")
                                 .font(.system(size: 13, weight: .bold))
@@ -1733,14 +1732,53 @@ struct TaskConversationView: View {
     }
 
     private func addImageData(_ data: Data) throws {
-        guard pendingImages.count < 8, data.count <= 10_000_000,
+        guard pendingImages.count < 8,
               let image = NSImage(data: data),
               let tiff = image.tiffRepresentation,
               let bitmap = NSBitmapImageRep(data: tiff),
-              let png = bitmap.representation(using: .png, properties: [:]) else {
-            throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images, each smaller than 10 MB.")
+              let encoded = Self.encodedImage(bitmap), encoded.data.count <= 10_000_000 else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images that fit within 10 MB after encoding.")
         }
-        pendingImages.append(PendingImage(dataURL: "data:image/png;base64,\(png.base64EncodedString())", image: image))
+        pendingImages.append(PendingImage(dataURL: "data:\(encoded.mimeType);base64,\(encoded.data.base64EncodedString())", image: image))
+    }
+
+    private static func encodedImage(_ bitmap: NSBitmapImageRep) -> (data: Data, mimeType: String)? {
+        if let png = bitmap.representation(using: .png, properties: [:]), png.count <= 10_000_000 {
+            return (png, "image/png")
+        }
+
+        var width = bitmap.pixelsWide
+        var height = bitmap.pixelsHigh
+        while width > 0 && height > 0 {
+            guard let resized = NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: width,
+                pixelsHigh: height,
+                bitsPerSample: 8,
+                samplesPerPixel: 3,
+                hasAlpha: false,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bytesPerRow: 0,
+                bitsPerPixel: 0
+            ) else { return nil }
+            guard let context = NSGraphicsContext(bitmapImageRep: resized) else { return nil }
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = context
+            context.imageInterpolation = .high
+            bitmap.draw(in: NSRect(x: 0, y: 0, width: width, height: height))
+            context.flushGraphics()
+            NSGraphicsContext.restoreGraphicsState()
+            for quality in stride(from: 0.85, through: 0.35, by: -0.1) {
+                if let jpeg = resized.representation(using: .jpeg, properties: [.compressionFactor: quality]), jpeg.count <= 10_000_000 {
+                    return (jpeg, "image/jpeg")
+                }
+            }
+            guard width > 1, height > 1 else { return nil }
+            width = max(1, Int(Double(width) * 0.85))
+            height = max(1, Int(Double(height) * 0.85))
+        }
+        return nil
     }
 
     private static func image(fromDataURL value: String) -> NSImage? {
@@ -1749,6 +1787,7 @@ struct TaskConversationView: View {
     }
 
     private func saveAndBack() {
+        draftAutosaveTask?.cancel()
         if isReadOnly { onBack(); return }
         if isResponding { onBack(); return }
         if isNewTask, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -1763,7 +1802,35 @@ struct TaskConversationView: View {
             }
             return
         }
+        if draftNeedsAutosave, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            Task { @MainActor in
+                do {
+                    _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: "")
+                    draftNeedsAutosave = false
+                    await saveDraftAndGenerateTitle(status: nil, then: onBack)
+                } catch {
+                    errorMessage = error.localizedDescription
+                }
+            }
+            return
+        }
         Task { @MainActor in _ = await saveDraftAndGenerateTitle(status: nil, then: onBack) }
+    }
+
+    private func scheduleDraftAutosave(_ value: String) {
+        draftAutosaveTask?.cancel()
+        let prompt = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isReadOnly, !isResponding, !isLoadingHistory else { return }
+        draftAutosaveTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled, !isResponding, !isLoadingHistory else { return }
+            do {
+                _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: prompt)
+                if draft == value { draftNeedsAutosave = false }
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     @discardableResult

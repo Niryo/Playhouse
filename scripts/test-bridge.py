@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import base64
 import errno
 import fcntl
 import json
@@ -436,8 +437,17 @@ class StationAIBridgeTests(unittest.TestCase):
         task = self.assert_success(self.call_cli("task", "create", "--title", "Protected store", "--root", self.primary)[0])
         self.assert_success(self.call_cli("task", "prompt", task["id"], "--text", "Protected draft", "--status", "Backlog")[0])
         root = Path(__file__).resolve().parent.parent
-        contract = subprocess.run(["python3", str(root / "scripts/check-app-launch-contract.py"), str(self.cli.parent.parent.parent), str(root), str(self.data_directory)], capture_output=True, text=True)
-        self.assertEqual(contract.returncode, 0, f"App launch contract check failed: {contract.stdout}\n{contract.stderr}")
+        launch_contract = subprocess.run(
+            ["python3", str(root / "scripts/check-app-launch-contract.py"), str(self.cli.parent.parent.parent), str(root), str(self.data_directory)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            launch_contract.returncode,
+            0,
+            f"App launch contract check failed: {launch_contract.stdout}\n{launch_contract.stderr}",
+        )
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["savedPrompt"], "Protected draft")
 
     # case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots; a saved conversation remains visible after an app restart.
@@ -2039,7 +2049,7 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "get", task_id, expected_status=3)
         self.assert_failure(response, "not_found")
 
-    # case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while backing out saves an unsent prompt; reopening restores the draft without creating a branch or worktree, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
+    # case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while the composer automatically saves an unsent prompt as it is typed; clearing the composer clears the stored draft, backing out needs no Save button, and reopening restores the draft without creating a branch or worktree. Blank drafts cannot be stored, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
     def test_task_prompt_draft_persists_after_back(self):
         suggestions, _ = self.call_cli("workspace", "suggest", "--parent", self.fixture / "suggested-parent")
         self.assertIn(str(self.primary), self.assert_success(suggestions)["repositories"])
@@ -2063,6 +2073,10 @@ class StationAIBridgeTests(unittest.TestCase):
         reopened_task = self.assert_success(reopened)
         self.assertEqual(reopened_task["savedPrompt"], prompt)
         self.assertEqual(reopened_task["status"], "Backlog")
+        cleared, _ = self.call_cli("task", "prompt", task_id, "--text", "")
+        self.assertIsNone(self.assert_success(cleared).get("savedPrompt"))
+        restored, _ = self.call_cli("task", "prompt", task_id, "--text", prompt)
+        self.assertEqual(self.assert_success(restored)["savedPrompt"], prompt)
         self.assertEqual(reopened_task["title"], "Stable draft title")
 
         delayed_task = self.create_task(title="Untitled task", roots=[self.primary])
@@ -2368,7 +2382,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(completed["codexThreadID"], thread_id)
         self.assertEqual(completed["status"], "Review")
 
-    # case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history. Diagnostics record image MIME and encoded size without storing image payloads.
+    # case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history. Diagnostics record image MIME and encoded size without storing image payloads.
     def test_conversation_sends_image_attachments(self):
         task_id = self.create_task(title="Image conversation") ["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -2389,6 +2403,16 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(len(sent["images"]), 1)
         self.assertTrue(sent["images"][0].startswith("data:image/png;base64,"))
         self.assertEqual(sent["imageInputs"], [{"type": "image", "url": sent["images"][0]}])
+        jpeg = self.data_directory / "tiny.jpg"
+        subprocess.run(["sips", "-s", "format", "jpeg", str(image), "--out", str(jpeg)], check=True, capture_output=True)
+        jpeg_result, _ = self.call_cli(
+            "conversation", "send", task_id, "--image", str(jpeg),
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        self.assert_success(jpeg_result)
+        sent = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        self.assertTrue(sent["images"][0].startswith("data:image/jpeg;base64,"))
+        self.assertLessEqual(len(base64.b64decode(sent["images"][0].split(",", 1)[1])), 10_000_000)
         text_prompt = "Describe this screenshot."
         mixed, _ = self.call_cli(
             "conversation", "send", task_id, "--message", text_prompt, "--image", str(image),

@@ -2734,7 +2734,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "New conversation shows its empty state")
     }
 
-    // case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while backing out saves an unsent prompt; reopening restores the draft without creating a branch or worktree, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
+    // case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while the composer automatically saves an unsent prompt as it is typed; clearing the composer clears the stored draft, backing out needs no Save button, and reopening restores the draft without creating a branch or worktree. Blank drafts cannot be stored, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
     func test_task_prompt_draft_persists_after_back() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-title-success-wait").path
         launchApp(defaultParent: fixture.parent.path)
@@ -2742,6 +2742,7 @@ final class StationAIUITests: XCTestCase {
         chooseRepositorySuggestion("primary")
         let composer = element("message-composer")
         XCTAssertTrue(composer.waitForExistence(timeout: 10), "Task creation should open its conversation immediately.")
+        XCTAssertFalse(element("save-task-prompt-button").exists, "Drafts should save automatically without a separate Save button.")
         let initialTask = try XCTUnwrap(tasksFromBoardList().first)
         let selectedRepository = try XCTUnwrap((initialTask["repositoryWorktrees"] as? [[String: Any]])?.first?["repositoryPath"] as? String)
         XCTAssertEqual(selectedRepository, fixture.primary.path)
@@ -2752,6 +2753,19 @@ final class StationAIUITests: XCTestCase {
         let prompt = "Please update the README and explain the change."
         composer.click()
         composer.typeText(prompt)
+        let taskID = try XCTUnwrap(initialTask["id"] as? String)
+        XCTAssertTrue(waitUntil({
+            ((try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) ?? nil) == prompt
+        }, timeout: 10), "The draft should persist while it is being typed.")
+        composer.typeKey("a", modifierFlags: .command)
+        composer.typeKey(.delete, modifierFlags: [])
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) == nil
+        }, timeout: 10), "Clearing the composer should clear the persisted draft.")
+        composer.typeText(prompt)
+        XCTAssertTrue(waitUntil({
+            ((try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) ?? nil) == prompt
+        }, timeout: 10), "Typing again should autosave the replacement draft.")
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
         let titleGenerationReady = URL(fileURLWithPath: codexFixtureExecutable! + ".resolve-ready")
@@ -2759,7 +2773,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: titleGenerationReady.path) }, timeout: 10), "The real app-server fixture should confirm that title generation is in flight.")
         let tasks = try tasksFromBoardList()
         let task = try XCTUnwrap(tasks.first)
-        let taskID = try XCTUnwrap(task["id"] as? String)
+        XCTAssertEqual(task["id"] as? String, taskID)
         let response = try runCLI(["task", "get", taskID])["result"] as? [String: Any]
         XCTAssertEqual(response?["savedPrompt"] as? String, prompt)
         XCTAssertEqual(response?["status"] as? String, "Backlog")
@@ -3184,7 +3198,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts[secondPrompt].waitForExistence(timeout: 10), "Reopening the task should load the completed second send from the real app-server thread.")
     }
 
-    // case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history. Diagnostics record image MIME and encoded size without storing image payloads.
+    // case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history. Diagnostics record image MIME and encoded size without storing image payloads.
     func test_conversation_sends_image_attachments() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -3236,8 +3250,28 @@ final class StationAIUITests: XCTestCase {
         try createTaskFixture(title: "Pasted image conversation", roots: [fixture.primary.path])
         openTask(named: "Pasted image conversation")
 
+        let largeBitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 3000, pixelsHigh: 1500, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        let pixelBytes = try XCTUnwrap(largeBitmap.bitmapData)
+        var pixelState: UInt32 = 0x5EED1234
+        for y in 0..<1500 {
+            for x in 0..<3000 {
+                let offset = y * largeBitmap.bytesPerRow + x * 4
+                pixelState = pixelState &* 1_664_525 &+ 1_013_904_223
+                pixelBytes[offset] = UInt8(truncatingIfNeeded: pixelState >> 24)
+                pixelState = pixelState &* 1_664_525 &+ 1_013_904_223
+                pixelBytes[offset + 1] = UInt8(truncatingIfNeeded: pixelState >> 24)
+                pixelState = pixelState &* 1_664_525 &+ 1_013_904_223
+                pixelBytes[offset + 2] = UInt8(truncatingIfNeeded: pixelState >> 24)
+            pixelBytes[offset + 3] = 0xFF
+            }
+        }
+        let rawClipboardPNG = try XCTUnwrap(largeBitmap.representation(using: .png, properties: [:]))
+        XCTAssertGreaterThan(rawClipboardPNG.count, 10_000_000, "The clipboard source PNG should exceed the encoded payload limit.")
+        XCTAssertGreaterThan(try XCTUnwrap(largeBitmap.tiffRepresentation).count, 10_000_000, "The clipboard TIFF representation should exceed the raw limit that previously caused rejection.")
+        let largeImage = NSImage(size: NSSize(width: 3000, height: 1500))
+        largeImage.addRepresentation(largeBitmap)
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects([try XCTUnwrap(NSImage(contentsOf: image))])
+        NSPasteboard.general.writeObjects([largeImage])
         let pastedComposer = element("message-composer")
         pastedComposer.click()
         pastedComposer.typeKey("v", modifierFlags: .command)
@@ -3256,14 +3290,16 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(pastedTurn["userMessage"] is NSNull, "The fixture should receive no text for the pasted image-only turn.")
         XCTAssertEqual((pastedTurn["images"] as? [String])?.count, 1, "The fixture should receive the pasted image.")
         let pastedImage = try XCTUnwrap((pastedTurn["images"] as? [String])?.first)
-        XCTAssertTrue(pastedImage.hasPrefix("data:image/png;base64,"), "The pasted image should reach Codex as a data URL.")
+        XCTAssertTrue(pastedImage.hasPrefix("data:image/jpeg;base64,"), "An oversized clipboard image should be compressed and reach Codex as JPEG.")
+        let pastedPayload = try XCTUnwrap(Data(base64Encoded: String(pastedImage.split(separator: ",", maxSplits: 1)[1])))
+        XCTAssertLessThanOrEqual(pastedPayload.count, 10_000_000, "The full-size clipboard image should fit the 10 MB payload limit.")
         XCTAssertEqual(pastedTurn["imageInputs"] as? [[String: String]], [["type": "image", "url": pastedImage]], "Image-only requests should use the tagged image URL payload.")
         imageDiagnostics = try diagnosticEvents()
         XCTAssertTrue(imageDiagnostics.contains {
             $0["event"] as? String == "bridge.request.succeeded"
                 && $0["command"] as? String == "conversation.send"
-                && $0["argument.images.0.mime"] as? String == "image/png"
-        }, "The image-only request should retain MIME metadata in diagnostics.")
+                && $0["argument.images.0.mime"] as? String == "image/jpeg"
+        }, "The compressed image-only request should retain JPEG MIME metadata in diagnostics.")
         let serializedImageDiagnostics = String(data: try JSONSerialization.data(withJSONObject: imageDiagnostics), encoding: .utf8) ?? ""
         XCTAssertFalse(serializedImageDiagnostics.contains(pickedImage))
         XCTAssertFalse(serializedImageDiagnostics.contains(pastedImage))
@@ -3952,8 +3988,8 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15), "The direct-created task should expose its conversation composer.")
         composer.click()
         composer.typeText(prompt ?? title)
-        element("save-task-prompt-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "Saving the task prompt should return to the board.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "Returning to the board should preserve the automatically saved prompt.")
         guard let task = try? tasksFromBoardList().first, let taskID = task["id"] as? String else {
             XCTFail("The created task should remain in Backlog after saving its prompt.")
             return

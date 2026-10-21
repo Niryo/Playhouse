@@ -8,6 +8,8 @@ if [[ "${1:-}" != "--locked" ]]; then
   exec "${repository_root}/scripts/with-e2e-lock.sh" -- bash "${script_path}" --locked "$@"
 fi
 shift
+source "${repository_root}/scripts/app-profile.sh"
+stationai_load_app_profile "${repository_root}"
 
 selected_cases=()
 while (( $# > 0 )); do
@@ -29,8 +31,6 @@ done
 
 test_output_dir="$(mktemp -d /tmp/stationai-bridge.XXXXXX)"
 architecture="$(uname -m)"
-source "${repository_root}/scripts/app-profile.sh"
-stationai_load_app_profile "${repository_root}"
 python3 "${repository_root}/scripts/check-test-parity.py"
 python3 "${repository_root}/scripts/check-button-feedback.py"
 build_info="$(python3 "${repository_root}/scripts/prepare-e2e-build.py" \
