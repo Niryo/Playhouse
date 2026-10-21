@@ -9,7 +9,7 @@
   },
   {
     "id": "test_task_creation_persists_ordered_roots_across_fresh_connections",
-    "expectation": "A directly created conversation can add repositories in order, edit pending branch settings, and add a context folder; these settings persist across fresh connections without creating branches or worktrees before the first send."
+    "expectation": "A directly created conversation can add repositories in order, edit pending branch settings, and add a context folder; these settings persist across fresh connections without creating branches or worktrees before the first send. Saving an unsent prompt records task creation, prompt save, and subsequent reads with safe argument metadata, result state, and outcome while excluding prompt text."
   },
   {
     "id": "test_task_creation_reuses_existing_branch_worktree",
@@ -33,7 +33,7 @@
   },
   {
     "id": "test_task_store_serializes_cross_process_writes",
-    "expectation": "If another process holds the shared task-store write lock when a Codex turn completes, final status persistence waits and then saves Review status and full history across fresh CLI/XPC reads; reopening the conversation in the UI shows the saved exchange without a store error."
+    "expectation": "If another process holds the shared task-store write lock when a Codex turn completes, final status persistence waits and then saves Review status and full history across fresh CLI/XPC reads. Correlated persistence diagnostics include task ID, store path, lock wait, attempts, and retry count; reopening the conversation in the UI shows the saved exchange without a store error."
   },
   {
     "id": "test_task_worktree_preparation_serializes_auto_branch_claims",
@@ -93,11 +93,11 @@
   },
   {
     "id": "test_task_delete_reports_real_worktree_failure_and_allows_retry",
-    "expectation": "A real worktree-removal failure records task, thread, process, phase, and underlying error details without recording task titles or conversation text; the failed task and worktree remain available and deletion succeeds after the repository is restored."
+    "expectation": "A real worktree-removal failure records the task title and task, thread, process, phase, and underlying error details without recording conversation text; the failed task and worktree remain available and deletion succeeds after the repository is restored."
   },
   {
     "id": "test_default_parent_settings_read_write_clear_and_validation",
-    "expectation": "The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. In the UI, the conversation picker keeps a Change parent affordance visible after a valid parent is selected, and choosing another folder refreshes suggestions and persists the new parent. Dark and Light appearance choices persist, and Dark renders the workspace canvas as #1E1E1E in the VS Code Dark+ palette."
+    "expectation": "The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. In the UI, the conversation picker keeps a Change parent affordance visible after a valid parent is selected, and choosing another folder refreshes suggestions and persists the new parent. Dark and Light appearance choices persist and log successful writes, an external CLI appearance write updates the open Settings picker, and Dark renders the workspace canvas as #1E1E1E in the VS Code Dark+ palette."
   },
   {
     "id": "test_repository_suggestions_skip_nested_repositories_and_symlinks",
@@ -125,7 +125,7 @@
   },
   {
     "id": "test_conversation_composer_rejects_blank_and_supports_live_turn_controls",
-    "expectation": "Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text."
+    "expectation": "Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors."
   },
   {
     "id": "test_conversation_serializes_concurrent_sends",
@@ -133,7 +133,7 @@
   },
   {
     "id": "test_conversation_sends_image_attachments",
-    "expectation": "The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history."
+    "expectation": "The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history. Diagnostics record image MIME and encoded size without storing image payloads."
   },
   {
     "id": "test_conversation_rejects_invalid_image_attachments",
@@ -141,7 +141,7 @@
   },
   {
     "id": "test_conversation_shows_subagent_delegation",
-    "expectation": "When Codex delegates a task to a subagent, the conversation activity shows the delegated task and its completion status during the turn and after history reload."
+    "expectation": "When Codex delegates a task to a subagent, the conversation activity shows the delegated task and its completion status during the turn and after history reload. Diagnostics record Codex RPC outcomes and command working directory and file-change paths while excluding conversation text, command output, and diffs."
   },
   {
     "id": "test_plan_mode_renders_markdown_in_conversation",
@@ -169,7 +169,7 @@
   },
   {
     "id": "test_task_workspace_changes_group_staged_and_unstaged_diffs",
-    "expectation": "The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation."
+    "expectation": "The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation. Diagnostics record inventory and file-read outcomes with paths and byte counts, without logging file contents."
   },
   {
     "id": "test_external_git_edits_and_commit_refresh_workspace_changes",

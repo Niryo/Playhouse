@@ -469,29 +469,6 @@ final class BoardTaskManager {
         }
     }
 
-    private func saveChanges() async throws {
-        guard let storeURL = modelContext.container.configurations.first?.url else {
-            throw BridgeFileLockError(message: "Couldn't determine the task-store location for a write lock.")
-        }
-        let lockURL = storeURL.deletingLastPathComponent().appendingPathComponent("store-write.lock")
-        try await withExclusiveFileLocks(at: [lockURL], purpose: "task-store-write") {
-            let retryDelays: [UInt64] = [100_000_000, 300_000_000, 600_000_000]
-            var retryIndex = 0
-            while true {
-                do {
-                    try modelContext.save()
-                    return
-                } catch {
-                    guard Self.isStoreOpenFailure(error), retryIndex < retryDelays.count else {
-                        throw error
-                    }
-                    try await Task.sleep(nanoseconds: retryDelays[retryIndex])
-                    retryIndex += 1
-                }
-            }
-        }
-    }
-
     private static func isStoreOpenFailure(_ error: Error) -> Bool {
         var underlying: NSError? = error as NSError
         var depth = 0
@@ -633,7 +610,25 @@ final class BoardTaskManager {
 
     func list() throws -> [BoardTaskRecord] {
         let descriptor = FetchDescriptor<BoardTask>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
-        return try modelContext.fetch(descriptor).map(BoardTaskRecord.init(task:))
+        StationAIDiagnostics.record("persistence.read.started", fields: [
+            "operation": "BoardTaskManager.list",
+            "entity": "BoardTask"
+        ])
+        do {
+            let tasks = try modelContext.fetch(descriptor).map(BoardTaskRecord.init(task:))
+            StationAIDiagnostics.record("persistence.read.succeeded", fields: [
+                "operation": "BoardTaskManager.list",
+                "entity": "BoardTask",
+                "resultCount": String(tasks.count)
+            ])
+            return tasks
+        } catch {
+            var fields = StationAIDiagnostics.errorFields(error)
+            fields["operation"] = "BoardTaskManager.list"
+            fields["entity"] = "BoardTask"
+            StationAIDiagnostics.record("persistence.read.failed", fields: fields)
+            throw error
+        }
     }
 
     func get(_ id: UUID) throws -> BoardTaskRecord {
@@ -647,7 +642,14 @@ final class BoardTaskManager {
         let normalizedRoots = try Self.normalizeRoots(workspaceRoots)
         let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: normalizedRoots)
         modelContext.insert(task)
-        try await saveChanges()
+        try await saveTaskContext(taskID: task.id)
+        StationAIDiagnostics.record("task.create.succeeded", fields: [
+            "taskID": task.id.uuidString,
+            "titleByteCount": String(normalizedTitle.utf8.count),
+            "workspaceRootCount": String(normalizedRoots.count),
+            "workspaceRoots": normalizedRoots.joined(separator: "\n"),
+            "status": task.status.rawValue
+        ])
         return BoardTaskRecord(task: task)
     }
 
@@ -673,7 +675,16 @@ final class BoardTaskManager {
         return try await withRepositoryAllocationLocks(worktrees.map(\.repositoryPath)) {
             try validateRepositoryAssignments(worktrees, excludingTaskID: nil)
             modelContext.insert(task)
-            try await saveChanges()
+            try await saveTaskContext(taskID: task.id)
+            StationAIDiagnostics.record("task.create.succeeded", fields: [
+                "taskID": task.id.uuidString,
+                "titleByteCount": String(normalizedTitle.utf8.count),
+                "repositoryCount": String(worktrees.count),
+                "repositoryPaths": worktrees.map(\.repositoryPath).joined(separator: "\n"),
+                "contextFolderCount": String(folders.count),
+                "contextFolders": folders.joined(separator: "\n"),
+                "status": task.status.rawValue
+            ])
             return BoardTaskRecord(task: task)
         }
     }
@@ -748,7 +759,7 @@ final class BoardTaskManager {
                     task.repositoryWorktrees = repositories
                     task.contextFolderPaths = contextFolders
                     task.workspaceRootPaths = roots
-                    try await saveChanges()
+                    try await saveTaskContext(taskID: id)
                     return BoardTaskRecord(task: task)
                 }
             }
@@ -797,7 +808,7 @@ final class BoardTaskManager {
                     var repositories = task.repositoryWorktrees
                     repositories[index] = validated
                     task.repositoryWorktrees = repositories
-                    try await saveChanges()
+                    try await saveTaskContext(taskID: id)
                     return BoardTaskRecord(task: task)
                 }
             }
@@ -846,7 +857,7 @@ final class BoardTaskManager {
 
                 currentTask.repositoryWorktrees = updatedRepositories
                 currentTask.workspaceRootPaths = roots
-                try await saveChanges()
+                try await saveTaskContext(taskID: id)
 
                 if shouldRemoveWorktree {
                     do {
@@ -861,7 +872,7 @@ final class BoardTaskManager {
                         current.repositoryWorktrees = originalRepositories
                         current.workspaceRootPaths = originalRoots
                         do {
-                            try await saveChanges()
+                            try await saveTaskContext(taskID: id)
                         } catch {
                             throw BridgeCommandError(
                                 code: "operation_failed",
@@ -882,6 +893,11 @@ final class BoardTaskManager {
         to statusName: String,
         allowUnmergedPullRequests: Bool = false
     ) async throws -> BoardTaskRecord {
+        StationAIDiagnostics.record("task.move.started", fields: [
+            "taskID": id.uuidString,
+            "requestedStatus": statusName,
+            "allowUnmergedPullRequests": String(allowUnmergedPullRequests)
+        ])
         guard let status = TaskStatus(rawValue: statusName) else {
             throw StationAIManagerError.invalidStatus(statusName)
         }
@@ -918,7 +934,11 @@ final class BoardTaskManager {
             task.status = .done
             task.statusMessage = nil
             clearProgressReport(task)
-            try await saveChanges()
+            try await saveTaskContext(taskID: id)
+            StationAIDiagnostics.record("task.move.succeeded", fields: [
+                "taskID": id.uuidString,
+                "status": task.status.rawValue
+            ])
             return BoardTaskRecord(task: task)
         }
     }
@@ -954,7 +974,7 @@ final class BoardTaskManager {
                 throw BridgeCommandError(code: "invalid_transition", message: "The task repositories changed while pull requests were being checked. Try again.")
             }
             taskAfterLookup.repositoryWorktrees = records
-            try await saveChanges()
+            try await saveTaskContext(taskID: id)
             return (gh, records, BoardTaskRecord(task: taskAfterLookup))
         }
         let (gh, records, lookedUpRecords) = lookup
@@ -1024,7 +1044,7 @@ final class BoardTaskManager {
                     throw BridgeCommandError(code: "invalid_transition", message: "The task repositories changed while the pull request was being created.")
                 }
                 currentTask.repositoryWorktrees = updatedRecords
-                try await saveChanges()
+                try await saveTaskContext(taskID: id)
                 expectedRecords = updatedRecords
             }
             return try get(id)
@@ -1032,13 +1052,22 @@ final class BoardTaskManager {
     }
 
     func setLifecycleStatus(_ id: UUID, to status: TaskStatus, message: String? = nil) async throws -> BoardTaskRecord {
-        try await withTaskOperationLock(id) {
+        StationAIDiagnostics.record("task.lifecycle_status.write.started", fields: [
+            "taskID": id.uuidString,
+            "status": status.rawValue,
+            "hasStatusMessage": String(message != nil)
+        ])
+        return try await withTaskOperationLock(id) {
             let task = try requireTask(id)
             guard task.status != .done else { return BoardTaskRecord(task: task) }
             task.status = status
             task.statusMessage = message
             if status != .inProgress { clearProgressReport(task) }
-            try await saveChanges()
+            try await saveTaskContext(taskID: id)
+            StationAIDiagnostics.record("task.lifecycle_status.write.succeeded", fields: [
+                "taskID": id.uuidString,
+                "status": task.status.rawValue
+            ])
             return BoardTaskRecord(task: task)
         }
     }
@@ -1061,7 +1090,7 @@ final class BoardTaskManager {
             task.progressTypeRawValue = type?.rawValue
             task.progressLabel = label
             task.progressDetail = normalizedDetail?.isEmpty == true ? nil : normalizedDetail
-            try await saveChanges()
+            try await saveTaskContext(taskID: id)
             return BoardTaskRecord(task: task)
         }
     }
@@ -1071,7 +1100,7 @@ final class BoardTaskManager {
         try await withTaskOperationLock(id) {
             let task = try requireTask(id)
             clearProgressReport(task)
-            try await saveChanges()
+            try await saveTaskContext(taskID: id)
             return BoardTaskRecord(task: task)
         }
     }
@@ -1092,7 +1121,7 @@ final class BoardTaskManager {
                         task.statusMessage = "StationAI reopened before Codex started this turn. Review the prompt and retry."
                     }
                     task.pendingSubmittedPrompt = nil
-                    try await saveChanges()
+                    try await saveTaskContext(taskID: id)
                 }
                 return BoardTaskRecord(task: task)
             }
@@ -1115,7 +1144,7 @@ final class BoardTaskManager {
             task.statusMessage = message
             task.pendingSubmittedPrompt = nil
             clearProgressReport(task)
-            try await saveChanges()
+            try await saveTaskContext(taskID: id)
             return BoardTaskRecord(task: task)
         }
     }
@@ -1142,7 +1171,7 @@ final class BoardTaskManager {
                     }
                 }
                 modelContext.delete(task)
-                try await saveChanges()
+                try await saveTaskContext(taskID: snapshot.id)
                 return dirtyPaths
             }
             dirtyManagedWorktrees.append(contentsOf: dirtyForTask)
@@ -1154,10 +1183,15 @@ final class BoardTaskManager {
     func rename(_ id: UUID, title: String) async throws -> BoardTaskRecord {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty else { throw StationAIManagerError.invalidTitle }
+        StationAIDiagnostics.record("task.rename.started", fields: [
+            "taskID": id.uuidString,
+            "titleByteCount": String(normalizedTitle.utf8.count)
+        ])
         return try await withTaskOperationLock(id) {
             let task = try requireTask(id)
             task.title = normalizedTitle
-            try await saveChanges()
+            try await saveTaskContext(taskID: id)
+            StationAIDiagnostics.record("task.rename.succeeded", fields: ["taskID": id.uuidString])
             return BoardTaskRecord(task: task)
         }
     }
@@ -1172,7 +1206,7 @@ final class BoardTaskManager {
             let previousTitle = task.title
             task.title = normalizedTitle
             do {
-                try await saveChanges()
+                try await saveTaskContext(taskID: id)
             } catch {
                 task.title = previousTitle
                 throw error
@@ -1183,6 +1217,12 @@ final class BoardTaskManager {
 
     @discardableResult
     func savePrompt(_ id: UUID, prompt: String, status: TaskStatus? = nil, submitted: Bool = false) async throws -> BoardTaskRecord {
+        StationAIDiagnostics.record("task.prompt.write.started", fields: [
+            "taskID": id.uuidString,
+            "promptByteCount": String(prompt.utf8.count),
+            "status": status?.rawValue ?? "unchanged",
+            "submitted": String(submitted)
+        ])
         if let status, status != .backlog && status != .inProgress {
             throw StationAIManagerError.invalidTransition("Saving a task prompt can only place it in Backlog or Progress.")
         }
@@ -1197,7 +1237,12 @@ final class BoardTaskManager {
                 task.status = status
                 if status != .inProgress { clearProgressReport(task) }
             }
-            try await saveChanges()
+            try await saveTaskContext(taskID: id)
+            StationAIDiagnostics.record("task.prompt.write.succeeded", fields: [
+                "taskID": id.uuidString,
+                "status": task.status.rawValue,
+                "submitted": String(submitted)
+            ])
             return BoardTaskRecord(task: task)
         }
     }
@@ -1207,7 +1252,7 @@ final class BoardTaskManager {
             let task = try requireTask(id)
             guard task.pendingSubmittedPrompt != nil else { return }
             task.pendingSubmittedPrompt = nil
-            try await saveChanges()
+            try await saveTaskContext(taskID: id)
         }
     }
 
@@ -1223,7 +1268,7 @@ final class BoardTaskManager {
             guard task.codexThreadID != threadID else { return BoardTaskRecord(task: task) }
             task.codexThreadID = threadID
             do {
-                try await saveChanges()
+                try await saveTaskContext(taskID: id)
             } catch {
                 task.codexThreadID = nil
                 throw error
@@ -1250,7 +1295,7 @@ final class BoardTaskManager {
                     }
                     task.workspaceRootPaths = normalizedRoots
                     task.contextFolderPaths = normalizedRoots
-                    try await saveChanges()
+                    try await saveTaskContext(taskID: id)
                     return BoardTaskRecord(task: task)
                 }
             }
@@ -1285,7 +1330,7 @@ final class BoardTaskManager {
                         let resolvedRoots = try Self.normalizeOptionalRoots(worktrees.map(\.worktreePath) + folders)
                         guard !resolvedRoots.isEmpty else { throw StationAIManagerError.noWorkspaceRoots }
                         task.workspaceRootPaths = resolvedRoots
-                        try await saveChanges()
+                        try await saveTaskContext(taskID: id)
                         return BoardTaskRecord(task: task)
                     }
                 }
@@ -1329,7 +1374,7 @@ final class BoardTaskManager {
             }
             phase = "swiftdata-save"
             modelContext.delete(task)
-            try await saveChanges()
+            try await saveTaskContext(taskID: task.id)
             StationAIDiagnostics.record("task.delete.succeeded", fields: fields)
         } catch {
             fields["phase"] = phase
@@ -1388,7 +1433,7 @@ final class BoardTaskManager {
                     var iterator = resolved.makeIterator()
                     currentTask.repositoryWorktrees = currentTask.repositoryWorktrees.map { $0.isPending ? (iterator.next() ?? $0) : $0 }
                     currentTask.workspaceRootPaths = try Self.normalizeOptionalRoots(currentTask.repositoryWorktrees.map(\.worktreePath) + currentTask.contextFolderPaths)
-                    try await saveChanges()
+                    try await saveTaskContext(taskID: id)
                     return currentTask
                 } catch {
                     for record in resolved where record.createdByStationAI {
@@ -1418,10 +1463,41 @@ final class BoardTaskManager {
     private func requireTask(_ id: UUID) throws -> BoardTask {
         var descriptor = FetchDescriptor<BoardTask>(predicate: #Predicate { $0.id == id })
         descriptor.fetchLimit = 1
-        guard let task = try modelContext.fetch(descriptor).first else {
-            throw StationAIManagerError.taskNotFound(id)
+        StationAIDiagnostics.record("persistence.read.started", fields: [
+            "operation": "BoardTaskManager.requireTask",
+            "entity": "BoardTask",
+            "taskID": id.uuidString
+        ])
+        do {
+            guard let task = try modelContext.fetch(descriptor).first else {
+                StationAIDiagnostics.record("persistence.read.missing", fields: [
+                    "operation": "BoardTaskManager.requireTask",
+                    "entity": "BoardTask",
+                    "taskID": id.uuidString
+                ])
+                throw StationAIManagerError.taskNotFound(id)
+            }
+            StationAIDiagnostics.record("persistence.read.succeeded", fields: [
+                "operation": "BoardTaskManager.requireTask",
+                "entity": "BoardTask",
+                "taskID": id.uuidString,
+                "status": task.status.rawValue,
+                "repositoryCount": String(task.repositoryWorktrees.count),
+                "workspaceRootCount": String(task.workspaceRootPaths.count),
+                "hasCodexThread": String(task.codexThreadID != nil),
+                "hasSavedPrompt": String(task.savedPrompt != nil)
+            ])
+            return task
+        } catch {
+            if !(error is StationAIManagerError) {
+                var fields = StationAIDiagnostics.errorFields(error)
+                fields["operation"] = "BoardTaskManager.requireTask"
+                fields["entity"] = "BoardTask"
+                fields["taskID"] = id.uuidString
+                StationAIDiagnostics.record("persistence.read.failed", fields: fields)
+            }
+            throw error
         }
-        return task
     }
 
     private func validateRepositoryAssignments(
@@ -1490,8 +1566,98 @@ final class BoardTaskManager {
     }
 
     private func listModels() throws -> [BoardTask] {
-        try modelContext.fetch(FetchDescriptor<BoardTask>())
+        StationAIDiagnostics.record("persistence.read.started", fields: [
+            "operation": "BoardTaskManager.listModels",
+            "entity": "BoardTask"
+        ])
+        do {
+            let tasks = try modelContext.fetch(FetchDescriptor<BoardTask>())
+            StationAIDiagnostics.record("persistence.read.succeeded", fields: [
+                "operation": "BoardTaskManager.listModels",
+                "entity": "BoardTask",
+                "resultCount": String(tasks.count)
+            ])
+            return tasks
+        } catch {
+            var fields = StationAIDiagnostics.errorFields(error)
+            fields["operation"] = "BoardTaskManager.listModels"
+            fields["entity"] = "BoardTask"
+            StationAIDiagnostics.record("persistence.read.failed", fields: fields)
+            throw error
+        }
     }
+
+    private func saveTaskContext(operation: String = #function, taskID: UUID? = nil) async throws {
+        let storeURL = modelContext.container.configurations.first?.url
+        let writeID = UUID().uuidString
+        let fields = [
+            "writeID": writeID,
+            "operation": operation,
+            "entity": "BoardTask",
+            "taskID": taskID?.uuidString ?? "",
+            "storePath": storeURL?.path ?? "",
+            "hasChanges": String(modelContext.hasChanges)
+        ]
+        StationAIDiagnostics.record("persistence.write.started", fields: fields)
+
+        let lockWaitStartedAt = DispatchTime.now().uptimeNanoseconds
+        var lockWaitMilliseconds = 0
+        var lockAcquired = false
+        var attemptCount = 0
+        var retryCount = 0
+        do {
+            guard let storeURL else {
+                throw BridgeFileLockError(message: "Couldn't determine the task-store location for a write lock.")
+            }
+            let lockURL = storeURL.deletingLastPathComponent().appendingPathComponent("store-write.lock")
+            try await withExclusiveFileLocks(at: [lockURL], purpose: "task-store-write") {
+                lockWaitMilliseconds = Int((DispatchTime.now().uptimeNanoseconds - lockWaitStartedAt) / 1_000_000)
+                lockAcquired = true
+                var lockFields = fields
+                lockFields["lockWaitMilliseconds"] = String(lockWaitMilliseconds)
+                StationAIDiagnostics.record("persistence.write.lock_acquired", fields: lockFields)
+
+                let retryDelays: [UInt64] = [100_000_000, 300_000_000, 600_000_000]
+                while true {
+                    attemptCount += 1
+                    do {
+                        try modelContext.save()
+                        var successFields = fields
+                        successFields["attemptCount"] = String(attemptCount)
+                        successFields["retryCount"] = String(retryCount)
+                        successFields["lockWaitMilliseconds"] = String(lockWaitMilliseconds)
+                        StationAIDiagnostics.record("persistence.write.succeeded", fields: successFields)
+                        return
+                    } catch {
+                        guard Self.isStoreOpenFailure(error), retryCount < retryDelays.count else {
+                            throw error
+                        }
+                        let retryDelayMilliseconds = retryDelays[retryCount] / 1_000_000
+                        var retryFields = StationAIDiagnostics.errorFields(error)
+                        retryFields.merge(fields) { _, new in new }
+                        retryFields["attempt"] = String(attemptCount)
+                        retryFields["retryCount"] = String(retryCount + 1)
+                        retryFields["retryDelayMilliseconds"] = String(retryDelayMilliseconds)
+                        retryFields["lockWaitMilliseconds"] = String(lockWaitMilliseconds)
+                        StationAIDiagnostics.record("persistence.write.retry", fields: retryFields)
+                        try await Task.sleep(nanoseconds: retryDelays[retryCount])
+                        retryCount += 1
+                    }
+                }
+            }
+        } catch {
+            var failureFields = StationAIDiagnostics.errorFields(error)
+            failureFields.merge(fields) { _, new in new }
+            failureFields["attemptCount"] = String(attemptCount)
+            failureFields["retryCount"] = String(retryCount)
+            failureFields["lockWaitMilliseconds"] = String(lockAcquired
+                ? lockWaitMilliseconds
+                : Int((DispatchTime.now().uptimeNanoseconds - lockWaitStartedAt) / 1_000_000))
+            StationAIDiagnostics.record("persistence.write.failed", fields: failureFields)
+            throw error
+        }
+    }
+
 }
 
 @MainActor
@@ -1503,23 +1669,44 @@ final class WorkspaceSettingsManager {
     }
 
     var defaultParentFolderPath: String {
-        defaults.string(forKey: WorkspaceSettings.defaultParentFolderKey) ?? ""
+        let value = defaults.string(forKey: WorkspaceSettings.defaultParentFolderKey) ?? ""
+        StationAIDiagnostics.record("settings.read", fields: [
+            "setting": "defaultParentFolder",
+            "isSet": String(!value.isEmpty),
+            "path": value
+        ])
+        return value
     }
 
     var lastSelectedRepositories: [String] {
-        defaults.stringArray(forKey: WorkspaceSettings.lastSelectedRepositoriesKey) ?? []
+        let value = defaults.stringArray(forKey: WorkspaceSettings.lastSelectedRepositoriesKey) ?? []
+        StationAIDiagnostics.record("settings.read", fields: [
+            "setting": "lastSelectedRepositories",
+            "repositoryCount": String(value.count),
+            "repositoryPaths": value.joined(separator: "\n")
+        ])
+        return value
     }
 
     var appearance: String {
         let value = defaults.string(forKey: WorkspaceSettings.appearanceKey) ?? "dark"
-        return value == "light" ? "light" : "dark"
+        let appearance = value == "light" ? "light" : "dark"
+        StationAIDiagnostics.record("settings.read", fields: ["setting": "appearance", "value": appearance])
+        return appearance
     }
 
     func setAppearance(_ value: String) throws {
+        StationAIDiagnostics.record("settings.write.started", fields: ["setting": "appearance", "value": value])
         guard value == "dark" || value == "light" else {
+            StationAIDiagnostics.record("settings.write.failed", fields: [
+                "setting": "appearance",
+                "value": value,
+                "errorCode": "invalid_argument"
+            ])
             throw BridgeCommandError(code: "invalid_argument", message: "Appearance must be 'dark' or 'light'.")
         }
         defaults.set(value, forKey: WorkspaceSettings.appearanceKey)
+        StationAIDiagnostics.record("settings.write.succeeded", fields: ["setting": "appearance", "value": value])
     }
 
     var defaultParentFolderURL: URL? {
@@ -1527,26 +1714,60 @@ final class WorkspaceSettingsManager {
     }
 
     func setDefaultParentFolder(_ path: String?) throws {
+        StationAIDiagnostics.record("settings.write.started", fields: [
+            "setting": "defaultParentFolder",
+            "path": path ?? "",
+            "cleared": String(path == nil || path?.isEmpty == true)
+        ])
         guard let path, !path.isEmpty else {
             defaults.removeObject(forKey: WorkspaceSettings.defaultParentFolderKey)
+            StationAIDiagnostics.record("settings.write.succeeded", fields: [
+                "setting": "defaultParentFolder",
+                "cleared": "true"
+            ])
             return
         }
         guard let url = WorkspaceSettings.validDirectoryURL(for: path) else {
+            StationAIDiagnostics.record("settings.write.failed", fields: [
+                "setting": "defaultParentFolder",
+                "path": path,
+                "errorCode": "invalid_argument"
+            ])
             throw StationAIManagerError.invalidParentFolder(path)
         }
         defaults.set(url.path, forKey: WorkspaceSettings.defaultParentFolderKey)
+        StationAIDiagnostics.record("settings.write.succeeded", fields: [
+            "setting": "defaultParentFolder",
+            "path": url.path,
+            "cleared": "false"
+        ])
     }
 
     func setLastSelectedRepositories(_ paths: [String]) throws {
+        StationAIDiagnostics.record("settings.write.started", fields: [
+            "setting": "lastSelectedRepositories",
+            "requestedCount": String(paths.count),
+            "requestedPaths": paths.joined(separator: "\n")
+        ])
         var normalized: [String] = []
         for path in paths {
             let url = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
             guard FileManager.default.fileExists(atPath: url.appendingPathComponent(".git").path) else {
+                StationAIDiagnostics.record("settings.write.failed", fields: [
+                    "setting": "lastSelectedRepositories",
+                    "path": path,
+                    "errorCode": "invalid_argument"
+                ])
                 throw StationAIManagerError.unavailableWorkspaceRoot(path)
             }
             if !normalized.contains(url.path) { normalized.append(url.path) }
         }
         defaults.set(normalized, forKey: WorkspaceSettings.lastSelectedRepositoriesKey)
+        StationAIDiagnostics.record("settings.write.succeeded", fields: [
+            "setting": "lastSelectedRepositories",
+            "repositoryCount": String(normalized.count),
+            "repositoryPaths": normalized.joined(separator: "\n")
+        ])
     }
 }
 
@@ -1562,37 +1783,89 @@ final class WorkspaceManager {
         guard let parent = WorkspaceSettings.validDirectoryURL(for: parentPath) else {
             throw StationAIManagerError.invalidParentFolder(parentPath)
         }
-        return await RepositoryScanner.scan(parent: parent).map(\.path)
+        StationAIDiagnostics.record("workspace.repositories.scan.started", fields: ["parentPath": parent.path])
+        let repositories = await RepositoryScanner.scan(parent: parent).map(\.path)
+        StationAIDiagnostics.record("workspace.repositories.scan.succeeded", fields: [
+            "parentPath": parent.path,
+            "repositoryCount": String(repositories.count),
+            "repositories": repositories.joined(separator: "\n")
+        ])
+        return repositories
     }
 
     func roots(for taskID: UUID) throws -> [String] {
         guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
-        return try taskManager.get(taskID).workspaceRoots
+        StationAIDiagnostics.record("workspace.roots.read.started", fields: ["taskID": taskID.uuidString])
+        let roots = try taskManager.get(taskID).workspaceRoots
+        StationAIDiagnostics.record("workspace.roots.read.succeeded", fields: [
+            "taskID": taskID.uuidString,
+            "rootCount": String(roots.count),
+            "roots": roots.joined(separator: "\n")
+        ])
+        return roots
     }
 
     @discardableResult
     func setRoots(_ roots: [String], for taskID: UUID) async throws -> BoardTaskRecord {
         guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
-        return try await taskManager.setWorkspaceRoots(taskID, roots: roots)
+        StationAIDiagnostics.record("workspace.roots.write.started", fields: [
+            "taskID": taskID.uuidString,
+            "requestedRoots": roots.joined(separator: "\n"),
+            "requestedRootCount": String(roots.count)
+        ])
+        let record = try await taskManager.setWorkspaceRoots(taskID, roots: roots)
+        StationAIDiagnostics.record("workspace.roots.write.succeeded", fields: [
+            "taskID": taskID.uuidString,
+            "rootCount": String(record.workspaceRoots.count),
+            "roots": record.workspaceRoots.joined(separator: "\n")
+        ])
+        return record
     }
 
     @discardableResult
     func addRepository(_ repositoryPath: String, to taskID: UUID) async throws -> BoardTaskRecord {
         guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
-        return try await taskManager.addRepository(taskID, repositoryPath: repositoryPath)
+        StationAIDiagnostics.record("workspace.repository.add.started", fields: [
+            "taskID": taskID.uuidString,
+            "repositoryPath": repositoryPath
+        ])
+        let record = try await taskManager.addRepository(taskID, repositoryPath: repositoryPath)
+        StationAIDiagnostics.record("workspace.repository.add.succeeded", fields: [
+            "taskID": taskID.uuidString,
+            "repositoryPath": repositoryPath,
+            "repositoryCount": String(record.repositoryWorktrees.count)
+        ])
+        return record
     }
 
     @discardableResult
     func addRepositories(_ repositoryPaths: [String], to taskID: UUID) async throws -> BoardTaskRecord {
         guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
-        return try await taskManager.addRepositories(taskID, repositoryPaths: repositoryPaths)
+        StationAIDiagnostics.record("workspace.repositories.add.started", fields: [
+            "taskID": taskID.uuidString,
+            "repositoryPaths": repositoryPaths.joined(separator: "\n"),
+            "repositoryCount": String(repositoryPaths.count)
+        ])
+        let record = try await taskManager.addRepositories(taskID, repositoryPaths: repositoryPaths)
+        StationAIDiagnostics.record("workspace.repositories.add.succeeded", fields: [
+            "taskID": taskID.uuidString,
+            "repositoryCount": String(record.repositoryWorktrees.count)
+        ])
+        return record
     }
 
     func changes(for taskID: UUID) async throws -> WorkspaceChangeInventory {
         guard taskManager != nil else {
             throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.")
         }
-        return try await WorkspaceChangeScanner.inventory(workspaceRoots: roots(for: taskID))
+        StationAIDiagnostics.record("workspace.changes.read.started", fields: ["taskID": taskID.uuidString])
+        let inventory = try await WorkspaceChangeScanner.inventory(workspaceRoots: roots(for: taskID))
+        StationAIDiagnostics.record("workspace.changes.read.succeeded", fields: [
+            "taskID": taskID.uuidString,
+            "stagedCount": String(inventory.staged.count),
+            "workingCount": String(inventory.working.count)
+        ])
+        return inventory
     }
 
     func diff(
@@ -1607,12 +1880,28 @@ final class WorkspaceManager {
         guard let changeGroup = WorkspaceChangeGroup(rawValue: group) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Change group must be 'staged' or 'working'.")
         }
-        return try await WorkspaceChangeScanner.diff(
+        StationAIDiagnostics.record("workspace.diff.read.started", fields: [
+            "taskID": taskID.uuidString,
+            "repositoryPath": repository,
+            "path": path,
+            "group": group
+        ])
+        let fileDiff = try await WorkspaceChangeScanner.diff(
             workspaceRoots: roots(for: taskID),
             repositoryPath: repository,
             relativePath: path,
             group: changeGroup
         )
+        StationAIDiagnostics.record("workspace.diff.read.succeeded", fields: [
+            "taskID": taskID.uuidString,
+            "repositoryPath": repository,
+            "path": path,
+            "group": group,
+            "originalBytes": String(fileDiff.original?.utf8.count ?? 0),
+            "modifiedBytes": String(fileDiff.modified?.utf8.count ?? 0),
+            "isText": String(fileDiff.isText)
+        ])
+        return fileDiff
     }
 }
 
@@ -1674,17 +1963,37 @@ final class CodexConversationManager {
     }
 
     func models(taskID: UUID) async throws -> [CodexModelOption] {
+        StationAIDiagnostics.record("codex.models.read.started", fields: ["taskID": taskID.uuidString])
         let task = try tasks.taskModel(taskID)
         let workspace = try CodexWorkspaceContext(roots: task.workspaceRootPaths.map {
             URL(fileURLWithPath: $0, isDirectory: true)
         })
-        return try await client.availableModels(workspace: workspace)
+        let models = try await client.availableModels(workspace: workspace)
+        StationAIDiagnostics.record("codex.models.read.succeeded", fields: [
+            "taskID": taskID.uuidString,
+            "modelCount": String(models.count),
+            "modelIDs": models.map(\.id).joined(separator: ",")
+        ])
+        return models
     }
 
     func interrupt(taskID: UUID) async throws -> Bool {
+        StationAIDiagnostics.record("conversation.interrupt.started", fields: ["taskID": taskID.uuidString])
         let task = try tasks.taskModel(taskID)
-        guard let threadID = task.codexThreadID else { return false }
-        return try await client.interruptActiveTurn(threadID: threadID)
+        guard let threadID = task.codexThreadID else {
+            StationAIDiagnostics.record("conversation.interrupt.skipped", fields: [
+                "taskID": taskID.uuidString,
+                "reason": "no_thread"
+            ])
+            return false
+        }
+        let interrupted = try await client.interruptActiveTurn(threadID: threadID)
+        StationAIDiagnostics.record("conversation.interrupt.finished", fields: [
+            "taskID": taskID.uuidString,
+            "threadID": threadID,
+            "interrupted": String(interrupted)
+        ])
+        return interrupted
     }
 
     func send(
@@ -2043,8 +2352,21 @@ final class StationAIBridgeRuntime {
         _ request: BridgeRequest,
         eventHandler: @escaping (BridgeEvent) -> Void
     ) async -> BridgeResponse {
+        let requestStartedAt = DispatchTime.now().uptimeNanoseconds
+        let requestFields = Self.diagnosticRequestFields(request)
+        StationAIDiagnostics.record("bridge.request.started", fields: requestFields)
         guard request.version == BridgeContract.currentVersion else {
-            return .failure(request, code: "unsupported_version", message: "Unsupported bridge version \(request.version). This service supports version \(BridgeContract.currentVersion).")
+            let response = BridgeResponse.failure(
+                request,
+                code: "unsupported_version",
+                message: "Unsupported bridge version \(request.version). This service supports version \(BridgeContract.currentVersion)."
+            )
+            StationAIDiagnostics.record("bridge.request.failed", fields: requestFields.merging([
+                "errorCode": "unsupported_version",
+                "durationMilliseconds": Self.elapsedMilliseconds(since: requestStartedAt)
+            ]) { _, new in new })
+            await StationAIDiagnostics.endBatch()
+            return response
         }
 
         do {
@@ -2247,8 +2569,21 @@ final class StationAIBridgeRuntime {
             default:
                 throw BridgeCommandError(code: "unknown_command", message: "Unknown command '\(request.command)'. Run 'stationai help' to list commands.")
             }
-            return .success(request, result: result)
+            let response = BridgeResponse.success(request, result: result)
+            StationAIDiagnostics.record("bridge.request.succeeded", fields: requestFields.merging(
+                Self.diagnosticResultFields(result).merging([
+                    "durationMilliseconds": Self.elapsedMilliseconds(since: requestStartedAt)
+                ]) { _, new in new }
+            ) { _, new in new })
+            await StationAIDiagnostics.endBatch()
+            return response
         } catch let error as BridgeCommandError {
+            StationAIDiagnostics.record("bridge.request.failed", fields: requestFields.merging([
+                "errorCode": error.code,
+                "errorDescription": error.message,
+                "durationMilliseconds": Self.elapsedMilliseconds(since: requestStartedAt)
+            ]) { _, new in new })
+            await StationAIDiagnostics.endBatch()
             return .failure(request, code: error.code, message: error.message)
         } catch let error as StationAIManagerError {
             let code: String
@@ -2258,10 +2593,133 @@ final class StationAIBridgeRuntime {
             case .invalidTransition: code = "invalid_argument"
             case .unmergedPullRequests: code = "invalid_transition"
             }
+            StationAIDiagnostics.record("bridge.request.failed", fields: requestFields.merging([
+                "errorCode": code,
+                "errorDescription": error.localizedDescription,
+                "durationMilliseconds": Self.elapsedMilliseconds(since: requestStartedAt)
+            ]) { _, new in new })
+            await StationAIDiagnostics.endBatch()
             return .failure(request, code: code, message: error.localizedDescription)
         } catch {
+            var fields = requestFields
+            fields.merge(StationAIDiagnostics.errorFields(error)) { _, new in new }
+            fields["errorCode"] = "operation_failed"
+            fields["durationMilliseconds"] = Self.elapsedMilliseconds(since: requestStartedAt)
+            StationAIDiagnostics.record("bridge.request.failed", fields: fields)
+            await StationAIDiagnostics.endBatch()
             return .failure(request, code: "operation_failed", message: error.localizedDescription)
         }
+    }
+
+    private static func diagnosticRequestFields(_ request: BridgeRequest) -> [String: String] {
+        var fields = [
+            "requestID": request.id,
+            "command": request.command,
+            "argumentCount": String(request.arguments.count),
+            "argumentNames": request.arguments.keys.sorted().joined(separator: ",")
+        ]
+        for (key, value) in request.arguments {
+            let normalizedKey = key.lowercased()
+            if normalizedKey == "images", case .array(let values) = value {
+                fields["argument.\(key).provided"] = "true"
+                fields["argument.\(key).itemCount"] = String(values.count)
+                for (index, value) in values.enumerated() {
+                    guard case .string(let dataURL) = value,
+                          dataURL.hasPrefix("data:image/"),
+                          let separator = dataURL.firstIndex(of: ",") else { continue }
+                    let metadata = dataURL[..<separator]
+                    let mime = metadata.dropFirst("data:".count).split(separator: ";", maxSplits: 1).first.map(String.init) ?? "unknown"
+                    fields["argument.\(key).\(index).mime"] = mime
+                    fields["argument.\(key).\(index).encodedCharacterCount"] = String(dataURL[dataURL.index(after: separator)...].count)
+                }
+                continue
+            }
+            if ["message", "text", "prompt", "body", "summary", "answers", "images", "content"].contains(normalizedKey) {
+                fields["argument.\(key).provided"] = "true"
+                switch value {
+                case .string(let text): fields["argument.\(key).utf8Bytes"] = String(text.utf8.count)
+                case .array(let values): fields["argument.\(key).itemCount"] = String(values.count)
+                case .object(let values): fields["argument.\(key).itemCount"] = String(values.count)
+                default: break
+                }
+                continue
+            }
+            switch value {
+            case .string(let string):
+                fields["argument.\(key)"] = string
+            case .integer(let number):
+                fields["argument.\(key)"] = String(number)
+            case .decimal(let number):
+                fields["argument.\(key)"] = String(number)
+            case .boolean(let boolean):
+                fields["argument.\(key)"] = String(boolean)
+            case .array(let values):
+                fields["argument.\(key).itemCount"] = String(values.count)
+                let strings = values.compactMap(\.string)
+                if strings.count == values.count {
+                    fields["argument.\(key).values"] = strings.joined(separator: "\n")
+                }
+                for (index, item) in values.enumerated() {
+                    guard case .object(let itemFields) = item else { continue }
+                    fields["argument.\(key).\(index).fieldNames"] = itemFields.keys.sorted().joined(separator: ",")
+                    for (itemKey, itemValue) in itemFields {
+                        let itemField = "argument.\(key).\(index).\(itemKey)"
+                        let normalizedItemKey = itemKey.lowercased()
+                        if ["message", "text", "prompt", "body", "summary", "answers", "images", "content"].contains(normalizedItemKey) {
+                            fields["\(itemField).provided"] = "true"
+                            continue
+                        }
+                        switch itemValue {
+                        case .string(let string): fields[itemField] = string
+                        case .integer(let number): fields[itemField] = String(number)
+                        case .decimal(let number): fields[itemField] = String(number)
+                        case .boolean(let boolean): fields[itemField] = String(boolean)
+                        case .array(let nested): fields["\(itemField).itemCount"] = String(nested.count)
+                        case .object(let nested): fields["\(itemField).itemCount"] = String(nested.count)
+                        case .null: fields["\(itemField).isNull"] = "true"
+                        }
+                    }
+                }
+            case .object(let values):
+                fields["argument.\(key).itemCount"] = String(values.count)
+                fields["argument.\(key).subkeys"] = values.keys.sorted().joined(separator: "\n")
+            case .null:
+                fields["argument.\(key).isNull"] = "true"
+            }
+        }
+        if let dataDirectory = request.dataDirectory { fields["dataDirectory"] = dataDirectory }
+        if let worktreeDirectory = request.worktreeDirectory { fields["worktreeDirectory"] = worktreeDirectory }
+        return fields
+    }
+
+    private static func diagnosticResultFields(_ result: BridgeValue) -> [String: String] {
+        switch result {
+        case .object(let values):
+            var fields = ["resultKind": "object", "resultFieldCount": String(values.count)]
+            for key in ["id", "status", "taskStatus", "command", "count"] {
+                if let value = values[key]?.string { fields["result.\(key)"] = value }
+                else if let value = values[key] {
+                    switch value {
+                    case .integer(let number): fields["result.\(key)"] = String(number)
+                    case .boolean(let boolean): fields["result.\(key)"] = String(boolean)
+                    default: break
+                    }
+                }
+            }
+            return fields
+        case .array(let values):
+            return ["resultKind": "array", "resultItemCount": String(values.count)]
+        case .string(let value):
+            return ["resultKind": "string", "resultUTF8Bytes": String(value.utf8.count)]
+        case .integer, .decimal, .boolean:
+            return ["resultKind": "scalar"]
+        case .null:
+            return ["resultKind": "null"]
+        }
+    }
+
+    private static func elapsedMilliseconds(since start: UInt64) -> String {
+        String((DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
     }
 
     private static func value<T: Encodable>(_ value: T) throws -> BridgeValue {

@@ -1825,7 +1825,7 @@ struct TaskConversationView: View {
                     "fallbackWordCount": title == nil ? String(fallback.split(whereSeparator: \.isWhitespace).count) : "0"
                 ])
             } catch {
-                var fields = StationAIDiagnostics.errorFields(error, redacting: [resolvedTitle, prompt])
+                var fields = StationAIDiagnostics.errorFields(error)
                 fields["taskID"] = task.id.uuidString
                 fields["titleSource"] = title == nil ? "prompt-fallback" : "codex"
                 StationAIDiagnostics.record("task.title_apply.failed", fields: fields)
