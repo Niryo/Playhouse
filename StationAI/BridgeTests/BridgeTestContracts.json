@@ -105,7 +105,7 @@
   },
   {
     "id": "test_task_repository_removal_preserves_state_on_dirty_worktree",
-    "expectation": "Removing a pending repository preserves the source repository and other context folders; removing a clean managed worktree waits for an active conversation turn and then succeeds, while a dirty worktree rejects removal and preserves its task record and files."
+    "expectation": "Removing the only pending repository leaves the task with no workspace and preserves the source repository; removing a pending repository preserves other context folders; removing a clean managed worktree waits for an active conversation turn and then succeeds, while a dirty worktree rejects removal and preserves its task record and files."
   },
   {
     "id": "test_task_delete_removes_task_and_later_lookup_is_not_found",
