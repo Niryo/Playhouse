@@ -1053,6 +1053,13 @@ struct TaskConversationView: View {
                     if !activities.isEmpty || isResponding {
                         activityList
                     }
+
+                    // Keep a stable scroll target outside the LazyVStack. A newly
+                    // loaded last message may not have been materialized yet when
+                    // SwiftUI delivers the messages change notification.
+                    Color.clear
+                        .frame(height: 1)
+                        .id("conversation-latest-anchor")
                 }
                 .padding(.horizontal, 28)
                 .padding(.vertical, 24)
@@ -1971,16 +1978,15 @@ struct TaskConversationView: View {
     }
 
     private func scrollToLatest(using proxy: ScrollViewProxy) {
-        let target: String
-        if let latestMessage = messages.last {
-            target = latestMessage.id
-        } else if let latestActivity = activities.last {
-            target = latestActivity.id
-        } else {
-            return
-        }
-        withAnimation(.easeOut(duration: 0.2)) {
-            proxy.scrollTo(target, anchor: .bottom)
+        guard !messages.isEmpty || !activities.isEmpty else { return }
+        // Defer until the state-driven content update has had a layout pass.
+        // Scrolling synchronously from onChange can run before LazyVStack has
+        // created its final row, which intermittently leaves reopened chats at top.
+        Task { @MainActor in
+            await Task.yield()
+            withAnimation(.easeOut(duration: 0.2)) {
+                proxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
+            }
         }
     }
 }
