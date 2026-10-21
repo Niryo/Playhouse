@@ -785,7 +785,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(waiting["status"], "Review")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", blocked_id)[0])["status"], "Blocked")
 
-    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, clears explicitly and at turn completion, and the board card shows the built-in icon, label, and detail without changing lifecycle status; each turn receives hidden CLI usage instructions.
+    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, clears explicitly and at turn completion, and the board card shows the built-in icon, label, and detail without changing lifecycle status; each new task thread receives hidden CLI usage instructions that persist with the thread.
     def test_task_progress_reports_publish_persist_and_clear(self):
         task_id = self.create_task("Progress reports", roots=[self.primary])["id"]
         response, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "building", expected_status=1)
@@ -851,11 +851,34 @@ class StationAIBridgeTests(unittest.TestCase):
             finished_record = self.assert_success(finished)
             self.assertEqual(finished_record["status"], "Review")
             self.assertIsNone(finished_record.get("progressLabel"))
+            follow_up = subprocess.Popen(
+                [str(self.cli), "conversation", "send", task_id, "--message", "Continue on this task."],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment,
+            )
+            try:
+                deadline = time.monotonic() + 10
+                while not active_marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(active_marker.exists(), "The resumed fixture turn did not become active.")
+                release_marker.write_text("Release the resumed turn.\n", encoding="utf-8")
+                follow_stdout, follow_stderr = follow_up.communicate(timeout=20)
+                self.assertEqual(follow_up.returncode, 0, f"Resumed fixture conversation failed: {follow_stdout}; {follow_stderr}")
+                follow_response = json.loads([line for line in follow_stdout.splitlines() if line.strip()][-1])
+                self.assertTrue(follow_response["ok"], follow_response.get("error"))
+            finally:
+                if follow_up.poll() is None:
+                    release_marker.write_text("Release the resumed turn.\n", encoding="utf-8")
+                    follow_up.communicate(timeout=20)
             turn_data = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
-            instructions = turn_data["developerInstructions"]
+            self.assertEqual(turn_data["threadStartCount"], 1)
+            self.assertGreaterEqual(turn_data["threadResumeCount"], 1)
+            self.assertEqual(len(turn_data["turns"]), 2)
+            self.assertTrue(all(turn["developerInstructions"] is None for turn in turn_data["turns"]))
+            instructions = turn_data["threadStartDeveloperInstructions"]
             self.assertIn(str(self.cli), instructions)
             self.assertIn("task progress publish", instructions)
             self.assertIn("hidden from the conversation", instructions)
+            self.assertIsNone(turn_data["developerInstructions"])
         finally:
             if turn.poll() is None:
                 release_marker.write_text("Release the active turn.\n", encoding="utf-8")

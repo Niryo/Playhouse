@@ -24,7 +24,6 @@ struct CodexTaskTitleGenerator {
                 modelID: CodexAppServerClient.modelID,
                 threadID: threadID,
                 workspace: workspace,
-                developerInstructions: "",
                 onDelta: { _ in },
                 onFinalMessage: { generated = $0.trimmingCharacters(in: .whitespacesAndNewlines) },
                 onActivity: { _ in }, onDiff: { _ in }, onHistory: { _ in },
@@ -942,7 +941,6 @@ final class BoardTaskManager {
                 modelID: CodexAppServerClient.modelID,
                 threadID: summaryThread,
                 workspace: workspace,
-                developerInstructions: "",
                 onDelta: { _ in },
                 onFinalMessage: { generated = $0.trimmingCharacters(in: .whitespacesAndNewlines) },
                 onActivity: { _ in }, onDiff: { _ in }, onHistory: { _ in },
@@ -1802,7 +1800,11 @@ final class CodexConversationManager {
             if let existing = task.codexThreadID {
                 threadID = existing
             } else {
-                threadID = try await client.startThread(workspace: workspace, modelID: modelID)
+                threadID = try await client.startThread(
+                    workspace: workspace,
+                    modelID: modelID,
+                    developerInstructions: TaskProgressReportInstructions.make(taskID: taskID)
+                )
                 phase = "thread-persistence"
                 _ = try await tasks.persistCodexThreadID(taskID, threadID: threadID)
                 persistedThreadID = threadID
@@ -1819,7 +1821,6 @@ final class CodexConversationManager {
                 modelID: modelID,
                 threadID: threadID,
                 workspace: workspace,
-                developerInstructions: TaskProgressReportInstructions.make(taskID: taskID),
                 onDelta: { delta in onUpdate(ConversationUpdate(type: "text_delta", text: delta)) },
                 onFinalMessage: { message in onUpdate(ConversationUpdate(type: "assistant_final", text: message)) },
                 onActivity: { activity in onUpdate(ConversationUpdate(type: "activity", activity: activity)) },
