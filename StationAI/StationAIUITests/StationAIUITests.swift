@@ -768,7 +768,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Done preserves the task worktree without merging")
     }
 
-    // case-contract: test_task_pr_create_reports_real_gh_failure | A repository-backed Done task exposes an archive PR action; it preserves the configured merge target, waits for the task operation lock, commits and publishes the branch before GitHub lookup, and reports publication failure without saving a PR link or changing Done status when no usable remote exists.
+    // case-contract: test_task_pr_create_reports_real_gh_failure | A repository-backed task exposes an active-card PR action and a Done-task archive PR action with distinct hover emphasis and useful help; it preserves the configured merge target, waits for the task operation lock, commits and publishes the branch before GitHub lookup, and reports publication failure without saving a PR link or changing Done status when no usable remote exists.
     func test_task_pr_create_reports_real_gh_failure() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -786,6 +786,10 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(accessibleLabelOrValue(of: mergeTargetValue), "main")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "PR failure UI")
         element("back-to-board-button").click()
+        let activeCreateButton = element("task-create-pr-\(taskID)")
+        XCTAssertTrue(activeCreateButton.waitForExistence(timeout: 5), "An active repository task should expose its PR action on the card.")
+        assertHoverEmphasis(for: activeCreateButton)
+        assertHelpTag(for: activeCreateButton, equals: "Create a pull request for each repository linked to this task")
         moveTaskToDone(taskID: taskID)
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
         element("done-archive-button").click()
@@ -793,6 +797,8 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(archiveTask.waitForExistence(timeout: 10), "The completed task should be listed in the archive.")
         let createButton = element("done-archive-create-pr-\(taskID)")
         XCTAssertTrue(createButton.waitForExistence(timeout: 5))
+        assertHoverEmphasis(for: createButton)
+        assertHelpTag(for: createButton, equals: "Create a pull request for each repository linked to this completed task")
         let operationLock = try TaskOperationLockBarrier(dataDirectory: dataDirectory, taskID: taskID)
         var operationLockReleased = false
         defer { if !operationLockReleased { try? operationLock.release() } }
@@ -818,7 +824,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(current["status"] as? String, "Done")
     }
 
-    // case-contract: test_done_archive_displays_existing_pull_request_link | A Done task's real SwiftData record can retain a linked PR number and URL across fresh CLI/XPC reads so the archive can render the existing PR link.
+    // case-contract: test_done_archive_displays_existing_pull_request_link | A Done task's real SwiftData record retains a linked PR number and URL across fresh CLI/XPC reads so the archive renders the PR link with distinct hover emphasis and useful help; an active repository-backed task card renders a saved PR link with the same hover indication.
     func test_done_archive_displays_existing_pull_request_link() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -830,10 +836,21 @@ final class StationAIUITests: XCTestCase {
         moveTaskToDone(taskID: taskID)
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
 
+        let activeCreated = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Active linked PR UI", "--repo", fixture.primary.path,
+        ])["result"] as? [String: Any])
+        let activeTaskID = try XCTUnwrap(activeCreated["id"] as? String)
+        openTask(named: "Active linked PR UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Active linked PR UI")
+        element("back-to-board-button").click()
+        XCTAssertEqual(try taskRecord(id: activeTaskID)?["status"] as? String, "Review")
+
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 10), "The app must close its SwiftData container before seeding the isolated store.")
         let prURL = "https://github.com/stationai-test/fixture/pull/123"
-        try seedDoneTaskPullRequest(taskID: taskID, number: 123, url: prURL)
+        let activePRURL = "https://github.com/stationai-test/fixture/pull/456"
+        try seedTaskPullRequest(taskID: taskID, number: 123, url: prURL)
+        try seedTaskPullRequest(taskID: activeTaskID, number: 456, url: activePRURL)
         let persisted = try XCTUnwrap(taskRecord(id: taskID))
         XCTAssertEqual(persisted["status"] as? String, "Done")
         let record = try XCTUnwrap((persisted["repositoryWorktrees"] as? [[String: Any]])?.first)
@@ -841,10 +858,16 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(record["pullRequestURL"] as? String, prURL)
 
         launchApp(defaultParent: fixture.parent.path)
+        let activePRLink = app.links["task-pr-link-\(activeTaskID)-456"]
+        XCTAssertTrue(activePRLink.waitForExistence(timeout: 10), "The active task card should show its saved PR number as a link.")
+        assertHoverEmphasis(for: activePRLink)
+        assertHelpTag(for: activePRLink, equals: "Open pull request #456 in your browser")
         element("done-archive-button").click()
         XCTAssertTrue(element("done-archive-task-\(taskID)").waitForExistence(timeout: 10))
         let prLink = app.links["done-archive-pr-link-\(taskID)-123"]
         XCTAssertTrue(prLink.waitForExistence(timeout: 10), "The Done archive should show the saved PR number as a link.")
+        assertHoverEmphasis(for: prLink)
+        assertHelpTag(for: prLink, equals: "Open pull request #123 in your browser")
         attachScreenshot(named: "Done archive shows the linked pull request")
     }
 
@@ -3461,7 +3484,7 @@ final class StationAIUITests: XCTestCase {
         return try XCTUnwrap(record["id"] as? String)
     }
 
-    private func seedDoneTaskPullRequest(taskID: String, number: Int, url: String) throws {
+    private func seedTaskPullRequest(taskID: String, number: Int, url: String) throws {
         let seeder = WorkspaceFixture.root.appendingPathComponent("seed-task-pr-link")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: seeder.path), "The precompiled SwiftData fixture seeder should be executable.")
 
@@ -3633,6 +3656,35 @@ final class StationAIUITests: XCTestCase {
         let helpTag = app.descendants(matching: .helpTag)
             .matching(NSPredicate(format: "label == %@", expected)).firstMatch
         XCTAssertTrue(helpTag.waitForExistence(timeout: 4), "Expected the hovered control to show the help tag ‘\(expected)’." )
+    }
+
+    private func assertHoverEmphasis(for element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        let before = element.screenshot().image
+        element.hover()
+        Thread.sleep(forTimeInterval: 0.2)
+        let after = element.screenshot().image
+        guard let beforeCG = before.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let afterCG = after.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            XCTFail("Could not read control screenshots to verify hover emphasis.", file: file, line: line)
+            return
+        }
+        XCTAssertEqual(beforeCG.width, afterCG.width, "Hover must not change the control screenshot width.", file: file, line: line)
+        XCTAssertEqual(beforeCG.height, afterCG.height, "Hover must not change the control screenshot height.", file: file, line: line)
+        let beforeBitmap = NSBitmapImageRep(cgImage: beforeCG)
+        let afterBitmap = NSBitmapImageRep(cgImage: afterCG)
+        var changedPixels = 0
+        let step = max(1, beforeCG.width / 40)
+        for x in stride(from: 0, to: beforeCG.width, by: step) {
+            for y in stride(from: 0, to: beforeCG.height, by: step) {
+                guard let beforeColor = beforeBitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                      let afterColor = afterBitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                let delta = abs(beforeColor.redComponent - afterColor.redComponent)
+                    + abs(beforeColor.greenComponent - afterColor.greenComponent)
+                    + abs(beforeColor.blueComponent - afterColor.blueComponent)
+                if delta > 0.08 { changedPixels += 1 }
+            }
+        }
+        XCTAssertGreaterThan(changedPixels, 5, "Hovering a PR control should visibly change its appearance.", file: file, line: line)
     }
 
     private func element(containingAccessibilityText text: String) -> XCUIElement {

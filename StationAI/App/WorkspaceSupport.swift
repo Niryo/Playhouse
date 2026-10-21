@@ -32,6 +32,28 @@ extension View {
     }
 }
 
+private struct ActionButtonHoverEmphasis: ViewModifier {
+    @State private var isHovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .padding(4)
+            .background {
+                Capsule()
+                    .fill(Color.accentColor.opacity(isHovering ? 0.14 : 0))
+            }
+            .scaleEffect(isHovering ? 1.06 : 1)
+            .animation(.easeOut(duration: 0.14), value: isHovering)
+            .onHover { isHovering = $0 }
+    }
+}
+
+extension View {
+    func actionButtonHoverEmphasis() -> some View {
+        modifier(ActionButtonHoverEmphasis())
+    }
+}
+
 enum WorkspaceSettings {
     static let defaultParentFolderKey = "defaultWorkspaceParentFolderPath"
     static let lastSelectedRepositoriesKey = "lastSelectedRepositories"

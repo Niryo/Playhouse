@@ -457,7 +457,8 @@ struct KanbanBoardView: View {
                 }
             }
             .buttonHoverPointer()
-            .help("Create pull requests")
+            .actionButtonHoverEmphasis()
+            .help("Create a pull request for each repository linked to this completed task")
             .disabled(taskCreatingPullRequests.contains(task.id))
             .accessibilityIdentifier("done-archive-create-pr-\(task.id.uuidString)")
         } else {
@@ -467,7 +468,8 @@ struct KanbanBoardView: View {
                         Link("#\(number)", destination: url)
                             .font(.system(size: 10, weight: .semibold, design: .monospaced))
                             .buttonHoverPointer()
-                            .help("Open pull request #\(number)")
+                            .actionButtonHoverEmphasis()
+                            .help("Open pull request #\(number) in your browser")
                             .accessibilityIdentifier("done-archive-pr-link-\(task.id.uuidString)-\(number)")
                     }
                 }
@@ -1009,7 +1011,8 @@ private struct TaskCardView: View {
                             }
                         }
                         .buttonHoverPointer()
-                        .help("Create pull requests")
+                        .actionButtonHoverEmphasis()
+                        .help("Create a pull request for each repository linked to this task")
                         .disabled(isCreatingPullRequests)
                         .accessibilityIdentifier("task-create-pr-\(task.id.uuidString)")
                     } else {
@@ -1018,7 +1021,8 @@ private struct TaskCardView: View {
                                 Link("#\(number)", destination: url)
                                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                                     .buttonHoverPointer()
-                                    .help("Open pull request #\(number)")
+                                    .actionButtonHoverEmphasis()
+                                    .help("Open pull request #\(number) in your browser")
                                     .accessibilityIdentifier("task-pr-link-\(task.id.uuidString)-\(number)")
                             }
                         }

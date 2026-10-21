@@ -654,7 +654,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), branch_head)
         self.assertTrue(self.branch_exists(self.primary, branch))
 
-    # case-contract: test_task_pr_create_reports_real_gh_failure | A repository-backed Done task exposes an archive PR action; it preserves the configured merge target, waits for the task operation lock, commits and publishes the branch before GitHub lookup, and reports publication failure without saving a PR link or changing Done status when no usable remote exists.
+    # case-contract: test_task_pr_create_reports_real_gh_failure | A repository-backed task exposes an active-card PR action and a Done-task archive PR action with distinct hover emphasis and useful help; it preserves the configured merge target, waits for the task operation lock, commits and publishes the branch before GitHub lookup, and reports publication failure without saving a PR link or changing Done status when no usable remote exists.
     def test_task_pr_create_reports_real_gh_failure(self):
         task = self.create_repo_task(
             "PR failure", [self.primary], merge_targets={self.primary: "main"}, materialize=True
@@ -690,7 +690,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIsNone(record.get("pullRequestURL"))
         self.assertEqual(current["status"], "Done")
 
-    # case-contract: test_done_archive_displays_existing_pull_request_link | A Done task's real SwiftData record can retain a linked PR number and URL across fresh CLI/XPC reads so the archive can render the existing PR link.
+    # case-contract: test_done_archive_displays_existing_pull_request_link | A Done task's real SwiftData record retains a linked PR number and URL across fresh CLI/XPC reads so the archive renders the PR link with distinct hover emphasis and useful help; an active repository-backed task card renders a saved PR link with the same hover indication.
     def test_done_archive_displays_existing_pull_request_link(self):
         task = self.create_repo_task("Archived linked PR", [self.primary], materialize=True)
         completed, _ = self.call_cli("task", "move", task["id"], "Done")
