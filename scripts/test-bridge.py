@@ -1629,9 +1629,17 @@ class StationAIBridgeTests(unittest.TestCase):
         serialized_title_events = json.dumps(title_events)
         self.assertNotIn("Explain the delayed title result.", serialized_title_events)
         self.assertNotIn("Generated fixture title", serialized_title_events)
-    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text.
+    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text.
     def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
         task_id = self.create_task(title="Blank conversation send", roots=[self.primary])["id"]
+        response, _ = self.call_cli(
+            "task", "prompt", task_id, "--text", "Invalid submitted prompt", "--submitted", "true", expected_status=2
+        )
+        self.assert_failure(response, "invalid_argument")
+        response, _ = self.call_cli(
+            "task", "prompt", task_id, "--text", " ", "--status", "In Progress", "--submitted", "true", expected_status=2
+        )
+        self.assert_failure(response, "invalid_argument")
         response, _ = self.call_cli("conversation", "send", task_id, "--message", " ", expected_status=2)
         self.assert_failure(response, "invalid_argument")
         response, _ = self.call_cli("conversation", "history", task_id)
@@ -1724,6 +1732,49 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertNotIn(title_prompt, title_log)
         self.assertNotIn("Generated fixture title", title_log)
         self.assertNotIn(failure_prompt, title_log)
+
+        pending_task = self.create_task("Untitled task", roots=[self.primary])
+        pending_prompt = "Persist this prompt before title generation finishes."
+        pending_executable = self.data_directory / "codex-fixture-title-success-wait"
+        shutil.copyfile(fixture, pending_executable)
+        pending_executable.chmod(0o755)
+        pending_send = self.start_cli(
+            "conversation", "send", pending_task["id"], "--message", pending_prompt,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(pending_executable)},
+        )
+        pending_ready = Path(str(pending_executable) + ".resolve-ready")
+        pending_release = Path(str(pending_executable) + ".resolve-continue")
+        try:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and not pending_ready.exists() and pending_send.poll() is None:
+                time.sleep(0.02)
+            self.assertTrue(pending_ready.exists(), "The title generation fixture should reach its pending state.")
+            pending_record, _ = self.call_cli("task", "get", pending_task["id"])
+            pending_record = self.assert_success(pending_record)
+            self.assertEqual(pending_record["title"], "Generating title…")
+            self.assertEqual(pending_record["savedPrompt"], pending_prompt)
+            self.assertEqual(pending_record["pendingSubmittedPrompt"], pending_prompt)
+        finally:
+            pending_release.write_text("Release title generation.\n", encoding="utf-8")
+        self.finish_cli(pending_send, ["conversation", "send", pending_task["id"], "--message", pending_prompt])
+        completed_pending, _ = self.call_cli("task", "get", pending_task["id"])
+        self.assertIsNone(self.assert_success(completed_pending).get("pendingSubmittedPrompt"))
+
+        stale_task = self.create_task("Untitled task", roots=[self.primary])
+        stale_prompt = "Restore a stale submitted prompt to the composer."
+        saved, _ = self.call_cli(
+            "task", "prompt", stale_task["id"], "--text", stale_prompt,
+            "--status", "In Progress", "--submitted", "true",
+        )
+        stale_record = self.assert_success(saved)
+        self.assertEqual(stale_record["pendingSubmittedPrompt"], stale_prompt)
+        stale_history, _ = self.call_cli("conversation", "history", stale_task["id"])
+        self.assertEqual(self.assert_success(stale_history)["messages"], [])
+        recovered, _ = self.call_cli("task", "get", stale_task["id"])
+        recovered_record = self.assert_success(recovered)
+        self.assertEqual(recovered_record["status"], "Blocked")
+        self.assertEqual(recovered_record["savedPrompt"], stale_prompt)
+        self.assertIsNone(recovered_record.get("pendingSubmittedPrompt"))
 
     # case-contract: test_conversation_serializes_concurrent_sends | Two concurrent sends for the same task are serialized across the app and CLI/XPC paths against the local Codex app-server fixture; the second waits for the first, both complete on the persisted thread, and the task remains In Progress while a send is active.
     def test_conversation_serializes_concurrent_sends(self):

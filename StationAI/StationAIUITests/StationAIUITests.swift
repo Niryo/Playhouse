@@ -2145,7 +2145,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Unsent task prompt is saved after returning to backlog")
     }
 
-    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text.
+    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text.
     func test_conversation_composer_rejects_blank_and_supports_live_turn_controls() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Blank message", roots: [fixture.primary.path])
@@ -2177,6 +2177,14 @@ final class StationAIUITests: XCTestCase {
 
         let taskID = try taskID(named: "Blank message")
         assertCLIError(
+            try runCLI(["task", "prompt", taskID, "--text", "Invalid submitted prompt", "--submitted", "true"], expectedStatus: 2),
+            code: "invalid_argument"
+        )
+        assertCLIError(
+            try runCLI(["task", "prompt", taskID, "--text", " ", "--status", "In Progress", "--submitted", "true"], expectedStatus: 2),
+            code: "invalid_argument"
+        )
+        assertCLIError(
             try runCLI(["conversation", "send", taskID, "--message", " "], expectedStatus: 2),
             code: "invalid_argument"
         )
@@ -2186,7 +2194,8 @@ final class StationAIUITests: XCTestCase {
         let isLiveIntegration = FileManager.default.fileExists(atPath: "/tmp/stationai-codex-live-ui-integration")
         if !isLiveIntegration {
             app.terminate()
-            codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-title-success").path
+            codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-title-success-wait").path
+            let titleFixtureExecutable = try XCTUnwrap(codexFixtureExecutable)
             launchApp(defaultParent: fixture.parent.path)
             let titleTask = try XCTUnwrap(
                 (try runCLI(["task", "create", "--title", "Untitled task", "--repo", fixture.primary.path])["result"] as? [String: Any])
@@ -2201,6 +2210,24 @@ final class StationAIUITests: XCTestCase {
             titleComposer.click()
             titleComposer.typeText(titlePrompt)
             element("send-message-button").click()
+            let titleFixtureReady = URL(fileURLWithPath: titleFixtureExecutable + ".resolve-ready")
+            XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: titleFixtureReady.path) }, timeout: 15), "The title fixture should hold the task in its title-pending state.")
+            XCTAssertEqual(try taskRecord(id: titleTaskID)?["title"] as? String, "Generating title…")
+            XCTAssertEqual(try taskRecord(id: titleTaskID)?["savedPrompt"] as? String, titlePrompt)
+            XCTAssertEqual(try taskRecord(id: titleTaskID)?["pendingSubmittedPrompt"] as? String, titlePrompt)
+            let backButton = element("back-to-board-button")
+            XCTAssertTrue(waitUntil({ backButton.isEnabled }, timeout: 5), "Back should become available after the submitted prompt and title placeholder are persisted.")
+            backButton.click()
+            let titleTaskCard = element("task-card-\(titleTaskID.uppercased())")
+            XCTAssertTrue(titleTaskCard.waitForExistence(timeout: 10))
+            XCTAssertEqual(try taskRecord(id: titleTaskID)?["title"] as? String, "Generating title…", "The board should retain the title placeholder while title generation is pending.")
+            titleTaskCard.click()
+            XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
+            XCTAssertEqual(element("message-composer").value as? String, "", "A submitted prompt must not reappear as a draft after returning during title generation.")
+            XCTAssertTrue(app.staticTexts[titlePrompt].waitForExistence(timeout: 5), "The submitted prompt should remain visible as a conversation message after reopening.")
+            XCTAssertTrue(element("pause-response-button").exists, "The reopened task should retain its active-send controls while the Codex thread is being prepared.")
+            XCTAssertFalse(element("send-message-button").exists, "A second message must not be sent while the submitted prompt is still active.")
+            try Data("continue\n".utf8).write(to: URL(fileURLWithPath: titleFixtureExecutable + ".resolve-continue"))
             XCTAssertTrue(waitUntil({
                 ((try? self.taskRecord(id: titleTaskID)?["title"] as? String) ?? nil) == "Generated fixture title"
             }, timeout: 20), "Sending a prompt from an empty task should persist the Codex-generated title.")
@@ -2226,6 +2253,33 @@ final class StationAIUITests: XCTestCase {
             XCTAssertFalse(serializedTitleEvents.contains("Generated fixture title"), "Title diagnostics must not include generated title text.")
             _ = try runCLI(["task", "rename", titleTaskID, "--title", "Generated title success"])
             element("back-to-board-button").click()
+
+            let recoveryTask = try XCTUnwrap(
+                (try runCLI(["task", "create", "--title", "Untitled task", "--repo", fixture.primary.path])["result"] as? [String: Any])
+            )
+            let recoveryTaskID = try XCTUnwrap(recoveryTask["id"] as? String)
+            openTask(named: "Untitled task")
+            let recoveryPrompt = "Recover this prompt after StationAI closes before Codex starts."
+            element("message-composer").click()
+            element("message-composer").typeText(recoveryPrompt)
+            element("send-message-button").click()
+            let recoveryFixtureReady = URL(fileURLWithPath: titleFixtureExecutable + ".resolve-ready")
+            XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: recoveryFixtureReady.path) }, timeout: 15))
+            XCTAssertEqual(try taskRecord(id: recoveryTaskID)?["codexThreadID"] as? String, nil)
+            XCTAssertEqual(try taskRecord(id: recoveryTaskID)?["pendingSubmittedPrompt"] as? String, recoveryPrompt)
+            app.terminate()
+            try Data("continue recovery\n".utf8).write(to: URL(fileURLWithPath: titleFixtureExecutable + ".resolve-continue"))
+            launchApp(defaultParent: fixture.parent.path)
+            let recoveryTaskCard = element("task-card-\(recoveryTaskID.uppercased())")
+            XCTAssertTrue(recoveryTaskCard.waitForExistence(timeout: 10))
+            recoveryTaskCard.click()
+            XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
+            XCTAssertTrue(waitUntil({
+                ((try? self.taskRecord(id: recoveryTaskID)?["status"] as? String) ?? nil) == "Blocked"
+                    && ((try? self.taskRecord(id: recoveryTaskID)?["pendingSubmittedPrompt"]) is NSNull || (try? self.taskRecord(id: recoveryTaskID)?["pendingSubmittedPrompt"]) == nil)
+            }, timeout: 10), "Reopening a task whose send never reached Codex should clear the pending marker and expose the interrupted state.")
+            XCTAssertEqual(element("message-composer").value as? String, recoveryPrompt, "A stale submitted prompt should return to the composer for retry.")
+            XCTAssertFalse(app.staticTexts[recoveryPrompt].exists, "A turn that never reached Codex should not be shown as a sent message.")
 
             codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-title-failure").path
             app.terminate()
