@@ -469,6 +469,42 @@ final class BoardTaskManager {
         }
     }
 
+    private func saveChanges() async throws {
+        guard let storeURL = modelContext.container.configurations.first?.url else {
+            throw BridgeFileLockError(message: "Couldn't determine the task-store location for a write lock.")
+        }
+        let lockURL = storeURL.deletingLastPathComponent().appendingPathComponent("store-write.lock")
+        try await withExclusiveFileLocks(at: [lockURL], purpose: "task-store-write") {
+            let retryDelays: [UInt64] = [100_000_000, 300_000_000, 600_000_000]
+            var retryIndex = 0
+            while true {
+                do {
+                    try modelContext.save()
+                    return
+                } catch {
+                    guard Self.isStoreOpenFailure(error), retryIndex < retryDelays.count else {
+                        throw error
+                    }
+                    try await Task.sleep(nanoseconds: retryDelays[retryIndex])
+                    retryIndex += 1
+                }
+            }
+        }
+    }
+
+    private static func isStoreOpenFailure(_ error: Error) -> Bool {
+        var underlying: NSError? = error as NSError
+        var depth = 0
+        while let current = underlying, depth < 5 {
+            if current.domain == NSCocoaErrorDomain, current.code == 256 {
+                return true
+            }
+            underlying = current.userInfo[NSUnderlyingErrorKey] as? NSError
+            depth += 1
+        }
+        return false
+    }
+
     /// Reserves a task's whole conversation send across app/XPC processes.
     /// Workspace and repository changes, plus task deletion, use this same
     /// reservation so they cannot change a worktree while a turn is using it.
@@ -605,13 +641,13 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func create(title: String, workspaceRoots: [String]) throws -> BoardTaskRecord {
+    func create(title: String, workspaceRoots: [String]) async throws -> BoardTaskRecord {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty else { throw StationAIManagerError.invalidTitle }
         let normalizedRoots = try Self.normalizeRoots(workspaceRoots)
         let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: normalizedRoots)
         modelContext.insert(task)
-        try modelContext.save()
+        try await saveChanges()
         return BoardTaskRecord(task: task)
     }
 
@@ -637,7 +673,7 @@ final class BoardTaskManager {
         return try await withRepositoryAllocationLocks(worktrees.map(\.repositoryPath)) {
             try validateRepositoryAssignments(worktrees, excludingTaskID: nil)
             modelContext.insert(task)
-            try modelContext.save()
+            try await saveChanges()
             return BoardTaskRecord(task: task)
         }
     }
@@ -712,7 +748,7 @@ final class BoardTaskManager {
                     task.repositoryWorktrees = repositories
                     task.contextFolderPaths = contextFolders
                     task.workspaceRootPaths = roots
-                    try modelContext.save()
+                    try await saveChanges()
                     return BoardTaskRecord(task: task)
                 }
             }
@@ -761,7 +797,7 @@ final class BoardTaskManager {
                     var repositories = task.repositoryWorktrees
                     repositories[index] = validated
                     task.repositoryWorktrees = repositories
-                    try modelContext.save()
+                    try await saveChanges()
                     return BoardTaskRecord(task: task)
                 }
             }
@@ -810,7 +846,7 @@ final class BoardTaskManager {
 
                 currentTask.repositoryWorktrees = updatedRepositories
                 currentTask.workspaceRootPaths = roots
-                try modelContext.save()
+                try await saveChanges()
 
                 if shouldRemoveWorktree {
                     do {
@@ -825,7 +861,7 @@ final class BoardTaskManager {
                         current.repositoryWorktrees = originalRepositories
                         current.workspaceRootPaths = originalRoots
                         do {
-                            try modelContext.save()
+                            try await saveChanges()
                         } catch {
                             throw BridgeCommandError(
                                 code: "operation_failed",
@@ -882,7 +918,7 @@ final class BoardTaskManager {
             task.status = .done
             task.statusMessage = nil
             clearProgressReport(task)
-            try modelContext.save()
+            try await saveChanges()
             return BoardTaskRecord(task: task)
         }
     }
@@ -918,7 +954,7 @@ final class BoardTaskManager {
                 throw BridgeCommandError(code: "invalid_transition", message: "The task repositories changed while pull requests were being checked. Try again.")
             }
             taskAfterLookup.repositoryWorktrees = records
-            try modelContext.save()
+            try await saveChanges()
             return (gh, records, BoardTaskRecord(task: taskAfterLookup))
         }
         let (gh, records, lookedUpRecords) = lookup
@@ -988,7 +1024,7 @@ final class BoardTaskManager {
                     throw BridgeCommandError(code: "invalid_transition", message: "The task repositories changed while the pull request was being created.")
                 }
                 currentTask.repositoryWorktrees = updatedRecords
-                try modelContext.save()
+                try await saveChanges()
                 expectedRecords = updatedRecords
             }
             return try get(id)
@@ -1002,7 +1038,7 @@ final class BoardTaskManager {
             task.status = status
             task.statusMessage = message
             if status != .inProgress { clearProgressReport(task) }
-            try modelContext.save()
+            try await saveChanges()
             return BoardTaskRecord(task: task)
         }
     }
@@ -1025,7 +1061,7 @@ final class BoardTaskManager {
             task.progressTypeRawValue = type?.rawValue
             task.progressLabel = label
             task.progressDetail = normalizedDetail?.isEmpty == true ? nil : normalizedDetail
-            try modelContext.save()
+            try await saveChanges()
             return BoardTaskRecord(task: task)
         }
     }
@@ -1035,7 +1071,7 @@ final class BoardTaskManager {
         try await withTaskOperationLock(id) {
             let task = try requireTask(id)
             clearProgressReport(task)
-            try modelContext.save()
+            try await saveChanges()
             return BoardTaskRecord(task: task)
         }
     }
@@ -1056,7 +1092,7 @@ final class BoardTaskManager {
                         task.statusMessage = "StationAI reopened before Codex started this turn. Review the prompt and retry."
                     }
                     task.pendingSubmittedPrompt = nil
-                    try modelContext.save()
+                    try await saveChanges()
                 }
                 return BoardTaskRecord(task: task)
             }
@@ -1079,7 +1115,7 @@ final class BoardTaskManager {
             task.statusMessage = message
             task.pendingSubmittedPrompt = nil
             clearProgressReport(task)
-            try modelContext.save()
+            try await saveChanges()
             return BoardTaskRecord(task: task)
         }
     }
@@ -1106,7 +1142,7 @@ final class BoardTaskManager {
                     }
                 }
                 modelContext.delete(task)
-                try modelContext.save()
+                try await saveChanges()
                 return dirtyPaths
             }
             dirtyManagedWorktrees.append(contentsOf: dirtyForTask)
@@ -1121,7 +1157,7 @@ final class BoardTaskManager {
         return try await withTaskOperationLock(id) {
             let task = try requireTask(id)
             task.title = normalizedTitle
-            try modelContext.save()
+            try await saveChanges()
             return BoardTaskRecord(task: task)
         }
     }
@@ -1136,7 +1172,7 @@ final class BoardTaskManager {
             let previousTitle = task.title
             task.title = normalizedTitle
             do {
-                try modelContext.save()
+                try await saveChanges()
             } catch {
                 task.title = previousTitle
                 throw error
@@ -1161,7 +1197,7 @@ final class BoardTaskManager {
                 task.status = status
                 if status != .inProgress { clearProgressReport(task) }
             }
-            try modelContext.save()
+            try await saveChanges()
             return BoardTaskRecord(task: task)
         }
     }
@@ -1171,7 +1207,7 @@ final class BoardTaskManager {
             let task = try requireTask(id)
             guard task.pendingSubmittedPrompt != nil else { return }
             task.pendingSubmittedPrompt = nil
-            try modelContext.save()
+            try await saveChanges()
         }
     }
 
@@ -1187,7 +1223,7 @@ final class BoardTaskManager {
             guard task.codexThreadID != threadID else { return BoardTaskRecord(task: task) }
             task.codexThreadID = threadID
             do {
-                try modelContext.save()
+                try await saveChanges()
             } catch {
                 task.codexThreadID = nil
                 throw error
@@ -1214,7 +1250,7 @@ final class BoardTaskManager {
                     }
                     task.workspaceRootPaths = normalizedRoots
                     task.contextFolderPaths = normalizedRoots
-                    try modelContext.save()
+                    try await saveChanges()
                     return BoardTaskRecord(task: task)
                 }
             }
@@ -1249,7 +1285,7 @@ final class BoardTaskManager {
                         let resolvedRoots = try Self.normalizeOptionalRoots(worktrees.map(\.worktreePath) + folders)
                         guard !resolvedRoots.isEmpty else { throw StationAIManagerError.noWorkspaceRoots }
                         task.workspaceRootPaths = resolvedRoots
-                        try modelContext.save()
+                        try await saveChanges()
                         return BoardTaskRecord(task: task)
                     }
                 }
@@ -1293,7 +1329,7 @@ final class BoardTaskManager {
             }
             phase = "swiftdata-save"
             modelContext.delete(task)
-            try modelContext.save()
+            try await saveChanges()
             StationAIDiagnostics.record("task.delete.succeeded", fields: fields)
         } catch {
             fields["phase"] = phase
@@ -1352,7 +1388,7 @@ final class BoardTaskManager {
                     var iterator = resolved.makeIterator()
                     currentTask.repositoryWorktrees = currentTask.repositoryWorktrees.map { $0.isPending ? (iterator.next() ?? $0) : $0 }
                     currentTask.workspaceRootPaths = try Self.normalizeOptionalRoots(currentTask.repositoryWorktrees.map(\.worktreePath) + currentTask.contextFolderPaths)
-                    try modelContext.save()
+                    try await saveChanges()
                     return currentTask
                 } catch {
                     for record in resolved where record.createdByStationAI {

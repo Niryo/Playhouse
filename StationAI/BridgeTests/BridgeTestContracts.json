@@ -32,6 +32,10 @@
     "expectation": "Two concurrent CLI/XPC creates targeting the same explicit branch in one repository serialize through a shared cross-process lock, leaving exactly one persisted active task and rejecting the other."
   },
   {
+    "id": "test_task_store_serializes_cross_process_writes",
+    "expectation": "If another process holds the shared task-store write lock when a Codex turn completes, final status persistence waits and then saves Review status and full history across fresh CLI/XPC reads; reopening the conversation in the UI shows the saved exchange without a store error."
+  },
+  {
     "id": "test_task_worktree_preparation_serializes_auto_branch_claims",
     "expectation": "Tasks with the same automatic branch choice remain pending without creating a worktree before conversation start; the opt-in live Codex integration sends both turns concurrently and confirms only one task claims the generated branch."
   },

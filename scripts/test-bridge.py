@@ -96,6 +96,26 @@ class TaskOperationLockBarrier:
         self.descriptor = None
 
 
+class TaskStoreWriteLockBarrier:
+    """Hold the real shared task-store write lock across a final conversation save."""
+
+    def __init__(self, data_directory):
+        self.descriptor = os.open(Path(data_directory) / "store-write.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.lockf(self.descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB, 0, 0, os.SEEK_SET)
+        except BaseException:
+            os.close(self.descriptor)
+            self.descriptor = None
+            raise
+
+    def release(self):
+        if self.descriptor is None:
+            return
+        fcntl.lockf(self.descriptor, fcntl.LOCK_UN, 0, 0, os.SEEK_SET)
+        os.close(self.descriptor)
+        self.descriptor = None
+
+
 class ConversationTurnLockBarrier:
     """Hold the real per-task conversation-turn reservation across XPC requests."""
 
@@ -564,6 +584,87 @@ class StationAIBridgeTests(unittest.TestCase):
         record = task["repositoryWorktrees"][0]
         self.assertEqual(record["branch"], branch)
         self.assertTrue(record["isPending"])
+
+    # case-contract: test_task_store_serializes_cross_process_writes | If another process holds the shared task-store write lock when a Codex turn completes, final status persistence waits and then saves Review status and full history across fresh CLI/XPC reads; reopening the conversation in the UI shows the saved exchange without a store error.
+    def test_task_store_serializes_cross_process_writes(self):
+        task = self.create_repo_task("Store write contention", [self.primary])
+        fixture_path = self.data_directory / "codex-fixture-store-write-success-wait"
+        self.assertFalse(fixture_path.exists(), "A new, unique per-case fixture path must not replace an existing file.")
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py", fixture_path)
+        fixture_path.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        ready = Path(str(fixture_path) + ".resolve-ready")
+        continuation = Path(str(fixture_path) + ".resolve-continue")
+        command = ["conversation", "send", task["id"], "--message", "Persist this completed turn."]
+        process = self.start_cli(
+            *command,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(fixture_path)},
+        )
+        barrier = None
+        try:
+            deadline = time.monotonic() + 15
+            while not ready.is_file() and time.monotonic() < deadline:
+                if process.poll() is not None:
+                    stdout, stderr = process.communicate()
+                    self.fail(f"The fixture turn ended before it could be held: stdout={stdout!r}; stderr={stderr!r}")
+                time.sleep(0.02)
+            self.assertTrue(ready.is_file(), "The real app-server fixture did not pause inside the active turn.")
+            barrier = TaskStoreWriteLockBarrier(self.data_directory)
+            continuation.write_text("Release the completed fixture turn.\n", encoding="utf-8")
+
+            deadline = time.monotonic() + 15
+            completed_event_seen = False
+            while time.monotonic() < deadline:
+                diagnostics = self.data_directory / "Diagnostics.jsonl"
+                if diagnostics.is_file():
+                    completed_event_seen = any(
+                        event.get("event") == "codex.turn.ended" and event.get("turnStatus") == "completed"
+                        for event in (json.loads(line) for line in diagnostics.read_text(encoding="utf-8").splitlines() if line.strip())
+                    )
+                if completed_event_seen:
+                    break
+                time.sleep(0.02)
+            self.assertTrue(completed_event_seen, "Codex should finish before final task-status persistence begins.")
+            time.sleep(0.2)
+            self.assertIsNone(process.poll(), "The completed turn must wait for the shared store write lock.")
+            current, _ = self.call_cli("task", "get", task["id"])
+            self.assertEqual(self.assert_success(current)["status"], "In Progress")
+        except BaseException:
+            continuation.touch(exist_ok=True)
+            if barrier is not None:
+                barrier.release()
+            if process.poll() is None:
+                process.terminate()
+                process.communicate(timeout=20)
+            raise
+        finally:
+            continuation.touch(exist_ok=True)
+            if barrier is not None:
+                barrier.release()
+
+        response, _ = self.finish_cli(process, command)
+        self.assert_success(response)
+        current, _ = self.call_cli("task", "get", task["id"])
+        current = self.assert_success(current)
+        self.assertEqual(current["status"], "Review")
+        self.assertIsNone(current.get("pendingSubmittedPrompt"))
+        history, _ = self.call_cli(
+            "conversation", "history", task["id"],
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(fixture_path)},
+        )
+        messages = self.assert_success(history)["messages"]
+        self.assertTrue(any(item["role"] == "user" and item["text"] == "Persist this completed turn." for item in messages))
+        self.assertTrue(any(
+            item["role"] == "assistant" and item["text"] == "Answers received: Blue / fixture-secret."
+            for item in messages
+        ))
+        failures = [
+            json.loads(line) for line in (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8").splitlines()
+            if json.loads(line).get("taskID") == task["id"] and json.loads(line).get("event") == "conversation.send.failed"
+        ]
+        self.assertEqual(failures, [], "A transient store lock must not surface as a failed conversation send.")
 
     # case-contract: test_task_worktree_preparation_serializes_auto_branch_claims | Tasks with the same automatic branch choice remain pending without creating a worktree before conversation start; the opt-in live Codex integration sends both turns concurrently and confirms only one task claims the generated branch.
     def test_task_worktree_preparation_serializes_auto_branch_claims(self):
