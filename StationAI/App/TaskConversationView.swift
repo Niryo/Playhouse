@@ -98,6 +98,11 @@ struct TaskConversationView: View {
         (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty) || workspaceRootURLs.isEmpty || isResponding || isLoadingHistory
     }
 
+    private var canPauseResponse: Bool {
+        guard let threadID = task.codexThreadID else { return false }
+        return codexClient.canInterruptActiveTurn(threadID: threadID)
+    }
+
     private var diffHighlightStatus: String {
         guard let diffChangeCount else { return "Calculating changes…" }
         guard diffChangeCount > 0 else { return "No text changes" }
@@ -1338,7 +1343,7 @@ struct TaskConversationView: View {
             VStack(alignment: .leading, spacing: 10) {
                 TextField("Message…", text: $draft, axis: .vertical)
                     .font(.system(size: 14))
-                    .lineLimit(1...5)
+                    .lineLimit(1...12)
                     .textFieldStyle(.plain)
                     .focused($isComposerFocused)
                     .onKeyPress(.return, phases: .down) { press in
@@ -1453,7 +1458,7 @@ struct TaskConversationView: View {
                         .buttonHoverPointer()
                         .help("Pause Codex response")
                         .buttonStyle(.plain)
-                        .disabled(isPausingResponse || !codexClient.isTurnActive)
+                        .disabled(isPausingResponse || !canPauseResponse)
                         .accessibilityLabel("Pause response")
                         .accessibilityIdentifier("pause-response-button")
                     } else if hasPausedResponse {

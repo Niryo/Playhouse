@@ -567,6 +567,10 @@ final class CodexAppServerClient: ObservableObject {
         return active.processID
     }
 
+    func canInterruptActiveTurn(threadID: String) -> Bool {
+        activeThreadID == threadID && activeTurnID != nil
+    }
+
     func markTurnStarting(threadID: String) {
         startingThreadIDs.insert(threadID)
         activeThreadID = threadID

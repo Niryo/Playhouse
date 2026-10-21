@@ -2129,7 +2129,7 @@ class StationAIBridgeTests(unittest.TestCase):
         serialized_title_events = json.dumps(title_events)
         self.assertNotIn("Explain the delayed title result.", serialized_title_events)
         self.assertNotIn("Generated fixture title", serialized_title_events)
-    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, the UI exposes separate steer and queue actions, sends steering with the active turn ID, and retains the queued follow-up across reopening.
+    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, and the CLI/XPC preserves a 15-line draft, and the UI composer expands beyond five lines, stops growing at its 12-line limit, and retains the complete draft while scrolling. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. During title preparation, CLI/XPC confirms the submitted prompt and conversation thread remain attached to the task, while the UI keeps Pause disabled until the task's conversation client has an interruptible turn. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, the UI exposes separate steer and queue actions, sends steering with the active turn ID, and retains the queued follow-up across reopening.
     def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         task_id = self.create_task(title="Blank conversation send", roots=[self.primary])["id"]
@@ -2150,7 +2150,7 @@ class StationAIBridgeTests(unittest.TestCase):
         prompt = "Work on the persisted prompt while I reopen this task."
         saved, _ = self.call_cli("task", "prompt", task_id, "--text", prompt)
         self.assertEqual(self.assert_success(saved)["savedPrompt"], prompt)
-        multiline_prompt = "First line\nSecond line"
+        multiline_prompt = "\n".join(f"Draft line {index}" for index in range(1, 16))
         saved, _ = self.call_cli("task", "prompt", task_id, "--text", multiline_prompt)
         self.assertEqual(self.assert_success(saved)["savedPrompt"], multiline_prompt)
         saved, _ = self.call_cli("task", "prompt", task_id, "--text", prompt)
@@ -2208,7 +2208,7 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-title-success"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        title_prompt = "Explain the workspace layout briefly."
+        title_prompt = "Transcript entry " + ("Readable chat content for scrolling. " * 120).rstrip()
         sent, _ = self.call_cli(
             "conversation", "send", title_task["id"], "--message", title_prompt,
             extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
@@ -2302,6 +2302,7 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assertEqual(pending_record["title"], "Generating title…")
             self.assertEqual(pending_record["savedPrompt"], pending_prompt)
             self.assertEqual(pending_record["pendingSubmittedPrompt"], pending_prompt)
+            self.assertTrue(pending_record.get("codexThreadID"), "The pending conversation thread should remain attached to the task.")
         finally:
             pending_release.write_text("Release title generation.\n", encoding="utf-8")
         self.finish_cli(pending_send, ["conversation", "send", pending_task["id"], "--message", pending_prompt])
