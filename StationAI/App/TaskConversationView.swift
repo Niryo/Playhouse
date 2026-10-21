@@ -43,6 +43,8 @@ struct TaskConversationView: View {
     let onBack: () -> Void
 
     @State private var draft = ""
+    @State private var draftAutosaveTask: Task<Void, Never>?
+    @State private var draftNeedsAutosave = false
     @State private var pendingImages: [PendingImage] = []
     @State private var isShowingImagePicker = false
     @State private var isGeneratingTitle = false
@@ -1353,6 +1355,10 @@ struct TaskConversationView: View {
                         if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/plan" {
                             activatePlanMode()
                         }
+                        if !isReadOnly, !isResponding, !isLoadingHistory {
+                            draftNeedsAutosave = true
+                        }
+                        scheduleDraftAutosave(newValue)
                     }
                     .disabled(isReadOnly || isResponding || isLoadingHistory)
                     .accessibilityIdentifier("message-composer")
@@ -1441,13 +1447,6 @@ struct TaskConversationView: View {
                         .accessibilityLabel("Continue response")
                         .accessibilityIdentifier("continue-response-button")
                     } else {
-                        Button("Save") {
-                            Task { @MainActor in _ = await saveDraftAndGenerateTitle(status: nil, then: onBack) }
-                        }
-                        .buttonHoverPointer()
-                        .help("Save draft and return to the board")
-                            .disabled(isResponding || isLoadingHistory || draft.isEmpty)
-                            .accessibilityIdentifier("save-task-prompt-button")
                         Button { sendMessage() } label: {
                             Image(systemName: "arrow.up")
                                 .font(.system(size: 13, weight: .bold))
@@ -1779,6 +1778,7 @@ struct TaskConversationView: View {
     }
 
     private func saveAndBack() {
+        draftAutosaveTask?.cancel()
         if isReadOnly { onBack(); return }
         if isResponding { onBack(); return }
         if isNewTask, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -1793,7 +1793,35 @@ struct TaskConversationView: View {
             }
             return
         }
+        if draftNeedsAutosave, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            Task { @MainActor in
+                do {
+                    _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: "")
+                    draftNeedsAutosave = false
+                    await saveDraftAndGenerateTitle(status: nil, then: onBack)
+                } catch {
+                    errorMessage = error.localizedDescription
+                }
+            }
+            return
+        }
         Task { @MainActor in _ = await saveDraftAndGenerateTitle(status: nil, then: onBack) }
+    }
+
+    private func scheduleDraftAutosave(_ value: String) {
+        draftAutosaveTask?.cancel()
+        let prompt = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isReadOnly, !isResponding, !isLoadingHistory else { return }
+        draftAutosaveTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled, !isResponding, !isLoadingHistory else { return }
+            do {
+                _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: prompt)
+                if draft == value { draftNeedsAutosave = false }
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     @discardableResult
