@@ -1534,7 +1534,7 @@ final class BoardTaskManager {
         }
         return try await withTaskOperationLock(id) {
             let task = try requireTask(id)
-            task.savedPrompt = prompt
+            task.savedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : prompt
             task.pendingSubmittedPrompt = submitted ? prompt : nil
             if let status {
                 task.status = status
@@ -2795,7 +2795,9 @@ final class StationAIBridgeRuntime {
                     guard let status = TaskStatus(rawValue: value) else { throw StationAIManagerError.invalidStatus(value) }
                     return status
                 }
-                let prompt = try request.requiredString("prompt")
+                guard let prompt = request.arguments["prompt"]?.string else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Missing required argument: prompt.")
+                }
                 let submitted = request.arguments["submitted"]?.bool ?? false
                 if submitted && prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     throw BridgeCommandError(code: "invalid_argument", message: "A submitted prompt must contain text.")
