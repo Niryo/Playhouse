@@ -16,7 +16,9 @@ env = os.environ.copy()
 env['STATIONAI_DATA_DIRECTORY'] = str(data)
 env.pop('STATIONAI_BRIDGE_SERVICE_NAME', None)
 validator = [sys.executable, str(root / 'scripts/validate-app-launch.py'), str(bundle), str(root), profile['bundleID'], profile['dataDirectory']]
-subprocess.run(validator, env=env, check=True, capture_output=True)
+validation = subprocess.run(validator, env=env, capture_output=True, text=True)
+if validation.returncode != 0:
+    raise RuntimeError(f"App launch validation failed: {validation.stdout}\n{validation.stderr}")
 copy = data / 'launch-check.app'
 if copy.exists():
     raise RuntimeError('Refusing to replace an existing app fixture')
