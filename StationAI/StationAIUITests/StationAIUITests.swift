@@ -604,7 +604,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
     }
 
-    // case-contract: test_task_store_serializes_cross_process_writes | If another process holds the shared task-store write lock when a Codex turn completes, final status persistence waits and then saves Review status and full history across fresh CLI/XPC reads; reopening the conversation in the UI shows the saved exchange without a store error.
+    // case-contract: test_task_store_serializes_cross_process_writes | If another process holds the shared task-store write lock when a Codex turn completes, final status persistence waits and then saves Review status and full history across fresh CLI/XPC reads. Correlated persistence diagnostics include task ID, store path, lock wait, attempts, and retry count; reopening the conversation in the UI shows the saved exchange without a store error.
     func test_task_store_serializes_cross_process_writes() throws {
         let fixtureExecutable = dataDirectory.appendingPathComponent("codex-fixture-store-write-success-wait")
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixtureExecutable.path), "A unique per-case fixture must not replace an existing file.")
@@ -672,6 +672,21 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(messages.contains {
             $0["role"] as? String == "assistant" && $0["text"] as? String == "Answers received: Blue / fixture-secret."
         })
+        let lockEvents = try diagnosticEvents().filter {
+            $0["taskID"] as? String == taskID && $0["event"] as? String == "persistence.write.lock_acquired"
+        }
+        let waitedWrite = try XCTUnwrap(lockEvents.first {
+            (Int($0["lockWaitMilliseconds"] as? String ?? "0") ?? 0) > 0
+        }, "The final task write should log its wait for the shared store lock.")
+        XCTAssertEqual(waitedWrite["storePath"] as? String, dataDirectory.appendingPathComponent("StationAI.store").path)
+        let waitedWriteID = try XCTUnwrap(waitedWrite["writeID"] as? String)
+        let matchingWrite = try XCTUnwrap(try diagnosticEvents().first {
+            $0["taskID"] as? String == taskID
+                && $0["event"] as? String == "persistence.write.succeeded"
+                && $0["writeID"] as? String == waitedWriteID
+        })
+        XCTAssertEqual(matchingWrite["attemptCount"] as? String, "1")
+        XCTAssertEqual(matchingWrite["retryCount"] as? String, "0")
 
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: title)

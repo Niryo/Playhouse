@@ -33,7 +33,7 @@
   },
   {
     "id": "test_task_store_serializes_cross_process_writes",
-    "expectation": "If another process holds the shared task-store write lock when a Codex turn completes, final status persistence waits and then saves Review status and full history across fresh CLI/XPC reads; reopening the conversation in the UI shows the saved exchange without a store error."
+    "expectation": "If another process holds the shared task-store write lock when a Codex turn completes, final status persistence waits and then saves Review status and full history across fresh CLI/XPC reads. Correlated persistence diagnostics include task ID, store path, lock wait, attempts, and retry count; reopening the conversation in the UI shows the saved exchange without a store error."
   },
   {
     "id": "test_task_worktree_preparation_serializes_auto_branch_claims",

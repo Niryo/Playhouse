@@ -638,7 +638,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(record["branch"], branch)
         self.assertTrue(record["isPending"])
 
-    # case-contract: test_task_store_serializes_cross_process_writes | If another process holds the shared task-store write lock when a Codex turn completes, final status persistence waits and then saves Review status and full history across fresh CLI/XPC reads; reopening the conversation in the UI shows the saved exchange without a store error.
+    # case-contract: test_task_store_serializes_cross_process_writes | If another process holds the shared task-store write lock when a Codex turn completes, final status persistence waits and then saves Review status and full history across fresh CLI/XPC reads. Correlated persistence diagnostics include task ID, store path, lock wait, attempts, and retry count; reopening the conversation in the UI shows the saved exchange without a store error.
     def test_task_store_serializes_cross_process_writes(self):
         task = self.create_repo_task("Store write contention", [self.primary])
         fixture_path = self.data_directory / "codex-fixture-store-write-success-wait"
@@ -718,6 +718,22 @@ class StationAIBridgeTests(unittest.TestCase):
             if json.loads(line).get("taskID") == task["id"] and json.loads(line).get("event") == "conversation.send.failed"
         ]
         self.assertEqual(failures, [], "A transient store lock must not surface as a failed conversation send.")
+        store_write_events = [
+            json.loads(line) for line in (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8").splitlines()
+            if json.loads(line).get("taskID") == task["id"]
+            and json.loads(line).get("event") == "persistence.write.lock_acquired"
+        ]
+        self.assertTrue(store_write_events, "The final task save should log when its shared store lock is acquired.")
+        waited_write = next(event for event in store_write_events if int(event.get("lockWaitMilliseconds", "0")) > 0)
+        self.assertEqual(waited_write["storePath"], str(self.data_directory / "StationAI.store"))
+        matching_success = next(
+            json.loads(line) for line in (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8").splitlines()
+            if (event := json.loads(line)).get("taskID") == task["id"]
+            and event.get("event") == "persistence.write.succeeded"
+            and event.get("writeID") == waited_write["writeID"]
+        )
+        self.assertEqual(matching_success["attemptCount"], "1")
+        self.assertEqual(matching_success["retryCount"], "0")
 
     # case-contract: test_task_worktree_preparation_serializes_auto_branch_claims | Tasks with the same automatic branch choice remain pending without creating a worktree before conversation start; the opt-in live Codex integration sends both turns concurrently and confirms only one task claims the generated branch.
     def test_task_worktree_preparation_serializes_auto_branch_claims(self):
