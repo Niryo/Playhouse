@@ -437,16 +437,16 @@ class StationAIBridgeTests(unittest.TestCase):
         task = self.assert_success(self.call_cli("task", "create", "--title", "Protected store", "--root", self.primary)[0])
         self.assert_success(self.call_cli("task", "prompt", task["id"], "--text", "Protected draft", "--status", "Backlog")[0])
         root = Path(__file__).resolve().parent.parent
-        contract_check = subprocess.run(
+        launch_contract = subprocess.run(
             ["python3", str(root / "scripts/check-app-launch-contract.py"), str(self.cli.parent.parent.parent), str(root), str(self.data_directory)],
             check=False,
             capture_output=True,
             text=True,
         )
         self.assertEqual(
-            contract_check.returncode,
+            launch_contract.returncode,
             0,
-            f"App launch contract check failed: stdout={contract_check.stdout}; stderr={contract_check.stderr}",
+            f"App launch contract check failed: {launch_contract.stdout}\n{launch_contract.stderr}",
         )
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["savedPrompt"], "Protected draft")
 
@@ -2049,7 +2049,7 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "get", task_id, expected_status=3)
         self.assert_failure(response, "not_found")
 
-    # case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while backing out saves an unsent prompt; reopening restores the draft without creating a branch or worktree, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
+    # case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while the composer automatically saves an unsent prompt as it is typed; clearing the composer clears the stored draft, backing out needs no Save button, and reopening restores the draft without creating a branch or worktree. Blank drafts cannot be stored, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
     def test_task_prompt_draft_persists_after_back(self):
         suggestions, _ = self.call_cli("workspace", "suggest", "--parent", self.fixture / "suggested-parent")
         self.assertIn(str(self.primary), self.assert_success(suggestions)["repositories"])
@@ -2073,6 +2073,10 @@ class StationAIBridgeTests(unittest.TestCase):
         reopened_task = self.assert_success(reopened)
         self.assertEqual(reopened_task["savedPrompt"], prompt)
         self.assertEqual(reopened_task["status"], "Backlog")
+        cleared, _ = self.call_cli("task", "prompt", task_id, "--text", "")
+        self.assertIsNone(self.assert_success(cleared).get("savedPrompt"))
+        restored, _ = self.call_cli("task", "prompt", task_id, "--text", prompt)
+        self.assertEqual(self.assert_success(restored)["savedPrompt"], prompt)
         self.assertEqual(reopened_task["title"], "Stable draft title")
 
         delayed_task = self.create_task(title="Untitled task", roots=[self.primary])

@@ -2719,7 +2719,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "New conversation shows its empty state")
     }
 
-    // case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while backing out saves an unsent prompt; reopening restores the draft without creating a branch or worktree, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
+    // case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while the composer automatically saves an unsent prompt as it is typed; clearing the composer clears the stored draft, backing out needs no Save button, and reopening restores the draft without creating a branch or worktree. Blank drafts cannot be stored, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
     func test_task_prompt_draft_persists_after_back() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-title-success-wait").path
         launchApp(defaultParent: fixture.parent.path)
@@ -2727,6 +2727,7 @@ final class StationAIUITests: XCTestCase {
         chooseRepositorySuggestion("primary")
         let composer = element("message-composer")
         XCTAssertTrue(composer.waitForExistence(timeout: 10), "Task creation should open its conversation immediately.")
+        XCTAssertFalse(element("save-task-prompt-button").exists, "Drafts should save automatically without a separate Save button.")
         let initialTask = try XCTUnwrap(tasksFromBoardList().first)
         let selectedRepository = try XCTUnwrap((initialTask["repositoryWorktrees"] as? [[String: Any]])?.first?["repositoryPath"] as? String)
         XCTAssertEqual(selectedRepository, fixture.primary.path)
@@ -2737,6 +2738,19 @@ final class StationAIUITests: XCTestCase {
         let prompt = "Please update the README and explain the change."
         composer.click()
         composer.typeText(prompt)
+        let taskID = try XCTUnwrap(initialTask["id"] as? String)
+        XCTAssertTrue(waitUntil({
+            ((try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) ?? nil) == prompt
+        }, timeout: 10), "The draft should persist while it is being typed.")
+        composer.typeKey("a", modifierFlags: .command)
+        composer.typeKey(.delete, modifierFlags: [])
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) == nil
+        }, timeout: 10), "Clearing the composer should clear the persisted draft.")
+        composer.typeText(prompt)
+        XCTAssertTrue(waitUntil({
+            ((try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) ?? nil) == prompt
+        }, timeout: 10), "Typing again should autosave the replacement draft.")
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
         let titleGenerationReady = URL(fileURLWithPath: codexFixtureExecutable! + ".resolve-ready")
@@ -2744,7 +2758,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: titleGenerationReady.path) }, timeout: 10), "The real app-server fixture should confirm that title generation is in flight.")
         let tasks = try tasksFromBoardList()
         let task = try XCTUnwrap(tasks.first)
-        let taskID = try XCTUnwrap(task["id"] as? String)
+        XCTAssertEqual(task["id"] as? String, taskID)
         let response = try runCLI(["task", "get", taskID])["result"] as? [String: Any]
         XCTAssertEqual(response?["savedPrompt"] as? String, prompt)
         XCTAssertEqual(response?["status"] as? String, "Backlog")
@@ -4088,8 +4102,8 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15), "The direct-created task should expose its conversation composer.")
         composer.click()
         composer.typeText(prompt ?? title)
-        element("save-task-prompt-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "Saving the task prompt should return to the board.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "Returning to the board should preserve the automatically saved prompt.")
         guard let task = try? tasksFromBoardList().first, let taskID = task["id"] as? String else {
             XCTFail("The created task should remain in Backlog after saving its prompt.")
             return
