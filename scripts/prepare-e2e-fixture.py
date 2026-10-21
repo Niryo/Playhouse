@@ -132,8 +132,16 @@ def prepare(workspace_changes: bool = False) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--fixture-root",
+        type=Path,
+        default=FIXTURE_ROOT,
+        help="directory for the owned deterministic Git fixture",
+    )
+    parser.add_argument(
         "--workspace-changes",
         action="store_true",
         help="prepare the owned Git fixture with staged and working changes for the UI case",
     )
-    prepare(workspace_changes=parser.parse_args().workspace_changes)
+    arguments = parser.parse_args()
+    FIXTURE_ROOT = arguments.fixture_root
+    prepare(workspace_changes=arguments.workspace_changes)

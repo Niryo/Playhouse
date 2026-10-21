@@ -31,6 +31,7 @@ if [[ "${STATIONAI_UI_TESTS_CONFIRMED:-0}" != "1" ]]; then
   bash "${repository_root}/scripts/confirm-ui-tests.sh"
 fi
 
+test_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/stationai-ui.XXXXXX")"
 prepare_workspace_changes=0
 if (( ${#ui_cases[@]} == 0 )); then
   prepare_workspace_changes=1
@@ -43,12 +44,12 @@ else
   done
 fi
 
+fixture_root="/tmp/stationai-ui-test-fixtures"
 if (( prepare_workspace_changes == 1 )); then
-  python3 "${repository_root}/scripts/prepare-e2e-fixture.py" --workspace-changes
+  python3 "${repository_root}/scripts/prepare-e2e-fixture.py" --fixture-root "${fixture_root}" --workspace-changes
 else
-  python3 "${repository_root}/scripts/prepare-e2e-fixture.py"
+  python3 "${repository_root}/scripts/prepare-e2e-fixture.py" --fixture-root "${fixture_root}"
 fi
-fixture_root="/tmp/stationai-bridge-workspaces"
 fixture_owner="StationAI bridge tests own this deterministic fixture (v1)."
 if [[ "$(cat "${fixture_root}/.stationai-bridge-fixture" 2>/dev/null || true)" != "${fixture_owner}" ]]; then
   printf 'Refusing to prepare UI Codex fixtures without the owned fixture root marker.\n' >&2
@@ -110,7 +111,6 @@ PY
 )
 fi
 
-test_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/stationai-ui.XXXXXX")"
 dashboard_script="${repository_root}/scripts/ui-test-dashboard.py"
 dashboard_state="${test_output_dir}/dashboard.json"
 dashboard_log="${test_output_dir}/xcodebuild.log"

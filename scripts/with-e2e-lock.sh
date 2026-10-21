@@ -2,7 +2,13 @@
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-lock_path="${repository_root}/.e2e.lock"
+common_git_dir="$(git -C "${repository_root}" rev-parse --git-common-dir)"
+if [[ "${common_git_dir}" != /* ]]; then
+  common_git_dir="${repository_root}/${common_git_dir}"
+fi
+common_git_dir="$(cd "${common_git_dir}" && pwd -P)"
+shared_repository_root="$(cd "${common_git_dir}/.." && pwd -P)"
+lock_path="${shared_repository_root}/.e2e.lock"
 
 if (($# == 0)); then
   printf 'Usage: %s -- <command> [args...]\n' "$0" >&2

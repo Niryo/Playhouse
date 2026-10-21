@@ -64,12 +64,15 @@ trap cleanup EXIT
 python3 "${repository_root}/scripts/check-test-parity.py"
 python3 "${repository_root}/scripts/check-button-feedback.py"
 
-xcodebuild build -quiet \
+# Compile the paired UI test target without launching the app so UI-only source
+# errors are caught by the fast verification path.
+xcodebuild build-for-testing -quiet \
   -project "${repository_root}/StationAI.xcodeproj" \
   -scheme StationAI \
   -configuration Debug \
   -destination "platform=macOS,arch=${architecture}" \
   -derivedDataPath "${derived_data_dir}" \
+  -only-testing:StationAIUITests/StationAIUITests \
   CODE_SIGNING_ALLOWED=YES \
   CODE_SIGN_IDENTITY=- \
   ARCHS="${architecture}" \

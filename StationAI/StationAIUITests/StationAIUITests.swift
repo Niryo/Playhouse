@@ -358,7 +358,9 @@ final class StationAIUITests: XCTestCase {
         assertHelpTag(for: editRoots, equals: "Edit working folders for this task")
         editRoots.click()
         XCTAssertTrue(element("browse-workspace-roots-button").waitForExistence(timeout: 5))
+        element("browse-workspace-roots-button").click()
         try chooseFolder(in: openFolderPanel, folder: fixture.custom, confirmationButton: "Add Folders")
+        element("save-workspace-roots-button").click()
         saveNewTaskPromptAndReturnToBoard("Ordered roots")
         openTask(named: "Ordered roots")
         let task = try XCTUnwrap(taskRecord(named: "Ordered roots"))
@@ -922,7 +924,7 @@ final class StationAIUITests: XCTestCase {
 
         try createTaskFixture(title: "In Progress layout", roots: [fixture.alternate.path])
         let activeTaskID = try taskID(named: "In Progress layout")
-        let activeExecutable = URL(fileURLWithPath: "/tmp/stationai-bridge-workspaces/codex-fixture-progress-hold-release")
+        let activeExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-progress-hold-release")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: activeExecutable.path))
         let activeTurn = try startProgressFixtureTurn(taskID: activeTaskID, executable: activeExecutable)
         defer {
@@ -1000,7 +1002,7 @@ final class StationAIUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Progress reports", roots: [fixture.primary.path])
         let taskID = try taskID(named: "Progress reports")
-        let executable = URL(fileURLWithPath: "/tmp/stationai-bridge-workspaces/codex-fixture-progress-hold-release")
+        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-progress-hold-release")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
         codexFixtureExecutable = executable.path
         let activeMarker = URL(fileURLWithPath: executable.path + ".turn-active")
@@ -1103,7 +1105,7 @@ final class StationAIUITests: XCTestCase {
             let title = "Progress \(expectedReason)"
             try createTaskFixture(title: title, roots: [fixture.primary.path])
             let taskID = try taskID(named: title)
-            let executable = URL(fileURLWithPath: "/tmp/stationai-bridge-workspaces/\(fixtureName)")
+            let executable = WorkspaceFixture.root.appendingPathComponent(fixtureName)
             let turn = try startProgressFixtureTurn(taskID: taskID, executable: executable)
             heldTurns.append((turn.process, turn.activeMarker, turn.releaseMarker))
             XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: turn.activeMarker.path) }, timeout: 10))
@@ -1124,7 +1126,7 @@ final class StationAIUITests: XCTestCase {
             XCTAssertTrue(waitForDisappearance(report), "A failed or interrupted turn should remove its progress row from the card.")
         }
 
-        let questionFixture = URL(fileURLWithPath: "/tmp/stationai-bridge-workspaces/codex-fixture-progress-question")
+        let questionFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-progress-question")
         codexFixtureExecutable = questionFixture.path
         app.launchEnvironment["STATIONAI_E2E_CODEX_EXECUTABLE"] = questionFixture.path
         relaunchApp()
@@ -1245,7 +1247,7 @@ final class StationAIUITests: XCTestCase {
         conversationReservationReleased = true
         XCTAssertTrue(waitUntil({
             guard let current = try? self.taskRecord(id: taskID),
-                  let roots = current?["workspaceRoots"] as? [String] else { return false }
+                  let roots = current["workspaceRoots"] as? [String] else { return false }
             return roots != [self.fixture.primary.path]
         }, timeout: 10), "The saved workspace roots should update after the conversation turn releases its reservation.")
         let taskAfterEdit = try XCTUnwrap(taskRecord(named: "Edit roots"))
@@ -2084,7 +2086,7 @@ final class StationAIUITests: XCTestCase {
 
     // case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while backing out saves an unsent prompt; reopening restores the draft without creating a branch or worktree, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
     func test_task_prompt_draft_persists_after_back() throws {
-        codexFixtureExecutable = "/tmp/stationai-bridge-workspaces/codex-fixture-title-success-wait"
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-title-success-wait").path
         launchApp(defaultParent: fixture.parent.path)
         openNewTaskConversation()
         chooseRepositorySuggestion("primary")
@@ -2185,7 +2187,7 @@ final class StationAIUITests: XCTestCase {
         let isLiveIntegration = FileManager.default.fileExists(atPath: "/tmp/stationai-codex-live-ui-integration")
         if !isLiveIntegration {
             app.terminate()
-            codexFixtureExecutable = "/tmp/stationai-bridge-workspaces/codex-fixture-title-success"
+            codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-title-success").path
             launchApp(defaultParent: fixture.parent.path)
             let titleTask = try XCTUnwrap(
                 (try runCLI(["task", "create", "--title", "Untitled task", "--repo", fixture.primary.path])["result"] as? [String: Any])
@@ -2226,7 +2228,7 @@ final class StationAIUITests: XCTestCase {
             _ = try runCLI(["task", "rename", titleTaskID, "--title", "Generated title success"])
             element("back-to-board-button").click()
 
-            codexFixtureExecutable = "/tmp/stationai-bridge-workspaces/codex-fixture-title-failure"
+            codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-title-failure").path
             app.terminate()
             launchApp(defaultParent: fixture.parent.path)
             let failureTask = try XCTUnwrap(
@@ -2541,7 +2543,7 @@ final class StationAIUITests: XCTestCase {
 
     // case-contract: test_conversation_shows_subagent_delegation | When Codex delegates a task to a subagent, the conversation activity shows the delegated task and its completion status during the turn and after history reload.
     func test_conversation_shows_subagent_delegation() throws {
-        let fixtureRoot = URL(fileURLWithPath: "/tmp/stationai-bridge-workspaces", isDirectory: true)
+        let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
         XCTAssertEqual(
             try String(contentsOf: fixtureOwnerMarker, encoding: .utf8),
@@ -2582,7 +2584,7 @@ final class StationAIUITests: XCTestCase {
 
     // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; a completed <proposed_plan> is automatically rendered as Markdown without exposing its wrapper tags, including after reopening, while bridge history preserves the exact source.
     func test_plan_mode_renders_markdown_in_conversation() throws {
-        let fixtureRoot = URL(fileURLWithPath: "/tmp/stationai-bridge-workspaces", isDirectory: true)
+        let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
         XCTAssertEqual(
             try String(contentsOf: fixtureOwnerMarker, encoding: .utf8),
@@ -2708,7 +2710,7 @@ final class StationAIUITests: XCTestCase {
         let created = try runCLI(["task", "create", "--title", "Codex questions", "--root", fixture.primary.path])
         XCTAssertEqual(created["ok"] as? Bool, true)
         let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
-        codexFixtureExecutable = "/tmp/stationai-bridge-workspaces/codex-fixture-plan-slow"
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-plan-slow").path
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Codex questions")
         let modeMenu = element("conversation-mode-menu")
@@ -2805,7 +2807,7 @@ final class StationAIUITests: XCTestCase {
     // case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions remain visible without moving the task out of In Progress, then successful completion moves it to Review.
     func test_codex_nonblocking_question_keeps_task_in_progress() throws {
         _ = try runCLI(["task", "create", "--title", "Non-blocking question", "--root", fixture.primary.path])
-        codexFixtureExecutable = "/tmp/stationai-bridge-workspaces/codex-fixture-nonblocking-slow"
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-nonblocking-slow").path
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Non-blocking question")
         element("message-composer").click()
@@ -2832,7 +2834,7 @@ final class StationAIUITests: XCTestCase {
     // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes persist Blocked across connections, and diagnostics identify the failed turn phase and store path; a new prompt can finish in Review.
     func test_codex_interrupted_turn_blocks_with_reason_and_can_retry() throws {
         _ = try runCLI(["task", "create", "--title", "Interrupted turn", "--root", fixture.primary.path])
-        codexFixtureExecutable = URL(fileURLWithPath: "/tmp/stationai-bridge-workspaces/codex-fixture-interrupted").path
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-interrupted").path
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Interrupted turn")
         element("message-composer").click()
@@ -2874,7 +2876,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(named: "Interrupted turn")?["status"] as? String, "Review")
 
         _ = try runCLI(["task", "create", "--title", "Reopen active turn", "--root", fixture.primary.path])
-        codexFixtureExecutable = "/tmp/stationai-bridge-workspaces/codex-fixture-hold"
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-hold").path
         app.launchEnvironment["STATIONAI_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
         relaunchApp()
         openTask(named: "Reopen active turn")
@@ -3059,7 +3061,7 @@ final class StationAIUITests: XCTestCase {
     }
 
     private func makeCodexFixture(emptyQuestions: Bool, nonblocking: Bool = false) throws -> URL {
-        let executable = URL(fileURLWithPath: "/tmp/stationai-bridge-workspaces", isDirectory: true)
+        let executable = WorkspaceFixture.root
             .appendingPathComponent(emptyQuestions ? "codex-fixture-empty" : (nonblocking ? "codex-fixture-nonblocking" : "codex-fixture-ui"))
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path), "The prepared Codex fixture is missing or not executable.")
         return executable
@@ -3627,7 +3629,7 @@ final class StationAIUITests: XCTestCase {
 }
 
 private struct WorkspaceFixture {
-    static let root = URL(fileURLWithPath: "/tmp/stationai-bridge-workspaces", isDirectory: true)
+    static let root = URL(fileURLWithPath: "/tmp/stationai-ui-test-fixtures", isDirectory: true)
     static let ownerMarker = ".stationai-bridge-fixture"
     static let ownerContents = "StationAI bridge tests own this deterministic fixture (v1).\n"
 
@@ -3648,7 +3650,7 @@ private struct WorkspaceFixture {
         let marker = root.appendingPathComponent(ownerMarker)
         guard let contents = try? String(contentsOf: marker, encoding: .utf8), contents == ownerContents else {
             throw NSError(domain: "StationAIUITests", code: 2, userInfo: [
-                NSLocalizedDescriptionKey: "The deterministic Git fixtures are missing or not owned by StationAI. Run scripts/test-e2e.sh first."
+                NSLocalizedDescriptionKey: "The deterministic Git fixtures are missing or not owned by StationAI. Run scripts/test-ui.sh first."
             ])
         }
         let parent = root.appendingPathComponent("suggested-parent", isDirectory: true)

@@ -8,6 +8,8 @@
 	<array>
 		<string>/tmp/stationai-bridge-workspaces/</string>
 		<string>/private/tmp/stationai-bridge-workspaces/</string>
+		<string>/tmp/stationai-ui-test-fixtures/</string>
+		<string>/private/tmp/stationai-ui-test-fixtures/</string>
 	</array>
 </dict>
 </plist>
