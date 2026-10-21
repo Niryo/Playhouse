@@ -43,9 +43,7 @@ stationai_load_app_profile() {
 stationai_verify_build_identity() {
   local bundle_id="${1:?Expected the app bundle identifier}"
   if [[ "${bundle_id}" == "${STATIONAI_PROFILE_BUNDLE_ID}" ||
-        "${bundle_id}" == com.stationai.app.e2e.* ||
-        "${bundle_id}" == "${STATIONAI_PROFILE_BUNDLE_ID}".e2e.* ||
-        "${bundle_id}" =~ ^com\.stationai\.app\.worktree\.w[0-9a-f]{16}\.e2e\.[a-z0-9.]+$ ]]; then
+        "${bundle_id}" == "${STATIONAI_PROFILE_BUNDLE_ID}".e2e.* ]]; then
     return 0
   fi
   printf 'Bundle ID %s does not match this worktree profile (%s). Build with scripts/run.sh or pass STATIONAI_APP_BUNDLE_IDENTIFIER=%s.\n' \
