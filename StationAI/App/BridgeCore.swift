@@ -75,7 +75,7 @@ enum StationAIStore {
 
     static func storeURL(dataDirectory: String? = nil) throws -> URL {
         if let dataDirectory {
-            if StationAIAppIdentity.worktreeKey != nil && !StationAIAppIdentity.isTestBundle {
+            if !StationAIAppIdentity.isTestBundle {
                 let requested = URL(fileURLWithPath: dataDirectory, isDirectory: true)
                     .resolvingSymlinksInPath().standardizedFileURL
                 let expected = try StationAIAppIdentity.defaultDataDirectory()
@@ -84,10 +84,10 @@ enum StationAIStore {
                     throw StoreSchemaRepairError("This StationAI worktree app cannot open another app’s task store.")
                 }
             }
-            return URL(fileURLWithPath: dataDirectory, isDirectory: true).appendingPathComponent("StationAI.store")
+            return URL(fileURLWithPath: dataDirectory, isDirectory: true).appendingPathComponent("StationAI-v2.store")
         }
         let supportDirectory = try StationAIAppIdentity.defaultDataDirectory()
-        return supportDirectory.appendingPathComponent("StationAI.store")
+        return supportDirectory.appendingPathComponent("StationAI-v2.store")
     }
 
     static func makeContainer(dataDirectory: String? = nil) throws -> ModelContainer {
@@ -111,12 +111,13 @@ enum StationAIStore {
         StationAIDiagnostics.useDataDirectory(dataDirectory)
         do {
             try FileManager.default.createDirectory(at: storeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if (try? storeNeedsPendingPromptColumn(storeURL)) == true {
+            if (try? storeNeedsPendingPromptColumn(storeURL)) == true || FileManager.default.fileExists(atPath: storeURL.deletingLastPathComponent().appendingPathComponent("StationAI.store").path) {
                 StationAIDiagnostics.recordAndFlush("persistence.store.schema_migration.waiting_for_schema_lock", fields: [
                     "storePath": storeURL.path
                 ])
             }
             return try withSchemaRepairLock(at: storeURL) {
+                try importLegacyStoreIfNeeded(at: storeURL)
                 // A legacy store can have both an old model hash and a missing column.
                 // Opening SwiftData first can fail before the table repair is reached.
                 let configuration = ModelConfiguration(
@@ -183,7 +184,7 @@ enum StationAIStore {
         }
         for suffix in ["", "-wal", "-shm"] {
             let candidate = URL(fileURLWithPath: dataDirectory, isDirectory: true)
-                .appendingPathComponent("StationAI.store" + suffix)
+                .appendingPathComponent("StationAI-v2.store" + suffix)
             var metadata = stat()
             if Darwin.lstat(candidate.path, &metadata) == 0,
                metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFLNK) {
@@ -278,6 +279,61 @@ enum StationAIStore {
         defer { sqlite3_close(database) }
         sqlite3_busy_timeout(database, 5_000)
         return try body(database)
+    }
+
+    // A new filename keeps binaries predating the compatibility contract away from
+    // live data. Import a consistent SQLite snapshot once; never reopen the legacy
+    // path with SwiftData or overwrite an already imported store.
+    private static func importLegacyStoreIfNeeded(at destination: URL) throws {
+        guard !FileManager.default.fileExists(atPath: destination.path) else { return }
+        let source = destination.deletingLastPathComponent().appendingPathComponent("StationAI.store")
+        guard FileManager.default.fileExists(atPath: source.path) else { return }
+        var metadata = stat()
+        guard Darwin.lstat(source.path, &metadata) == 0,
+              metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
+            throw StoreSchemaRepairError("The legacy task store must be a regular file.")
+        }
+        let temporary = destination.deletingLastPathComponent()
+            .appendingPathComponent(".store-import-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        var input: OpaquePointer?
+        guard sqlite3_open_v2(source.path, &input, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let input else {
+            if let input { sqlite3_close(input) }
+            throw StoreSchemaRepairError("Couldn't read the legacy task store for import.")
+        }
+        defer { sqlite3_close(input) }
+        let descriptor = Darwin.open(temporary.path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, mode_t(0o600))
+        guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        _ = Darwin.close(descriptor)
+        try withSQLite(at: temporary) { output in
+            guard let backup = sqlite3_backup_init(output, "main", input, "main") else {
+                throw StoreSchemaRepairError("Couldn't start the legacy task store snapshot.")
+            }
+            var status = sqlite3_backup_step(backup, -1)
+            var retries = 0
+            while (status == SQLITE_BUSY || status == SQLITE_LOCKED) && retries < 100 {
+                sqlite3_sleep(50)
+                status = sqlite3_backup_step(backup, -1)
+                retries += 1
+            }
+            let finished = sqlite3_backup_finish(backup)
+            guard status == SQLITE_DONE, finished == SQLITE_OK else {
+                throw StoreSchemaRepairError("Couldn't complete the legacy task store snapshot.")
+            }
+            var check: OpaquePointer?
+            guard sqlite3_prepare_v2(output, "PRAGMA quick_check", -1, &check, nil) == SQLITE_OK else {
+                throw StoreSchemaRepairError("Couldn't check the imported task store.")
+            }
+            defer { sqlite3_finalize(check) }
+            guard sqlite3_step(check) == SQLITE_ROW, let result = sqlite3_column_text(check, 0),
+                  String(cString: result) == "ok" else {
+                throw StoreSchemaRepairError("The legacy task store failed its integrity check.")
+            }
+        }
+        try FileManager.default.moveItem(at: temporary, to: destination)
+        StationAIDiagnostics.recordAndFlush("persistence.store.legacy_imported", fields: [
+            "legacyPath": source.path, "storePath": destination.path
+        ])
     }
 
     private static func storeNeedsPendingPromptColumn(_ url: URL) throws -> Bool {

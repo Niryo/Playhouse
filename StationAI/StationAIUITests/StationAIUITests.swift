@@ -3,6 +3,7 @@ import CoreGraphics
 import Darwin
 import Foundation
 import XCTest
+import SQLite3
 
 private struct RunningCLIProcess {
     let process: Process
@@ -332,6 +333,29 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "StationAI board opened with a healthy bridge")
     }
 
+    // case-contract: test_app_override_rejects_incompatible_bundles | Explicit app overrides reject obsolete compatibility metadata, foreign worktree or bridge identities, and nonisolated test data before launching; the current app preserves a saved draft across restart.
+    func test_app_override_rejects_incompatible_bundles() throws {
+        let root = try XCTUnwrap(ProcessInfo.processInfo.environment["STATIONAI_REPOSITORY_ROOT"])
+        launchApp(defaultParent: fixture.parent.path)
+        openNewTaskConversation()
+        chooseRepositorySuggestion("primary")
+        saveNewTaskPromptAndReturnToBoard("Protected store", prompt: "Protected draft")
+        XCTAssertTrue(terminateAppAndWait(app))
+        let check = Process()
+        check.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        check.arguments = ["python3", root + "/scripts/check-app-launch-contract.py", appBundle.path, root, dataDirectory.path]
+        let output = Pipe()
+        check.standardOutput = output
+        check.standardError = output
+        try check.run()
+        let text = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        check.waitUntilExit()
+        XCTAssertEqual(check.terminationStatus, 0, text)
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Protected store")
+        XCTAssertEqual(element("message-composer").value as? String, "Protected draft")
+    }
+
     // case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots; a saved conversation remains visible after an app restart.
     func test_worktree_app_profiles_isolate_identity_and_store() throws {
         guard let repositoryRoot = ProcessInfo.processInfo.environment["STATIONAI_REPOSITORY_ROOT"] else {
@@ -380,7 +404,7 @@ final class StationAIUITests: XCTestCase {
         relaunchApp()
         openTask(named: "Worktree profile")
         XCTAssertEqual(element("message-composer").value as? String, "Keep this draft after restart.")
-        let store = dataDirectory.appendingPathComponent("StationAI.store")
+        let store = dataDirectory.appendingPathComponent("StationAI-v2.store")
         let log = dataDirectory.appendingPathComponent("Diagnostics.jsonl")
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.path))
         let diagnostics = try String(contentsOf: log, encoding: .utf8)
@@ -665,7 +689,7 @@ final class StationAIUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         let failureDirectory = dataDirectory.appendingPathComponent("invalid-store-open", isDirectory: true)
         try FileManager.default.createDirectory(at: failureDirectory, withIntermediateDirectories: true)
-        let store = failureDirectory.appendingPathComponent("StationAI.store", isDirectory: true)
+        let store = failureDirectory.appendingPathComponent("StationAI-v2.store", isDirectory: true)
         try FileManager.default.createDirectory(at: store, withIntermediateDirectories: false)
 
         let failedResponse = try runCLI(
@@ -707,7 +731,7 @@ final class StationAIUITests: XCTestCase {
             ["task", "create", "--title", "Missing column read failure", "--root", fixture.primary.path],
             extraEnvironment: ["STATIONAI_DATA_DIRECTORY": failureDirectory.path]
         )
-        let store = failureDirectory.appendingPathComponent("StationAI.store")
+        let store = failureDirectory.appendingPathComponent("StationAI-v2.store")
         let corrupt = Process()
         corrupt.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
         corrupt.arguments = [store.path, "ALTER TABLE ZBOARDTASK DROP COLUMN ZPROGRESSLABEL"]
@@ -759,10 +783,32 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5), "The normal app board should stay available while the isolated bridge store fails.")
     }
 
-    // case-contract: test_task_store_repairs_missing_pending_prompt_column | A real legacy SwiftData task store with old model metadata and no submitted-prompt column waits for the store-write lock while app and CLI/XPC open concurrently, is backed up before migration, and preserves its task and draft after a visible restart; metadata advances and later opens create no additional backup.
+    // case-contract: test_legacy_store_import_failure_preserves_original | An invalid legacy database fails import without changing the source or publishing a destination or partial snapshot; the normal isolated board remains usable.
+    func test_legacy_store_import_failure_preserves_original() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        let failure = dataDirectory.appendingPathComponent("invalid-legacy", isDirectory: true)
+        try FileManager.default.createDirectory(at: failure, withIntermediateDirectories: true)
+        let source = failure.appendingPathComponent("StationAI.store")
+        let contents = Data("Not a SQLite database".utf8)
+        try contents.write(to: source)
+        let response = try runCLI(["task", "list"], expectedStatus: 1, extraEnvironment: ["STATIONAI_DATA_DIRECTORY": failure.path])
+        XCTAssertEqual(response["ok"] as? Bool, false)
+        XCTAssertEqual(try Data(contentsOf: source), contents)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: failure.appendingPathComponent("StationAI-v2.store").path))
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: failure.path).contains { $0.hasPrefix(".store-import-") })
+        XCTAssertEqual(app.state, .runningForeground)
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        openNewTaskConversation()
+        chooseRepositorySuggestion("primary")
+        saveNewTaskPromptAndReturnToBoard("Healthy board", prompt: "Still usable")
+        openTask(named: "Healthy board")
+        XCTAssertEqual(element("message-composer").value as? String, "Still usable")
+    }
+
+    // case-contract: test_task_store_repairs_missing_pending_prompt_column | A real legacy SwiftData task store with old model metadata and no submitted-prompt column waits for the store-write lock while app and CLI/XPC open concurrently, is backed up before migration, and preserves its task and draft after a visible restart; metadata advances and later opens create no additional backup. The store is imported once into the protected filename and the legacy database remains unchanged. Committed WAL-only draft data survives import, and a subsequent edited draft survives restart without reimport.
     func test_task_store_repairs_missing_pending_prompt_column() throws {
         let title = "Legacy pending prompt store"
-        let draft = "Keep this draft through the store repair."
+        let draft = "Committed WAL draft must survive import."
         let seeder = WorkspaceFixture.root.appendingPathComponent("seed-legacy-task-store")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: seeder.path))
         let seed = Process()
@@ -776,7 +822,8 @@ final class StationAIUITests: XCTestCase {
         let seeded = String(data: seedOutput.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         XCTAssertEqual(seed.terminationStatus, 0, seeded)
         let taskID = seeded.trimmingCharacters(in: .whitespacesAndNewlines)
-        let store = dataDirectory.appendingPathComponent("StationAI.store")
+        let store = dataDirectory.appendingPathComponent("StationAI-v2.store")
+        let legacyStore = dataDirectory.appendingPathComponent("StationAI.store")
         func sqlite(_ statement: String, at databaseURL: URL) throws -> String {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
@@ -790,9 +837,15 @@ final class StationAIUITests: XCTestCase {
             XCTAssertEqual(process.terminationStatus, 0, "SQLite fixture operation failed: \(text)")
             return text
         }
-        XCTAssertFalse(try sqlite("PRAGMA table_info(ZBOARDTASK)", at: store).contains("ZPENDINGSUBMITTEDPROMPT"))
-        XCTAssertEqual(try sqlite("SELECT count(*) FROM ZBOARDTASK", at: store).trimmingCharacters(in: .whitespacesAndNewlines), "1")
-        let legacyMetadata = try sqlite("SELECT hex(Z_PLIST) FROM Z_METADATA", at: store)
+        XCTAssertFalse(try sqlite("PRAGMA table_info(ZBOARDTASK)", at: legacyStore).contains("ZPENDINGSUBMITTEDPROMPT"))
+        XCTAssertEqual(try sqlite("SELECT count(*) FROM ZBOARDTASK", at: legacyStore).trimmingCharacters(in: .whitespacesAndNewlines), "1")
+        let legacyMetadata = try sqlite("SELECT hex(Z_PLIST) FROM Z_METADATA", at: legacyStore)
+        var wal: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(legacyStore.path, &wal), SQLITE_OK)
+        defer { sqlite3_close(wal) }
+        XCTAssertEqual(sqlite3_exec(wal, "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; UPDATE ZBOARDTASK SET ZSAVEDPROMPT='Committed WAL draft must survive import.'", nil, nil, nil), SQLITE_OK)
+        XCTAssertGreaterThan(try Data(contentsOf: URL(fileURLWithPath: legacyStore.path + "-wal")).count, 0)
+        let legacyBytes = try Data(contentsOf: legacyStore)
 
         let writeBarrier = try TaskStoreWriteLockBarrier(dataDirectory: dataDirectory)
         defer { try? writeBarrier.release() }
@@ -847,6 +900,7 @@ final class StationAIUITests: XCTestCase {
         }
         XCTAssertEqual(try sqlite("PRAGMA table_info(ZBOARDTASK)", at: store).contains("ZPENDINGSUBMITTEDPROMPT"), true)
         XCTAssertNotEqual(try sqlite("SELECT hex(Z_PLIST) FROM Z_METADATA", at: store), legacyMetadata)
+        XCTAssertEqual(try Data(contentsOf: legacyStore), legacyBytes)
         let migrationEvents = try diagnosticEvents()
         XCTAssertTrue(migrationEvents.contains { $0["event"] as? String == "persistence.store.schema_migration.write_lock_acquired" })
         XCTAssertFalse(migrationEvents.contains {
@@ -856,11 +910,19 @@ final class StationAIUITests: XCTestCase {
         openTask(named: title)
         XCTAssertEqual(element("message-composer").value as? String, draft)
 
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeKey("a", modifierFlags: .command)
+        composer.typeText("Edited after import")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        XCTAssertEqual(try taskRecord(id: taskID)?["savedPrompt"] as? String, "Edited after import")
         XCTAssertTrue(terminateAppAndWait(app))
         launchApp(defaultParent: fixture.parent.path)
         assertTaskVisible(title, inColumn: "Backlog")
         openTask(named: title)
-        XCTAssertEqual(element("message-composer").value as? String, draft)
+        XCTAssertEqual(element("message-composer").value as? String, "Edited after import")
+        XCTAssertEqual(try diagnosticEvents().filter { $0["event"] as? String == "persistence.store.legacy_imported" }.count, 1)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(at: dataDirectory, includingPropertiesForKeys: nil)
             .filter { $0.lastPathComponent.hasPrefix("StationAI.store.before-pending-prompt-") && $0.pathExtension == "backup" }.count, 1)
     }
@@ -894,12 +956,12 @@ final class StationAIUITests: XCTestCase {
             "code": "operation_failed",
             "message": "A StationAI test bundle requires an isolated temporary data directory."
         ])
-        XCTAssertFalse(FileManager.default.fileExists(atPath: unsafe.appendingPathComponent("StationAI.store").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: unsafe.appendingPathComponent("StationAI-v2.store").path))
         let linked = dataDirectory.appendingPathComponent("linked-store", isDirectory: true)
         try FileManager.default.createDirectory(at: linked, withIntermediateDirectories: false)
         try FileManager.default.createSymbolicLink(
-            at: linked.appendingPathComponent("StationAI.store"),
-            withDestinationURL: unsafe.appendingPathComponent("StationAI.store")
+            at: linked.appendingPathComponent("StationAI-v2.store"),
+            withDestinationURL: unsafe.appendingPathComponent("StationAI-v2.store")
         )
         let linkedDenied = try runCLI(
             ["board", "list"], expectedStatus: 1,
@@ -909,7 +971,7 @@ final class StationAIUITests: XCTestCase {
             "code": "operation_failed",
             "message": "A StationAI test bundle cannot open a linked task store."
         ])
-        XCTAssertFalse(FileManager.default.fileExists(atPath: unsafe.appendingPathComponent("StationAI.store").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: unsafe.appendingPathComponent("StationAI-v2.store").path))
         XCTAssertEqual(try taskRecord(id: taskID)?["title"] as? String, title)
         assertTaskVisible(title, inColumn: "Backlog")
     }
@@ -988,7 +1050,7 @@ final class StationAIUITests: XCTestCase {
         let waitedWrite = try XCTUnwrap(lockEvents.first {
             (Int($0["lockWaitMilliseconds"] as? String ?? "0") ?? 0) > 0
         }, "The final task write should log its wait for the shared store lock.")
-        XCTAssertEqual(waitedWrite["storePath"] as? String, dataDirectory.appendingPathComponent("StationAI.store").path)
+        XCTAssertEqual(waitedWrite["storePath"] as? String, dataDirectory.appendingPathComponent("StationAI-v2.store").path)
         let waitedWriteID = try XCTUnwrap(waitedWrite["writeID"] as? String)
         let matchingWrite = try XCTUnwrap(try diagnosticEvents().first {
             $0["taskID"] as? String == taskID
@@ -1008,7 +1070,7 @@ final class StationAIUITests: XCTestCase {
         let matchingReadStart = try XCTUnwrap(readEvents.first {
             $0["event"] as? String == "persistence.read.started" && $0["readID"] as? String == readID
         })
-        let expectedStorePath = dataDirectory.appendingPathComponent("StationAI.store").path
+        let expectedStorePath = dataDirectory.appendingPathComponent("StationAI-v2.store").path
         let snapshotPrefixes = ["storeDirectory", "storeFile", "storeWAL", "storeSHM"]
         for readEvent in [matchingReadStart, successfulRead] {
             XCTAssertEqual(readEvent["storePath"] as? String, expectedStorePath)
@@ -3532,7 +3594,7 @@ final class StationAIUITests: XCTestCase {
             $0["event"] as? String == "conversation.send.failed" && $0["taskID"] as? String == interruptedID
         })
         XCTAssertEqual(sendFailure["phase"] as? String, "codex-turn")
-        XCTAssertEqual(sendFailure["storePath"] as? String, dataDirectory.appendingPathComponent("StationAI.store").path)
+        XCTAssertEqual(sendFailure["storePath"] as? String, dataDirectory.appendingPathComponent("StationAI-v2.store").path)
 
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         app.launchEnvironment["STATIONAI_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable

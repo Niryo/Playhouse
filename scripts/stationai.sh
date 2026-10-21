@@ -28,17 +28,10 @@ if [[ ! -x "${cli_path}" ]]; then
   exit 69
 fi
 
-if [[ -z "${STATIONAI_BRIDGE_SERVICE_NAME:-}" ]]; then
-  service_info="${app_bundle}/Contents/XPCServices/StationAIBridge.xpc/Contents/Info.plist"
-  export STATIONAI_BRIDGE_SERVICE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${service_info}")"
-fi
-
-if [[ -z "${STATIONAI_APP_PATH:-}" ]]; then
-  if [[ "${STATIONAI_PROFILE_KIND}" == "linked" && -n "${STATIONAI_DATA_DIRECTORY:-}" && "${STATIONAI_DATA_DIRECTORY}" != "${STATIONAI_PROFILE_DATA_DIRECTORY}" ]]; then
-    printf 'stationai.sh uses this worktree’s isolated data directory; STATIONAI_DATA_DIRECTORY points elsewhere.\n' >&2
-    exit 2
-  fi
-  export STATIONAI_DATA_DIRECTORY="${STATIONAI_DATA_DIRECTORY:-${STATIONAI_PROFILE_DATA_DIRECTORY}}"
-fi
+STATIONAI_DATA_DIRECTORY="$(python3 "${repository_root}/scripts/validate-app-launch.py" \
+  "${app_bundle}" "${repository_root}" "${STATIONAI_PROFILE_BUNDLE_ID}" "${STATIONAI_PROFILE_DATA_DIRECTORY}")"
+export STATIONAI_DATA_DIRECTORY
+service_info="${app_bundle}/Contents/XPCServices/StationAIBridge.xpc/Contents/Info.plist"
+export STATIONAI_BRIDGE_SERVICE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${service_info}")"
 
 exec "${repository_root}/scripts/with-e2e-lock.sh" -- "${cli_path}" "$@"

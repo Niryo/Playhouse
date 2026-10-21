@@ -1219,7 +1219,7 @@ enum StationAIDiagnostics {
         } else {
             directory = FileManager.default.temporaryDirectory.appendingPathComponent("StationAI", isDirectory: true)
         }
-        return directory.appendingPathComponent("StationAI.store")
+        return directory.appendingPathComponent("StationAI-v2.store")
     }
 
     static func storeContextFields(for storeURL: URL?) -> [String: String] {

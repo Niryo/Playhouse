@@ -91,6 +91,19 @@ cat > "${service_contents}/Info.plist" <<PLIST
 </plist>
 PLIST
 
+# These are checked without launching the selected executable, including overrides.
+python3 - "${app_contents}/Info.plist" "${service_contents}/Info.plist" "${STATIONAI_PROFILE_ROOT}" <<'PYMETA'
+import plistlib
+import sys
+for path in sys.argv[1:3]:
+    with open(path, 'rb') as stream:
+        info = plistlib.load(stream)
+    info['StationAIStoreCompatibilityVersion'] = '2'
+    info['StationAISourceWorktree'] = sys.argv[3]
+    with open(path, 'wb') as stream:
+        plistlib.dump(info, stream)
+PYMETA
+
 chmod 755 "${cli_executable}" "${service_macos}/StationAIBridge"
 if [[ "${app_executable}" -ef "${cli_executable}" ]]; then
   printf 'The CLI must not replace the StationAI app executable: %s\n' "${app_executable}" >&2

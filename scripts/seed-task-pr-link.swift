@@ -14,7 +14,7 @@ struct SeedTaskPullRequestLink {
         }
 
         let dataDirectory = URL(fileURLWithPath: arguments[0], isDirectory: true)
-        let storeURL = dataDirectory.appendingPathComponent("StationAI.store")
+        let storeURL = dataDirectory.appendingPathComponent("StationAI-v2.store")
         let schema = Schema([BoardTask.self])
         let configuration = ModelConfiguration(
             "StationAI",
