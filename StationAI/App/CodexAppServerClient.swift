@@ -117,6 +117,7 @@ final class CodexAppServerClient: ObservableObject {
     private var outputPipe: Pipe?
     private var stderrPipe: Pipe?
     private var pendingRequests: [Int: CheckedContinuation<[String: Any], Error>] = [:]
+    private var pendingRequestDiagnostics: [Int: (method: String, startedAt: UInt64)] = [:]
     private var nextRequestID = 1
     private var initialized = false
     private var resumedThreadIDs = Set<String>()
@@ -331,6 +332,12 @@ final class CodexAppServerClient: ObservableObject {
     }
 
     func answerUserInput(requestID: String, threadID: String, answers: [String: [String]]) -> Bool {
+        StationAIDiagnostics.record("codex.user_input.answer.started", fields: [
+            "requestID": requestID,
+            "threadID": threadID,
+            "questionCount": String(answers.count),
+            "answerCount": String(answers.values.reduce(0) { $0 + $1.count })
+        ])
         guard let requestIDValue = pendingUserInputRequestID,
               String(describing: requestIDValue) == requestID,
               pendingUserInputThreadID == threadID else { return false }
@@ -342,6 +349,12 @@ final class CodexAppServerClient: ObservableObject {
                 return values.allSatisfy { allowedLabels.contains($0) || question.allowsOther }
             }
         guard answersAreValid else {
+            StationAIDiagnostics.record("codex.user_input.answer.failed", fields: [
+                "requestID": requestID,
+                "threadID": threadID,
+                "reason": "invalid_answer_shape",
+                "questionCount": String(answers.count)
+            ])
             self.pendingUserInputRequestID = nil
             pendingUserInputThreadID = nil
             pendingUserInputQuestions.removeAll()
@@ -356,8 +369,18 @@ final class CodexAppServerClient: ObservableObject {
             try sendJSON(["jsonrpc": "2.0", "id": requestIDValue,
                           "result": ["answers": answers.mapValues { ["answers": $0] }]])
             self.pendingUserInputRequest = nil
+            StationAIDiagnostics.record("codex.user_input.answer.succeeded", fields: [
+                "requestID": requestID,
+                "threadID": threadID,
+                "questionCount": String(answers.count),
+                "answerCount": String(answers.values.reduce(0) { $0 + $1.count })
+            ])
             return true
         } catch {
+            var fields = StationAIDiagnostics.errorFields(error)
+            fields["requestID"] = requestID
+            fields["threadID"] = threadID
+            StationAIDiagnostics.record("codex.user_input.answer.failed", fields: fields)
             actionRequestHandler?()
             return false
         }
@@ -470,6 +493,11 @@ final class CodexAppServerClient: ObservableObject {
 
         do {
             try child.run()
+            StationAIDiagnostics.record("codex.app_server.started", fields: diagnosticFields([
+                "executable": executablePath,
+                "workingDirectory": workspaceURL.path,
+                "processID": String(child.processIdentifier)
+            ]))
         } catch {
             stdout.fileHandleForReading.readabilityHandler = nil
             stderr.fileHandleForReading.readabilityHandler = nil
@@ -574,6 +602,21 @@ final class CodexAppServerClient: ObservableObject {
     private func request(method: String, params: [String: Any]) async throws -> [String: Any] {
         let requestID = nextRequestID
         nextRequestID += 1
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        pendingRequestDiagnostics[requestID] = (method, startedAt)
+        var fields = diagnosticFields([
+            "requestID": String(requestID),
+            "method": method,
+            "parameterNames": params.keys.sorted().joined(separator: ",")
+        ])
+        for key in ["threadId", "turnId", "cwd", "model", "sandbox", "approvalPolicy"] {
+            if let value = params[key] as? String { fields["parameter.\(key)"] = value }
+        }
+        if let roots = params["runtimeWorkspaceRoots"] as? [String] {
+            fields["workspaceRootCount"] = String(roots.count)
+            fields["workspaceRoots"] = roots.joined(separator: "\n")
+        }
+        StationAIDiagnostics.record("codex.rpc.request.started", fields: fields)
 
         return try await withCheckedThrowingContinuation { continuation in
             pendingRequests[requestID] = continuation
@@ -586,6 +629,12 @@ final class CodexAppServerClient: ObservableObject {
                 ])
             } catch {
                 pendingRequests.removeValue(forKey: requestID)
+                pendingRequestDiagnostics.removeValue(forKey: requestID)
+                var fields = StationAIDiagnostics.errorFields(error)
+                fields["requestID"] = String(requestID)
+                fields["method"] = method
+                fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
+                StationAIDiagnostics.record("codex.rpc.request.failed", fields: fields)
                 continuation.resume(throwing: error)
             }
         }
@@ -627,8 +676,14 @@ final class CodexAppServerClient: ObservableObject {
 
         if let method = message["method"] as? String {
             if let requestID = message["id"] {
-                await handleServerRequest(method: method, params: message["params"] as? [String: Any] ?? [:], requestID: requestID)
+                let params = message["params"] as? [String: Any] ?? [:]
+                StationAIDiagnostics.record("codex.rpc.server_request", fields: Self.diagnosticNotificationFields(method: method, params: params))
+                await handleServerRequest(method: method, params: params, requestID: requestID)
             } else {
+                StationAIDiagnostics.record("codex.notification", fields: Self.diagnosticNotificationFields(
+                    method: method,
+                    params: message["params"] as? [String: Any] ?? [:]
+                ))
                 handleNotification(method: method, params: message["params"] as? [String: Any] ?? [:])
             }
             return
@@ -638,15 +693,75 @@ final class CodexAppServerClient: ObservableObject {
               let continuation = pendingRequests.removeValue(forKey: requestID) else {
             return
         }
+        let requestDiagnostics = pendingRequestDiagnostics.removeValue(forKey: requestID)
+        let responseFields: [String: String] = [
+            "requestID": String(requestID),
+            "method": requestDiagnostics?.method ?? "unknown",
+            "responseBytes": String(line.count),
+            "durationMilliseconds": requestDiagnostics.map {
+                String((DispatchTime.now().uptimeNanoseconds - $0.startedAt) / 1_000_000)
+            } ?? ""
+        ]
 
         if let serverError = message["error"] as? [String: Any] {
             let detail = serverError["message"] as? String ?? "Codex returned an unspecified error."
+            StationAIDiagnostics.record("codex.rpc.response.failed", fields: responseFields.merging([
+                "errorCode": String(describing: serverError["code"] ?? "unknown"),
+                "errorDescription": "Codex returned an RPC error."
+            ]) { _, new in new })
             continuation.resume(throwing: Self.error(forServerMessage: detail))
         } else if let result = message["result"] as? [String: Any] {
+            StationAIDiagnostics.record("codex.rpc.response.succeeded", fields: responseFields.merging([
+                "resultFieldNames": result.keys.sorted().joined(separator: ",")
+            ]) { _, new in new })
             continuation.resume(returning: result)
         } else {
+            StationAIDiagnostics.record("codex.rpc.response.failed", fields: responseFields.merging([
+                "errorCode": "empty_response",
+                "errorDescription": "Codex returned an empty response."
+            ]) { _, new in new })
             continuation.resume(throwing: ClientError.protocolFailure("Codex returned an empty response."))
         }
+    }
+
+    private static func diagnosticNotificationFields(method: String, params: [String: Any]) -> [String: String] {
+        var fields: [String: String] = [
+            "method": method,
+            "parameterNames": params.keys.sorted().joined(separator: ",")
+        ]
+        for key in ["threadId", "itemId"] {
+            if let value = params[key] as? String { fields[key] = value }
+        }
+        if let turn = params["turn"] as? [String: Any] {
+            fields["turnID"] = turn["id"] as? String ?? ""
+            fields["turnStatus"] = turn["status"] as? String ?? ""
+        }
+        if let item = params["item"] as? [String: Any] {
+            fields["itemID"] = item["id"] as? String ?? ""
+            fields["itemType"] = item["type"] as? String ?? ""
+            fields["itemStatus"] = item["status"] as? String ?? ""
+            if let text = item["text"] as? String { fields["textBytes"] = String(text.utf8.count) }
+            if let command = item["command"] as? String {
+                fields["command"] = command
+                fields["commandBytes"] = String(command.utf8.count)
+            } else if let commandParts = item["command"] as? [String] {
+                let command = commandParts.joined(separator: " ")
+                fields["command"] = command
+                fields["commandBytes"] = String(command.utf8.count)
+            }
+            if let workingDirectory = item["cwd"] as? String { fields["workingDirectory"] = workingDirectory }
+            if let exitCode = item["exitCode"] { fields["exitCode"] = String(describing: exitCode) }
+            if let output = item["aggregatedOutput"] as? String { fields["outputBytes"] = String(output.utf8.count) }
+            if let changes = item["changes"] as? [[String: Any]] {
+                fields["changedPathCount"] = String(changes.count)
+                fields["changedPaths"] = changes.compactMap { $0["path"] as? String }.joined(separator: "\n")
+                fields["changeKinds"] = changes.compactMap { $0["kind"] as? String }.joined(separator: ",")
+            }
+        }
+        for key in ["delta", "diff"] {
+            if let text = params[key] as? String { fields["\(key)Bytes"] = String(text.utf8.count) }
+        }
+        return fields
     }
 
     private func handleNotification(method: String, params: [String: Any]) {

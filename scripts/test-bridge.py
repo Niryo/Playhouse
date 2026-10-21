@@ -251,6 +251,12 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertFalse(response.get("ok"))
         self.assertEqual(response.get("error", {}).get("code"), code)
 
+    def diagnostic_events(self):
+        path = self.data_directory / "Diagnostics.jsonl"
+        if not path.is_file():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
     def create_task(self, title="Bridge task", roots=None):
         if roots is None:
             roots = [self.primary]
@@ -430,7 +436,7 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assert_failure(response, "invalid_argument")
 
-    # case-contract: test_task_creation_persists_ordered_roots_across_fresh_connections | A directly created conversation can add repositories in order, edit pending branch settings, and add a context folder; these settings persist across fresh connections without creating branches or worktrees before the first send.
+    # case-contract: test_task_creation_persists_ordered_roots_across_fresh_connections | A directly created conversation can add repositories in order, edit pending branch settings, and add a context folder; these settings persist across fresh connections without creating branches or worktrees before the first send. Saving an unsent prompt records task creation, prompt save, and subsequent reads with safe argument metadata, result state, and outcome while excluding prompt text.
     def test_task_creation_persists_ordered_roots_across_fresh_connections(self):
         branch_token = uuid.uuid4().hex[:8]
         title = f"Bridge task {branch_token}"
@@ -450,6 +456,9 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertFalse(self.branch_exists(self.primary, generated_branch))
         self.assertEqual(created["contextFolders"], [str(self.custom)])
         self.assertEqual(created["workspaceRoots"], [str(self.primary), str(self.custom)])
+        prompt = f"PROMPT_TEXT_NOT_IN_DIAGNOSTICS_{uuid.uuid4().hex}"
+        response, _ = self.call_cli("task", "prompt", task_id, "--text", prompt)
+        self.assertEqual(self.assert_success(response)["savedPrompt"], prompt)
 
         # Each CLI call starts a new process and XPC connection over the same real store.
         response, _ = self.call_cli("task", "get", task_id)
@@ -459,6 +468,50 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(task["workspaceRoots"], created["workspaceRoots"])
         response, _ = self.call_cli("board", "list")
         self.assertEqual([task["id"] for task in self.assert_success(response)["tasks"]], [task_id])
+        operation_events = [
+            event for event in self.diagnostic_events()
+            if event.get("event") in {"bridge.request.started", "bridge.request.succeeded"}
+        ]
+        created_event = next(
+            event for event in operation_events
+            if event.get("event") == "bridge.request.succeeded" and event.get("command") == "task.create"
+        )
+        self.assertEqual(created_event.get("result.status"), "Backlog")
+        self.assertEqual(created_event.get("argument.repositories.0.repositoryPath"), str(self.primary))
+        task_write = next(
+            event for event in self.diagnostic_events()
+            if event.get("event") == "persistence.write.succeeded"
+            and "create(title:repositories:contextFolders:)" in event.get("operation", "")
+        )
+        self.assertEqual(task_write.get("entity"), "BoardTask")
+        worktree_read = next(
+            event for event in self.diagnostic_events()
+            if event.get("event") == "git.operation.succeeded"
+            and event.get("operation") == "worktree.prepare"
+        )
+        self.assertEqual(worktree_read.get("repositoryPath"), str(self.primary))
+        get_event = next(
+            event for event in operation_events
+            if event.get("event") == "bridge.request.succeeded" and event.get("command") == "task.get"
+        )
+        self.assertEqual(get_event.get("argument.taskID"), task_id)
+        self.assertTrue(any(
+            event.get("event") == "persistence.read.succeeded"
+            and event.get("operation") == "BoardTaskManager.requireTask"
+            and event.get("taskID") == task_id
+            for event in self.diagnostic_events()
+        ))
+        list_event = next(
+            event for event in operation_events
+            if event.get("event") == "bridge.request.succeeded" and event.get("command") == "board.list"
+        )
+        self.assertEqual(list_event.get("resultKind"), "object")
+        prompt_event = next(
+            event for event in operation_events
+            if event.get("event") == "bridge.request.succeeded" and event.get("command") == "task.prompt.save"
+        )
+        self.assertEqual(prompt_event.get("argument.prompt.utf8Bytes"), str(len(prompt.encode("utf-8"))))
+        self.assertNotIn(prompt, json.dumps(self.diagnostic_events()))
 
     # case-contract: test_task_creation_reuses_existing_branch_worktree | A selected existing branch remains pending until task start, then reuses its exact existing worktree path.
     def test_task_creation_reuses_existing_branch_worktree(self):
@@ -1362,7 +1415,7 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("board", "list")
         self.assertEqual(self.assert_success(response)["tasks"], [])
 
-    # case-contract: test_task_delete_reports_real_worktree_failure_and_allows_retry | A real worktree-removal failure records task, thread, process, phase, and underlying error details without recording task titles or conversation text; the failed task and worktree remain available and deletion succeeds after the repository is restored.
+    # case-contract: test_task_delete_reports_real_worktree_failure_and_allows_retry | A real worktree-removal failure records the task title and task, thread, process, phase, and underlying error details without recording conversation text; the failed task and worktree remain available and deletion succeeds after the repository is restored.
     def test_task_delete_reports_real_worktree_failure_and_allows_retry(self):
         broken_repository = self.data_directory / "delete-failure-repository"
         broken_repository.mkdir()
@@ -1398,7 +1451,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIn("error0Domain", failure_event)
         self.assertIn("error0Code", failure_event)
         serialized_diagnostics = json.dumps(diagnostic_lines)
-        self.assertNotIn(failure_title, serialized_diagnostics)
+        self.assertIn(failure_title, serialized_diagnostics)
         self.assertNotIn(failure_prompt, serialized_diagnostics)
         self.assertTrue(broken_worktree.exists(), "A failed worktree removal must leave its worktree available for recovery.")
         preserved, _ = self.call_cli("task", "get", broken_id)
@@ -1408,7 +1461,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(self.assert_success(response)["deleted"])
         self.assertFalse(broken_worktree.exists())
 
-    # case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. In the UI, the conversation picker keeps a Change parent affordance visible after a valid parent is selected, and choosing another folder refreshes suggestions and persists the new parent. Dark and Light appearance choices persist, and Dark renders the workspace canvas as #1E1E1E in the VS Code Dark+ palette.
+    # case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. In the UI, the conversation picker keeps a Change parent affordance visible after a valid parent is selected, and choosing another folder refreshes suggestions and persists the new parent. Dark and Light appearance choices persist and log successful writes, an external CLI appearance write updates the open Settings picker, and Dark renders the workspace canvas as #1E1E1E in the VS Code Dark+ palette.
     def test_default_parent_settings_read_write_clear_and_validation(self):
         response, _ = self.call_cli("settings", "get")
         self.assertIsNone(self.assert_success(response)["defaultParentFolder"])
@@ -1418,6 +1471,12 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(response)["appearance"], "light")
         response, _ = self.call_cli("settings", "set-appearance", "dark")
         self.assertEqual(self.assert_success(response)["appearance"], "dark")
+        appearance_writes = [
+            event for event in self.diagnostic_events()
+            if event.get("event") == "settings.write.succeeded" and event.get("setting") == "appearance"
+        ]
+        self.assertTrue(any(event.get("value") == "light" for event in appearance_writes))
+        self.assertTrue(any(event.get("value") == "dark" for event in appearance_writes))
 
         response, _ = self.call_cli("settings", "set-parent", self.fixture / "suggested-parent")
         self.assertEqual(self.assert_success(response)["defaultParentFolder"], str(self.fixture / "suggested-parent"))
@@ -1652,7 +1711,7 @@ class StationAIBridgeTests(unittest.TestCase):
         serialized_title_events = json.dumps(title_events)
         self.assertNotIn("Explain the delayed title result.", serialized_title_events)
         self.assertNotIn("Generated fixture title", serialized_title_events)
-    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text.
+    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors.
     def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
         task_id = self.create_task(title="Blank conversation send", roots=[self.primary])["id"]
         response, _ = self.call_cli(
@@ -1738,18 +1797,22 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(Path(fallback_worktree["worktreePath"]).is_dir())
         self.assertTrue(self.branch_exists(self.primary, fallback_branch))
         self.assertNotEqual(failed_title_record["title"], "Generating title…")
-        failure_events = [
+        all_failure_events = [
             json.loads(line)
             for line in (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8").splitlines()
-            if json.loads(line).get("taskID") == failed_title_task["id"]
-            and json.loads(line).get("event", "").startswith("task.title_")
         ]
+        failure_task_events = [event for event in all_failure_events if event.get("taskID") == failed_title_task["id"]]
+        failure_events = [event for event in failure_task_events if event.get("event", "").startswith("task.title_")]
         generation_failed = next(event for event in failure_events if event["event"] == "task.title_generation.failed")
+        rpc_failed = next(event for event in all_failure_events if event.get("event") == "codex.rpc.response.failed" and event.get("errorCode") == "-32042")
         fallback_applied = next(event for event in failure_events if event["event"] == "task.title_apply.succeeded")
         self.assertEqual(generation_failed["phase"], "title-turn")
         self.assertTrue(generation_failed["threadID"])
         self.assertTrue(generation_failed.get("errorDescription"))
         self.assertIn("Fixture rejected task-title generation.", generation_failed["errorDescription"])
+        self.assertNotIn(failure_prompt, generation_failed["errorDescription"])
+        self.assertEqual(rpc_failed["errorDescription"], "Codex returned an RPC error.")
+        self.assertNotIn(failure_prompt, json.dumps(rpc_failed))
         self.assertEqual(fallback_applied["titleSource"], "prompt-fallback")
         title_log = json.dumps(title_events + failure_events)
         self.assertNotIn(title_prompt, title_log)
@@ -1895,7 +1958,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(completed["codexThreadID"], thread_id)
         self.assertEqual(completed["status"], "Review")
 
-    # case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history.
+    # case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history. Diagnostics record image MIME and encoded size without storing image payloads.
     def test_conversation_sends_image_attachments(self):
         task_id = self.create_task(title="Image conversation") ["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -1931,6 +1994,17 @@ class StationAIBridgeTests(unittest.TestCase):
             expected_status=2,
         )
         self.assertNotEqual(invalid.get("error", {}).get("code"), None)
+        diagnostics = self.diagnostic_events()
+        image_request = next(
+            event for event in diagnostics
+            if event.get("event") == "bridge.request.succeeded"
+            and event.get("command") == "conversation.send"
+            and event.get("argument.images.0.mime") == "image/png"
+        )
+        self.assertGreater(int(image_request["argument.images.0.encodedCharacterCount"]), 0)
+        serialized_diagnostics = json.dumps(diagnostics)
+        self.assertNotIn("data:image/png;base64,", serialized_diagnostics)
+        self.assertNotIn(sent["images"][0], serialized_diagnostics)
 
     # case-contract: test_conversation_rejects_invalid_image_attachments | Malformed image data is rejected with a visible composer error and an invalid_argument bridge response, without creating conversation history or advancing task status.
     def test_conversation_rejects_invalid_image_attachments(self):
@@ -1946,7 +2020,7 @@ class StationAIBridgeTests(unittest.TestCase):
         history, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(history)["messages"], [])
 
-    # case-contract: test_conversation_shows_subagent_delegation | When Codex delegates a task to a subagent, the conversation activity shows the delegated task and its completion status during the turn and after history reload.
+    # case-contract: test_conversation_shows_subagent_delegation | When Codex delegates a task to a subagent, the conversation activity shows the delegated task and its completion status during the turn and after history reload. Diagnostics record Codex RPC outcomes and command working directory and file-change paths while excluding conversation text, command output, and diffs.
     def test_conversation_shows_subagent_delegation(self):
         task_id = self.create_task(title="Subagent delegation")["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -1956,22 +2030,57 @@ class StationAIBridgeTests(unittest.TestCase):
         (self.data_directory / ".stationai-codex-fixture-owner").write_text(
             "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
-        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        env = {
+            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
+            "STATIONAI_FIXTURE_WORKSPACE": str(self.primary),
+        }
         sent, _ = self.call_cli(
             "conversation", "send", task_id, "--message", "Delegate this task.",
             extra_environment=env,
         )
         result = self.assert_success(sent)
         activities = result["activities"]
-        self.assertEqual(len(activities), 1)
-        self.assertEqual(activities[0]["title"], "Task delegated to subagent")
-        self.assertEqual(activities[0]["status"], "completed")
-        self.assertIn("Inspect the project structure", activities[0]["detail"])
-        self.assertIn("Inspected the project structure", activities[0]["detail"])
+        subagent = next(activity for activity in activities if activity["title"] == "Task delegated to subagent")
+        self.assertEqual(subagent["status"], "completed")
+        self.assertIn("Inspect the project structure", subagent["detail"])
+        self.assertIn("Inspected the project structure", subagent["detail"])
+
+        diagnostics = self.diagnostic_events()
+        rpc_start = next(event for event in diagnostics if event.get("event") == "codex.rpc.request.started" and event.get("method") == "turn/start")
+        self.assertIn("input", rpc_start.get("parameterNames", ""))
+        self.assertTrue(any(
+            event.get("event") == "codex.rpc.response.succeeded" and event.get("method") == "turn/start"
+            for event in diagnostics
+        ))
+        command_event = next(
+            event for event in diagnostics
+            if event.get("event") == "codex.notification"
+            and event.get("method") == "item/completed"
+            and event.get("itemType") == "commandExecution"
+        )
+        self.assertEqual(command_event.get("command"), "git status --short")
+        self.assertEqual(command_event.get("workingDirectory"), str(self.primary.resolve()))
+        self.assertGreater(int(command_event["outputBytes"]), 0)
+        file_event = next(
+            event for event in diagnostics
+            if event.get("event") == "codex.notification"
+            and event.get("method") == "item/completed"
+            and event.get("itemType") == "fileChange"
+        )
+        self.assertEqual(file_event.get("changedPathCount"), "1")
+        self.assertEqual(file_event.get("changedPaths"), "README.md")
+        self.assertEqual(file_event.get("changeKinds"), "update")
+        serialized_diagnostics = json.dumps(diagnostics)
+        self.assertNotIn("CODEX_OUTPUT_NOT_LOGGED", serialized_diagnostics)
+        self.assertNotIn("CODEX_DIFF_NOT_LOGGED", serialized_diagnostics)
+        self.assertNotIn("Delegate this task.", serialized_diagnostics)
 
         reloaded, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         history = self.assert_success(reloaded)
-        self.assertEqual(history["activities"], activities)
+        self.assertEqual(
+            {activity["id"]: activity for activity in history["activities"]},
+            {activity["id"]: activity for activity in activities},
+        )
         self.assertTrue(any("subagent inspected" in message["text"].lower() for message in history["messages"]))
 
     # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; a completed <proposed_plan> is automatically rendered as Markdown without exposing its wrapper tags, including after reopening, while bridge history preserves the exact source.
@@ -2195,7 +2304,7 @@ class StationAIBridgeTests(unittest.TestCase):
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Review")
 
-    # case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation.
+    # case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation. Diagnostics record inventory and file-read outcomes with paths and byte counts, without logging file contents.
     def test_task_workspace_changes_group_staged_and_unstaged_diffs(self):
         self.prepare_workspace_changes()
         task_id = self.create_task(title="Workspace changes", roots=[self.changes])["id"]
@@ -2238,6 +2347,27 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(staged_deleted["modified"], "")
 
         self.assert_failure(self.changes_diff(task_id, "stale.txt", "working", expected_status=3), "not_found")
+        diagnostics = self.diagnostic_events()
+        self.assertTrue(any(
+            event.get("event") == "workspace.files.inventory.succeeded"
+            and int(event.get("stagedCount", "0")) == 3
+            and int(event.get("workingCount", "0")) == 5
+            for event in diagnostics
+        ))
+        staged_read = next(
+            event for event in diagnostics
+            if event.get("event") == "workspace.file.read.succeeded"
+            and event.get("path") == "shared.txt"
+            and event.get("group") == "staged"
+        )
+        self.assertGreater(int(staged_read["originalBytes"]), 0)
+        self.assertGreater(int(staged_read["modifiedBytes"]), 0)
+        self.assertTrue(any(
+            event.get("event") == "workspace.file.read.failed" and event.get("path") == "stale.txt"
+            for event in diagnostics
+        ))
+        serialized_diagnostics = json.dumps(diagnostics)
+        self.assertNotIn("Shared index version.", serialized_diagnostics)
 
     # case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | External file edits and Git commits update the open task's changes sidebar automatically, and fresh CLI connections report the same Git status.
     def test_external_git_edits_and_commit_refresh_workspace_changes(self):

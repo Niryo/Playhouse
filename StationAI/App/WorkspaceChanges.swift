@@ -161,26 +161,76 @@ enum WorkspaceChangeScanner {
         }
     }
 
+    @MainActor
     static func inventory(workspaceRoots: [String]) async throws -> WorkspaceChangeInventory {
-        try await Task.detached(priority: .utility) {
-            try inventorySynchronously(workspaceRoots: workspaceRoots).changes
-        }.value
+        let operationID = UUID().uuidString
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        StationAIDiagnostics.record("workspace.files.inventory.started", fields: [
+            "operationID": operationID,
+            "workspaceRoots": workspaceRoots.joined(separator: "\n"),
+            "workspaceRootCount": String(workspaceRoots.count)
+        ])
+        do {
+            let inventory = try await Task.detached(priority: .utility) {
+                try inventorySynchronously(workspaceRoots: workspaceRoots).changes
+            }.value
+            StationAIDiagnostics.record("workspace.files.inventory.succeeded", fields: [
+                "operationID": operationID,
+                "stagedCount": String(inventory.staged.count),
+                "workingCount": String(inventory.working.count),
+                "durationMilliseconds": String((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
+            ])
+            return inventory
+        } catch {
+            var fields = StationAIDiagnostics.errorFields(error)
+            fields["operationID"] = operationID
+            fields["workspaceRoots"] = workspaceRoots.joined(separator: "\n")
+            fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
+            StationAIDiagnostics.record("workspace.files.inventory.failed", fields: fields)
+            throw error
+        }
     }
 
+    @MainActor
     static func diff(
         workspaceRoots: [String],
         repositoryPath: String,
         relativePath: String,
         group: WorkspaceChangeGroup
     ) async throws -> WorkspaceFileDiff {
-        try await Task.detached(priority: .utility) {
-            try diffSynchronously(
-                workspaceRoots: workspaceRoots,
-                repositoryPath: repositoryPath,
-                relativePath: relativePath,
-                group: group
-            )
-        }.value
+        let operationID = UUID().uuidString
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        let fields = [
+            "operationID": operationID,
+            "repositoryPath": repositoryPath,
+            "path": relativePath,
+            "group": group.rawValue,
+            "workspaceRoots": workspaceRoots.joined(separator: "\n")
+        ]
+        StationAIDiagnostics.record("workspace.file.read.started", fields: fields)
+        do {
+            let diff = try await Task.detached(priority: .utility) {
+                try diffSynchronously(
+                    workspaceRoots: workspaceRoots,
+                    repositoryPath: repositoryPath,
+                    relativePath: relativePath,
+                    group: group
+                )
+            }.value
+            StationAIDiagnostics.record("workspace.file.read.succeeded", fields: fields.merging([
+                "originalBytes": String(diff.original?.utf8.count ?? 0),
+                "modifiedBytes": String(diff.modified?.utf8.count ?? 0),
+                "isText": String(diff.isText),
+                "durationMilliseconds": String((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
+            ]) { _, new in new })
+            return diff
+        } catch {
+            var failureFields = fields
+            failureFields.merge(StationAIDiagnostics.errorFields(error)) { _, new in new }
+            failureFields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
+            StationAIDiagnostics.record("workspace.file.read.failed", fields: failureFields)
+            throw error
+        }
     }
 
     private static func inventorySynchronously(workspaceRoots: [String]) throws -> RepositoryInventory {

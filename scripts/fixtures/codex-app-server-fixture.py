@@ -77,6 +77,26 @@ def subagent_item(status):
     }
 
 
+def diagnostic_action_items(cwd):
+    return [
+        {
+            "id": "item_stationai_command",
+            "type": "commandExecution",
+            "command": "git status --short",
+            "cwd": cwd,
+            "aggregatedOutput": "CODEX_OUTPUT_NOT_LOGGED",
+            "exitCode": 0,
+            "status": "completed",
+        },
+        {
+            "id": "item_stationai_file_change",
+            "type": "fileChange",
+            "changes": [{"path": "README.md", "kind": "update", "diff": "CODEX_DIFF_NOT_LOGGED"}],
+            "status": "completed",
+        },
+    ]
+
+
 def main():
     global THREAD_ID, TURN_ID
     mode = os.path.basename(sys.argv[0])
@@ -167,13 +187,13 @@ def main():
             turn_message = next((item.get("text") for item in turn_input if item.get("type") == "text"), None)
             is_title_request = (turn_message or "").startswith("Write a concise task title of at most 8 words")
             if is_title_request:
-                write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": TURN_ID, "status": "inProgress"}}})
                 if mode.endswith("-title-failure"):
-                    write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
-                        "threadId": THREAD_ID,
-                        "turn": {"id": TURN_ID, "status": "failed", "error": {"message": "Fixture rejected task-title generation."}},
+                    write({"jsonrpc": "2.0", "id": message["id"], "error": {
+                        "code": -32042,
+                        "message": f"Fixture rejected task-title generation. {turn_message}",
                     }})
                     continue
+                write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": TURN_ID, "status": "inProgress"}}})
                 if mode.endswith("-title-success-wait"):
                     ready = Path(str(sys.argv[0]) + ".resolve-ready")
                     resume = Path(str(sys.argv[0]) + ".resolve-continue")
@@ -280,6 +300,13 @@ def main():
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID, "item": subagent_item("completed"),
                 }})
+                for action_item in diagnostic_action_items(os.environ.get("STATIONAI_FIXTURE_WORKSPACE", os.getcwd())):
+                    write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                        "threadId": THREAD_ID, "item": {**action_item, "status": "inProgress"},
+                    }})
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                        "threadId": THREAD_ID, "item": action_item,
+                    }})
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
@@ -377,6 +404,7 @@ def main():
                     {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": "Delegate this task."}]},
                     {"id": "item_assistant_fixture", "type": "agentMessage", "text": "The subagent inspected the project structure."},
                     subagent_item("completed"),
+                    *diagnostic_action_items(os.environ.get("STATIONAI_FIXTURE_WORKSPACE", os.getcwd())),
                 ]
             if mode.endswith("-markdown"):
                 saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}

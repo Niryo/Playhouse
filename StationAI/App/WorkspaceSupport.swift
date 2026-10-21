@@ -716,11 +716,48 @@ enum StationAIBackgroundOperation {
     }
 }
 
+@MainActor
 struct StationAIWorktreeService {
 
+    private func perform<T>(
+        _ operation: String,
+        record: RepositoryWorktreeRecord? = nil,
+        fields extraFields: [String: String] = [:],
+        body: () async throws -> T
+    ) async throws -> T {
+        var fields = extraFields
+        fields["operation"] = operation
+        if let record {
+            fields["repositoryPath"] = record.repositoryPath
+            fields["branch"] = record.branch
+            fields["worktreePath"] = record.worktreePath
+            fields["isPending"] = String(record.isPending)
+            fields["createdByStationAI"] = String(record.createdByStationAI)
+        }
+        fields["operationID"] = UUID().uuidString
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        StationAIDiagnostics.record("git.operation.started", fields: fields)
+        do {
+            let result = try await body()
+            var resultFields = fields
+            resultFields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
+            if let changed = result as? Bool { resultFields["hasChanges"] = String(changed) }
+            StationAIDiagnostics.record("git.operation.succeeded", fields: resultFields)
+            return result
+        } catch {
+            var failureFields = fields
+            failureFields.merge(StationAIDiagnostics.errorFields(error)) { _, new in new }
+            failureFields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
+            StationAIDiagnostics.record("git.operation.failed", fields: failureFields)
+            throw error
+        }
+    }
+
     func pendingRecord(spec: RepositoryWorktreeSpec) async throws -> RepositoryWorktreeRecord {
-        try await StationAIBackgroundOperation.run {
-            try StationAIWorktreeManager.pendingRecord(spec: spec)
+        try await perform("worktree.prepare", fields: ["repositoryPath": spec.repositoryPath]) {
+            try await StationAIBackgroundOperation.run {
+                try StationAIWorktreeManager.pendingRecord(spec: spec)
+            }
         }
     }
 
@@ -729,38 +766,56 @@ struct StationAIWorktreeService {
         title: String,
         root: URL
     ) async throws -> RepositoryWorktreeRecord {
-        try await StationAIBackgroundOperation.run {
-            try StationAIWorktreeManager.resolve(spec: spec, title: title, root: root)
+        try await perform("worktree.create", fields: [
+            "repositoryPath": spec.repositoryPath,
+            "branch": spec.branch ?? "auto",
+            "branchFrom": spec.branchFrom ?? "",
+            "mergeTarget": spec.mergeTarget ?? "",
+            "managedRoot": root.path
+        ]) {
+            try await StationAIBackgroundOperation.run {
+                try StationAIWorktreeManager.resolve(spec: spec, title: title, root: root)
+            }
         }
     }
 
     func hasChanges(_ record: RepositoryWorktreeRecord) async throws -> Bool {
-        try await StationAIBackgroundOperation.run {
-            try StationAIWorktreeManager.hasChanges(record)
+        try await perform("worktree.check_changes", record: record) {
+            try await StationAIBackgroundOperation.run {
+                try StationAIWorktreeManager.hasChanges(record)
+            }
         }
     }
 
     func remove(_ record: RepositoryWorktreeRecord) async throws {
-        try await StationAIBackgroundOperation.run {
-            try StationAIWorktreeManager.remove(record)
+        try await perform("worktree.remove", record: record) {
+            try await StationAIBackgroundOperation.run {
+                try StationAIWorktreeManager.remove(record)
+            }
         }
     }
 
     func removeAfterConfirmation(_ record: RepositoryWorktreeRecord) async throws {
-        try await StationAIBackgroundOperation.run {
-            try StationAIWorktreeManager.removeAfterConfirmation(record)
+        try await perform("worktree.remove_after_confirmation", record: record) {
+            try await StationAIBackgroundOperation.run {
+                try StationAIWorktreeManager.removeAfterConfirmation(record)
+            }
         }
     }
 
     func commitChanges(_ record: RepositoryWorktreeRecord, message: String) async throws {
-        try await StationAIBackgroundOperation.run {
-            try StationAIWorktreeManager.commitChanges(record, message: message)
+        try await perform("git.commit", record: record, fields: ["commitMessageBytes": String(message.utf8.count)]) {
+            try await StationAIBackgroundOperation.run {
+                try StationAIWorktreeManager.commitChanges(record, message: message)
+            }
         }
     }
 
     func publishBranch(_ record: RepositoryWorktreeRecord) async throws {
-        try await StationAIBackgroundOperation.run {
-            try StationAIWorktreeManager.publishBranch(record)
+        try await perform("git.publish_branch", record: record) {
+            try await StationAIBackgroundOperation.run {
+                try StationAIWorktreeManager.publishBranch(record)
+            }
         }
     }
 }
@@ -964,11 +1019,21 @@ struct WorkspaceSettingsView: View {
     var body: some View {
         Form {
             Section("Appearance") {
-                Picker("Theme", selection: $appearance) {
+                Picker("Theme", selection: Binding(
+                    get: { appearance },
+                    set: { value in
+                        do {
+                            try WorkspaceSettingsManager().setAppearance(value)
+                        } catch {
+                            pickerError = error.localizedDescription
+                        }
+                    }
+                )) {
                     Text("Dark").tag("dark")
                     Text("Light").tag("light")
                 }
                 .accessibilityIdentifier("appearance-picker")
+                .accessibilityValue(appearance)
             }
             Section("Workspace suggestions") {
                 Text("Choose a parent folder. New tasks will search below it for Git repositories to suggest as working folders.")
@@ -1595,9 +1660,18 @@ enum StationAIDiagnostics {
     }
 
     static func errorFields(_ error: Error, redacting values: [String]) -> [String: String] {
-        // Retain the historical call shape; local extended logs keep full context.
-        _ = values
-        return errorFields(error)
+        var fields = errorFields(error)
+        let secrets = values.filter { !$0.isEmpty }.sorted { $0.count > $1.count }
+        guard !secrets.isEmpty else { return fields }
+
+        for key in ["errorDescription"] + (0..<5).map({ "error\($0)Reason" }) {
+            guard var value = fields[key] else { continue }
+            for secret in secrets {
+                value = value.replacingOccurrences(of: secret, with: "[redacted]")
+            }
+            fields[key] = value
+        }
+        return fields
     }
 }
 
