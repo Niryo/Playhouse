@@ -4,6 +4,10 @@
     "expectation": "StationAI opens one main board window and the bridge reports API version 1."
   },
   {
+    "id": "test_worktree_app_profiles_isolate_identity_and_store",
+    "expectation": "The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots; a saved conversation remains visible after an app restart."
+  },
+  {
     "id": "test_task_creation_rejects_invalid_title_roots_and_missing_folder",
     "expectation": "New Task immediately opens an empty conversation with the repository picker focused; sending stays disabled until a working folder is added. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets."
   },
@@ -33,7 +37,23 @@
   },
   {
     "id": "test_task_store_serializes_cross_process_writes",
-    "expectation": "If another process holds the shared task-store write lock when a Codex turn completes, final status persistence waits and then saves Review status and full history across fresh CLI/XPC reads. Correlated persistence diagnostics include task ID, store path, lock wait, attempts, and retry count; reopening the conversation in the UI shows the saved exchange without a store error."
+    "expectation": "If another process holds the shared task-store write lock when a Codex turn completes, final status persistence waits and then saves Review status and full history across fresh CLI/XPC reads. Correlated persistence diagnostics include task ID, store path, lock wait, attempts, and retry count; task reads correlate started and completed events by read ID and store path, while failed reads include store file and sidecar state. Reopening the conversation in the UI shows the saved exchange without a store error."
+  },
+  {
+    "id": "test_persistence_store_open_failure_records_detailed_error",
+    "expectation": "A real ModelContainer open failure against an isolated invalid store path returns an error and durably logs the phase, exact underlying NSError domain/code/userInfo, resolved store path, file/sidecar snapshot, and read-only schema probe failure; the paired visible UI case keeps StationAI open on its normal board while the same isolated CLI/XPC request fails and verifies the persisted diagnostic."
+  },
+  {
+    "id": "test_persistence_read_failure_records_detailed_error",
+    "expectation": "A real SwiftData fetch failure against an isolated store with a missing task column returns an error and logs a correlated read ID, NSError domain/code/userInfo, store path, file/sidecar snapshot, and the exact missing-column message from a read-only schema probe before the CLI/XPC request completes; the paired visible UI case keeps the normal task board open and verifies the same isolated failure record."
+  },
+  {
+    "id": "test_task_store_repairs_missing_pending_prompt_column",
+    "expectation": "A real legacy SwiftData task store with old model metadata and no submitted-prompt column waits for the store-write lock while app and CLI/XPC open concurrently, is backed up before migration, and preserves its task and draft after a visible restart; metadata advances and later opens create no additional backup."
+  },
+  {
+    "id": "test_test_bundle_rejects_unisolated_data_directory",
+    "expectation": "A test-built StationAI service rejects a data directory outside the temporary test area and a linked store inside it before creating or opening either store; the visible app remains on its isolated board and can still read its tasks."
   },
   {
     "id": "test_task_worktree_preparation_serializes_auto_branch_claims",
@@ -93,7 +113,7 @@
   },
   {
     "id": "test_task_delete_reports_real_worktree_failure_and_allows_retry",
-    "expectation": "A real worktree-removal failure records the task title and task, thread, process, phase, and underlying error details without recording conversation text; the failed task and worktree remain available and deletion succeeds after the repository is restored."
+    "expectation": "A real worktree-removal failure records the task title and task, thread, process, phase, and underlying error details, including bounded NSError user-info keys and values, without recording conversation text; the failed task and worktree remain available and deletion succeeds after the repository is restored."
   },
   {
     "id": "test_default_parent_settings_read_write_clear_and_validation",

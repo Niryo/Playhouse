@@ -79,6 +79,10 @@ xcodebuild build-for-testing -quiet \
   ONLY_ACTIVE_ARCH=YES \
   STATIONAI_APP_BUNDLE_IDENTIFIER="${e2e_bundle_identifier}"
 python3 "${repository_root}/scripts/prepare-e2e-fixture.py"
+legacy_store_seeder="/tmp/stationai-bridge-workspaces/seed-legacy-task-store"
+xcrun swiftc -parse-as-library -swift-version 5 -O \
+  "${repository_root}/scripts/seed-legacy-task-store.swift" \
+  -o "${legacy_store_seeder}"
 if [[ ! -x "${cli_path}" ]]; then
   printf 'The app build did not produce its bundled CLI at %s.\n' "${cli_path}" >&2
   exit 1
@@ -92,6 +96,7 @@ bridge_arguments=(
   --fixture-root /tmp/stationai-bridge-workspaces
   --data-root "${data_root}"
   --service-name "${service_name}"
+  --legacy-store-seeder "${legacy_store_seeder}"
 )
 if (( ${#selected_cases[@]} > 0 )); then
   for selected_case in "${selected_cases[@]}"; do

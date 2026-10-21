@@ -2,6 +2,9 @@
 set -euo pipefail
 
 repository_root="${SRCROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+source "${repository_root}/scripts/app-profile.sh"
+stationai_load_app_profile "${repository_root}"
+stationai_verify_build_identity "${PRODUCT_BUNDLE_IDENTIFIER:-com.stationai.app}"
 app_contents="${TARGET_BUILD_DIR:?}/${CONTENTS_FOLDER_PATH:?}"
 app_macos="${app_contents}/MacOS"
 cli_executable="${app_macos}/stationai-cli"

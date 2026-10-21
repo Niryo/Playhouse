@@ -4,8 +4,10 @@ import argparse
 import errno
 import fcntl
 import json
+import plistlib
 import os
 import shutil
+import sqlite3
 import stat
 import subprocess
 import time
@@ -19,6 +21,7 @@ parser.add_argument("--cli", required=True, type=Path)
 parser.add_argument("--fixture-root", required=True, type=Path)
 parser.add_argument("--data-root", required=True, type=Path)
 parser.add_argument("--service-name", required=True)
+parser.add_argument("--legacy-store-seeder", required=True, type=Path)
 parser.add_argument("--case", action="append", default=[], dest="selected_cases")
 arguments = parser.parse_args()
 CONTRACT_PATH = Path(__file__).resolve().parent.parent / "StationAI/BridgeTests/BridgeTestContracts.json"
@@ -428,6 +431,63 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("status")
         self.assertEqual(self.assert_success(response), {"bridgeVersion": 1, "service": "StationAI"})
 
+    # case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots; a saved conversation remains visible after an app restart.
+    def test_worktree_app_profiles_isolate_identity_and_store(self):
+        script = Path(__file__).resolve().parent / "app-profile.sh"
+        linked = self.fixture / "existing-worktree"
+
+        def profile(path):
+            result = subprocess.run(["bash", str(script), str(path)], check=True, capture_output=True, text=True)
+            return json.loads(result.stdout)
+
+        primary_profile = profile(self.primary)
+        linked_profile = profile(linked)
+        self.assertEqual(primary_profile["kind"], "primary")
+        self.assertEqual(primary_profile["bundleID"], "com.stationai.app")
+        self.assertEqual(primary_profile["dataDirectory"], str(Path.home() / "Library/Application Support/StationAI"))
+        self.assertEqual(linked_profile, profile(linked))
+        self.assertEqual(linked_profile["kind"], "linked")
+        self.assertNotEqual(primary_profile["bundleID"], linked_profile["bundleID"])
+        self.assertNotEqual(primary_profile["bridgeID"], linked_profile["bridgeID"])
+        self.assertNotEqual(primary_profile["derivedData"], linked_profile["derivedData"])
+        self.assertNotEqual(primary_profile["dataDirectory"], linked_profile["dataDirectory"])
+        self.assertNotEqual(primary_profile["logFile"], linked_profile["logFile"])
+        self.assertNotEqual(primary_profile["worktreeRoot"], linked_profile["worktreeRoot"])
+        self.assertTrue(linked_profile["bundleID"].endswith(linked_profile["key"]))
+        self.assertEqual(linked_profile["bridgeID"], linked_profile["bundleID"] + ".bridge")
+        self.assertEqual(
+            linked_profile["dataDirectory"],
+            str(Path.home() / "Library/Application Support/StationAI/Worktrees" / linked_profile["key"]),
+        )
+        verify_build = 'source "$1"; stationai_load_app_profile "$2"; stationai_verify_build_identity "$3"'
+        self.assertEqual(subprocess.run(
+            ["bash", "-c", verify_build, "profile-check", str(script), str(linked), linked_profile["bundleID"]],
+            capture_output=True, text=True,
+        ).returncode, 0)
+        self.assertNotEqual(subprocess.run(
+            ["bash", "-c", verify_build, "profile-check", str(script), str(linked), primary_profile["bundleID"]],
+            capture_output=True, text=True,
+        ).returncode, 0)
+        self.assertEqual(subprocess.run(
+            ["bash", "-c", verify_build, "profile-check", str(script), str(self.primary), linked_profile["bundleID"] + ".e2e.fixture"],
+            capture_output=True, text=True,
+        ).returncode, 0)
+        app_info = plistlib.loads((self.cli.parent.parent / "Info.plist").read_bytes())
+        service_info = plistlib.loads((self.cli.parent.parent / "XPCServices/StationAIBridge.xpc/Contents/Info.plist").read_bytes())
+        self.assertEqual(service_info["CFBundleIdentifier"], app_info["CFBundleIdentifier"] + ".bridge")
+        self.assertEqual(service_info["StationAIApplicationBundleIdentifier"], app_info["CFBundleIdentifier"])
+        self.assertEqual(arguments.service_name, service_info["CFBundleIdentifier"])
+
+        task = self.assert_success(self.call_cli("task", "create", "--title", "Profile restart", "--root", self.primary)[0])
+        saved = self.assert_success(self.call_cli(
+            "task", "prompt", task["id"], "--text", "Keep this draft after restart.", "--status", "Backlog",
+        )[0])
+        self.assertEqual(saved["savedPrompt"], "Keep this draft after restart.")
+        self.assertTrue((self.data_directory / "StationAI.store").is_file())
+        reopened = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(reopened["title"], "Profile restart")
+        self.assertEqual(reopened["savedPrompt"], "Keep this draft after restart.")
+
     # case-contract: test_task_creation_rejects_invalid_title_roots_and_missing_folder | New Task immediately opens an empty conversation with the repository picker focused; sending stays disabled until a working folder is added. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets.
     def test_task_creation_rejects_invalid_title_roots_and_missing_folder(self):
         response, _ = self.call_cli(
@@ -638,7 +698,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(record["branch"], branch)
         self.assertTrue(record["isPending"])
 
-    # case-contract: test_task_store_serializes_cross_process_writes | If another process holds the shared task-store write lock when a Codex turn completes, final status persistence waits and then saves Review status and full history across fresh CLI/XPC reads. Correlated persistence diagnostics include task ID, store path, lock wait, attempts, and retry count; reopening the conversation in the UI shows the saved exchange without a store error.
+    # case-contract: test_task_store_serializes_cross_process_writes | If another process holds the shared task-store write lock when a Codex turn completes, final status persistence waits and then saves Review status and full history across fresh CLI/XPC reads. Correlated persistence diagnostics include task ID, store path, lock wait, attempts, and retry count; task reads correlate started and completed events by read ID and store path, while failed reads include store file and sidecar state. Reopening the conversation in the UI shows the saved exchange without a store error.
     def test_task_store_serializes_cross_process_writes(self):
         task = self.create_repo_task("Store write contention", [self.primary])
         fixture_path = self.data_directory / "codex-fixture-store-write-success-wait"
@@ -734,6 +794,188 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assertEqual(matching_success["attemptCount"], "1")
         self.assertEqual(matching_success["retryCount"], "0")
+
+        read_events = [
+            json.loads(line) for line in (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8").splitlines()
+            if json.loads(line).get("taskID") == task["id"]
+            and json.loads(line).get("operation") == "BoardTaskManager.requireTask"
+            and json.loads(line).get("event") in {"persistence.read.started", "persistence.read.succeeded"}
+        ]
+        successful_read = next(event for event in read_events if event["event"] == "persistence.read.succeeded")
+        read_id = successful_read["readID"]
+        matching_read_start = next(
+            event for event in read_events
+            if event["event"] == "persistence.read.started" and event.get("readID") == read_id
+        )
+        expected_store_path = str(self.data_directory / "StationAI.store")
+        snapshot_prefixes = ("storeDirectory", "storeFile", "storeWAL", "storeSHM")
+        for read_event in (matching_read_start, successful_read):
+            self.assertEqual(read_event["storePath"], expected_store_path)
+            self.assertFalse(
+                any(key.startswith(snapshot_prefixes) for key in read_event),
+                f"Successful read events should omit filesystem snapshots: {read_event}",
+            )
+        self.assertIn("durationMilliseconds", successful_read)
+
+    # case-contract: test_persistence_store_open_failure_records_detailed_error | A real ModelContainer open failure against an isolated invalid store path returns an error and durably logs the phase, exact underlying NSError domain/code/userInfo, resolved store path, file/sidecar snapshot, and read-only schema probe failure; the paired visible UI case keeps StationAI open on its normal board while the same isolated CLI/XPC request fails and verifies the persisted diagnostic.
+    def test_persistence_store_open_failure_records_detailed_error(self):
+        failure_directory = self.data_directory / "invalid-store-open"
+        failure_directory.mkdir()
+        store = failure_directory / "StationAI.store"
+        store.mkdir()
+
+        response, _ = self.call_cli(
+            "task", "list", expected_status=1,
+            extra_environment={"STATIONAI_DATA_DIRECTORY": str(failure_directory)},
+        )
+        self.assertFalse(response["ok"], response)
+        diagnostic_path = failure_directory / "Diagnostics.jsonl"
+        events = [
+            json.loads(line) for line in diagnostic_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        failed_open = next(event for event in events if event.get("event") == "persistence.store.open.failed")
+        self.assertEqual(failed_open["phase"], "model-container-open")
+        self.assertEqual(failed_open["storePath"], str(store))
+        self.assertEqual(failed_open["storeFileExists"], "true")
+        self.assertIn("storeWALExists", failed_open)
+        self.assertIn("storeSHMExists", failed_open)
+        self.assertTrue(failed_open.get("errorDescription"))
+        self.assertTrue(failed_open.get("error0Domain"))
+        self.assertTrue(failed_open.get("error0Code"))
+        self.assertIn("error0UserInfoKeys", failed_open)
+        self.assertIn("error0UserInfoKeyCount", failed_open)
+        self.assertIn("error0UserInfo", failed_open)
+        self.assertEqual(failed_open["schemaProbeResult"], "open-failed")
+        self.assertTrue(failed_open.get("schemaProbeSQLiteMessage"))
+
+    # case-contract: test_persistence_read_failure_records_detailed_error | A real SwiftData fetch failure against an isolated store with a missing task column returns an error and logs a correlated read ID, NSError domain/code/userInfo, store path, file/sidecar snapshot, and the exact missing-column message from a read-only schema probe before the CLI/XPC request completes; the paired visible UI case keeps the normal task board open and verifies the same isolated failure record.
+    def test_persistence_read_failure_records_detailed_error(self):
+        self.create_task("Missing column read failure")
+        store = self.data_directory / "StationAI.store"
+        with sqlite3.connect(store) as database:
+            database.execute("ALTER TABLE ZBOARDTASK DROP COLUMN ZPROGRESSLABEL")
+
+        response, _ = self.call_cli("task", "list", expected_status=1)
+        self.assertFalse(response["ok"], response)
+        events = self.diagnostic_events()
+        failed_read = next(
+            event for event in events
+            if event.get("event") == "persistence.read.failed"
+            and event.get("operation") == "BoardTaskManager.list"
+        )
+        self.assertTrue(failed_read.get("readID"))
+        self.assertEqual(failed_read["storePath"], str(store))
+        self.assertEqual(failed_read["storeFileExists"], "true")
+        self.assertIn("storeWALExists", failed_read)
+        self.assertIn("storeSHMExists", failed_read)
+        self.assertTrue(failed_read.get("errorDescription"))
+        self.assertTrue(failed_read.get("error0Domain"))
+        self.assertTrue(failed_read.get("error0Code"))
+        self.assertIn("error0UserInfoKeys", failed_read)
+        self.assertIn("error0UserInfoKeyCount", failed_read)
+        self.assertIn("error0UserInfo", failed_read)
+        self.assertEqual(failed_read["schemaProbeResult"], "prepare-failed")
+        self.assertEqual(failed_read["schemaProbeSQLiteCode"], "1")
+        self.assertIn("no such column: t0.ZPROGRESSLABEL", failed_read["schemaProbeSQLiteMessage"])
+        self.assertTrue(any(
+            event.get("event") == "persistence.read.started"
+            and event.get("readID") == failed_read["readID"]
+            and event.get("storePath") == str(store)
+            for event in events
+        ))
+
+    # case-contract: test_task_store_repairs_missing_pending_prompt_column | A real legacy SwiftData task store with old model metadata and no submitted-prompt column waits for the store-write lock while app and CLI/XPC open concurrently, is backed up before migration, and preserves its task and draft after a visible restart; metadata advances and later opens create no additional backup.
+    def test_task_store_repairs_missing_pending_prompt_column(self):
+        seeded = subprocess.run(
+            [str(arguments.legacy_store_seeder), str(self.data_directory)],
+            check=True, capture_output=True, text=True,
+        )
+        task_id = seeded.stdout.strip()
+        draft = "Keep this draft through the store repair."
+        store = self.data_directory / "StationAI.store"
+        with sqlite3.connect(store) as database:
+            columns = {row[1] for row in database.execute("PRAGMA table_info(ZBOARDTASK)")}
+            self.assertNotIn("ZPENDINGSUBMITTEDPROMPT", columns)
+            self.assertEqual(database.execute("SELECT count(*) FROM ZBOARDTASK").fetchone()[0], 1)
+            legacy_metadata = plistlib.loads(database.execute("SELECT Z_PLIST FROM Z_METADATA").fetchone()[0])
+            legacy_hash = legacy_metadata["NSStoreModelVersionHashes"]["BoardTask"]
+            self.assertEqual(legacy_hash.hex(), "24594c3345454e4107a5224f966af3bb539b5a9d91e15480728b1fcf490b6070")
+
+        barrier = TaskStoreWriteLockBarrier(self.data_directory)
+        try:
+            waiting = self.start_cli("task", "get", task_id)
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and not any(
+                event.get("event") == "persistence.store.schema_migration.waiting_for_write_lock"
+                for event in self.diagnostic_events()
+            ):
+                time.sleep(0.05)
+            self.assertTrue(any(
+                event.get("event") == "persistence.store.schema_migration.waiting_for_write_lock"
+                for event in self.diagnostic_events()
+            ), "The legacy-store open should wait for the real store-write lock.")
+            self.assertIsNone(waiting.poll(), "The XPC read must not bypass the held migration lock.")
+            self.assertFalse(list(self.data_directory.glob("StationAI.store.before-pending-prompt-*.backup")))
+        finally:
+            barrier.release()
+        reopened, _ = self.finish_cli(waiting, ("task", "get", task_id))
+        self.assertEqual(self.assert_success(reopened)["savedPrompt"], draft)
+        self.assertEqual(self.assert_success(reopened)["title"], "Legacy pending prompt store")
+        self.assertTrue(any(
+            event.get("event") == "persistence.store.schema_migration.write_lock_acquired"
+            and int(event.get("waitMilliseconds", "0")) > 0
+            for event in self.diagnostic_events()
+        ))
+        backups = list(self.data_directory.glob("StationAI.store.before-pending-prompt-*.backup"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(stat.S_IMODE(backups[0].stat().st_mode), 0o600)
+        with sqlite3.connect(backups[0]) as backup:
+            self.assertEqual(backup.execute("PRAGMA quick_check").fetchone()[0], "ok")
+            self.assertEqual(backup.execute("SELECT count(*) FROM ZBOARDTASK").fetchone()[0], 1)
+            self.assertNotIn("ZPENDINGSUBMITTEDPROMPT", {row[1] for row in backup.execute("PRAGMA table_info(ZBOARDTASK)")})
+        listed, _ = self.call_cli("board", "list")
+        self.assertEqual([item["id"] for item in self.assert_success(listed)["tasks"]], [task_id])
+        self.assertEqual(len(list(self.data_directory.glob("StationAI.store.before-pending-prompt-*.backup"))), 1)
+        with sqlite3.connect(store) as database:
+            self.assertIn("ZPENDINGSUBMITTEDPROMPT", {row[1] for row in database.execute("PRAGMA table_info(ZBOARDTASK)")})
+            migrated_metadata = plistlib.loads(database.execute("SELECT Z_PLIST FROM Z_METADATA").fetchone()[0])
+            self.assertNotEqual(migrated_metadata["NSStoreModelVersionHashes"]["BoardTask"], legacy_hash)
+        self.assertEqual(
+            len([event for event in self.diagnostic_events() if event.get("event") == "persistence.store.schema_repaired"]),
+            1,
+        )
+
+    # case-contract: test_test_bundle_rejects_unisolated_data_directory | A test-built StationAI service rejects a data directory outside the temporary test area and a linked store inside it before creating or opening either store; the visible app remains on its isolated board and can still read its tasks.
+    def test_test_bundle_rejects_unisolated_data_directory(self):
+        unsafe = Path.home() / "Library" / "Caches" / f"StationAI-bridge-guard-{uuid.uuid4()}"
+        self.assertFalse(unsafe.exists())
+        unsafe.mkdir(parents=True)
+        marker = unsafe / ".stationai-test-owner"
+        marker.write_text("StationAI bridge guard test (v1).\n", encoding="utf-8")
+        try:
+            response, _ = self.call_cli(
+                "board", "list", expected_status=1,
+                extra_environment={"STATIONAI_DATA_DIRECTORY": str(unsafe)},
+            )
+            self.assert_failure(response, "operation_failed")
+            self.assertIn("isolated temporary data directory", response["error"]["message"])
+            self.assertFalse((unsafe / "StationAI.store").exists())
+            linked = self.data_directory / "linked-store"
+            linked.mkdir()
+            (linked / "StationAI.store").symlink_to(unsafe / "StationAI.store")
+            response, _ = self.call_cli(
+                "board", "list", expected_status=1,
+                extra_environment={"STATIONAI_DATA_DIRECTORY": str(linked)},
+            )
+            self.assert_failure(response, "operation_failed")
+            self.assertIn("linked task store", response["error"]["message"])
+            self.assertFalse((unsafe / "StationAI.store").exists())
+            good, _ = self.call_cli("board", "list")
+            self.assertEqual(self.assert_success(good)["tasks"], [])
+        finally:
+            self.assertEqual(marker.read_text(encoding="utf-8"), "StationAI bridge guard test (v1).\n")
+            shutil.rmtree(unsafe)
 
     # case-contract: test_task_worktree_preparation_serializes_auto_branch_claims | Tasks with the same automatic branch choice remain pending without creating a worktree before conversation start; the opt-in live Codex integration sends both turns concurrently and confirms only one task claims the generated branch.
     def test_task_worktree_preparation_serializes_auto_branch_claims(self):
@@ -1532,7 +1774,7 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("board", "list")
         self.assertEqual(self.assert_success(response)["tasks"], [])
 
-    # case-contract: test_task_delete_reports_real_worktree_failure_and_allows_retry | A real worktree-removal failure records the task title and task, thread, process, phase, and underlying error details without recording conversation text; the failed task and worktree remain available and deletion succeeds after the repository is restored.
+    # case-contract: test_task_delete_reports_real_worktree_failure_and_allows_retry | A real worktree-removal failure records the task title and task, thread, process, phase, and underlying error details, including bounded NSError user-info keys and values, without recording conversation text; the failed task and worktree remain available and deletion succeeds after the repository is restored.
     def test_task_delete_reports_real_worktree_failure_and_allows_retry(self):
         broken_repository = self.data_directory / "delete-failure-repository"
         broken_repository.mkdir()
@@ -1567,6 +1809,9 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIn("processID", failure_event)
         self.assertIn("error0Domain", failure_event)
         self.assertIn("error0Code", failure_event)
+        self.assertIn("error0UserInfoKeys", failure_event)
+        self.assertIn("error0UserInfoKeyCount", failure_event)
+        self.assertIn("error0UserInfo", failure_event)
         serialized_diagnostics = json.dumps(diagnostic_lines)
         self.assertIn(failure_title, serialized_diagnostics)
         self.assertNotIn(failure_prompt, serialized_diagnostics)

@@ -1,6 +1,7 @@
 import Foundation
 import SwiftData
 import Darwin
+import SQLite3
 
 @MainActor
 struct CodexTaskTitleGenerator {
@@ -74,30 +75,285 @@ enum StationAIStore {
 
     static func storeURL(dataDirectory: String? = nil) throws -> URL {
         if let dataDirectory {
+            if StationAIAppIdentity.worktreeKey != nil && !StationAIAppIdentity.isTestBundle {
+                let requested = URL(fileURLWithPath: dataDirectory, isDirectory: true)
+                    .resolvingSymlinksInPath().standardizedFileURL
+                let expected = try StationAIAppIdentity.defaultDataDirectory()
+                    .resolvingSymlinksInPath().standardizedFileURL
+                guard requested == expected else {
+                    throw StoreSchemaRepairError("This StationAI worktree app cannot open another app’s task store.")
+                }
+            }
             return URL(fileURLWithPath: dataDirectory, isDirectory: true).appendingPathComponent("StationAI.store")
         }
-        let supportDirectory = try FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        ).appendingPathComponent("StationAI", isDirectory: true)
+        let supportDirectory = try StationAIAppIdentity.defaultDataDirectory()
         return supportDirectory.appendingPathComponent("StationAI.store")
     }
 
     static func makeContainer(dataDirectory: String? = nil) throws -> ModelContainer {
-        StationAIDiagnostics.useDataDirectory(dataDirectory)
+        try validateTestDataDirectory(dataDirectory)
         let schema = Schema([BoardTask.self])
-        let storeURL = try Self.storeURL(dataDirectory: dataDirectory)
-        try FileManager.default.createDirectory(at: storeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let storeURL: URL
+        do {
+            storeURL = try Self.storeURL(dataDirectory: dataDirectory)
+        } catch {
+            // A rejected linked-app override must not send diagnostics to that foreign store directory.
+            let profileDirectory = StationAIAppIdentity.worktreeKey != nil
+                ? try? StationAIAppIdentity.defaultDataDirectory().path : nil
+            StationAIDiagnostics.useDataDirectory(profileDirectory)
+            StationAIDiagnostics.recordAndFlush(
+                "persistence.store.path.failed",
+                fields: StationAIDiagnostics.errorFields(error, includeUserInfoDetails: true)
+                    .merging(["phase": "resolve-store-path"]) { _, new in new }
+            )
+            throw error
+        }
+        StationAIDiagnostics.useDataDirectory(dataDirectory)
+        do {
+            try FileManager.default.createDirectory(at: storeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if (try? storeNeedsPendingPromptColumn(storeURL)) == true {
+                StationAIDiagnostics.recordAndFlush("persistence.store.schema_migration.waiting_for_schema_lock", fields: [
+                    "storePath": storeURL.path
+                ])
+            }
+            return try withSchemaRepairLock(at: storeURL) {
+                // A legacy store can have both an old model hash and a missing column.
+                // Opening SwiftData first can fail before the table repair is reached.
+                let configuration = ModelConfiguration(
+                    "StationAI",
+                    schema: schema,
+                    url: storeURL,
+                    cloudKitDatabase: .none
+                )
+                if try storeNeedsPendingPromptColumn(storeURL) {
+                    // Hold the write lock through SwiftData's model metadata update.
+                    let waitStartedAt = Date()
+                    StationAIDiagnostics.recordAndFlush("persistence.store.schema_migration.waiting_for_write_lock", fields: [
+                        "storePath": storeURL.path
+                    ])
+                    return try withStoreWriteLock(at: storeURL) {
+                        StationAIDiagnostics.recordAndFlush("persistence.store.schema_migration.write_lock_acquired", fields: [
+                            "storePath": storeURL.path,
+                            "waitMilliseconds": String(Int(Date().timeIntervalSince(waitStartedAt) * 1_000))
+                        ])
+                        let backupURL = try storeNeedsPendingPromptColumn(storeURL)
+                            ? repairPendingPromptColumn(at: storeURL) : nil
+                        let container = try ModelContainer(for: schema, configurations: [configuration])
+                        guard try !storeNeedsPendingPromptColumn(storeURL) else {
+                            throw StoreSchemaRepairError("The task store still lacks the pending prompt column after migration.")
+                        }
+                        if let backupURL {
+                            StationAIDiagnostics.record("persistence.store.schema_repaired", fields: [
+                                "storePath": storeURL.path,
+                                "backupPath": backupURL.path,
+                                "column": "ZPENDINGSUBMITTEDPROMPT"
+                            ])
+                        }
+                        return container
+                    }
+                }
+                let container = try ModelContainer(for: schema, configurations: [configuration])
+                guard try !storeNeedsPendingPromptColumn(storeURL) else {
+                    throw StoreSchemaRepairError("The task store lacks the pending prompt column after opening.")
+                }
+                return container
+            }
+        } catch {
+            var fields = StationAIDiagnostics.errorFields(error, includeUserInfoDetails: true)
+            fields.merge(StationAIDiagnostics.storeContextFields(for: storeURL)) { _, new in new }
+            fields.merge(Self.schemaProbeFields(at: storeURL)) { _, new in new }
+            fields["phase"] = "model-container-open"
+            StationAIDiagnostics.recordAndFlush("persistence.store.open.failed", fields: fields)
+            throw error
+        }
+    }
 
-        let configuration = ModelConfiguration(
-            "StationAI",
-            schema: schema,
-            url: storeURL,
-            cloudKitDatabase: .none
+    private static func validateTestDataDirectory(_ dataDirectory: String?) throws {
+        #if DEBUG
+        guard StationAIAppIdentity.isTestBundle else { return }
+        guard let dataDirectory, !dataDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw StoreSchemaRepairError("A StationAI test bundle requires an isolated data directory.")
+        }
+        let path = URL(fileURLWithPath: dataDirectory, isDirectory: true)
+            .resolvingSymlinksInPath().standardizedFileURL.path
+        let allowedRoots = [FileManager.default.temporaryDirectory.path, "/tmp"]
+            .map { URL(fileURLWithPath: $0, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL.path }
+        guard allowedRoots.contains(where: { path.hasPrefix($0 + "/") }) else {
+            throw StoreSchemaRepairError("A StationAI test bundle requires an isolated temporary data directory.")
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let candidate = URL(fileURLWithPath: dataDirectory, isDirectory: true)
+                .appendingPathComponent("StationAI.store" + suffix)
+            var metadata = stat()
+            if Darwin.lstat(candidate.path, &metadata) == 0,
+               metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFLNK) {
+                throw StoreSchemaRepairError("A StationAI test bundle cannot open a linked task store.")
+            }
+        }
+        #endif
+    }
+
+    /// Probe the task schema only after a persistence failure. SwiftData's NSError often
+    /// contains SQLite code 1 but omits the SQL message that explains a missing column.
+    static func schemaProbeFields(at storeURL: URL?) -> [String: String] {
+        guard let storeURL else { return ["schemaProbeResult": "store-path-unavailable"] }
+        var database: OpaquePointer?
+        let openStatus = sqlite3_open_v2(
+            storeURL.path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil
         )
-        return try ModelContainer(for: schema, configurations: [configuration])
+        guard openStatus == SQLITE_OK, let database else {
+            let message = database.map { String(cString: sqlite3_errmsg($0)) } ?? "SQLite open failed"
+            if let database { sqlite3_close(database) }
+            return [
+                "schemaProbeResult": "open-failed",
+                "schemaProbeSQLiteCode": String(openStatus),
+                "schemaProbeSQLiteMessage": String(message.prefix(2_048))
+            ]
+        }
+        defer { sqlite3_close(database) }
+        sqlite3_busy_timeout(database, 250)
+
+        // Keep this projection aligned with the persisted properties of BoardTask. A
+        // zero-row query validates table and column names without reading task data.
+        let query = """
+            SELECT t0.ZID, t0.ZTITLE, t0.ZSTATUSRAWVALUE, t0.ZSTATUSMESSAGE,
+                   t0.ZPROGRESSTYPERAWVALUE, t0.ZPROGRESSLABEL, t0.ZPROGRESSDETAIL,
+                   t0.ZCREATEDAT, t0.ZCODEXTHREADID, t0.ZSAVEDPROMPT,
+                   t0.ZPENDINGSUBMITTEDPROMPT, t0.ZWORKSPACEROOTPATHSDATA,
+                   t0.ZREPOSITORYWORKTREESDATA, t0.ZCONTEXTFOLDERPATHSDATA
+            FROM ZBOARDTASK t0 LIMIT 0
+            """
+        var statement: OpaquePointer?
+        let prepareStatus = sqlite3_prepare_v2(database, query, -1, &statement, nil)
+        defer { if let statement { sqlite3_finalize(statement) } }
+        guard prepareStatus == SQLITE_OK, let statement else {
+            return [
+                "schemaProbeResult": "prepare-failed",
+                "schemaProbeSQLiteCode": String(sqlite3_extended_errcode(database)),
+                "schemaProbeSQLiteMessage": String(String(cString: sqlite3_errmsg(database)).prefix(2_048))
+            ]
+        }
+        let stepStatus = sqlite3_step(statement)
+        guard stepStatus == SQLITE_DONE else {
+            return [
+                "schemaProbeResult": "step-failed",
+                "schemaProbeSQLiteCode": String(sqlite3_extended_errcode(database)),
+                "schemaProbeSQLiteMessage": String(String(cString: sqlite3_errmsg(database)).prefix(2_048))
+            ]
+        }
+        return ["schemaProbeResult": "ok"]
+    }
+
+    private static func withSchemaRepairLock<T>(at storeURL: URL, _ body: () throws -> T) throws -> T {
+        let lockURL = storeURL.deletingLastPathComponent().appendingPathComponent("store-schema-repair.lock")
+        return try withStoreFileLock(at: lockURL, body)
+    }
+
+    private static func withStoreWriteLock<T>(at storeURL: URL, _ body: () throws -> T) throws -> T {
+        let lockURL = storeURL.deletingLastPathComponent().appendingPathComponent("store-write.lock")
+        return try withStoreFileLock(at: lockURL, body)
+    }
+
+    private static func withStoreFileLock<T>(at lockURL: URL, _ body: () throws -> T) throws -> T {
+        let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, mode_t(0o600))
+        guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        defer { _ = Darwin.close(descriptor) }
+        var lock = flock()
+        lock.l_type = Int16(F_WRLCK)
+        lock.l_whence = Int16(SEEK_SET)
+        guard Darwin.fcntl(descriptor, F_SETLKW, &lock) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        return try body()
+    }
+
+    private static func withSQLite<T>(at url: URL, _ body: (OpaquePointer) throws -> T) throws -> T {
+        var database: OpaquePointer?
+        let status = sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil)
+        guard status == SQLITE_OK, let database else {
+            let message = database.map { String(cString: sqlite3_errmsg($0)) } ?? "SQLite open failed"
+            if let database { sqlite3_close(database) }
+            throw StoreSchemaRepairError(message)
+        }
+        defer { sqlite3_close(database) }
+        sqlite3_busy_timeout(database, 5_000)
+        return try body(database)
+    }
+
+    private static func storeNeedsPendingPromptColumn(_ url: URL) throws -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path) else { return false }
+        return try withSQLite(at: url) { database in
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(database, "PRAGMA table_info(ZBOARDTASK)", -1, &statement, nil) == SQLITE_OK else {
+                throw StoreSchemaRepairError(String(cString: sqlite3_errmsg(database)))
+            }
+            defer { sqlite3_finalize(statement) }
+            var columns = Set<String>()
+            var stepStatus = sqlite3_step(statement)
+            while stepStatus == SQLITE_ROW {
+                if let name = sqlite3_column_text(statement, 1) {
+                    columns.insert(String(cString: name))
+                }
+                stepStatus = sqlite3_step(statement)
+            }
+            guard stepStatus == SQLITE_DONE else {
+                throw StoreSchemaRepairError(String(cString: sqlite3_errmsg(database)))
+            }
+            guard columns.contains("ZID"), columns.contains("ZTITLE"), columns.contains("ZSAVEDPROMPT") else {
+                return false
+            }
+            return !columns.contains("ZPENDINGSUBMITTEDPROMPT")
+        }
+    }
+
+    private static func repairPendingPromptColumn(at url: URL) throws -> URL {
+        let backupURL = url.deletingLastPathComponent().appendingPathComponent(
+            "StationAI.store.before-pending-prompt-\(UUID().uuidString).backup"
+        )
+        try withSQLite(at: url) { database in
+            let backupDescriptor = Darwin.open(backupURL.path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, mode_t(0o600))
+            guard backupDescriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+            _ = Darwin.close(backupDescriptor)
+            var backupDatabase: OpaquePointer?
+            guard sqlite3_open_v2(backupURL.path, &backupDatabase, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK,
+                  let backupDatabase else {
+                if let backupDatabase { sqlite3_close(backupDatabase) }
+                throw StoreSchemaRepairError("Couldn't create a task-store backup before schema repair.")
+            }
+            defer { sqlite3_close(backupDatabase) }
+            sqlite3_busy_timeout(backupDatabase, 5_000)
+            guard let backup = sqlite3_backup_init(backupDatabase, "main", database, "main") else {
+                throw StoreSchemaRepairError(String(cString: sqlite3_errmsg(backupDatabase)))
+            }
+            var backupStatus = sqlite3_backup_step(backup, -1)
+            var backupRetries = 0
+            while (backupStatus == SQLITE_BUSY || backupStatus == SQLITE_LOCKED) && backupRetries < 100 {
+                sqlite3_sleep(50)
+                backupStatus = sqlite3_backup_step(backup, -1)
+                backupRetries += 1
+            }
+            let finishStatus = sqlite3_backup_finish(backup)
+            guard backupStatus == SQLITE_DONE, finishStatus == SQLITE_OK else {
+                throw StoreSchemaRepairError("Couldn't finish the task-store backup before schema repair.")
+            }
+            guard sqlite3_exec(database, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else {
+                throw StoreSchemaRepairError(String(cString: sqlite3_errmsg(database)))
+            }
+            do {
+                guard sqlite3_exec(database,
+                                   "ALTER TABLE ZBOARDTASK ADD COLUMN ZPENDINGSUBMITTEDPROMPT VARCHAR",
+                                   nil, nil, nil) == SQLITE_OK else {
+                    throw StoreSchemaRepairError(String(cString: sqlite3_errmsg(database)))
+                }
+                guard sqlite3_exec(database, "COMMIT", nil, nil, nil) == SQLITE_OK else {
+                    throw StoreSchemaRepairError(String(cString: sqlite3_errmsg(database)))
+                }
+            } catch {
+                sqlite3_exec(database, "ROLLBACK", nil, nil, nil)
+                throw error
+            }
+        }
+        return backupURL
     }
 
     @MainActor
@@ -162,19 +418,7 @@ enum StationAIStore {
     }
 
     static func takeLifecycleResetNotice(dataDirectory: String? = nil) -> [String] {
-        let directory: URL
-        if let dataDirectory {
-            directory = URL(fileURLWithPath: dataDirectory, isDirectory: true)
-        } else if let support = try? FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        ) {
-            directory = support.appendingPathComponent("StationAI", isDirectory: true)
-        } else {
-            return []
-        }
+        guard let directory = try? Self.storeURL(dataDirectory: dataDirectory).deletingLastPathComponent() else { return [] }
         let notice = directory.appendingPathComponent("task-lifecycle-v2-notice.json")
         guard let data = try? Data(contentsOf: notice),
               let paths = try? JSONDecoder().decode([String].self, from: data) else { return [] }
@@ -185,6 +429,12 @@ enum StationAIStore {
 
 private struct StoreLifecycleLockError: Error, LocalizedError, Sendable {
     let message: String
+    var errorDescription: String? { message }
+}
+
+private struct StoreSchemaRepairError: Error, LocalizedError, Sendable {
+    let message: String
+    init(_ message: String) { self.message = message }
     var errorDescription: String? { message }
 }
 
@@ -610,22 +860,19 @@ final class BoardTaskManager {
 
     func list() throws -> [BoardTaskRecord] {
         let descriptor = FetchDescriptor<BoardTask>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
-        StationAIDiagnostics.record("persistence.read.started", fields: [
-            "operation": "BoardTaskManager.list",
-            "entity": "BoardTask"
-        ])
+        let readFields = persistenceReadFields(operation: "BoardTaskManager.list")
+        let readStartedAt = DispatchTime.now().uptimeNanoseconds
+        StationAIDiagnostics.record("persistence.read.started", fields: readFields)
         do {
             let tasks = try modelContext.fetch(descriptor).map(BoardTaskRecord.init(task:))
-            StationAIDiagnostics.record("persistence.read.succeeded", fields: [
-                "operation": "BoardTaskManager.list",
-                "entity": "BoardTask",
-                "resultCount": String(tasks.count)
-            ])
+            var fields = readFields
+            fields["resultCount"] = String(tasks.count)
+            fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - readStartedAt) / 1_000_000)
+            StationAIDiagnostics.record("persistence.read.succeeded", fields: fields)
             return tasks
         } catch {
-            var fields = StationAIDiagnostics.errorFields(error)
-            fields["operation"] = "BoardTaskManager.list"
-            fields["entity"] = "BoardTask"
+            var fields = persistenceReadFailureFields(error, context: readFields)
+            fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - readStartedAt) / 1_000_000)
             StationAIDiagnostics.record("persistence.read.failed", fields: fields)
             throw error
         }
@@ -1463,41 +1710,59 @@ final class BoardTaskManager {
     private func requireTask(_ id: UUID) throws -> BoardTask {
         var descriptor = FetchDescriptor<BoardTask>(predicate: #Predicate { $0.id == id })
         descriptor.fetchLimit = 1
-        StationAIDiagnostics.record("persistence.read.started", fields: [
-            "operation": "BoardTaskManager.requireTask",
-            "entity": "BoardTask",
-            "taskID": id.uuidString
-        ])
+        let readFields = persistenceReadFields(operation: "BoardTaskManager.requireTask", taskID: id)
+        let readStartedAt = DispatchTime.now().uptimeNanoseconds
+        StationAIDiagnostics.record("persistence.read.started", fields: readFields)
         do {
             guard let task = try modelContext.fetch(descriptor).first else {
-                StationAIDiagnostics.record("persistence.read.missing", fields: [
-                    "operation": "BoardTaskManager.requireTask",
-                    "entity": "BoardTask",
-                    "taskID": id.uuidString
-                ])
+                var fields = readFields
+                fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - readStartedAt) / 1_000_000)
+                StationAIDiagnostics.record("persistence.read.missing", fields: fields)
                 throw StationAIManagerError.taskNotFound(id)
             }
-            StationAIDiagnostics.record("persistence.read.succeeded", fields: [
-                "operation": "BoardTaskManager.requireTask",
-                "entity": "BoardTask",
-                "taskID": id.uuidString,
-                "status": task.status.rawValue,
-                "repositoryCount": String(task.repositoryWorktrees.count),
-                "workspaceRootCount": String(task.workspaceRootPaths.count),
-                "hasCodexThread": String(task.codexThreadID != nil),
-                "hasSavedPrompt": String(task.savedPrompt != nil)
-            ])
+            var fields = readFields
+            fields["status"] = task.status.rawValue
+            fields["repositoryCount"] = String(task.repositoryWorktrees.count)
+            fields["workspaceRootCount"] = String(task.workspaceRootPaths.count)
+            fields["hasCodexThread"] = String(task.codexThreadID != nil)
+            fields["hasSavedPrompt"] = String(task.savedPrompt != nil)
+            fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - readStartedAt) / 1_000_000)
+            StationAIDiagnostics.record("persistence.read.succeeded", fields: fields)
             return task
         } catch {
             if !(error is StationAIManagerError) {
-                var fields = StationAIDiagnostics.errorFields(error)
-                fields["operation"] = "BoardTaskManager.requireTask"
-                fields["entity"] = "BoardTask"
-                fields["taskID"] = id.uuidString
+                var fields = persistenceReadFailureFields(error, context: readFields)
+                fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - readStartedAt) / 1_000_000)
                 StationAIDiagnostics.record("persistence.read.failed", fields: fields)
             }
             throw error
         }
+    }
+
+    private func persistenceReadFields(operation: String, taskID: UUID? = nil) -> [String: String] {
+        let storeURL = modelContext.container.configurations.first?.url
+        var fields = [
+            "storePathAvailable": String(storeURL != nil)
+        ]
+        if let storeURL {
+            fields["storePath"] = storeURL.standardizedFileURL.path
+        }
+        fields["readID"] = UUID().uuidString
+        fields["operation"] = operation
+        fields["entity"] = "BoardTask"
+        if let taskID { fields["taskID"] = taskID.uuidString }
+        return fields
+    }
+
+    private func persistenceReadFailureFields(_ error: Error, context: [String: String]) -> [String: String] {
+        var fields = StationAIDiagnostics.errorFields(error, includeUserInfoDetails: true)
+        fields.merge(context) { _, new in new }
+        let storeURL = modelContext.container.configurations.first?.url
+        fields.merge(StationAIDiagnostics.storeContextFields(for: storeURL)) {
+            _, new in new
+        }
+        fields.merge(StationAIStore.schemaProbeFields(at: storeURL)) { _, new in new }
+        return fields
     }
 
     private func validateRepositoryAssignments(
@@ -1566,22 +1831,19 @@ final class BoardTaskManager {
     }
 
     private func listModels() throws -> [BoardTask] {
-        StationAIDiagnostics.record("persistence.read.started", fields: [
-            "operation": "BoardTaskManager.listModels",
-            "entity": "BoardTask"
-        ])
+        let readFields = persistenceReadFields(operation: "BoardTaskManager.listModels")
+        let readStartedAt = DispatchTime.now().uptimeNanoseconds
+        StationAIDiagnostics.record("persistence.read.started", fields: readFields)
         do {
             let tasks = try modelContext.fetch(FetchDescriptor<BoardTask>())
-            StationAIDiagnostics.record("persistence.read.succeeded", fields: [
-                "operation": "BoardTaskManager.listModels",
-                "entity": "BoardTask",
-                "resultCount": String(tasks.count)
-            ])
+            var fields = readFields
+            fields["resultCount"] = String(tasks.count)
+            fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - readStartedAt) / 1_000_000)
+            StationAIDiagnostics.record("persistence.read.succeeded", fields: fields)
             return tasks
         } catch {
-            var fields = StationAIDiagnostics.errorFields(error)
-            fields["operation"] = "BoardTaskManager.listModels"
-            fields["entity"] = "BoardTask"
+            var fields = persistenceReadFailureFields(error, context: readFields)
+            fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - readStartedAt) / 1_000_000)
             StationAIDiagnostics.record("persistence.read.failed", fields: fields)
             throw error
         }
@@ -1633,7 +1895,7 @@ final class BoardTaskManager {
                             throw error
                         }
                         let retryDelayMilliseconds = retryDelays[retryCount] / 1_000_000
-                        var retryFields = StationAIDiagnostics.errorFields(error)
+                        var retryFields = StationAIDiagnostics.errorFields(error, includeUserInfoDetails: true)
                         retryFields.merge(fields) { _, new in new }
                         retryFields["attempt"] = String(attemptCount)
                         retryFields["retryCount"] = String(retryCount + 1)
@@ -1646,7 +1908,7 @@ final class BoardTaskManager {
                 }
             }
         } catch {
-            var failureFields = StationAIDiagnostics.errorFields(error)
+            var failureFields = StationAIDiagnostics.errorFields(error, includeUserInfoDetails: true)
             failureFields.merge(fields) { _, new in new }
             failureFields["attemptCount"] = String(attemptCount)
             failureFields["retryCount"] = String(retryCount)

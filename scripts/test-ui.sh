@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export STATIONAI_REPOSITORY_ROOT="${repository_root}"
 script_path="${repository_root}/scripts/test-ui.sh"
 
 if [[ "${1:-}" != "--locked" ]]; then
@@ -132,6 +133,10 @@ xcrun swiftc -module-name StationAI \
   "${repository_root}/StationAI/App/BoardTask.swift" \
   "${repository_root}/scripts/seed-task-pr-link.swift" \
   -o "${task_pr_seeder}"
+legacy_store_seeder="${fixture_root}/seed-legacy-task-store"
+xcrun swiftc -parse-as-library -swift-version 5 -O \
+  "${repository_root}/scripts/seed-legacy-task-store.swift" \
+  -o "${legacy_store_seeder}"
 live_ui_marker="/tmp/stationai-codex-live-ui-integration"
 rm -f "${live_ui_marker}"
 if [[ "${STATIONAI_RUN_CODEX_INTEGRATION:-0}" == "1" ]]; then
@@ -197,6 +202,13 @@ for (( batch_index=0; batch_index<batch_count; batch_index++ )); do
   summary_path="${test_output_dir}/test-summary-batch-${batch_tag}.json"
   dashboard_log="${test_output_dir}/xcodebuild-batch-${batch_tag}.log"
   app_bundle_identifier="com.stationai.app.e2e.${test_run_identifier}.b${batch_tag}"
+  for ui_case in "${batch_cases[@]}"; do
+    if [[ "${ui_case}" == "test_worktree_app_profiles_isolate_identity_and_store" ]]; then
+      linked_profile_key="$("${repository_root}/scripts/app-profile.sh" "${fixture_root}/existing-worktree" | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])')"
+      app_bundle_identifier="com.stationai.app.worktree.${linked_profile_key}.e2e.${test_run_identifier}.b${batch_tag}"
+      break
+    fi
+  done
   test_arguments=("${base_test_arguments[@]}" -resultBundlePath "${result_bundle}")
   for ui_case in "${batch_cases[@]}"; do
     test_arguments+=("-only-testing:StationAIUITests/StationAIUITests/${ui_case}")

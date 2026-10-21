@@ -329,6 +329,45 @@ enum RepositoryScanner {
     }
 }
 
+enum StationAIAppIdentity {
+    static var applicationIdentifier: String {
+        Bundle.main.infoDictionary?["StationAIApplicationBundleIdentifier"] as? String
+            ?? Bundle.main.bundleIdentifier ?? ""
+    }
+
+    static var isTestBundle: Bool {
+        #if DEBUG
+        return applicationIdentifier.contains(".e2e.")
+        #else
+        return false
+        #endif
+    }
+
+    static var worktreeKey: String? {
+        let prefix = "com.stationai.app.worktree."
+        guard applicationIdentifier.hasPrefix(prefix) else { return nil }
+        let remainder = String(applicationIdentifier.dropFirst(prefix.count))
+        let key = String(remainder.prefix(17))
+        guard key.count == 17, key.first == "w",
+              key.dropFirst().allSatisfy({ $0.isHexDigit && !$0.isUppercase }) else { return nil }
+        let suffix = remainder.dropFirst(key.count)
+        guard suffix.isEmpty || (isTestBundle && suffix.hasPrefix(".e2e.")) else { return nil }
+        return key
+    }
+
+    static func defaultDataDirectory() throws -> URL {
+        let support = try FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        ).appendingPathComponent("StationAI", isDirectory: true)
+        guard let worktreeKey else { return support }
+        return support.appendingPathComponent("Worktrees", isDirectory: true)
+            .appendingPathComponent(worktreeKey, isDirectory: true)
+    }
+}
+
 enum StationAIWorktreeManager {
     static func defaultRoot() -> URL {
         #if DEBUG
@@ -336,9 +375,12 @@ enum StationAIWorktreeManager {
             return URL(fileURLWithPath: override, isDirectory: true).standardizedFileURL
         }
         #endif
-        return FileManager.default.homeDirectoryForCurrentUser
+        var root = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".stationAI/worktrees", isDirectory: true)
-            .standardizedFileURL
+        if let key = StationAIAppIdentity.worktreeKey {
+            root.appendPathComponent(key, isDirectory: true)
+        }
+        return root.standardizedFileURL
     }
 
     static func branchSlug(_ title: String) -> String {
@@ -1150,6 +1192,9 @@ enum StationAIDiagnostics {
             directory = directoryOverride
         } else if let dataDirectory = ProcessInfo.processInfo.environment["STATIONAI_DATA_DIRECTORY"] {
             directory = URL(fileURLWithPath: dataDirectory, isDirectory: true)
+        } else if StationAIAppIdentity.worktreeKey != nil,
+                  let worktreeDirectory = try? StationAIAppIdentity.defaultDataDirectory() {
+            directory = worktreeDirectory
         } else if let logsDirectory = try? FileManager.default.url(
             for: .libraryDirectory,
             in: .userDomainMask,
@@ -1169,17 +1214,55 @@ enum StationAIDiagnostics {
             directory = directoryOverride
         } else if let dataDirectory = ProcessInfo.processInfo.environment["STATIONAI_DATA_DIRECTORY"] {
             directory = URL(fileURLWithPath: dataDirectory, isDirectory: true)
-        } else if let supportDirectory = try? FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        ) {
-            directory = supportDirectory.appendingPathComponent("StationAI", isDirectory: true)
+        } else if let supportDirectory = try? StationAIAppIdentity.defaultDataDirectory() {
+            directory = supportDirectory
         } else {
             directory = FileManager.default.temporaryDirectory.appendingPathComponent("StationAI", isDirectory: true)
         }
         return directory.appendingPathComponent("StationAI.store")
+    }
+
+    static func storeContextFields(for storeURL: URL?) -> [String: String] {
+        guard let storeURL else { return ["storePathAvailable": "false"] }
+
+        let fileManager = FileManager.default
+        let directoryURL = storeURL.deletingLastPathComponent()
+        var fields = [
+            "storePathAvailable": "true",
+            "storePath": storeURL.standardizedFileURL.path,
+            "storeDirectoryExists": String(fileManager.fileExists(atPath: directoryURL.path)),
+            "storeDirectoryReadable": String(fileManager.isReadableFile(atPath: directoryURL.path)),
+            "storeDirectoryWritable": String(fileManager.isWritableFile(atPath: directoryURL.path))
+        ]
+        appendFileSnapshot(storeURL, prefix: "storeFile", to: &fields)
+        appendFileSnapshot(
+            URL(fileURLWithPath: storeURL.path + "-wal"),
+            prefix: "storeWAL",
+            to: &fields
+        )
+        appendFileSnapshot(
+            URL(fileURLWithPath: storeURL.path + "-shm"),
+            prefix: "storeSHM",
+            to: &fields
+        )
+        return fields
+    }
+
+    private static func appendFileSnapshot(_ url: URL, prefix: String, to fields: inout [String: String]) {
+        let fileManager = FileManager.default
+        let attributes = try? fileManager.attributesOfItem(atPath: url.path)
+        fields["\(prefix)Exists"] = String(attributes != nil)
+        fields["\(prefix)Readable"] = String(fileManager.isReadableFile(atPath: url.path))
+        fields["\(prefix)Writable"] = String(fileManager.isWritableFile(atPath: url.path))
+        if let size = attributes?[.size] as? NSNumber {
+            fields["\(prefix)SizeBytes"] = size.stringValue
+        }
+        if let permissions = attributes?[.posixPermissions] as? NSNumber {
+            fields["\(prefix)Permissions"] = String(format: "%04o", permissions.intValue)
+        }
+        if let modified = attributes?[.modificationDate] as? Date {
+            fields["\(prefix)ModifiedAt"] = ISO8601DateFormatter().string(from: modified)
+        }
     }
 
     static func jsonString<T: Encodable>(_ value: T) -> String {
@@ -1252,6 +1335,14 @@ enum StationAIDiagnostics {
                 flushBufferedEvents(at: url)
                 continuation.resume()
             }
+        }
+    }
+
+    static func recordAndFlush(_ event: String, fields: [String: String] = [:]) {
+        record(event, fields: fields)
+        let url = logURL
+        writerQueue.sync {
+            flushBufferedEvents(at: url)
         }
     }
 
@@ -1642,8 +1733,7 @@ enum StationAIDiagnostics {
         if rotatedSize > perFileLimit { try FileManager.default.removeItem(at: previousURL) }
     }
 
-    static func errorFields(_ error: Error) -> [String: String] {
-
+    static func errorFields(_ error: Error, includeUserInfoDetails: Bool = false) -> [String: String] {
         var fields: [String: String] = [:]
         fields["errorDescription"] = error.localizedDescription
         var underlying: NSError? = error as NSError
@@ -1652,19 +1742,88 @@ enum StationAIDiagnostics {
             let prefix = "error\(depth)"
             fields["\(prefix)Domain"] = current.domain
             fields["\(prefix)Code"] = String(current.code)
+            fields["\(prefix)Description"] = String(current.localizedDescription.prefix(4_096))
+            let userInfoKeys = current.userInfo.keys.map(String.init(describing:)).sorted()
+            fields["\(prefix)UserInfoKeys"] = userInfoKeys.joined(separator: ",")
+            fields["\(prefix)UserInfoKeyCount"] = String(userInfoKeys.count)
             if let reason = current.localizedFailureReason { fields["\(prefix)Reason"] = reason }
+            if includeUserInfoDetails {
+                let diagnosticUserInfo = current.userInfo
+                    .filter { $0.key != NSUnderlyingErrorKey }
+                    .reduce(into: [String: Any]()) { result, item in
+                        result[item.key] = diagnosticUserInfoValue(item.value)
+                    }
+                if let data = try? JSONSerialization.data(withJSONObject: diagnosticUserInfo, options: [.sortedKeys]),
+                   let summary = String(data: data, encoding: .utf8) {
+                    fields["\(prefix)UserInfo"] = String(summary.prefix(8_192))
+                    fields["\(prefix)UserInfoTruncated"] = String(summary.utf8.count > 8_192)
+                }
+                if let debugDescription = current.userInfo["NSDebugDescription"] as? String {
+                    fields["\(prefix)DebugDescription"] = String(debugDescription.prefix(4_096))
+                }
+                if let filePath = current.userInfo[NSFilePathErrorKey] as? String {
+                    fields["\(prefix)FilePath"] = String(filePath.prefix(4_096))
+                }
+                if let recoverySuggestion = current.localizedRecoverySuggestion {
+                    fields["\(prefix)RecoverySuggestion"] = String(recoverySuggestion.prefix(2_048))
+                }
+                if let failingURL = current.userInfo["NSURLErrorKey"] as? URL {
+                    var components = URLComponents(url: failingURL, resolvingAgainstBaseURL: false)
+                    components?.query = nil
+                    components?.fragment = nil
+                    fields["\(prefix)URL"] = components?.string ?? failingURL.path
+                } else if let failingURL = current.userInfo["NSURLErrorKey"] as? String {
+                    var components = URLComponents(string: failingURL)
+                    components?.query = nil
+                    components?.fragment = nil
+                    fields["\(prefix)URL"] = components?.string ?? String(failingURL.prefix(4_096))
+                }
+            }
             underlying = current.userInfo[NSUnderlyingErrorKey] as? NSError
             depth += 1
         }
         return fields
     }
 
+    private static func diagnosticUserInfoValue(_ value: Any, depth: Int = 0) -> Any {
+        guard depth < 3 else { return "<nested-value-truncated>" }
+        if let string = value as? String { return String(string.prefix(4_096)) }
+        if let number = value as? NSNumber { return number }
+        if let url = value as? URL {
+            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            components?.query = nil
+            components?.fragment = nil
+            return components?.string ?? url.path
+        }
+        if let date = value as? Date { return ISO8601DateFormatter().string(from: date) }
+        if let data = value as? Data { return ["byteCount": data.count] }
+        if let error = value as? NSError {
+            return ["domain": error.domain, "code": error.code, "description": String(error.localizedDescription.prefix(4_096))]
+        }
+        if let dictionary = value as? [String: Any] {
+            return dictionary.keys.sorted().prefix(32).reduce(into: [String: Any]()) { result, key in
+                if let nested = dictionary[key] {
+                    result[key] = diagnosticUserInfoValue(nested, depth: depth + 1)
+                }
+            }
+        }
+        if let values = value as? [Any] {
+            return values.prefix(32).map { diagnosticUserInfoValue($0, depth: depth + 1) }
+        }
+        return ["type": String(reflecting: type(of: value))]
+    }
+
     static func errorFields(_ error: Error, redacting values: [String]) -> [String: String] {
-        var fields = errorFields(error)
+        var fields = errorFields(error, includeUserInfoDetails: true)
         let secrets = values.filter { !$0.isEmpty }.sorted { $0.count > $1.count }
         guard !secrets.isEmpty else { return fields }
 
-        for key in ["errorDescription"] + (0..<5).map({ "error\($0)Reason" }) {
+        let redactableFields = ["errorDescription"] + (0..<5).flatMap { index in
+            ["Description", "Reason", "UserInfo", "DebugDescription", "FilePath", "RecoverySuggestion", "URL"].map {
+                "error\(index)\($0)"
+            }
+        }
+        for key in redactableFields {
             guard var value = fields[key] else { continue }
             for secret in secrets {
                 value = value.replacingOccurrences(of: secret, with: "[redacted]")
