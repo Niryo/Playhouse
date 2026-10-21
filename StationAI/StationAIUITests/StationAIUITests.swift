@@ -1920,15 +1920,14 @@ final class StationAIUITests: XCTestCase {
         assertScreenshotIfVisible(named: "Repository suggestions exclude nested and symlinked folders")
     }
 
-    // case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections and applies them to empty tasks through repository batches with ordered roots and default auto/main/main branch settings; a newly saved list applies to a fresh task and remains saved. Invalid repository paths are rejected without changing the saved preference. In the UI, blank Return restores saved repositories in order, while typing and arrow selection replaces and persists the list for the next conversation.
+    // case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections and applies them to empty tasks through repository batches with ordered roots and default auto/main/main branch settings; a newly saved list applies to a fresh task and remains saved. Invalid repository paths are rejected without changing the saved preference. In the UI, the picker placeholder shows saved repository names in order followed immediately by a Return key indicator; blank Return restores the saved repositories, while typing and arrow selection replaces and persists the list for the next conversation.
     func test_new_task_remembers_last_selected_repositories() throws {
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["settings", "set-last-repositories", "--repo", fixture.secondary.path, "--repo", fixture.primary.path])
 
         openNewTaskConversation()
         let search = element("conversation-repository-search")
-        XCTAssertTrue((search.placeholderValue ?? "").contains("secondary, primary"), "The conversation picker should show the saved repository order.")
-        XCTAssertTrue((search.placeholderValue ?? "").contains("press Return to reuse"), "The picker should signal that blank Return restores the saved repositories.")
+        XCTAssertEqual(search.placeholderValue, "secondary, primary ↵", "The conversation picker should show the saved repository order followed by the Return key indicator.")
         search.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(element("conversation-repository-badge-secondary").waitForExistence(timeout: 10))
         XCTAssertTrue(element("conversation-repository-badge-primary").waitForExistence(timeout: 10))
