@@ -354,7 +354,9 @@ final class StationAIUITests: XCTestCase {
         setConversationRepositoryField("secondary", field: "branch-from", value: "branch-source")
         setConversationRepositoryField("primary", field: "branch-from", value: "branch-source")
         setConversationRepositoryField("primary", field: "merge-target", value: "branch-source")
-        element("edit-workspace-roots-button").click()
+        let editRoots = element("edit-workspace-roots-button")
+        assertHelpTag(for: editRoots, equals: "Edit working folders for this task")
+        editRoots.click()
         XCTAssertTrue(element("browse-workspace-roots-button").waitForExistence(timeout: 5))
         try chooseFolder(in: openFolderPanel, folder: fixture.custom, confirmationButton: "Add Folders")
         saveNewTaskPromptAndReturnToBoard("Ordered roots")
@@ -711,9 +713,12 @@ final class StationAIUITests: XCTestCase {
         )
         XCTAssertEqual(try XCTUnwrap((try runCLI(["task", "move", titleMatchID, "Done"])["result"] as? [String: Any])?["status"] as? String), "Done")
 
-        element("done-archive-button").click()
+        let archiveButton = element("done-archive-button")
+        assertHelpTag(for: archiveButton, equals: "Browse completed tasks")
+        archiveButton.click()
         let archiveResult = element("done-archive-task-\(taskID)")
         XCTAssertTrue(archiveResult.waitForExistence(timeout: 10), "The completed task should appear in the archive.")
+        assertHelpTag(for: archiveResult, equals: "Open task: \(currentTitle)")
         let archiveSearch = element("done-archive-search")
         archiveSearch.click()
         archiveSearch.typeText("no-such-archive-task")
@@ -1864,6 +1869,7 @@ final class StationAIUITests: XCTestCase {
         let chooseParent = reopenedPreferences.descendants(matching: .any)
             .matching(identifier: "choose-default-parent-folder-button").firstMatch
         XCTAssertTrue(chooseParent.waitForExistence(timeout: 10))
+        assertHelpTag(for: chooseParent, equals: "Choose parent folder")
         chooseParent.click()
         try chooseFolder(in: openFolderPanel, folder: fixture.parent, confirmationButton: "Use This Folder")
         assertText("default-parent-folder-path", equals: fixture.parent.path)
@@ -2162,6 +2168,7 @@ final class StationAIUITests: XCTestCase {
         composer.typeText("Second line")
         XCTAssertEqual(composer.value as? String, "First line\nSecond line", "Shift+Enter should add a line without submitting the composer.")
         XCTAssertTrue(sendButton.isEnabled)
+        assertHelpTag(for: sendButton, equals: "Send message")
         XCTAssertEqual(((try runCLI(["conversation", "history", taskID(named: "Blank message")])["result"] as? [String: Any])?["messages"] as? [Any])?.count, 0, "Adding a line must not send a conversation message.")
         composer.typeKey("a", modifierFlags: .command)
         composer.typeText("   ")
@@ -3564,6 +3571,13 @@ final class StationAIUITests: XCTestCase {
 
     private func element(_ identifier: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    private func assertHelpTag(for element: XCUIElement, equals expected: String) {
+        element.hover()
+        let helpTag = app.descendants(matching: .helpTag)
+            .matching(NSPredicate(format: "label == %@", expected)).firstMatch
+        XCTAssertTrue(helpTag.waitForExistence(timeout: 4), "Expected the hovered control to show the help tag ‘\(expected)’." )
     }
 
     private func element(containingAccessibilityText text: String) -> XCUIElement {

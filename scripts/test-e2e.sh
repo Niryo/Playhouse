@@ -62,6 +62,7 @@ cleanup() {
 trap cleanup EXIT
 
 python3 "${repository_root}/scripts/check-test-parity.py"
+python3 "${repository_root}/scripts/check-button-feedback.py"
 
 xcodebuild build -quiet \
   -project "${repository_root}/StationAI.xcodeproj" \

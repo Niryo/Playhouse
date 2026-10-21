@@ -180,6 +180,7 @@ struct TaskConversationView: View {
                         .font(.system(size: 11, weight: .medium))
                         .frame(width: 24, height: 24)
                 }
+                .buttonHoverPointer()
                 .buttonStyle(.plain)
                 .help("Refresh workspace changes")
                 .accessibilityLabel("Refresh workspace changes")
@@ -206,6 +207,8 @@ struct TaskConversationView: View {
                     Button("Retry") {
                         Task { await refreshWorkspaceChanges() }
                     }
+                    .buttonHoverPointer()
+                    .help("Retry")
                     .font(.system(size: 11, weight: .medium))
                     .accessibilityIdentifier("retry-workspace-changes-button")
                 }
@@ -315,6 +318,7 @@ struct TaskConversationView: View {
                                 in: RoundedRectangle(cornerRadius: 5)
                             )
                         }
+                        .buttonHoverPointer()
                         .buttonStyle(.plain)
                         .help("View \(entry.group.rawValue) diff for \(entry.path)")
                         .accessibilityLabel("\(entry.path), \(entry.status), \(entry.group.rawValue)")
@@ -421,6 +425,7 @@ struct TaskConversationView: View {
                         .frame(width: 26, height: 26)
                         .contentShape(Rectangle())
                 }
+                .buttonHoverPointer()
                 .buttonStyle(.plain)
                 .help("Close diff")
                 .accessibilityLabel("Close diff")
@@ -506,6 +511,8 @@ struct TaskConversationView: View {
                                 self.selectedDiff = nil
                                 if let selectedChange { openDiff(selectedChange) }
                             }
+                            .buttonHoverPointer()
+                            .help("Reload editor")
                             .font(.system(size: 11, weight: .medium))
                         }
                         .padding(24)
@@ -645,6 +652,7 @@ struct TaskConversationView: View {
                     .frame(width: 28, height: 28)
                     .contentShape(Rectangle())
             }
+            .buttonHoverPointer()
             .buttonStyle(.plain)
             .help("Back to Kanban")
             .accessibilityLabel("Back to Kanban board")
@@ -698,6 +706,7 @@ struct TaskConversationView: View {
                 Label("Folders", systemImage: "folder")
                     .font(.system(size: 12, weight: .medium))
             }
+            .buttonHoverPointer()
             .buttonStyle(.bordered)
             .help("Edit working folders for this task")
             .accessibilityIdentifier("edit-workspace-roots-button")
@@ -724,6 +733,8 @@ struct TaskConversationView: View {
                         .padding(.horizontal, 8).padding(.vertical, 5)
                         .background(Color.accentColor.opacity(0.1), in: Capsule())
                 }
+                .buttonHoverPointer()
+                .help("Edit repository settings for \(name)")
                 .buttonStyle(.plain)
                 .disabled(isReadOnly)
                 .popover(item: Binding(
@@ -737,10 +748,14 @@ struct TaskConversationView: View {
                         repositoryDetailRow("Merge to", value: $editedMergeTarget, field: "to", placeholder: "default", identifier: "conversation-repository-merge-target", editable: repository.isPending)
                         HStack {
                             Button("Remove Repository", role: .destructive) { removeConversationRepository(repository) }
+                            .buttonHoverPointer()
+                            .help("Remove Repository")
                                 .accessibilityIdentifier("remove-conversation-repository-button")
                             Spacer()
                             if repository.isPending {
                                 Button("Save") { saveConversationRepository(repository) }
+                                    .buttonHoverPointer()
+                                    .help("Save repository settings")
                                     .buttonStyle(.borderedProminent)
                                     .accessibilityIdentifier("save-conversation-repository-button")
                             } else {
@@ -762,6 +777,7 @@ struct TaskConversationView: View {
                 Image(systemName: "plus").font(.system(size: 10, weight: .semibold))
                     .frame(width: 22, height: 22).background(Color.primary.opacity(0.07), in: Circle())
             }
+            .buttonHoverPointer()
             .buttonStyle(.plain).help("Add a repository").accessibilityLabel("Add repository")
             .accessibilityIdentifier("add-conversation-repository-button")
             .popover(isPresented: $isShowingRepositoryPicker, arrowEdge: .bottom) { repositoryPicker }
@@ -779,6 +795,8 @@ struct TaskConversationView: View {
                         .help(parentFolderURL.path)
                     Spacer(minLength: 0)
                     Button("Change…", action: chooseRepositoryParentFolder)
+                        .buttonHoverPointer()
+                        .help("Choose a different repository suggestion folder")
                         .disabled(isChoosingRepositoryParent)
                         .accessibilityIdentifier("choose-repository-suggestion-parent-button")
                 }
@@ -789,6 +807,8 @@ struct TaskConversationView: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                 Button("Choose suggestion folder…", action: chooseRepositoryParentFolder)
+                    .buttonHoverPointer()
+                    .help("Choose a folder to find repository suggestions")
                     .disabled(isChoosingRepositoryParent)
                     .accessibilityIdentifier("choose-repository-suggestion-parent-button")
             }
@@ -847,6 +867,8 @@ struct TaskConversationView: View {
                                     Text(repository.path).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
                                 }.frame(maxWidth: .infinity, alignment: .leading).padding(7).contentShape(Rectangle())
                             }
+                            .buttonHoverPointer()
+                            .help("Select repository")
                             .buttonStyle(.plain)
                             .background(index == repositorySuggestionIndex ? Color.accentColor.opacity(0.16) : Color.clear, in: RoundedRectangle(cornerRadius: 5))
                             .accessibilityIdentifier("conversation-repository-suggestion-\(repository.lastPathComponent)")
@@ -1078,6 +1100,8 @@ struct TaskConversationView: View {
                 .contentShape(Rectangle())
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .buttonHoverPointer()
+            .help("Show or hide Codex activity details")
             .buttonStyle(.plain)
             .accessibilityLabel(isResponding && runningCount == 0 ? "Thinking" : runningCount > 0 ? "Running \(runningCount) task\(runningCount == 1 ? "" : "s")" : "Codex activity, \(activities.count) task\(activities.count == 1 ? "" : "s")")
             .accessibilityIdentifier("codex-activity-disclosure")
@@ -1253,7 +1277,9 @@ struct TaskConversationView: View {
                                 .overlay(alignment: .topTrailing) {
                                     Button { pendingImages.removeAll { $0.id == attachment.id } } label: {
                                         Image(systemName: "xmark.circle.fill").foregroundStyle(.white, .black.opacity(0.7))
-                                    }.buttonStyle(.plain).accessibilityLabel("Remove image")
+                                    }
+                                    .buttonHoverPointer()
+                                    .help("Remove image").buttonStyle(.plain).accessibilityLabel("Remove image")
                                 }
                         }
                     }
@@ -1317,6 +1343,8 @@ struct TaskConversationView: View {
 
                 HStack(spacing: 12) {
                     Button { isShowingImagePicker = true } label: { Image(systemName: "paperclip") }
+                    .buttonHoverPointer()
+                    .help("Attach image")
                         .buttonStyle(.plain).accessibilityLabel("Attach image")
                         .accessibilityIdentifier("attach-chat-image-button")
                     Menu {
@@ -1330,6 +1358,8 @@ struct TaskConversationView: View {
                                     Text(mode.title)
                                 }
                             }
+                            .buttonHoverPointer()
+                            .help("Switch to \(mode.title) mode")
                             .accessibilityIdentifier("conversation-mode-\(mode.rawValue)")
                         }
                     } label: {
@@ -1345,7 +1375,9 @@ struct TaskConversationView: View {
                         .frame(minWidth: 30, minHeight: 31)
                         .contentShape(Rectangle())
                     }
+                    .buttonHoverPointer()
                     .menuStyle(.borderlessButton)
+                    .help("Change conversation mode or add context")
                     .accessibilityLabel("Conversation mode: \(conversationMode.title)")
                     .accessibilityIdentifier("conversation-mode-menu")
 
@@ -1373,6 +1405,8 @@ struct TaskConversationView: View {
                                 .frame(width: 31, height: 31)
                                 .background(Color.primary.opacity(0.72), in: RoundedRectangle(cornerRadius: 9))
                         }
+                        .buttonHoverPointer()
+                        .help("Pause Codex response")
                         .buttonStyle(.plain)
                         .disabled(isPausingResponse || !codexClient.isTurnActive)
                         .accessibilityLabel("Pause response")
@@ -1385,6 +1419,8 @@ struct TaskConversationView: View {
                                 .frame(width: 31, height: 31)
                                 .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 9))
                         }
+                        .buttonHoverPointer()
+                        .help("Continue Codex response")
                         .buttonStyle(.plain)
                         .accessibilityLabel("Continue response")
                         .accessibilityIdentifier("continue-response-button")
@@ -1392,6 +1428,8 @@ struct TaskConversationView: View {
                         Button("Save") {
                             Task { @MainActor in _ = await saveDraftAndGenerateTitle(status: nil, then: onBack) }
                         }
+                        .buttonHoverPointer()
+                        .help("Save draft and return to the board")
                             .disabled(isResponding || isLoadingHistory || draft.isEmpty)
                             .accessibilityIdentifier("save-task-prompt-button")
                         Button { sendMessage() } label: {
@@ -1401,6 +1439,8 @@ struct TaskConversationView: View {
                                 .frame(width: 31, height: 31)
                                 .background(Color.accentColor, in: Circle())
                         }
+                        .buttonHoverPointer()
+                        .help("Send message")
                         .buttonStyle(.plain)
                         .disabled(isSendDisabled)
                         .opacity(isSendDisabled ? 0.45 : 1)
@@ -1458,6 +1498,8 @@ struct TaskConversationView: View {
                             } label: {
                                 Label(option.label, systemImage: (userInputAnswers[question.id] ?? []).contains(option.label) ? "checkmark.circle.fill" : "circle")
                             }
+                            .buttonHoverPointer()
+                            .help("Select answer: \(option.label)")
                             .buttonStyle(.plain)
                         }
                         if question.allowsOther {
@@ -1472,6 +1514,8 @@ struct TaskConversationView: View {
             Button("Submit answers") {
                 Task { @MainActor in await submitUserInput(request) }
             }
+            .buttonHoverPointer()
+            .help("Submit answers")
                 .buttonStyle(.borderedProminent)
                 .disabled(request.questions.contains { question in
                     let selections = userInputAnswers[question.id] ?? []
@@ -1866,6 +1910,7 @@ struct TaskConversationView: View {
                     } label: {
                         Image(systemName: "pencil").font(.system(size: 10, weight: .medium))
                     }
+                    .buttonHoverPointer()
                     .buttonStyle(.plain).help("Edit \(title)").accessibilityLabel("Edit \(title)")
                     .accessibilityIdentifier("\(identifier)-edit")
                 }

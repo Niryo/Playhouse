@@ -37,11 +37,15 @@ struct WorkspaceRootsEditor: View {
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
+                    .buttonHoverPointer()
+                    .help("Cancel folder changes")
                     .keyboardShortcut(.cancelAction)
                 Button("Save folders") {
                     onSave(roots)
                     dismiss()
                 }
+                .buttonHoverPointer()
+                .help("Save working folders")
                 .buttonStyle(.borderedProminent)
                 .disabled(roots.isEmpty)
                 .accessibilityIdentifier("save-workspace-roots-button")

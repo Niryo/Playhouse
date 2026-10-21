@@ -83,10 +83,14 @@ struct KanbanBoardView: View {
                     self.taskBeingDeleted = nil
                 }
             }
+            .buttonHoverPointer()
+            .help("Delete Task")
             .accessibilityIdentifier("confirm-delete-task-button")
             Button("Cancel", role: .cancel) {
                 taskBeingDeleted = nil
             }
+            .buttonHoverPointer()
+            .help("Cancel task deletion")
             .accessibilityIdentifier("cancel-delete-task-button")
         } message: {
             Text("The task conversation and saved working folders will also be deleted.")
@@ -95,6 +99,8 @@ struct KanbanBoardView: View {
             Button("OK", role: .cancel) {
                 saveError = nil
             }
+            .buttonHoverPointer()
+            .help("Dismiss save error")
         } message: {
             Text(saveError ?? "Please try again.")
         }
@@ -103,6 +109,8 @@ struct KanbanBoardView: View {
             set: { if !$0 { pullRequestError = nil } }
         )) {
             Button("OK", role: .cancel) { pullRequestError = nil }
+            .buttonHoverPointer()
+            .help("Dismiss pull request error")
         } message: {
             Text(pullRequestError ?? "Please try again.")
         }
@@ -111,6 +119,8 @@ struct KanbanBoardView: View {
             set: { if !$0 { doneMoveError = nil } }
         )) {
             Button("OK", role: .cancel) { doneMoveError = nil }
+            .buttonHoverPointer()
+            .help("Dismiss pull request status error")
         } message: {
             Text(doneMoveError ?? "Please try again.")
         }
@@ -127,9 +137,23 @@ struct KanbanBoardView: View {
                 taskAwaitingUnmergedConfirmation = nil
                 moveTask(id: id, to: .done, allowUnmergedPullRequests: true)
             }
+            .buttonHoverPointer()
+            .help("Mark Done Anyway")
             Button("Cancel", role: .cancel) { taskAwaitingUnmergedConfirmation = nil }
+            .buttonHoverPointer()
+            .help("Cancel marking this task Done")
         } message: {
             Text("The pull request hasn't been merged. Marking this task Done will keep its worktree and branch as they are.")
+        }
+        .alert("Some task worktrees were kept", isPresented: Binding(
+            get: { lifecycleResetNotice != nil },
+            set: { if !$0 { lifecycleResetNotice = nil } }
+        )) {
+            Button("OK", role: .cancel) { lifecycleResetNotice = nil }
+                .buttonHoverPointer()
+                .help("Dismiss worktree notice")
+        } message: {
+            Text(lifecycleResetNotice ?? "")
         }
     }
 
@@ -156,6 +180,8 @@ struct KanbanBoardView: View {
                     }
                     Spacer(minLength: 8)
                     Button("OK") { self.lifecycleResetNotice = nil }
+                        .buttonHoverPointer()
+                        .help("Dismiss worktree notice")
                         .accessibilityIdentifier("dismiss-task-lifecycle-reset-notice")
                 }
                 .padding(.horizontal, 18)
@@ -304,6 +330,7 @@ struct KanbanBoardView: View {
                         .font(.system(size: 14, weight: .semibold))
                         .frame(width: 30, height: 30)
                 }
+                .buttonHoverPointer()
                 .buttonStyle(.bordered)
                 .help("Browse completed tasks")
                 .accessibilityLabel("Done tasks")
@@ -317,6 +344,8 @@ struct KanbanBoardView: View {
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3)
                 }
+                .buttonHoverPointer()
+                .help("Create a new task")
                 .buttonStyle(.borderedProminent)
                 .tint(WorkspaceTheme.accent)
                 .disabled(isCreatingNewTask)
@@ -347,6 +376,8 @@ struct KanbanBoardView: View {
                 Text("Done tasks").font(.system(size: 14, weight: .semibold))
                 Spacer()
                 Button { withAnimation { isShowingDoneArchive = false } } label: { Image(systemName: "xmark") }
+                .buttonHoverPointer()
+                .help("Close done tasks")
                     .buttonStyle(.plain).accessibilityLabel("Close done tasks")
                     .accessibilityIdentifier("close-done-archive-button")
             }
@@ -358,6 +389,8 @@ struct KanbanBoardView: View {
                     .textFieldStyle(.plain).accessibilityIdentifier("done-archive-search")
                 if !archiveSearchText.isEmpty {
                     Button { archiveSearchText = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                    .buttonHoverPointer()
+                    .help("Clear archive search")
                         .buttonStyle(.plain).accessibilityLabel("Clear archive search")
                         .accessibilityIdentifier("clear-archive-search-button")
                 }
@@ -389,6 +422,8 @@ struct KanbanBoardView: View {
                                 }
                                 .padding(10).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                             }
+                            .buttonHoverPointer()
+                            .help("Open task: \(task.title)")
                             .buttonStyle(.plain)
                             .accessibilityIdentifier("done-archive-task-\(task.id.uuidString)")
                             .overlay(alignment: .trailing) {
@@ -421,6 +456,8 @@ struct KanbanBoardView: View {
                     Text("PR").font(.system(size: 10, weight: .semibold))
                 }
             }
+            .buttonHoverPointer()
+            .help("Create pull requests")
             .disabled(taskCreatingPullRequests.contains(task.id))
             .accessibilityIdentifier("done-archive-create-pr-\(task.id.uuidString)")
         } else {
@@ -429,6 +466,8 @@ struct KanbanBoardView: View {
                     if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
                         Link("#\(number)", destination: url)
                             .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .buttonHoverPointer()
+                            .help("Open pull request #\(number)")
                             .accessibilityIdentifier("done-archive-pr-link-\(task.id.uuidString)-\(number)")
                     }
                 }
@@ -632,6 +671,7 @@ private struct KanbanColumnView: View {
                         Image(systemName: "plus")
                             .font(.system(size: 11, weight: .semibold))
                     }
+                    .buttonHoverPointer()
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .accessibilityLabel("Add task to Backlog")
@@ -948,7 +988,9 @@ private struct TaskCardView: View {
                 Color.clear
                     .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
+            .buttonHoverPointer()
             .buttonStyle(.plain)
+            .help("Open task: \(task.title)")
             .accessibilityLabel(task.title)
             .accessibilityHint("Open task")
             .accessibilityIdentifier("task-card-\(task.id.uuidString)")
@@ -966,6 +1008,8 @@ private struct TaskCardView: View {
                                 Text("PR").font(.system(size: 10, weight: .semibold))
                             }
                         }
+                        .buttonHoverPointer()
+                        .help("Create pull requests")
                         .disabled(isCreatingPullRequests)
                         .accessibilityIdentifier("task-create-pr-\(task.id.uuidString)")
                     } else {
@@ -973,6 +1017,8 @@ private struct TaskCardView: View {
                             if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
                                 Link("#\(number)", destination: url)
                                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                    .buttonHoverPointer()
+                                    .help("Open pull request #\(number)")
                                     .accessibilityIdentifier("task-pr-link-\(task.id.uuidString)-\(number)")
                             }
                         }
@@ -986,11 +1032,17 @@ private struct TaskCardView: View {
         .contextMenu {
             if let onMoveToDone {
                 Button("Move to Done", systemImage: "checkmark.circle", action: onMoveToDone)
+                .buttonHoverPointer()
+                .help("Move to Done")
                     .accessibilityIdentifier("move-task-to-done-menu-item")
             }
             Button("Rename…", systemImage: "pencil", action: onRename)
+            .buttonHoverPointer()
+            .help("Rename")
                 .accessibilityIdentifier("rename-task-menu-item")
             Button("Delete Task", systemImage: "trash", role: .destructive, action: onDelete)
+            .buttonHoverPointer()
+            .help("Delete Task")
                 .accessibilityIdentifier("delete-task-menu-item")
         }
     }
@@ -1021,11 +1073,15 @@ private struct RenameTaskSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
+                .buttonHoverPointer()
+                .help("Cancel")
                     .keyboardShortcut(.cancelAction)
                 Button("Save") {
                     onSave(normalizedTitle)
                     dismiss()
                 }
+                .buttonHoverPointer()
+                .help("Save")
                 .buttonStyle(.borderedProminent)
                 .disabled(normalizedTitle.isEmpty)
                 .accessibilityIdentifier("save-task-rename-button")

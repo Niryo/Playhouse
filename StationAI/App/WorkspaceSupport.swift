@@ -3,6 +3,35 @@ import Darwin
 import Foundation
 import SwiftUI
 
+private struct ButtonHoverPointer: ViewModifier {
+    @State private var isHovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .onHover { isInside in
+                guard isInside != isHovering else { return }
+                isHovering = isInside
+                if isInside {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+            .onDisappear {
+                if isHovering {
+                    NSCursor.pop()
+                    isHovering = false
+                }
+            }
+    }
+}
+
+extension View {
+    func buttonHoverPointer() -> some View {
+        modifier(ButtonHoverPointer())
+    }
+}
+
 enum WorkspaceSettings {
     static let defaultParentFolderKey = "defaultWorkspaceParentFolderPath"
     static let lastSelectedRepositoriesKey = "lastSelectedRepositories"
@@ -742,6 +771,8 @@ struct WorkspaceRootSelector: View {
                     Label("Browse…", systemImage: "folder")
                         .font(.system(size: 12, weight: .medium))
                 }
+                .buttonHoverPointer()
+                .help("Browse folders")
                 .buttonStyle(.bordered)
                 .accessibilityIdentifier("browse-workspace-roots-button")
             }
@@ -766,6 +797,7 @@ struct WorkspaceRootSelector: View {
                                 Image(systemName: "xmark.circle.fill")
                                     .font(.system(size: 11))
                             }
+                            .buttonHoverPointer()
                             .buttonStyle(.plain)
                             .help("Remove \(displayNames[root.standardizedFileURL.path] ?? root.path)")
                             .accessibilityLabel("Remove \(displayNames[root.standardizedFileURL.path] ?? root.lastPathComponent)")
@@ -810,6 +842,8 @@ struct WorkspaceRootSelector: View {
                                 .padding(.vertical, 7)
                                 .contentShape(Rectangle())
                             }
+                            .buttonHoverPointer()
+                            .help("Add repository \(repository.lastPathComponent)")
                             .buttonStyle(.plain)
                             .accessibilityIdentifier("repository-suggestion-\(repository.lastPathComponent)")
                         }
@@ -926,6 +960,8 @@ struct WorkspaceSettingsView: View {
                         .accessibilityIdentifier("default-parent-folder-path")
                     Spacer()
                     Button(parentFolderURL == nil ? "Choose…" : "Change…", action: chooseParentFolder)
+                    .buttonHoverPointer()
+                    .help("Choose parent folder")
                         .accessibilityIdentifier("choose-default-parent-folder-button")
                     if parentFolderURL != nil {
                         Button("Clear") {
@@ -936,6 +972,8 @@ struct WorkspaceSettingsView: View {
                                 pickerError = error.localizedDescription
                             }
                         }
+                        .buttonHoverPointer()
+                        .help("Clear default parent folder")
                         .accessibilityIdentifier("clear-default-parent-folder-button")
                     }
                 }
@@ -958,6 +996,8 @@ struct WorkspaceSettingsView: View {
             set: { if !$0 { pickerError = nil } }
         )) {
             Button("OK", role: .cancel) { pickerError = nil }
+            .buttonHoverPointer()
+            .help("Dismiss folder error")
         } message: {
             Text(pickerError ?? "Please try again.")
         }
