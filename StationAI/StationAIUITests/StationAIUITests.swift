@@ -2781,7 +2781,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Unsent task prompt is saved after returning to backlog")
     }
 
-    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors.
+    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text and the composer expands beyond five lines before scrolling. The long submitted prompt persists through the CLI/XPC path; the UI transcript shows a scrollbar for overflow and scrolling reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors.
     func test_conversation_composer_rejects_blank_and_supports_live_turn_controls() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Blank message", roots: [fixture.primary.path])
@@ -2804,6 +2804,19 @@ final class StationAIUITests: XCTestCase {
         composer.typeKey(.return, modifierFlags: .shift)
         composer.typeText("Second line")
         XCTAssertEqual(composer.value as? String, "First line\nSecond line", "Shift+Enter should add a line without submitting the composer.")
+        let twoLineHeight = composer.frame.height
+        for index in 3...5 {
+            composer.typeKey(.return, modifierFlags: .shift)
+            composer.typeText("Line \(index)")
+        }
+        let fiveLineHeight = composer.frame.height
+        for index in 6...9 {
+            composer.typeKey(.return, modifierFlags: .shift)
+            composer.typeText("Line \(index)")
+        }
+        XCTAssertGreaterThan(composer.frame.height, twoLineHeight, "The composer should grow as a draft gains lines, up to its expanded limit.")
+        XCTAssertGreaterThan(composer.frame.height, fiveLineHeight, "The composer should expand beyond the previous five-line limit.")
+        XCTAssertTrue(element("conversation-scroll-view").exists, "The transcript should expose its scroll view for reading the full conversation.")
         XCTAssertTrue(sendButton.isEnabled)
         assertHelpTag(for: sendButton, equals: "Send message")
         XCTAssertEqual(((try runCLI(["conversation", "history", taskID(named: "Blank message")])["result"] as? [String: Any])?["messages"] as? [Any])?.count, 0, "Adding a line must not send a conversation message.")
@@ -2842,7 +2855,8 @@ final class StationAIUITests: XCTestCase {
             openTask(named: "Untitled task")
             let titleComposer = element("message-composer")
             XCTAssertTrue(titleComposer.waitForExistence(timeout: 10))
-            let titlePrompt = "Explain the workspace layout briefly."
+            let titlePrompt = "Transcript entry " + String(repeating: "Readable chat content for scrolling. ", count: 120)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             titleComposer.click()
             titleComposer.typeText(titlePrompt)
             element("send-message-button").click()
@@ -2887,6 +2901,16 @@ final class StationAIUITests: XCTestCase {
             let serializedTitleEvents = String(data: try JSONSerialization.data(withJSONObject: titleEvents), encoding: .utf8) ?? ""
             XCTAssertFalse(serializedTitleEvents.contains(titlePrompt), "Title diagnostics must not include conversation text.")
             XCTAssertFalse(serializedTitleEvents.contains("Generated fixture title"), "Title diagnostics must not include generated title text.")
+            let transcriptScrollView = element("conversation-scroll-view")
+            let longPromptMessage = app.staticTexts[titlePrompt]
+            XCTAssertTrue(longPromptMessage.waitForExistence(timeout: 5), "The full long prompt should remain present in conversation history.")
+            XCTAssertTrue(app.scrollBars.firstMatch.waitForExistence(timeout: 5), "An overflowing transcript should expose a visible scrollbar.")
+            let latestPosition = longPromptMessage.frame.minY
+            transcriptScrollView.swipeDown()
+            XCTAssertTrue(waitUntil({ longPromptMessage.frame.minY > latestPosition + 20 }, timeout: 5), "Scrolling up should reveal earlier content in the long message.")
+            let earlierPosition = longPromptMessage.frame.minY
+            transcriptScrollView.swipeUp()
+            XCTAssertTrue(waitUntil({ longPromptMessage.frame.minY < earlierPosition - 20 }, timeout: 5), "Scrolling down should return to later content in the long message.")
             _ = try runCLI(["task", "rename", titleTaskID, "--title", "Generated title success"])
             element("back-to-board-button").click()
 
