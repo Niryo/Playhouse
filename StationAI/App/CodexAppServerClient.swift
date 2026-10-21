@@ -162,12 +162,14 @@ final class CodexAppServerClient: ObservableObject {
         return try await readMessages(threadID: threadID)
     }
 
-    func startThread(workspace: CodexWorkspaceContext, modelID: String = CodexAppServerClient.modelID) async throws -> String {
+    func startThread(
+        workspace: CodexWorkspaceContext,
+        modelID: String = CodexAppServerClient.modelID,
+        developerInstructions: String? = nil
+    ) async throws -> String {
         try await ensureInitialized(workspace: workspace)
 
-        let response = try await request(
-            method: "thread/start",
-            params: [
+        var params: [String: Any] = [
                 "model": modelID,
                 "allowProviderModelFallback": false,
                 "cwd": workspace.cwd.path,
@@ -179,7 +181,10 @@ final class CodexAppServerClient: ObservableObject {
                 "selectedCapabilityRoots": [],
                 "runtimeWorkspaceRoots": workspace.roots.map(\.path)
             ]
-        )
+        if let developerInstructions {
+            params["developerInstructions"] = developerInstructions
+        }
+        let response = try await request(method: "thread/start", params: params)
 
         guard let thread = response["thread"] as? [String: Any],
               let threadID = thread["id"] as? String else {
@@ -225,7 +230,6 @@ final class CodexAppServerClient: ObservableObject {
         modelID: String,
         threadID: String,
         workspace: CodexWorkspaceContext,
-        developerInstructions: String,
         onDelta: @escaping (String) -> Void,
         onFinalMessage: @escaping (String) -> Void,
         onActivity: @escaping (CodexActivity) -> Void,
@@ -277,7 +281,7 @@ final class CodexAppServerClient: ObservableObject {
                     "settings": [
                         "model": modelID,
                         "reasoningEffort": NSNull(),
-                        "developerInstructions": developerInstructions
+                        "developerInstructions": NSNull()
                     ]
                 ]
             ]

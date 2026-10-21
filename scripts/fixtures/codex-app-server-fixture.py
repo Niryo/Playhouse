@@ -108,6 +108,7 @@ def main():
         if message.get("method") == "initialize":
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"serverInfo": {"name": "stationai-fixture", "version": "1"}}})
         elif message.get("method") == "thread/start":
+            thread_start_instructions = message.get("params", {}).get("developerInstructions")
             if serial_mode:
                 history = serial_history()
                 if history.get("threadID") is not None:
@@ -115,7 +116,16 @@ def main():
                     continue
                 THREAD_ID = f"stationai-serial-{uuid.uuid4()}"
                 history["threadID"] = THREAD_ID
+                history["threadStartDeveloperInstructions"] = thread_start_instructions
                 history["events"].append({"method": "thread/start", "threadID": THREAD_ID})
+                history_path.write_text(json.dumps(history), encoding="utf-8")
+            else:
+                history = serial_history()
+                history.update({
+                    "threadID": THREAD_ID,
+                    "threadStartDeveloperInstructions": thread_start_instructions,
+                    "threadStartCount": history.get("threadStartCount", 0) + 1,
+                })
                 history_path.write_text(json.dumps(history), encoding="utf-8")
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": "gpt-6-luna"}})
         elif message.get("method") == "thread/resume":
@@ -127,6 +137,13 @@ def main():
                     continue
                 THREAD_ID = history["threadID"]
                 history["events"].append({"method": "thread/resume", "threadID": THREAD_ID})
+                history_path.write_text(json.dumps(history), encoding="utf-8")
+            else:
+                history = serial_history()
+                history.update({
+                    "threadID": THREAD_ID,
+                    "threadResumeCount": history.get("threadResumeCount", 0) + 1,
+                })
                 history_path.write_text(json.dumps(history), encoding="utf-8")
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": "gpt-6-luna"}})
         elif message.get("method") == "turn/start":
@@ -194,7 +211,12 @@ def main():
                 saved_history["events"].append({"method": "turn/start", "threadID": THREAD_ID, "turnID": TURN_ID, "userMessage": turn_message})
                 history_path.write_text(json.dumps(saved_history), encoding="utf-8")
             else:
-                history_path.write_text(json.dumps(turn_history), encoding="utf-8")
+                saved_history = serial_history()
+                saved_history.update(turn_history)
+                turns = saved_history.get("turns", [])
+                turns.append(turn_history)
+                saved_history["turns"] = turns
+                history_path.write_text(json.dumps(saved_history), encoding="utf-8")
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": TURN_ID, "status": "inProgress"}}})
             if mode.endswith("-abort"):
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {

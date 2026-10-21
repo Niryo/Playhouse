@@ -997,7 +997,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: activeTaskID)?["status"] as? String, "Review")
     }
 
-    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, clears explicitly and at turn completion, and the board card shows the built-in icon, label, and detail without changing lifecycle status; each turn receives hidden CLI usage instructions.
+    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, clears explicitly and at turn completion, and the board card shows the built-in icon, label, and detail without changing lifecycle status; each new task thread receives hidden CLI usage instructions that persist with the thread.
     func test_task_progress_reports_publish_persist_and_clear() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Progress reports", roots: [fixture.primary.path])
@@ -1072,16 +1072,41 @@ final class StationAIUITests: XCTestCase {
         let responseLine = try XCTUnwrap(output.split(whereSeparator: \.isNewline).last)
         let response = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(responseLine.utf8)) as? [String: Any])
         XCTAssertTrue(response["ok"] as? Bool == true)
+
+        let resumedProcess = Process()
+        resumedProcess.executableURL = cliURL
+        resumedProcess.arguments = ["conversation", "send", taskID, "--message", "Continue on this task."]
+        resumedProcess.environment = environment
+        let resumedStdout = Pipe()
+        let resumedStderr = Pipe()
+        resumedProcess.standardOutput = resumedStdout
+        resumedProcess.standardError = resumedStderr
+        try resumedProcess.run()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The follow-up should resume the existing fixture thread.")
+        try "Release the resumed turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+        resumedProcess.waitUntilExit()
+        let resumedOutput = String(data: resumedStdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let resumedError = String(data: resumedStderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(resumedProcess.terminationStatus, 0, "The resumed fixture conversation should finish successfully: \(resumedOutput) \(resumedError)")
+        let resumedResponseLine = try XCTUnwrap(resumedOutput.split(whereSeparator: \.isNewline).last)
+        let resumedResponse = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(resumedResponseLine.utf8)) as? [String: Any])
+        XCTAssertTrue(resumedResponse["ok"] as? Bool == true)
+
         let finished = try XCTUnwrap(taskRecord(id: taskID))
         XCTAssertEqual(finished["status"] as? String, "Review")
         XCTAssertNil(finished["progressLabel"], "Turn completion should clear the last live report.")
         XCTAssertTrue(waitForDisappearance(report), "Turn completion should remove the progress row from the board card.")
         let turnData = try Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
         let turn = try XCTUnwrap(try JSONSerialization.jsonObject(with: turnData) as? [String: Any])
-        let instructions = try XCTUnwrap(turn["developerInstructions"] as? String)
+        let instructions = try XCTUnwrap(turn["threadStartDeveloperInstructions"] as? String)
         XCTAssertTrue(instructions.contains(cliURL.path))
         XCTAssertTrue(instructions.contains("task progress publish"))
         XCTAssertTrue(instructions.contains("hidden from the conversation"))
+        XCTAssertEqual(turn["threadStartCount"] as? Int, 1, "The follow-up should reuse the thread created with progress instructions.")
+        XCTAssertGreaterThanOrEqual(turn["threadResumeCount"] as? Int ?? 0, 1)
+        let turns = try XCTUnwrap(turn["turns"] as? [[String: Any]])
+        XCTAssertEqual(turns.count, 2)
+        XCTAssertTrue(turns.allSatisfy { $0["developerInstructions"] is NSNull }, "Turns should retain the collaboration mode's built-in instructions.")
     }
 
     // case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; the task card removes the report while lifecycle states remain Blocked or Waiting Response, and answering the question resumes the task successfully.
