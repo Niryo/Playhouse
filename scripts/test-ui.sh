@@ -27,6 +27,11 @@ while (( $# > 0 )); do
   esac
 done
 
+if [[ "${STATIONAI_UI_TESTS_CONFIRMED:-0}" != "1" ]]; then
+  bash "${repository_root}/scripts/confirm-ui-tests.sh"
+fi
+
+test_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/stationai-ui.XXXXXX")"
 prepare_workspace_changes=0
 if (( ${#ui_cases[@]} == 0 )); then
   prepare_workspace_changes=1
@@ -39,42 +44,33 @@ else
   done
 fi
 
+fixture_root="/tmp/stationai-ui-test-fixtures"
 if (( prepare_workspace_changes == 1 )); then
-  python3 "${repository_root}/scripts/prepare-e2e-fixture.py" --workspace-changes
+  python3 "${repository_root}/scripts/prepare-e2e-fixture.py" --fixture-root "${fixture_root}" --workspace-changes
 else
-  python3 "${repository_root}/scripts/prepare-e2e-fixture.py"
+  python3 "${repository_root}/scripts/prepare-e2e-fixture.py" --fixture-root "${fixture_root}"
 fi
-fixture_root="/tmp/stationai-bridge-workspaces"
 fixture_owner="StationAI bridge tests own this deterministic fixture (v1)."
 if [[ "$(cat "${fixture_root}/.stationai-bridge-fixture" 2>/dev/null || true)" != "${fixture_owner}" ]]; then
   printf 'Refusing to prepare UI Codex fixtures without the owned fixture root marker.\n' >&2
   exit 1
 fi
-cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-ui"
-cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-empty"
-cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-nonblocking"
-cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-slow"
-cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-plan-slow"
-cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-interrupted"
-cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-abort"
-cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-success"
-cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-title-success"
-cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-title-failure"
-cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-title-success-wait"
-cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-hold"
-cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-progress-hold-release"
-cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-progress-hold-release-failed"
-cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-progress-hold-release-interrupted"
-cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-progress-question"
-cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-success-wait"
-cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-nonblocking-slow"
-cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-subagent"
-cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_root}/codex-fixture-markdown"
-chmod 755 "${fixture_root}/codex-fixture-ui" "${fixture_root}/codex-fixture-empty" "${fixture_root}/codex-fixture-nonblocking" "${fixture_root}/codex-fixture-slow" "${fixture_root}/codex-fixture-plan-slow" "${fixture_root}/codex-fixture-nonblocking-slow" "${fixture_root}/codex-fixture-interrupted" "${fixture_root}/codex-fixture-abort" "${fixture_root}/codex-fixture-success" "${fixture_root}/codex-fixture-title-success" "${fixture_root}/codex-fixture-title-failure" "${fixture_root}/codex-fixture-title-success-wait" "${fixture_root}/codex-fixture-hold" "${fixture_root}/codex-fixture-progress-hold-release" "${fixture_root}/codex-fixture-progress-hold-release-failed" "${fixture_root}/codex-fixture-progress-hold-release-interrupted" "${fixture_root}/codex-fixture-progress-question" "${fixture_root}/codex-fixture-success-wait" "${fixture_root}/codex-fixture-subagent" "${fixture_root}/codex-fixture-markdown"
-xattr -d com.apple.quarantine "${fixture_root}/codex-fixture-subagent" 2>/dev/null || true
-xattr -d com.apple.provenance "${fixture_root}/codex-fixture-subagent" 2>/dev/null || true
-xattr -d com.apple.quarantine "${fixture_root}/codex-fixture-markdown" 2>/dev/null || true
-xattr -d com.apple.provenance "${fixture_root}/codex-fixture-markdown" 2>/dev/null || true
+codex_fixtures=(
+  ui empty nonblocking slow plan-slow interrupted abort success
+  title-success title-failure title-success-wait hold
+  progress-hold-release progress-hold-release-failed progress-hold-release-interrupted
+  progress-question success-wait nonblocking-slow subagent markdown
+)
+for fixture in "${codex_fixtures[@]}"; do
+  fixture_path="${fixture_root}/codex-fixture-${fixture}"
+  cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_path}"
+  chmod 755 "${fixture_path}"
+done
+for fixture in subagent markdown; do
+  fixture_path="${fixture_root}/codex-fixture-${fixture}"
+  xattr -d com.apple.quarantine "${fixture_path}" 2>/dev/null || true
+  xattr -d com.apple.provenance "${fixture_path}" 2>/dev/null || true
+done
 python3 "${repository_root}/scripts/check-test-parity.py"
 
 contract_path="${repository_root}/StationAI/BridgeTests/BridgeTestContracts.json"
@@ -98,10 +94,44 @@ if unknown_cases:
 print(len(selected_cases) if selected_cases else len(known_cases))
 PY
 )"
+if (( ${#ui_cases[@]} > 0 )); then
+  selected_cases=("${ui_cases[@]}")
+else
+  selected_cases=()
+  while IFS= read -r ui_case; do
+    selected_cases+=("${ui_case}")
+  done < <(python3 - "${contract_path}" <<'PY'
+import json
+import sys
 
-test_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/stationai-ui.XXXXXX")"
+with open(sys.argv[1], encoding="utf-8") as contract_file:
+    for contract in json.load(contract_file):
+        print(contract["id"])
+PY
+)
+fi
+
+dashboard_script="${repository_root}/scripts/ui-test-dashboard.py"
+dashboard_state="${test_output_dir}/dashboard.json"
+dashboard_log="${test_output_dir}/xcodebuild.log"
+dashboard_arguments=(init --state-file "${dashboard_state}" --contract "${contract_path}")
+if (( ${#ui_cases[@]} > 0 )); then
+  for ui_case in "${ui_cases[@]}"; do
+    dashboard_arguments+=(--case "${ui_case}")
+  done
+fi
+python3 "${dashboard_script}" "${dashboard_arguments[@]}" >/dev/null
+
 architecture="$(uname -m)"
-result_bundle="${test_output_dir}/StationAI-UI.xcresult"
+xcode_version="$(xcodebuild -version | awk '/^Xcode / {print $2}')"
+repository_cache_key="$(printf '%s' "${repository_root}" | shasum -a 256 | cut -c 1-12)"
+derived_data_dir="${TMPDIR:-/tmp}/stationai-ui-derived-data-${xcode_version}-${architecture}-${repository_cache_key}"
+test_run_identifier="$(basename "${test_output_dir}" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')"
+task_pr_seeder="${fixture_root}/seed-task-pr-link"
+xcrun swiftc -module-name StationAI \
+  "${repository_root}/StationAI/App/BoardTask.swift" \
+  "${repository_root}/scripts/seed-task-pr-link.swift" \
+  -o "${task_pr_seeder}"
 live_ui_marker="/tmp/stationai-codex-live-ui-integration"
 rm -f "${live_ui_marker}"
 if [[ "${STATIONAI_RUN_CODEX_INTEGRATION:-0}" == "1" ]]; then
@@ -115,43 +145,104 @@ cleanup() {
 }
 trap cleanup EXIT
 
-test_arguments=(
+dashboard_inline=0
+if [[ "${STATIONAI_UI_DASHBOARD:-1}" != "0" ]]; then
+  if command -v osascript >/dev/null 2>&1 && osascript - "${dashboard_script}" "${dashboard_state}" <<'APPLESCRIPT' >/dev/null 2>&1
+on run argv
+  set dashboardScript to item 1 of argv
+  set dashboardState to item 2 of argv
+  set dashboardCommand to "python3 " & quoted form of dashboardScript & " watch --state-file " & quoted form of dashboardState
+  tell application "Terminal"
+    activate
+    do script dashboardCommand
+  end tell
+end run
+APPLESCRIPT
+  then
+    printf 'Live UI test dashboard opened in a separate Terminal window.\n'
+  else
+    dashboard_inline=1
+    printf 'Could not open a separate Terminal dashboard; test progress will be printed in this terminal.\n' >&2
+  fi
+else
+  dashboard_inline=1
+fi
+
+base_test_arguments=(
   test
   -project "${repository_root}/StationAI.xcodeproj"
   -scheme StationAI
   -destination "platform=macOS,arch=${architecture}"
-  -derivedDataPath "${test_output_dir}/DerivedData"
-  -resultBundlePath "${result_bundle}"
+  -derivedDataPath "${derived_data_dir}"
   -parallel-testing-enabled NO
 )
-if (( ${#ui_cases[@]} == 0 )); then
-  test_arguments+=("-only-testing:StationAIUITests")
-else
-  for ui_case in "${ui_cases[@]}"; do
-    test_arguments+=("-only-testing:StationAIUITests/StationAIUITests/${ui_case}")
-  done
-fi
-test_arguments+=(
+base_test_arguments+=(
   CODE_SIGNING_ALLOWED=YES
   CODE_SIGN_IDENTITY=-
   ARCHS="${architecture}"
   ONLY_ACTIVE_ARCH=YES
-  STATIONAI_APP_BUNDLE_IDENTIFIER=com.stationai.app.e2e
 )
 
-set +e
-xcodebuild "${test_arguments[@]}"
-xcodebuild_status=$?
-set -e
+# A new xcodebuild test session every eight cases bounds sequence-dependent
+# XCTest/macOS state while keeping each case single-shot and serial.
+batch_size=8
+batch_count=$(( (${#selected_cases[@]} + batch_size - 1) / batch_size ))
+overall_failed=0
+for (( batch_index=0; batch_index<batch_count; batch_index++ )); do
+  first_case=$(( batch_index * batch_size ))
+  batch_cases=("${selected_cases[@]:first_case:batch_size}")
+  batch_number=$(( batch_index + 1 ))
+  batch_tag="$(printf '%02d' "${batch_number}")"
+  result_bundle="${test_output_dir}/StationAI-UI-batch-${batch_tag}.xcresult"
+  summary_path="${test_output_dir}/test-summary-batch-${batch_tag}.json"
+  dashboard_log="${test_output_dir}/xcodebuild-batch-${batch_tag}.log"
+  app_bundle_identifier="com.stationai.app.e2e.${test_run_identifier}.b${batch_tag}"
+  test_arguments=("${base_test_arguments[@]}" -resultBundlePath "${result_bundle}")
+  for ui_case in "${batch_cases[@]}"; do
+    test_arguments+=("-only-testing:StationAIUITests/StationAIUITests/${ui_case}")
+  done
+  test_arguments+=("STATIONAI_APP_BUNDLE_IDENTIFIER=${app_bundle_identifier}")
 
-summary_path="${test_output_dir}/test-summary.json"
-if ! xcrun xcresulttool get test-results summary --path "${result_bundle}" > "${summary_path}"; then
-  printf "Could not read the visible UI test summary (xcodebuild exit %s).\n" "${xcodebuild_status}" >&2
-  if (( xcodebuild_status != 0 )); then exit "${xcodebuild_status}"; fi
-  exit 1
-fi
+  printf '\nVisible UI batch %s/%s (%s cases): %s\n' \
+    "${batch_number}" "${batch_count}" "${#batch_cases[@]}" "${batch_cases[*]}"
+  set +e
+  tracker_arguments=(track --state-file "${dashboard_state}" --log-file "${dashboard_log}")
+  if (( dashboard_inline == 1 )); then
+    tracker_arguments+=(--announce)
+  fi
+  caffeinate -d xcodebuild "${test_arguments[@]}" 2>&1 \
+    | python3 "${dashboard_script}" "${tracker_arguments[@]}"
+  pipeline_status=("${PIPESTATUS[@]}")
+  xcodebuild_status="${pipeline_status[0]}"
+  dashboard_tracker_status="${pipeline_status[1]}"
+  set -e
 
-python3 - "${summary_path}" "${xcodebuild_status}" "${expected_count}" <<'PY'
+  summary_read_status=0
+  if xcrun xcresulttool get test-results summary --path "${result_bundle}" > "${summary_path}"; then
+    :
+  else
+    summary_read_status=$?
+    printf "Could not read UI batch %s summary (xcodebuild exit %s).\n" "${batch_number}" "${xcodebuild_status}" >&2
+  fi
+
+  batch_finish_arguments=(finish --state-file "${dashboard_state}" --exit-status "${xcodebuild_status}")
+  for ui_case in "${batch_cases[@]}"; do
+    batch_finish_arguments+=(--case "${ui_case}")
+  done
+  if (( summary_read_status == 0 )); then
+    batch_finish_arguments+=(--summary "${summary_path}")
+  fi
+  python3 "${dashboard_script}" "${batch_finish_arguments[@]}" >/dev/null
+
+  if (( dashboard_tracker_status != 0 )); then
+    printf 'The live dashboard could not read batch %s output; see %s.\n' "${batch_number}" "${dashboard_log}" >&2
+    overall_failed=1
+  fi
+  if (( summary_read_status != 0 )); then
+    overall_failed=1
+  else
+    batch_validation_status=0
+    if python3 - "${summary_path}" "${xcodebuild_status}" "${#batch_cases[@]}" "${batch_number}" <<'PY'
 import json
 import sys
 
@@ -165,25 +256,120 @@ failed = summary.get("failedTests", 0)
 skipped = summary.get("skippedTests", 0)
 xcodebuild_status = int(sys.argv[2])
 expected_count = int(sys.argv[3])
+batch_number = sys.argv[4]
 print(
-    f"Visible UI suite: result={result}; total={total} (expected {expected_count}), passed={passed}, "
-    f"failed={failed}, skipped={skipped}; xcodebuild exit={xcodebuild_status}"
+    f"Visible UI batch {batch_number}: result={result}; total={total} (expected {expected_count}), "
+    f"passed={passed}, failed={failed}, skipped={skipped}; xcodebuild exit={xcodebuild_status}"
 )
 
+failures = summary.get("testFailures", [])
+automation_startup_failure = (
+    total == 1
+    and passed == 0
+    and skipped == 0
+    and failed == 1
+    and any(
+        "StationAIUITests-Runner" in failure.get("testName", "")
+        and "failed to initialize for ui testing" in failure.get("failureText", "").lower()
+        for failure in failures
+    )
+)
 if xcodebuild_status != 0 or result != "Passed" or total != expected_count or failed != 0 or skipped != 0 or passed != total:
-    failures = summary.get("testFailures", [])
     for failure in failures:
         print(f"{failure.get('testName', 'Unknown test')}: {failure.get('failureText', '')}")
     if any("Timed out while enabling automation mode" in failure.get("failureText", "") for failure in failures):
         print(
-            "XCTest did not start a UI case. On macOS, enable Xcode Helper under "
+            "XCTest could not start a UI case because macOS automation mode timed out. "
+            "Check that the user session is unlocked and Xcode Helper is enabled under "
             "System Settings > Privacy & Security > Accessibility, then rerun scripts/test-ui.sh."
         )
+    if automation_startup_failure:
+        raise SystemExit(2)
+    raise SystemExit(1)
+PY
+    then
+      :
+    else
+      batch_validation_status=$?
+      overall_failed=1
+    fi
+    if (( batch_validation_status == 2 )); then
+      printf 'Stopping remaining UI batches because XCTest did not start any selected case; retrying would repeat the same system automation failure.\n' >&2
+      break
+    fi
+  fi
+done
+
+if ! python3 - "${test_output_dir}" "${batch_count}" "${expected_count}" <<'PY'
+import json
+import pathlib
+import sys
+
+output_dir = pathlib.Path(sys.argv[1])
+batch_count = int(sys.argv[2])
+expected = int(sys.argv[3])
+totals = {"totalTestCount": 0, "passedTests": 0, "failedTests": 0, "skippedTests": 0}
+all_passed = True
+for batch_number in range(1, batch_count + 1):
+    summary_path = output_dir / f"test-summary-batch-{batch_number:02d}.json"
+    try:
+        with summary_path.open(encoding="utf-8") as summary_file:
+            summary = json.load(summary_file)
+    except (OSError, json.JSONDecodeError):
+        print(f"UI batch {batch_number} has no readable xcresult summary.")
+        all_passed = False
+        continue
+    all_passed = all_passed and summary.get("result") == "Passed"
+    for key in totals:
+        value = summary.get(key, 0)
+        if not isinstance(value, int):
+            all_passed = False
+            value = 0
+        totals[key] += value
+
+print(
+    "Aggregate xcresult counts: "
+    f"total={totals['totalTestCount']} (expected {expected}), "
+    f"passed={totals['passedTests']}, failed={totals['failedTests']}, "
+    f"skipped={totals['skippedTests']}, batches={batch_count}"
+)
+if (
+    not all_passed
+    or totals["totalTestCount"] != expected
+    or totals["passedTests"] != expected
+    or totals["failedTests"] != 0
+    or totals["skippedTests"] != 0
+):
+    raise SystemExit("Aggregate xcresult counts must include every selected UI case exactly once with no failures or skips.")
+PY
+then
+  overall_failed=1
+fi
+
+python3 "${dashboard_script}" finish --state-file "${dashboard_state}" --exit-status "${overall_failed}" >/dev/null
+
+python3 - "${dashboard_state}" "${expected_count}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as state_file:
+    state = json.load(state_file)
+summary = state.get("summary") or {}
+expected = int(sys.argv[2])
+print(
+    f"Visible UI suite: result={summary.get('result')}; total={summary.get('total')} (expected {expected}), "
+    f"passed={summary.get('passed')}, failed={summary.get('failed')}, skipped={summary.get('skipped')}, "
+    f"not run={summary.get('not_run')}; batches={summary.get('batch_count')}"
+)
+if state.get("suite_status") != "passed" or summary.get("total") != expected or summary.get("passed") != expected:
     raise SystemExit("Every paired UI case must run and pass with no skips.")
 PY
 
+if (( overall_failed != 0 )); then
+  exit 1
+fi
 if (( ${#ui_cases[@]} == 0 )); then
-  printf 'StationAI full visible UI suite passed. The app was launched and interacted with by XCTest.\n'
+  printf 'StationAI full visible UI suite passed across %s fresh serial Xcode sessions.\n' "${batch_count}"
 else
-  printf 'StationAI focused UI cases passed: %s\n' "${ui_cases[*]}"
+  printf 'StationAI focused UI cases passed across %s Xcode session(s): %s\n' "${batch_count}" "${ui_cases[*]}"
 fi

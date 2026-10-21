@@ -45,7 +45,14 @@ fi
 
 test_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/stationai-bridge.XXXXXX")"
 architecture="$(uname -m)"
-result_bundle="${test_output_dir}/StationAI.xcresult"
+e2e_bundle_identifier="com.stationai.app.e2e.$$.${RANDOM}"
+xcode_version="$(xcodebuild -version | awk '/^Xcode / {print $2}')"
+repository_cache_key="$(printf '%s' "${repository_root}" | shasum -a 256 | cut -c 1-12)"
+derived_data_dir="${TMPDIR:-/tmp}/stationai-bridge-derived-data-${xcode_version}-${architecture}-${repository_cache_key}"
+app_bundle="${derived_data_dir}/Build/Products/Debug/StationAI.app"
+cli_path="${app_bundle}/Contents/MacOS/stationai-cli"
+data_root="${test_output_dir}/data"
+bridge_log="${test_output_dir}/bridge-tests.log"
 cleanup() {
   if [[ "$(head -n 1 "${selection_file}" 2>/dev/null || true)" == "${selection_owner}" ]]; then
     rm -f "${selection_file}"
@@ -54,55 +61,51 @@ cleanup() {
 }
 trap cleanup EXIT
 
-python3 "${repository_root}/scripts/prepare-e2e-fixture.py"
 python3 "${repository_root}/scripts/check-test-parity.py"
+python3 "${repository_root}/scripts/check-button-feedback.py"
 
-set +e
-xcodebuild test -quiet \
+# Compile the paired UI test target without launching the app so UI-only source
+# errors are caught by the fast verification path.
+xcodebuild build-for-testing -quiet \
   -project "${repository_root}/StationAI.xcodeproj" \
   -scheme StationAI \
+  -configuration Debug \
   -destination "platform=macOS,arch=${architecture}" \
-  -derivedDataPath "${test_output_dir}/DerivedData" \
-  -resultBundlePath "${result_bundle}" \
-  -parallel-testing-enabled NO \
-  -only-testing:StationAIBridgeTests \
+  -derivedDataPath "${derived_data_dir}" \
+  -only-testing:StationAIUITests/StationAIUITests \
   CODE_SIGNING_ALLOWED=YES \
   CODE_SIGN_IDENTITY=- \
   ARCHS="${architecture}" \
   ONLY_ACTIVE_ARCH=YES \
-  STATIONAI_APP_BUNDLE_IDENTIFIER=com.stationai.app.e2e
-xcodebuild_status=$?
-set -e
-
-summary_path="${test_output_dir}/test-summary.json"
-if ! xcrun xcresulttool get test-results summary --path "${result_bundle}" > "${summary_path}"; then
-  printf "Could not read the bridge test summary (xcodebuild exit %s).\n" "${xcodebuild_status}" >&2
-  if (( xcodebuild_status != 0 )); then exit "${xcodebuild_status}"; fi
+  STATIONAI_APP_BUNDLE_IDENTIFIER="${e2e_bundle_identifier}"
+python3 "${repository_root}/scripts/prepare-e2e-fixture.py"
+if [[ ! -x "${cli_path}" ]]; then
+  printf 'The app build did not produce its bundled CLI at %s.\n' "${cli_path}" >&2
   exit 1
 fi
 
-python3 - "${summary_path}" "${xcodebuild_status}" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as summary_file:
-    summary = json.load(summary_file)
-
-result = summary.get("result")
-total = summary.get("totalTestCount", 0)
-passed = summary.get("passedTests", 0)
-failed = summary.get("failedTests", 0)
-skipped = summary.get("skippedTests", 0)
-xcodebuild_status = int(sys.argv[2])
-print(
-    f"Xcode bridge suite: result={result}; total={total}, passed={passed}, "
-    f"failed={failed}, skipped={skipped}; xcodebuild exit={xcodebuild_status}"
+service_info="${app_bundle}/Contents/XPCServices/StationAIBridge.xpc/Contents/Info.plist"
+service_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${service_info}")"
+bridge_arguments=(
+  "${repository_root}/scripts/test-bridge.py"
+  --cli "${cli_path}"
+  --fixture-root /tmp/stationai-bridge-workspaces
+  --data-root "${data_root}"
+  --service-name "${service_name}"
 )
+if (( ${#selected_cases[@]} > 0 )); then
+  for selected_case in "${selected_cases[@]}"; do
+    bridge_arguments+=(--case "${selected_case}")
+  done
+fi
 
-if xcodebuild_status != 0 or result != "Passed" or total == 0 or failed != 0 or skipped != 0 or passed != total:
-    for failure in summary.get("testFailures", []):
-        print(f"{failure.get('testName', 'Unknown test')}: {failure.get('failureText', '')}")
-    raise SystemExit("Every discovered bridge test must pass without skips.")
-PY
+set +e
+python3 "${bridge_arguments[@]}" 2>&1 | tee "${bridge_log}"
+bridge_status="${PIPESTATUS[0]}"
+set -e
+if (( bridge_status != 0 )); then
+  printf 'The CLI/XPC bridge suite failed; full output: %s\n' "${bridge_log}" >&2
+  exit "${bridge_status}"
+fi
 
 printf 'StationAI CLI/XPC bridge verification passed without launching the UI.\n'

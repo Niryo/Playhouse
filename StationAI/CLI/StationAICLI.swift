@@ -131,21 +131,61 @@ enum StationAICLI {
                 let title = try requiredFlag("--title", flags: flags).first!
                 return BridgeRequest(command: "task.rename", arguments: ["taskID": .string(id), "title": .string(title)])
             case "repository":
-                guard tail.count >= 2, tail[0] == "add" else {
-                    throw CLIError.usage("Use: stationai task repository add <task-id> --repo <path>")
-                }
+                guard tail.count >= 2 else { throw CLIError.usage("Use: stationai task repository add|add-batch|edit|remove <task-id> ...") }
                 let id = tail[1]
-                let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--repo"])
-                let repository = try requiredFlag("--repo", flags: flags).first!
-                return BridgeRequest(command: "task.repository.add", arguments: [
-                    "taskID": .string(id),
-                    "repositoryPath": .string(repository)
-                ])
+                switch tail[0] {
+                case "add-batch":
+                    let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--repo"])
+                    let repositories = try requiredFlag("--repo", flags: flags)
+                    return BridgeRequest(command: "task.repository.add-batch", arguments: [
+                        "taskID": .string(id),
+                        "repositoryPaths": .array(repositories.map(BridgeValue.string))
+                    ])
+                case "add", "remove":
+                    let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--repo"])
+                    let repository = try requiredFlag("--repo", flags: flags).first!
+                    return BridgeRequest(
+                        command: "task.repository.\(tail[0])",
+                        arguments: ["taskID": .string(id), "repositoryPath": .string(repository)]
+                    )
+                case "edit":
+                    let flags = try parseFlags(
+                        Array(tail.dropFirst(2)),
+                        valueFlags: ["--repo", "--branch", "--branch-from", "--merge-target"]
+                    )
+                    let repository = try requiredFlag("--repo", flags: flags).first!
+                    let branch = try requiredFlag("--branch", flags: flags).first!
+                    let branchFrom = try requiredFlag("--branch-from", flags: flags).first!
+                    let mergeTarget = flags["--merge-target"]?.last ?? ""
+                    return BridgeRequest(command: "task.repository.edit", arguments: [
+                        "taskID": .string(id),
+                        "repositoryPath": .string(repository),
+                        "branch": .string(branch),
+                        "branchFrom": .string(branchFrom),
+                        "mergeTarget": .string(mergeTarget)
+                    ])
+                default:
+                    throw CLIError.usage("Use: stationai task repository add|add-batch|edit|remove <task-id> ...")
+                }
             case "prompt":
-                guard let id = tail.first else { throw CLIError.usage("Use: stationai task prompt <task-id> --text <prompt> [--status <status>]") }
-                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--text", "--status"])
-                var arguments: [String: BridgeValue] = ["taskID": .string(id), "prompt": .string(try requiredFlag("--text", flags: flags).first!)]
-                if let status = flags["--status"]?.first { arguments["status"] = .string(status) }
+                guard let id = tail.first else { throw CLIError.usage("Use: stationai task prompt <task-id> --text <prompt> [--status <status>] [--submitted true]") }
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--text", "--status", "--submitted"])
+                let prompt = try requiredFlag("--text", flags: flags).first!
+                let status = flags["--status"]?.first
+                let submittedValue = flags["--submitted"]?.first
+                var submitted = false
+                if let submittedValue {
+                    guard submittedValue == "true" || submittedValue == "false" else {
+                        throw CLIError.usage("Use true or false for --submitted.")
+                    }
+                    submitted = submittedValue == "true"
+                }
+                if submitted, (status != "In Progress" || prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+                    throw CLIError.usage("A submitted prompt requires nonblank text and --status \"In Progress\".")
+                }
+                var arguments: [String: BridgeValue] = ["taskID": .string(id), "prompt": .string(prompt)]
+                if let status { arguments["status"] = .string(status) }
+                if submitted { arguments["submitted"] = .boolean(true) }
                 return BridgeRequest(command: "task.prompt.save", arguments: arguments)
             case "delete":
                 let id = try firstPositional(tail)
@@ -334,6 +374,10 @@ enum StationAICLI {
       stationai task progress clear <task-id>
       stationai task rename <task-id> --title <title>
       stationai task repository add <task-id> --repo <path>
+      stationai task repository add-batch <task-id> --repo <path> [--repo <path>...]
+      stationai task repository edit <task-id> --repo <path> --branch <name> --branch-from <ref> [--merge-target <ref>]
+      stationai task repository remove <task-id> --repo <path>
+      stationai task prompt <task-id> --text <prompt> [--status <status>] [--submitted true]
       stationai task roots get <task-id>
       stationai task roots set <task-id> --root <path> [--root <path>...]
       stationai task changes list <task-id>

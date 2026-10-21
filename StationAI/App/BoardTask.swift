@@ -70,6 +70,7 @@ final class BoardTask {
     var createdAt: Date
     var codexThreadID: String?
     var savedPrompt: String?
+    var pendingSubmittedPrompt: String?
     var workspaceRootPathsData: Data?
     var repositoryWorktreesData: Data?
     var contextFolderPathsData: Data?
@@ -110,35 +111,34 @@ final class BoardTask {
         createdAt = .now
         codexThreadID = nil
         savedPrompt = nil
+        pendingSubmittedPrompt = nil
         workspaceRootPathsData = try? JSONEncoder().encode(workspaceRootPaths)
         repositoryWorktreesData = nil
         contextFolderPathsData = nil
     }
 }
 
-struct RepositoryWorktreeSpec: Codable, Equatable {
+struct RepositoryWorktreeSpec: Codable, Equatable, Sendable {
     var repositoryPath: String
     var branch: String?
     var branchFrom: String?
     var mergeTarget: String? = nil
 }
 
-struct RepositoryWorktreeRecord: Codable, Equatable {
+struct RepositoryWorktreeRecord: Codable, Equatable, Sendable {
     var repositoryPath: String
     var branch: String
     var worktreePath: String
     var branchFrom: String
     var createdByStationAI: Bool
     var mergeTarget: String? = nil
-    var mergeCompleted: Bool = false
-    var mergeError: String? = nil
     var isPending: Bool = false
     var pullRequestNumber: Int? = nil
     var pullRequestURL: String? = nil
 
     private enum CodingKeys: String, CodingKey {
         case repositoryPath, branch, worktreePath, branchFrom, createdByStationAI
-        case mergeTarget, mergeCompleted, mergeError, isPending, pullRequestNumber, pullRequestURL
+        case mergeTarget, isPending, pullRequestNumber, pullRequestURL
     }
 
     init(
@@ -148,8 +148,6 @@ struct RepositoryWorktreeRecord: Codable, Equatable {
         branchFrom: String,
         createdByStationAI: Bool,
         mergeTarget: String? = nil,
-        mergeCompleted: Bool = false,
-        mergeError: String? = nil,
         isPending: Bool = false,
         pullRequestNumber: Int? = nil,
         pullRequestURL: String? = nil
@@ -160,8 +158,6 @@ struct RepositoryWorktreeRecord: Codable, Equatable {
         self.branchFrom = branchFrom
         self.createdByStationAI = createdByStationAI
         self.mergeTarget = mergeTarget
-        self.mergeCompleted = mergeCompleted
-        self.mergeError = mergeError
         self.isPending = isPending
         self.pullRequestNumber = pullRequestNumber
         self.pullRequestURL = pullRequestURL
@@ -175,8 +171,6 @@ struct RepositoryWorktreeRecord: Codable, Equatable {
         branchFrom = try values.decode(String.self, forKey: .branchFrom)
         createdByStationAI = try values.decode(Bool.self, forKey: .createdByStationAI)
         mergeTarget = try values.decodeIfPresent(String.self, forKey: .mergeTarget)
-        mergeCompleted = try values.decodeIfPresent(Bool.self, forKey: .mergeCompleted) ?? false
-        mergeError = try values.decodeIfPresent(String.self, forKey: .mergeError)
         isPending = try values.decodeIfPresent(Bool.self, forKey: .isPending) ?? false
         pullRequestNumber = try values.decodeIfPresent(Int.self, forKey: .pullRequestNumber)
         pullRequestURL = try values.decodeIfPresent(String.self, forKey: .pullRequestURL)

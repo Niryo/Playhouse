@@ -26,7 +26,6 @@ struct SeedTaskPullRequestLink {
         let context = ModelContext(container)
         let descriptor = FetchDescriptor<BoardTask>(predicate: #Predicate { $0.id == taskID })
         guard let task = try context.fetch(descriptor).first,
-              task.status == .done,
               !task.repositoryWorktrees.isEmpty else {
             throw SeedError.taskUnavailable
         }
@@ -36,7 +35,7 @@ struct SeedTaskPullRequestLink {
         worktrees[0].pullRequestURL = url.absoluteString
         task.repositoryWorktrees = worktrees
         try context.save()
-        print("Seeded linked PR #\(number) for Done task \(taskID).")
+        print("Seeded linked PR #\(number) for task \(taskID).")
     }
 }
 
@@ -49,7 +48,7 @@ private enum SeedError: LocalizedError {
         case .usage:
             "Usage: seed-task-pr-link <data-directory> <task-id> <pr-number> <https-url>"
         case .taskUnavailable:
-            "The task must exist, be Done, and have at least one repository."
+            "The task must exist and have at least one repository."
         }
     }
 }
