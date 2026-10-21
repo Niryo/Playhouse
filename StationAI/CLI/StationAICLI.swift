@@ -263,6 +263,16 @@ enum StationAICLI {
             switch operation {
             case "history": return BridgeRequest(command: "conversation.history", arguments: ["taskID": .string(id)])
             case "models": return BridgeRequest(command: "conversation.models", arguments: ["taskID": .string(id)])
+            case "queue":
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message"])
+                return BridgeRequest(command: "conversation.queue", arguments: ["taskID": .string(id), "message": .string(flags["--message"]?.first ?? "")])
+            case "queue-list": return BridgeRequest(command: "conversation.queue.list", arguments: ["taskID": .string(id)])
+            case "queue-retry":
+                guard tail.count == 2 else { throw CLIError.usage("Use: stationai conversation queue-retry <task-id> <message-id>") }
+                return BridgeRequest(command: "conversation.queue.retry", arguments: ["taskID": .string(id), "messageID": .string(tail[1])])
+            case "steer":
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message"])
+                return BridgeRequest(command: "conversation.steer", arguments: ["taskID": .string(id), "message": .string(flags["--message"]?.first ?? "")])
             case "send":
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode", "--model", "--answer", "--image"])
                 var answers: [String: [String]] = [:]
@@ -387,6 +397,10 @@ enum StationAICLI {
       stationai workspace suggest --parent <path>
       stationai settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>
       stationai conversation history <task-id>
+      stationai conversation queue <task-id> --message <text>
+      stationai conversation queue-list <task-id>
+      stationai conversation queue-retry <task-id> <message-id>
+      stationai conversation steer <task-id> --message <text>
       stationai conversation models <task-id>
       stationai conversation send <task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...]
 

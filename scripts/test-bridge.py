@@ -436,7 +436,17 @@ class StationAIBridgeTests(unittest.TestCase):
         task = self.assert_success(self.call_cli("task", "create", "--title", "Protected store", "--root", self.primary)[0])
         self.assert_success(self.call_cli("task", "prompt", task["id"], "--text", "Protected draft", "--status", "Backlog")[0])
         root = Path(__file__).resolve().parent.parent
-        subprocess.run(["python3", str(root / "scripts/check-app-launch-contract.py"), str(self.cli.parent.parent.parent), str(root), str(self.data_directory)], check=True, capture_output=True, text=True)
+        contract_check = subprocess.run(
+            ["python3", str(root / "scripts/check-app-launch-contract.py"), str(self.cli.parent.parent.parent), str(root), str(self.data_directory)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            contract_check.returncode,
+            0,
+            f"App launch contract check failed: stdout={contract_check.stdout}; stderr={contract_check.stderr}",
+        )
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["savedPrompt"], "Protected draft")
 
     # case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots; a saved conversation remains visible after an app restart.
@@ -2119,8 +2129,9 @@ class StationAIBridgeTests(unittest.TestCase):
         serialized_title_events = json.dumps(title_events)
         self.assertNotIn("Explain the delayed title result.", serialized_title_events)
         self.assertNotIn("Generated fixture title", serialized_title_events)
-    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors.
+    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, the UI exposes separate steer and queue actions, sends steering with the active turn ID, and retains the queued follow-up across reopening.
     def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         task_id = self.create_task(title="Blank conversation send", roots=[self.primary])["id"]
         response, _ = self.call_cli(
             "task", "prompt", task_id, "--text", "Invalid submitted prompt", "--submitted", "true", expected_status=2
@@ -2144,10 +2155,53 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(saved)["savedPrompt"], multiline_prompt)
         saved, _ = self.call_cli("task", "prompt", task_id, "--text", prompt)
         self.assertEqual(self.assert_success(saved)["savedPrompt"], prompt)
-        persisted = self.complete_fixture_turn(task_id, message=prompt)
+        persisted = self.complete_fixture_turn(task_id, executable_name="codex-fixture-success", message=prompt)
         self.assertTrue(any(message["role"] == "user" and message["text"] == prompt for message in persisted["messages"]))
+        queued_text = "Send this follow-up once the next turn completes."
+        queued, _ = self.call_cli("conversation", "queue", task_id, "--message", queued_text)
+        queued_record = self.assert_success(queued)
+        self.assertEqual(queued_record["taskID"], task_id)
+        self.assertEqual(queued_record["threadID"], self.assert_success(self.call_cli("task", "get", task_id)[0])["codexThreadID"])
+        queue_read, _ = self.call_cli("conversation", "queue-list", task_id)
+        self.assertEqual([item["text"] for item in self.assert_success(queue_read)], [queued_text])
+        self.complete_fixture_turn(task_id, executable_name="codex-fixture-success", message="Start the turn that releases the saved follow-up.")
+        reloaded_history, _ = self.call_cli(
+            "conversation", "history", task_id,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture-success")},
+        )
+        self.assertEqual([message["text"] for message in self.assert_success(reloaded_history)["messages"] if message["role"] == "user"].count(queued_text), 1)
+        queue_read, _ = self.call_cli("conversation", "queue-list", task_id)
+        self.assertEqual(self.assert_success(queue_read), [], "A completed queued send should be removed and must not dispatch again after reload.")
+        interrupted_followup = "Keep this queued after an interrupted turn."
+        queued, _ = self.call_cli("conversation", "queue", task_id, "--message", interrupted_followup)
+        queued_record = self.assert_success(queued)
+        interrupted_fixture = self.data_directory / "codex-fixture-interrupted"
+        shutil.copyfile(fixture, interrupted_fixture)
+        interrupted_fixture.chmod(0o755)
+        shutil.copyfile(self.data_directory / "codex-fixture-success.history", Path(str(interrupted_fixture) + ".history"))
+        interrupted, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Interrupt the active turn.",
+            "--answer", "color=Blue", "--answer", "token=fixture-secret", expected_status=1,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(interrupted_fixture)},
+        )
+        self.assert_failure(interrupted, "operation_failed")
+        queue_read, _ = self.call_cli("conversation", "queue-list", task_id)
+        retained = self.assert_success(queue_read)
+        self.assertEqual(retained[0]["id"], queued_record["id"])
+        self.assertEqual(retained[0]["state"], "needsAction", "An interrupted turn must retain its queued text without silently retrying it.")
+        retry_fixture = self.data_directory / "codex-fixture-success"
+        shutil.copyfile(fixture, retry_fixture)
+        retry_fixture.chmod(0o755)
+        shutil.copyfile(Path(str(interrupted_fixture) + ".history"), Path(str(retry_fixture) + ".history"))
+        retried, _ = self.call_cli(
+            "conversation", "queue-retry", task_id, queued_record["id"],
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(retry_fixture)},
+        )
+        self.assertTrue(self.assert_success(retried)["retried"])
+        queue_read, _ = self.call_cli("conversation", "queue-list", task_id)
+        self.assertEqual(self.assert_success(queue_read), [], "An explicit retry that completes should remove the queued item.")
         task, _ = self.call_cli("task", "get", task_id)
-        self.assertEqual(self.assert_success(task)["savedPrompt"], prompt)
+        self.assertEqual(self.assert_success(task)["savedPrompt"], interrupted_followup)
 
         title_task = self.create_repo_task("Untitled task", [self.primary])
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -2310,6 +2364,14 @@ class StationAIBridgeTests(unittest.TestCase):
                     f"exit={first_process.returncode}; stdout={output}; stderr={error_output}"
                 )
 
+            time.sleep(0.1)
+            steer_message = "Keep the current approach and prioritize the smaller change."
+            steered, _ = self.call_cli(
+                "conversation", "steer", task_id, "--message", steer_message,
+                extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            )
+            self.assertTrue(self.assert_success(steered)["accepted"], "Steering should use the active XPC client and turn ID.")
+
             second_process = self.start_cli(
                 *second_command,
                 extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
@@ -2365,6 +2427,79 @@ class StationAIBridgeTests(unittest.TestCase):
         completed = self.assert_success(self.call_cli("task", "get", task_id)[0])
         self.assertEqual(completed["codexThreadID"], thread_id)
         self.assertEqual(completed["status"], "Review")
+        self.assertEqual(len(saved_history.get("steerRequests", [])), 1)
+        steer_params = saved_history["steerRequests"][0]
+        self.assertEqual(steer_params["threadId"], thread_id)
+        self.assertEqual(steer_params["input"], [{"type": "text", "text": steer_message}])
+        self.assertTrue(steer_params["expectedTurnId"], "Steering must identify the matching active turn.")
+        stale_steer, _ = self.call_cli(
+            "conversation", "steer", task_id, "--message", "This turn is already over.",
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        self.assertFalse(self.assert_success(stale_steer)["accepted"], "A completed turn must not be steered.")
+
+    # case-contract: test_conversation_steers_and_queues_active_turn | While a Codex turn is active, a stale steer response is shown as an error and preserves the draft for retry; CLI/XPC steering routes to a UI-owned active turn and appears in the visible conversation. The user can also persist a distinct follow-up for after completion; it dispatches once after a matching completed notification, survives fresh CLI/XPC reads, and is removed only after successful delivery.
+    def test_conversation_steers_and_queues_active_turn(self):
+        task = self.create_repo_task("Active turn message controls", [self.primary])
+        task_id = task["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-steer-queue-serial-success-wait"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        Path(str(executable) + ".reject-next-steer").write_text("reject one stale steer\n", encoding="utf-8")
+        first_prompt = "Start the active turn before steering and queueing."
+        steering_text = "Keep the current approach and simplify the final change."
+        queued_text = "After the current work, verify the saved follow-up."
+        send_command = ["conversation", "send", task_id, "--message", first_prompt]
+        process = self.start_cli(
+            *send_command,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        ready = Path(str(executable) + ".resolve-ready")
+        release = Path(str(executable) + ".resolve-continue")
+        try:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and not ready.exists() and process.poll() is None:
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "The fixture should hold the first turn active for steering and queueing.")
+            time.sleep(0.1)
+            rejected_steer, _ = self.call_cli(
+                "conversation", "steer", task_id, "--message", steering_text,
+                expected_status=1,
+                extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            )
+            self.assert_failure(rejected_steer, "operation_failed")
+            steered, _ = self.call_cli(
+                "conversation", "steer", task_id, "--message", steering_text,
+                extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            )
+            self.assertTrue(self.assert_success(steered)["accepted"])
+            queued, _ = self.call_cli("conversation", "queue", task_id, "--message", queued_text)
+            queued_record = self.assert_success(queued)
+            persisted, _ = self.call_cli("conversation", "queue-list", task_id)
+            self.assertEqual(self.assert_success(persisted)[0]["id"], queued_record["id"])
+        finally:
+            release.write_text("Release the active turn.\n", encoding="utf-8")
+        self.finish_cli(process, send_command)
+
+        history_response, _ = self.call_cli(
+            "conversation", "history", task_id,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        history = self.assert_success(history_response)
+        self.assertEqual([message["text"] for message in history["messages"] if message["role"] == "user"].count(queued_text), 1)
+        protocol_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        self.assertEqual(len(protocol_history["rejectedSteerRequests"]), 1, "A server rejection must not be reported as an accepted steer.")
+        self.assertEqual(len(protocol_history["steerRequests"]), 1)
+        steer = protocol_history["steerRequests"][0]
+        self.assertEqual(steer["threadId"], protocol_history["threadID"])
+        self.assertEqual(steer["input"], [{"type": "text", "text": steering_text}])
+        self.assertEqual(steer["expectedTurnId"], protocol_history["messages"][0]["turnID"])
+        queue_after_completion, _ = self.call_cli("conversation", "queue-list", task_id)
+        self.assertEqual(self.assert_success(queue_after_completion), [], "Successful dispatch must be durable and nonduplicating across reload.")
 
     # case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history. Diagnostics record image MIME and encoded size without storing image payloads.
     def test_conversation_sends_image_attachments(self):
@@ -2677,7 +2812,7 @@ class StationAIBridgeTests(unittest.TestCase):
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Review")
 
-    # case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes persist Blocked across connections, and diagnostics identify the failed turn phase and store path; a new prompt can finish in Review.
+    # case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes persist Blocked across connections, and diagnostics identify the failed turn phase and store path; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
     def test_codex_interrupted_turn_blocks_with_reason_and_can_retry(self):
         task_id = self.create_task("Interrupted turn", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"

@@ -2781,7 +2781,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Unsent task prompt is saved after returning to backlog")
     }
 
-    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors.
+    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, the UI exposes separate steer and queue actions, sends steering with the active turn ID, and retains the queued follow-up across reopening.
     func test_conversation_composer_rejects_blank_and_supports_live_turn_controls() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Blank message", roots: [fixture.primary.path])
@@ -2967,6 +2967,14 @@ final class StationAIUITests: XCTestCase {
             XCTAssertEqual(fallbackApplied["titleSource"] as? String, "prompt-fallback")
             let serializedFailureTitleEvents = String(data: try JSONSerialization.data(withJSONObject: failureTitleEvents), encoding: .utf8) ?? ""
             XCTAssertFalse(serializedFailureTitleEvents.contains(failurePrompt), "Title diagnostics must not include conversation text.")
+            let queuedText = "Follow up after the next turn."
+            _ = try runCLI(["conversation", "queue", failureTaskID, "--message", queuedText])
+            let reloadedQueue = try runCLI(["conversation", "queue-list", failureTaskID])["result"] as? [[String: Any]]
+            XCTAssertEqual(reloadedQueue?.first?["text"] as? String, queuedText, "The queue should persist through a fresh CLI/XPC read.")
+            app.terminate()
+            launchApp(defaultParent: fixture.parent.path)
+            openTask(named: failurePrompt)
+            XCTAssertTrue(app.staticTexts["Queued for after this turn"].waitForExistence(timeout: 10), "The saved queued follow-up should appear after reopening the conversation.")
             app.terminate()
             codexFixtureExecutable = nil
             launchApp(defaultParent: fixture.parent.path)
@@ -2985,10 +2993,23 @@ final class StationAIUITests: XCTestCase {
             let pauseButton = element("pause-response-button")
             XCTAssertTrue(pauseButton.waitForExistence(timeout: 60), "A live turn should replace Send with Pause.")
             XCTAssertTrue(pauseButton.isEnabled, "Pause should be enabled after Codex reports an active turn.")
+            XCTAssertTrue(element("steer-current-turn-button").waitForExistence(timeout: 10), "An active turn should offer a distinct steering action.")
+            XCTAssertTrue(element("queue-message-after-turn-button").exists, "An active turn should offer a distinct queue action.")
+            let steeringText = "Preserve the existing file and stop after the current command."
+            composer.click()
+            composer.typeText(steeringText)
+            element("steer-current-turn-button").click()
+            XCTAssertTrue(app.staticTexts[steeringText].waitForExistence(timeout: 10), "Steering should use the active turn and appear as a sent user message.")
+            let queuedText = "Afterward, report that the queued message was dispatched."
+            composer.click()
+            composer.typeText(queuedText)
+            element("queue-message-after-turn-button").click()
+            XCTAssertTrue(app.staticTexts["Queued for after this turn"].waitForExistence(timeout: 10), "Queueing should persist and visibly distinguish a follow-up from steering.")
 
             element("back-to-board-button").click()
             openTask(named: "Blank message")
             XCTAssertTrue(element("pause-response-button").waitForExistence(timeout: 30), "Reopening the task should retain the active-turn controls.")
+            XCTAssertTrue(app.staticTexts["Queued for after this turn"].waitForExistence(timeout: 10), "The queued follow-up should survive closing and reopening the conversation.")
             XCTAssertEqual(composer.value as? String, "", "A prompt already sent to Codex must not reappear as a composer draft.")
             let reopenedActivity = element("codex-activity-disclosure")
             let visibleThinking = NSPredicate(format: "label CONTAINS %@ OR label CONTAINS %@", "Thinking", "Running")
@@ -3142,6 +3163,75 @@ final class StationAIUITests: XCTestCase {
         openTask(named: "Concurrent conversation sends")
         XCTAssertTrue(app.staticTexts[firstPrompt].waitForExistence(timeout: 10), "Reopening the task should retain the first completed send in conversation history.")
         XCTAssertTrue(app.staticTexts[secondPrompt].waitForExistence(timeout: 10), "Reopening the task should load the completed second send from the real app-server thread.")
+    }
+
+    // case-contract: test_conversation_steers_and_queues_active_turn | While a Codex turn is active, a stale steer response is shown as an error and preserves the draft for retry; CLI/XPC steering routes to a UI-owned active turn and appears in the visible conversation. The user can also persist a distinct follow-up for after completion; it dispatches once after a matching completed notification, survives fresh CLI/XPC reads, and is removed only after successful delivery.
+    func test_conversation_steers_and_queues_active_turn() throws {
+        let fixtureTemplate = try makeCodexFixture(emptyQuestions: false)
+        let sharedFixture = dataDirectory.appendingPathComponent("codex-fixture-steer-queue-serial-success-wait")
+        try FileManager.default.copyItem(at: fixtureTemplate, to: sharedFixture)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: sharedFixture.path)
+        try "StationAI test owns this Codex protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".stationai-codex-fixture-owner"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try "reject one stale steer\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".reject-next-steer"), atomically: true, encoding: .utf8)
+        codexFixtureExecutable = sharedFixture.path
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Active turn message controls", roots: [fixture.primary.path])
+        openTask(named: "Active turn message controls")
+
+        let taskID = try taskID(named: "Active turn message controls")
+        let firstPrompt = "Start the active turn before steering and queueing."
+        let steeringText = "Keep the current approach and simplify the final change."
+        let queuedText = "After the current work, verify the saved follow-up."
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText(firstPrompt)
+        element("send-message-button").click()
+        let ready = URL(fileURLWithPath: sharedFixture.path + ".resolve-ready")
+        let release = URL(fileURLWithPath: sharedFixture.path + ".resolve-continue")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15), "The fixture should hold the current turn active.")
+        XCTAssertTrue(element("steer-current-turn-button").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("queue-message-after-turn-button").exists)
+
+        composer.click()
+        composer.typeText(steeringText)
+        element("steer-current-turn-button").click()
+        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10), "A stale server response should be shown as a steering error.")
+        XCTAssertEqual(composer.value as? String, steeringText, "A rejected steering message should remain available for retry.")
+        XCTAssertFalse(app.staticTexts[steeringText].exists, "A rejected steering message must not appear as sent.")
+        let remoteSteer = try runCLI(["conversation", "steer", taskID, "--message", steeringText])["result"] as? [String: Any]
+        XCTAssertEqual(remoteSteer?["accepted"] as? Bool, true, "CLI/XPC steering should route to the UI-owned active turn.")
+        XCTAssertTrue(app.staticTexts[steeringText].waitForExistence(timeout: 10))
+        XCTAssertEqual(composer.value as? String, "", "A successful XPC steer should clear the matching draft in the visible composer.")
+        composer.click()
+        composer.typeText(queuedText)
+        element("queue-message-after-turn-button").click()
+        XCTAssertTrue(app.staticTexts["Queued for after this turn"].waitForExistence(timeout: 10))
+        let queued = try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
+        XCTAssertEqual(queued?.count, 1)
+        XCTAssertEqual(queued?.first?["text"] as? String, queuedText)
+
+        try "Release the active turn.\n".write(to: release, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).isEmpty
+        }, timeout: 20), "The queued message should dispatch once after the matching completed notification.")
+        let history = try runCLI(["conversation", "history", taskID], extraEnvironment: [
+            "STATIONAI_E2E_CODEX_EXECUTABLE": sharedFixture.path
+        ])["result"] as? [String: Any]
+        let userMessages = (history?["messages"] as? [[String: Any]] ?? []).filter { $0["role"] as? String == "user" }
+        XCTAssertEqual(userMessages.compactMap { $0["text"] as? String }.filter { $0 == queuedText }.count, 1)
+        let fixtureHistory = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: sharedFixture.path + ".history"))) as? [String: Any]
+        )
+        let steerRequests = try XCTUnwrap(fixtureHistory["steerRequests"] as? [[String: Any]])
+        XCTAssertEqual((fixtureHistory["rejectedSteerRequests"] as? [[String: Any]])?.count, 1)
+        XCTAssertEqual(steerRequests.count, 1)
+        XCTAssertEqual(steerRequests[0]["expectedTurnId"] as? String, (fixtureHistory["messages"] as? [[String: Any]])?.first?["turnID"] as? String)
+        XCTAssertEqual(steerRequests[0]["input"] as? [[String: String]], [["type": "text", "text": steeringText]])
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 10))
     }
 
     // case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history. Diagnostics record image MIME and encoded size without storing image payloads.
@@ -3585,7 +3675,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(named: "Non-blocking question")?["status"] as? String, "Review")
     }
 
-    // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes persist Blocked across connections, and diagnostics identify the failed turn phase and store path; a new prompt can finish in Review.
+    // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes persist Blocked across connections, and diagnostics identify the failed turn phase and store path; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
     func test_codex_interrupted_turn_blocks_with_reason_and_can_retry() throws {
         _ = try runCLI(["task", "create", "--title", "Interrupted turn", "--root", fixture.primary.path])
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-interrupted").path
@@ -3595,16 +3685,20 @@ final class StationAIUITests: XCTestCase {
         element("message-composer").typeText("Start work that will be interrupted.")
         element("send-message-button").click()
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        let interruptedID = try taskID(named: "Interrupted turn")
+        let queuedText = "Follow up after I review the interrupted turn."
+        let queued = try runCLI(["conversation", "queue", interruptedID, "--message", queuedText])["result"] as? [String: Any]
+        let queuedID = try XCTUnwrap(queued?["id"] as? String)
         app.buttons["Blue"].click()
         element("ai-question-answer-token").click()
         element("ai-question-answer-token").typeText("fixture-secret")
         element("submit-ai-answers-button").click()
 
         XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Follow-up needs your action"].waitForExistence(timeout: 10), "An interrupted turn must retain its queued message for an explicit retry.")
         let blocked = try XCTUnwrap(taskRecord(named: "Interrupted turn"))
         XCTAssertEqual(blocked["status"] as? String, "Blocked")
         XCTAssertTrue((blocked["statusMessage"] as? String)?.localizedCaseInsensitiveContains("interrupted") == true)
-        let interruptedID = try taskID(named: "Interrupted turn")
         let sendFailure = try XCTUnwrap(diagnosticEvents().first {
             $0["event"] as? String == "conversation.send.failed" && $0["taskID"] as? String == interruptedID
         })
@@ -3628,6 +3722,19 @@ final class StationAIUITests: XCTestCase {
         element("submit-ai-answers-button").click()
         XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
         XCTAssertEqual(try taskRecord(named: "Interrupted turn")?["status"] as? String, "Review")
+        let retryQueuedButton = element("retry-queued-message-\(queuedID.uppercased())")
+        XCTAssertTrue(retryQueuedButton.waitForExistence(timeout: 10), "The retained follow-up should remain explicitly retryable after reopening and completing a new turn.")
+        retryQueuedButton.click()
+        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10), "Explicit retry should submit the queued message to Codex.")
+        app.buttons["Blue"].click()
+        element("ai-question-answer-token").click()
+        element("ai-question-answer-token").typeText("fixture-secret")
+        element("submit-ai-answers-button").click()
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({
+            (((try? self.runCLI(["conversation", "queue-list", interruptedID])["result"] as? [[String: Any]]) ?? [])).isEmpty
+        }, timeout: 10), "A completed explicit retry should remove the queued item.")
+        XCTAssertEqual(try taskRecord(id: interruptedID)?["savedPrompt"] as? String, queuedText, "The successfully retried follow-up should become the latest saved prompt.")
 
         _ = try runCLI(["task", "create", "--title", "Reopen active turn", "--root", fixture.primary.path])
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-hold").path

@@ -576,6 +576,17 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     }
 }
 
+struct QueuedConversationMessage: Codable, Equatable, Identifiable {
+    enum State: String, Codable { case queued, dispatching, needsAction }
+    let id: UUID
+    let taskID: UUID
+    let threadID: String
+    let text: String
+    var state: State
+    var enqueuedProcessID: Int32? = nil
+    var dispatchingProcessID: Int32? = nil
+}
+
 enum GitHubPullRequestManager {
     struct PullRequest: Decodable, Sendable {
         let number: Int
@@ -743,6 +754,120 @@ final class BoardTaskManager {
     private let modelContext: ModelContext
     private let worktreeRoot: URL
     private let taskOperationLockDirectory: URL?
+
+    func queuedConversationMessages(taskID: UUID) throws -> [QueuedConversationMessage] {
+        try mutateQueuedMessages(taskID: taskID) { items in
+            for index in items.indices where items[index].state == .queued || items[index].state == .dispatching {
+                let processID = items[index].state == .dispatching ? items[index].dispatchingProcessID : items[index].enqueuedProcessID
+                if items[index].state == .queued, processID == nil { continue }
+                guard let processID, Darwin.kill(processID, 0) == 0 || errno == EPERM else {
+                    items[index].state = .needsAction
+                    items[index].dispatchingProcessID = nil
+                    items[index].enqueuedProcessID = nil
+                    continue
+                }
+            }
+        }
+        return try readQueuedMessages()[taskID.uuidString] ?? []
+    }
+
+    func enqueueConversationMessage(taskID: UUID, text: String, ownerProcessID: Int32?) throws -> QueuedConversationMessage {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { throw StationAIManagerError.invalidMessage }
+        let task = try taskModel(taskID)
+        guard let threadID = task.codexThreadID else {
+            throw BridgeCommandError(code: "invalid_transition", message: "A follow-up can only be queued after this conversation has a Codex thread.")
+        }
+        let item = QueuedConversationMessage(
+            id: UUID(), taskID: taskID, threadID: threadID, text: normalized, state: .queued,
+            enqueuedProcessID: ownerProcessID
+        )
+        try mutateQueuedMessages(taskID: taskID) { $0.append(item) }
+        return item
+    }
+
+    func conversationSteerMailboxDirectory() throws -> URL {
+        guard let storeURL = modelContext.container.configurations.first?.url else {
+            throw BridgeCommandError(code: "operation_failed", message: "Couldn't locate the task store for steering requests.")
+        }
+        return storeURL.deletingLastPathComponent().appendingPathComponent("conversation-steer-mailbox", isDirectory: true)
+    }
+
+    func claimNextQueuedMessage(taskID: UUID, threadID: String, messageID: UUID? = nil) throws -> QueuedConversationMessage? {
+        var claimed: QueuedConversationMessage?
+        try mutateQueuedMessages(taskID: taskID) { items in
+            guard let index = items.firstIndex(where: {
+                $0.state == .queued && $0.threadID == threadID && (messageID == nil || $0.id == messageID)
+            }) else { return }
+            items[index].state = .dispatching
+            items[index].dispatchingProcessID = Int32(ProcessInfo.processInfo.processIdentifier)
+            claimed = items[index]
+        }
+        return claimed
+    }
+
+    func finishQueuedMessage(_ message: QueuedConversationMessage, succeeded: Bool) throws {
+        try mutateQueuedMessages(taskID: message.taskID) { items in
+            guard let index = items.firstIndex(where: { $0.id == message.id && $0.state == .dispatching }) else { return }
+            if succeeded { items.remove(at: index) }
+            else { items[index].state = .needsAction; items[index].dispatchingProcessID = nil }
+        }
+    }
+
+    func retryQueuedMessage(taskID: UUID, messageID: UUID) throws {
+        try mutateQueuedMessages(taskID: taskID) { items in
+            guard let index = items.firstIndex(where: { $0.id == messageID && $0.state == .needsAction }) else {
+                throw BridgeCommandError(code: "invalid_transition", message: "That queued message is not waiting for an explicit retry.")
+            }
+            items[index].state = .queued
+            items[index].enqueuedProcessID = Int32(ProcessInfo.processInfo.processIdentifier)
+            items[index].dispatchingProcessID = nil
+        }
+    }
+
+    func retainQueuedMessagesForUserAction(taskID: UUID, threadID: String) throws {
+        try mutateQueuedMessages(taskID: taskID) { items in
+            for index in items.indices where items[index].threadID == threadID && items[index].state == .queued {
+                items[index].state = .needsAction
+            }
+        }
+    }
+
+    private func readQueuedMessages() throws -> [String: [QueuedConversationMessage]] {
+        let url = try queuedMessagesURL()
+        guard FileManager.default.fileExists(atPath: url.path) else { return [:] }
+        return try JSONDecoder().decode([String: [QueuedConversationMessage]].self, from: Data(contentsOf: url))
+    }
+
+    private func mutateQueuedMessages(taskID: UUID, _ mutation: (inout [QueuedConversationMessage]) throws -> Void) throws {
+        let url = try queuedMessagesURL()
+        let lockURL = url.appendingPathExtension("lock")
+        let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, mode_t(0o600))
+        guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        defer { _ = Darwin.close(descriptor) }
+        var lock = flock()
+        lock.l_type = Int16(F_WRLCK); lock.l_whence = Int16(SEEK_SET)
+        guard Darwin.fcntl(descriptor, F_SETLKW, &lock) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        defer { lock.l_type = Int16(F_UNLCK); _ = Darwin.fcntl(descriptor, F_SETLK, &lock) }
+        var all: [String: [QueuedConversationMessage]] = [:]
+        if FileManager.default.fileExists(atPath: url.path) {
+            all = try JSONDecoder().decode([String: [QueuedConversationMessage]].self, from: Data(contentsOf: url))
+        }
+        var items = all[taskID.uuidString] ?? []
+        try mutation(&items)
+        all[taskID.uuidString] = items
+        try JSONEncoder().encode(all).write(to: url, options: .atomic)
+        guard Darwin.chmod(url.path, mode_t(0o600)) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+    }
+
+    private func queuedMessagesURL() throws -> URL {
+        guard let storeURL = modelContext.container.configurations.first?.url else {
+            throw BridgeCommandError(code: "operation_failed", message: "Couldn't locate the task store for queued messages.")
+        }
+        return storeURL.deletingLastPathComponent().appendingPathComponent("queued-conversation-messages.json")
+    }
     private let repositoryAllocationLockDirectory: URL?
     private let conversationTurnLockDirectory: URL?
     private let worktreeService = StationAIWorktreeService()
@@ -2237,10 +2362,14 @@ struct ConversationUpdate: Codable {
 final class CodexConversationManager {
     private let tasks: BoardTaskManager
     private let client: CodexAppServerClient
+    private var dispatchingQueuedMessages = false
 
     init(tasks: BoardTaskManager, client: CodexAppServerClient) {
         self.tasks = tasks
         self.client = client
+        if let directory = try? tasks.conversationSteerMailboxDirectory() {
+            CodexAppServerClient.configureSteerMailbox(directory: directory)
+        }
     }
 
     func history(taskID: UUID, onActionRequest: @escaping () -> Void = {}) async throws -> CodexThreadHistory {
@@ -2313,6 +2442,36 @@ final class CodexConversationManager {
         return interrupted
     }
 
+    func steer(taskID: UUID, text: String) async throws -> Bool {
+        let task = try tasks.taskModel(taskID)
+        guard let threadID = task.codexThreadID else { return false }
+        return try await client.steerActiveTurn(threadID: threadID, text: text)
+    }
+
+    func queuedMessages(taskID: UUID) throws -> [QueuedConversationMessage] {
+        try tasks.queuedConversationMessages(taskID: taskID)
+    }
+
+    func queueMessage(taskID: UUID, text: String) throws -> QueuedConversationMessage {
+        let task = try tasks.taskModel(taskID)
+        return try tasks.enqueueConversationMessage(
+            taskID: taskID,
+            text: text,
+            ownerProcessID: task.codexThreadID.flatMap { client.activeTurnOwnerProcessID(threadID: $0) }
+        )
+    }
+
+    func retryQueuedMessage(
+        taskID: UUID,
+        messageID: UUID,
+        onUpdate: @escaping (ConversationUpdate) -> Void = { _ in },
+        onUserInput: @escaping (CodexUserInputRequest) async -> Void = { _ in }
+    ) async throws -> Bool {
+        try tasks.retryQueuedMessage(taskID: taskID, messageID: messageID)
+        await dispatchQueuedMessages(taskID: taskID, mode: .code, modelID: CodexAppServerClient.modelID, onlyMessageID: messageID, onUpdate: onUpdate, onUserInput: onUserInput)
+        return try !tasks.queuedConversationMessages(taskID: taskID).contains { $0.id == messageID }
+    }
+
     func send(
         taskID: UUID,
         text: String,
@@ -2324,24 +2483,71 @@ final class CodexConversationManager {
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in },
         onUserInput: @escaping (CodexUserInputRequest) async -> Void = { _ in }
     ) async throws -> CodexThreadHistory {
-        return try await tasks.withConversationTurnReservation(taskID) {
+        let history: CodexThreadHistory
+        do {
+            history = try await tasks.withConversationTurnReservation(taskID) {
+                do {
+                    let result = try await self.sendReserved(
+                        taskID: taskID,
+                        text: text,
+                        imageDataURLs: imageDataURLs,
+                        mode: mode,
+                        modelID: modelID,
+                        userInputAnswers: userInputAnswers,
+                        onTurnStarting: onTurnStarting,
+                        onUpdate: onUpdate,
+                        onUserInput: onUserInput
+                    )
+                    try? await self.tasks.clearPendingSubmittedPrompt(taskID)
+                    return result
+                } catch {
+                    try? await self.tasks.clearPendingSubmittedPrompt(taskID)
+                    throw error
+                }
+            }
+        } catch {
+            if let threadID = try? tasks.taskModel(taskID).codexThreadID {
+                try? tasks.retainQueuedMessagesForUserAction(taskID: taskID, threadID: threadID)
+                onUpdate(ConversationUpdate(type: "queue_changed"))
+            }
+            throw error
+        }
+        if !dispatchingQueuedMessages {
+            await dispatchQueuedMessages(taskID: taskID, mode: mode, modelID: modelID, onUpdate: onUpdate, onUserInput: onUserInput)
+        }
+        return history
+    }
+
+    private func dispatchQueuedMessages(
+        taskID: UUID,
+        mode: CodexConversationMode,
+        modelID: String,
+        onlyMessageID: UUID? = nil,
+        onUpdate: @escaping (ConversationUpdate) -> Void,
+        onUserInput: @escaping (CodexUserInputRequest) async -> Void
+    ) async {
+        guard !dispatchingQueuedMessages else { return }
+        let threadID: String
+        do {
+            guard let value = try tasks.taskModel(taskID).codexThreadID else { return }
+            threadID = value
+        } catch { return }
+        dispatchingQueuedMessages = true
+        defer { dispatchingQueuedMessages = false }
+        while true {
+            let item: QueuedConversationMessage?
+            do { item = try tasks.claimNextQueuedMessage(taskID: taskID, threadID: threadID, messageID: onlyMessageID) }
+            catch { break }
+            guard let item else { break }
             do {
-                let history = try await self.sendReserved(
-                    taskID: taskID,
-                    text: text,
-                    imageDataURLs: imageDataURLs,
-                    mode: mode,
-                    modelID: modelID,
-                    userInputAnswers: userInputAnswers,
-                    onTurnStarting: onTurnStarting,
-                    onUpdate: onUpdate,
-                    onUserInput: onUserInput
-                )
-                try? await self.tasks.clearPendingSubmittedPrompt(taskID)
-                return history
+                _ = try await send(taskID: taskID, text: item.text, mode: mode, modelID: modelID, onUpdate: onUpdate, onUserInput: onUserInput)
+                try tasks.finishQueuedMessage(item, succeeded: true)
+                onUpdate(ConversationUpdate(type: "queue_changed"))
             } catch {
-                try? await self.tasks.clearPendingSubmittedPrompt(taskID)
-                throw error
+                try? tasks.finishQueuedMessage(item, succeeded: false)
+                onUpdate(ConversationUpdate(type: "queue_changed"))
+                onUpdate(ConversationUpdate(type: "action_notice", message: "A queued follow-up needs your review before it can be retried."))
+                break
             }
         }
     }
@@ -2518,6 +2724,9 @@ final class CodexConversationManager {
                         }
                     }
                     await onUserInput(request)
+                },
+                onSteerMessage: { message in
+                    onUpdate(ConversationUpdate(type: "steered_message", message: message))
                 }
             )
             phase = "worktree-finalization"
@@ -2860,6 +3069,19 @@ final class StationAIBridgeRuntime {
             case "conversation.models":
                 let conversations = CodexConversationManager(tasks: taskManager, client: CodexAppServerClient())
                 result = .object(["models": .array(try await conversations.models(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })])
+            case "conversation.queue", "conversation.queue.list", "conversation.queue.retry", "conversation.steer":
+                let taskID = try request.requiredUUID("taskID")
+                let conversations = CodexConversationManager(tasks: taskManager, client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string))
+                switch request.command {
+                case "conversation.queue": result = try Self.value(conversations.queueMessage(taskID: taskID, text: request.requiredString("message")))
+                case "conversation.queue.list": result = .array(try conversations.queuedMessages(taskID: taskID).map { try Self.value($0) })
+                case "conversation.queue.retry":
+                    let retried = try await conversations.retryQueuedMessage(taskID: taskID, messageID: request.requiredUUID("messageID"))
+                    result = .object(["retried": .boolean(retried)])
+                default:
+                    let accepted = try await conversations.steer(taskID: taskID, text: request.requiredString("message"))
+                    result = .object(["accepted": .boolean(accepted)])
+                }
             case "conversation.send":
                 let taskID = try request.requiredUUID("taskID")
                 let message = request.arguments["message"]?.string ?? ""

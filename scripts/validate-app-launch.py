@@ -29,7 +29,12 @@ def validate():
     if '.e2e.' in identifier:
         if not os.environ.get('STATIONAI_DATA_DIRECTORY') or not any(data.is_relative_to(p.resolve()) and data != p.resolve() for p in (Path('/tmp'), Path(tempfile.gettempdir()))):
             raise ValueError('A test app requires an explicit isolated temporary data directory.')
-        if not (identifier.startswith(expected_id + '.e2e.') or identifier.startswith('com.stationai.app.worktree.') and '.e2e.' in identifier):
+        is_isolated_test_identity = (
+            identifier.startswith(expected_id + '.e2e.')
+            or identifier.startswith('com.stationai.app.e2e.')
+            or identifier.startswith('com.stationai.app.worktree.')
+        )
+        if not is_isolated_test_identity:
             raise ValueError('Unexpected test app identity.')
     elif identifier != expected_id or data != expected_data:
         raise ValueError('The selected app or data directory does not match this worktree profile.')
