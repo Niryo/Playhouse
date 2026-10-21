@@ -27,61 +27,32 @@ while (( $# > 0 )); do
   esac
 done
 
-selected_cases_csv=""
-if (( ${#selected_cases[@]} > 0 )); then
-  selected_cases_csv="$(IFS=,; printf '%s' "${selected_cases[*]}")"
-fi
-selection_file="/tmp/stationai-bridge-test-selection-${repository_root//\//_}"
-selection_owner="StationAI bridge test selection (v1)."
-if [[ -e "${selection_file}" ]] && [[ "$(head -n 1 "${selection_file}" 2>/dev/null || true)" != "${selection_owner}" ]]; then
-  printf 'Refusing to overwrite an unowned bridge test selection file: %s\n' "${selection_file}" >&2
-  exit 1
-fi
-if (( ${#selected_cases[@]} > 0 )); then
-  printf '%s\n%s\n' "${selection_owner}" "${selected_cases_csv}" > "${selection_file}"
-else
-  rm -f "${selection_file}"
-fi
-
-test_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/stationai-bridge.XXXXXX")"
+test_output_dir="$(mktemp -d /tmp/stationai-bridge.XXXXXX)"
 architecture="$(uname -m)"
-app_profile_json="$(bash "${repository_root}/scripts/app-profile.sh" "${repository_root}")"
-app_profile_bundle_identifier="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["bundleID"])' <<<"${app_profile_json}")"
-e2e_bundle_identifier="${app_profile_bundle_identifier}.e2e.$$.${RANDOM}"
-xcode_version="$(xcodebuild -version | awk '/^Xcode / {print $2}')"
-repository_cache_key="$(printf '%s' "${repository_root}" | shasum -a 256 | cut -c 1-12)"
-derived_data_dir="${TMPDIR:-/tmp}/stationai-bridge-derived-data-${xcode_version}-${architecture}-${repository_cache_key}"
+source "${repository_root}/scripts/app-profile.sh"
+stationai_load_app_profile "${repository_root}"
+python3 "${repository_root}/scripts/check-test-parity.py"
+python3 "${repository_root}/scripts/check-button-feedback.py"
+build_info="$(python3 "${repository_root}/scripts/prepare-e2e-build.py" \
+  --root "${repository_root}" \
+  --profile-bundle-id "${STATIONAI_PROFILE_BUNDLE_ID}" \
+  --architecture "${architecture}")"
+derived_data_dir="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["derivedData"])' "${build_info}")"
+e2e_bundle_identifier="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["bundleID"])' "${build_info}")"
 app_bundle="${derived_data_dir}/Build/Products/Debug/StationAI.app"
 cli_path="${app_bundle}/Contents/MacOS/stationai-cli"
 data_root="${test_output_dir}/data"
+fixture_root="${test_output_dir}/fixtures"
 bridge_log="${test_output_dir}/bridge-tests.log"
 cleanup() {
-  if [[ "$(head -n 1 "${selection_file}" 2>/dev/null || true)" == "${selection_owner}" ]]; then
-    rm -f "${selection_file}"
-  fi
   printf 'Bridge test artifacts: %s\n' "${test_output_dir}"
 }
 trap cleanup EXIT
 
-python3 "${repository_root}/scripts/check-test-parity.py"
-python3 "${repository_root}/scripts/check-button-feedback.py"
-
-# Compile the paired UI test target without launching the app so UI-only source
-# errors are caught by the fast verification path.
-xcodebuild build-for-testing -quiet \
-  -project "${repository_root}/StationAI.xcodeproj" \
-  -scheme StationAI \
-  -configuration Debug \
-  -destination "platform=macOS,arch=${architecture}" \
-  -derivedDataPath "${derived_data_dir}" \
-  -only-testing:StationAIUITests/StationAIUITests \
-  CODE_SIGNING_ALLOWED=YES \
-  CODE_SIGN_IDENTITY=- \
-  ARCHS="${architecture}" \
-  ONLY_ACTIVE_ARCH=YES \
-  STATIONAI_APP_BUNDLE_IDENTIFIER="${e2e_bundle_identifier}"
-python3 "${repository_root}/scripts/prepare-e2e-fixture.py"
-legacy_store_seeder="/tmp/stationai-bridge-workspaces/seed-legacy-task-store"
+# The build helper also compiles the paired UI test target and reuses this
+# content-matched DerivedData for focused retries and final full verification.
+python3 "${repository_root}/scripts/prepare-e2e-fixture.py" --fixture-root "${fixture_root}"
+legacy_store_seeder="${fixture_root}/seed-legacy-task-store"
 xcrun swiftc -parse-as-library -swift-version 5 -O \
   "${repository_root}/scripts/seed-legacy-task-store.swift" \
   -o "${legacy_store_seeder}"
@@ -95,7 +66,7 @@ service_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${servic
 bridge_arguments=(
   "${repository_root}/scripts/test-bridge.py"
   --cli "${cli_path}"
-  --fixture-root /tmp/stationai-bridge-workspaces
+  --fixture-root "${fixture_root}"
   --data-root "${data_root}"
   --service-name "${service_name}"
   --legacy-store-seeder "${legacy_store_seeder}"

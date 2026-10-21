@@ -1139,8 +1139,7 @@ final class BoardTaskManager {
             let originalRoots = task.workspaceRootPaths
             let updatedRepositories = originalRepositories.filter { $0.repositoryPath != record.repositoryPath }
             let roots = try Self.normalizeOptionalRoots(updatedRepositories.map(\.worktreePath) + task.contextFolderPaths)
-            guard !roots.isEmpty else { throw StationAIManagerError.noWorkspaceRoots }
-
+            guard !roots.isEmpty || record.isPending else { throw StationAIManagerError.noWorkspaceRoots }
             let shouldRemoveWorktree = record.createdByStationAI && !record.isPending
                 && FileManager.default.fileExists(atPath: record.worktreePath)
 
