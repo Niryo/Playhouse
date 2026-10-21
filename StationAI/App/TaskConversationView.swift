@@ -1321,7 +1321,7 @@ struct TaskConversationView: View {
             VStack(alignment: .leading, spacing: 10) {
                 TextField("Message…", text: $draft, axis: .vertical)
                     .font(.system(size: 14))
-                    .lineLimit(1...5)
+                    .lineLimit(1...12)
                     .textFieldStyle(.plain)
                     .focused($isComposerFocused)
                     .onKeyPress(.return, phases: .down) { press in
