@@ -135,6 +135,41 @@ private final class TaskOperationLockBarrier {
     deinit { try? release() }
 }
 
+private final class TaskStoreWriteLockBarrier {
+    private var descriptor: Int32
+
+    init(dataDirectory: URL) throws {
+        let lockURL = dataDirectory.appendingPathComponent("store-write.lock")
+        descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, mode_t(0o600))
+        guard descriptor >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        var lock = flock()
+        lock.l_type = Int16(F_WRLCK)
+        lock.l_whence = Int16(SEEK_SET)
+        guard Darwin.fcntl(descriptor, F_SETLK, &lock) == 0 else {
+            let error = NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            Darwin.close(descriptor)
+            descriptor = -1
+            throw error
+        }
+    }
+
+    func release() throws {
+        guard descriptor >= 0 else { return }
+        var lock = flock()
+        lock.l_type = Int16(F_UNLCK)
+        lock.l_whence = Int16(SEEK_SET)
+        guard Darwin.fcntl(descriptor, F_SETLK, &lock) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        Darwin.close(descriptor)
+        descriptor = -1
+    }
+
+    deinit { try? release() }
+}
+
 private final class ConversationTurnLockBarrier {
     private var descriptor: Int32
 
@@ -567,6 +602,84 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ card.exists }, timeout: 10), "Exactly one reservation should appear on the visible board.")
         card.click()
         XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
+    }
+
+    // case-contract: test_task_store_serializes_cross_process_writes | If another process holds the shared task-store write lock when a Codex turn completes, final status persistence waits and then saves Review status and full history across fresh CLI/XPC reads; reopening the conversation in the UI shows the saved exchange without a store error.
+    func test_task_store_serializes_cross_process_writes() throws {
+        let fixtureExecutable = dataDirectory.appendingPathComponent("codex-fixture-store-write-success-wait")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixtureExecutable.path), "A unique per-case fixture must not replace an existing file.")
+        try FileManager.default.copyItem(
+            at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-success-wait"),
+            to: fixtureExecutable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fixtureExecutable.path)
+        try "StationAI test owns this Codex protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".stationai-codex-fixture-owner"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let title = "Store write contention"
+        let created = try XCTUnwrap(
+            try runCLI(["task", "create", "--title", title, "--repo", fixture.primary.path])["result"] as? [String: Any]
+        )
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        codexFixtureExecutable = fixtureExecutable.path
+        let prompt = "Persist this completed turn."
+        let process = try startCLIProcess(
+            ["conversation", "send", taskID, "--message", prompt],
+            extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": fixtureExecutable.path]
+        )
+        let ready = URL(fileURLWithPath: fixtureExecutable.path + ".resolve-ready")
+        let continuation = URL(fileURLWithPath: fixtureExecutable.path + ".resolve-continue")
+        var barrier: TaskStoreWriteLockBarrier?
+        var barrierReleased = false
+        defer {
+            if !barrierReleased { try? barrier?.release() }
+            if process.process.isRunning {
+                process.process.terminate()
+                process.process.waitUntilExit()
+            }
+        }
+
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15), "The app-server fixture should pause during the active Codex turn.")
+        barrier = try TaskStoreWriteLockBarrier(dataDirectory: dataDirectory)
+        try "Release the completed fixture turn.\n".write(to: continuation, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({
+            (try? self.diagnosticEvents().contains {
+                $0["event"] as? String == "codex.turn.ended"
+                    && $0["threadID"] as? String == "00000000-0000-0000-0000-000000000001"
+                    && $0["turnStatus"] as? String == "completed"
+            }) == true
+        }, timeout: 15), "Codex should finish before the task's final status save.")
+        Thread.sleep(forTimeInterval: 0.2)
+        XCTAssertTrue(process.process.isRunning, "Final task status persistence should wait for the shared store write lock.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+
+        try barrier?.release()
+        barrierReleased = true
+        let response = try finishCLIProcess(process)
+        XCTAssertEqual(response["ok"] as? Bool, true)
+        let finalTask = try XCTUnwrap(taskRecord(id: taskID))
+        XCTAssertEqual(finalTask["status"] as? String, "Review")
+        XCTAssertNil(finalTask["pendingSubmittedPrompt"] as? String)
+        let history = try runCLI(
+            ["conversation", "history", taskID],
+            extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": fixtureExecutable.path]
+        )["result"] as? [String: Any]
+        let messages = try XCTUnwrap(history?["messages"] as? [[String: Any]])
+        XCTAssertTrue(messages.contains { $0["role"] as? String == "user" && $0["text"] as? String == prompt })
+        XCTAssertTrue(messages.contains {
+            $0["role"] as? String == "assistant" && $0["text"] as? String == "Answers received: Blue / fixture-secret."
+        })
+
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: title)
+        XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts[prompt].waitForExistence(timeout: 10), "The saved user message should render after reopening the conversation.")
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10), "The saved assistant reply should render after reopening the conversation.")
+        XCTAssertFalse(element("codex-chat-error").exists, "A recovered store write must not leave a conversation error banner.")
+        attachScreenshot(named: "Conversation status and history persist after shared store contention")
     }
 
     // case-contract: test_task_worktree_preparation_serializes_auto_branch_claims | Tasks with the same automatic branch choice remain pending without creating a worktree before conversation start; the opt-in live Codex integration sends both turns concurrently and confirms only one task claims the generated branch.
@@ -2789,7 +2902,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Conversation shows a completed subagent delegation")
     }
 
-    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; a completed <proposed_plan> is automatically rendered as Markdown without exposing its wrapper tags, including after reopening, while bridge history preserves the exact source.
+    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; a completed <proposed_plan> is automatically rendered as Markdown without exposing its wrapper tags, including after reopening, while bridge history preserves the exact source and the reopened conversation shows its latest message.
     func test_plan_mode_renders_markdown_in_conversation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -2818,7 +2931,7 @@ final class StationAIUITests: XCTestCase {
         composer.typeText("Plan the task.")
         element("send-message-button").click()
         let taskID = try taskID(named: "Plan mode Markdown")
-        let markdownReply = "<proposed_plan>\n## Implementation plan\n\nStart with the **workspace model**.\n\n- Add structured conversation rendering\n- Verify history after reopening\n</proposed_plan>"
+        let markdownReply = "<proposed_plan>\n## Implementation plan\n\nStart with the **workspace model**.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening\n</proposed_plan>"
         let assistantMarkdown = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", "Implementation plan"))
             .firstMatch
@@ -2834,6 +2947,7 @@ final class StationAIUITests: XCTestCase {
         )["result"] as? [String: Any]
         let reloadedMessages = reloadedHistory?["messages"] as? [[String: Any]] ?? []
         XCTAssertTrue(reloadedMessages.contains { $0["role"] as? String == "assistant" && $0["text"] as? String == markdownReply }, "The exact Markdown source should persist after reopening the plan conversation.")
+        XCTAssertEqual(reloadedMessages.last?["role"] as? String, "assistant", "The bridge history should keep the latest response last.")
         let reloadedAssistant = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", "Implementation plan"))
             .firstMatch
@@ -2850,9 +2964,17 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(heading.waitForExistence(timeout: 10), "Plan headings should render as distinct elements after reopening.")
         XCTAssertTrue(accessibleLabelOrValue(of: heading).contains("Implementation plan"), "The rendered heading should retain the plan title after reopening.")
         XCTAssertTrue(firstListItem.waitForExistence(timeout: 5), "The first plan list entry should render after reopening.")
-        XCTAssertTrue(accessibleLabelOrValue(of: firstListItem).contains("Add structured conversation rendering"))
+        XCTAssertTrue(accessibleLabelOrValue(of: firstListItem).contains("Implementation detail 01"))
         XCTAssertTrue(secondListItem.waitForExistence(timeout: 5), "The second plan list entry should render after reopening.")
-        XCTAssertTrue(accessibleLabelOrValue(of: secondListItem).contains("Verify history after reopening"))
+        XCTAssertTrue(accessibleLabelOrValue(of: secondListItem).contains("Implementation detail 02"))
+        let latestListItem = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "Final verification: confirm the latest message is visible after reopening"))
+            .firstMatch
+        let conversationScrollView = element("conversation-scroll-view")
+        XCTAssertTrue(waitUntil({
+            latestListItem.frame.maxY <= conversationScrollView.frame.maxY + 2
+                && latestListItem.frame.maxY > conversationScrollView.frame.minY
+        }, timeout: 5), "Reopening a long conversation should position its final message in the visible viewport.")
         attachScreenshot(named: "Plan mode response renders a structured Markdown plan")
     }
 

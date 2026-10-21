@@ -59,7 +59,7 @@ codex_fixtures=(
   ui empty nonblocking slow plan-slow interrupted abort success
   title-success title-failure title-success-wait hold
   progress-hold-release progress-hold-release-failed progress-hold-release-interrupted
-  progress-question success-wait nonblocking-slow subagent markdown
+  progress-question success-wait store-write-success-wait nonblocking-slow subagent markdown
 )
 for fixture in "${codex_fixtures[@]}"; do
   fixture_path="${fixture_root}/codex-fixture-${fixture}"
