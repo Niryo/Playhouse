@@ -205,7 +205,7 @@
   },
   {
     "id": "test_task_pr_create_reports_real_gh_failure",
-    "expectation": "A repository-backed task checks its configured merge target for conflicts before PR creation; the clean path returns no conflicts, and the active-card and Done-archive PR controls retain their help and wait for the task lock before publication failure without saving a PR link or changing Done status."
+    "expectation": "The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes. The Done archive control retains its help and waits for the task lock before publication failure without saving a PR link or changing Done status."
   },
   {
     "id": "test_task_pr_conflicts_detect_without_mutation",

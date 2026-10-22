@@ -1119,11 +1119,16 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), branch_head)
         self.assertTrue(self.branch_exists(self.primary, branch))
 
-    # case-contract: test_task_pr_create_reports_real_gh_failure | A repository-backed task checks its configured merge target for conflicts before PR creation; the clean path returns no conflicts, and the active-card and Done-archive PR controls retain their help and wait for the task lock before publication failure without saving a PR link or changing Done status.
+    # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes. The Done archive control retains its help and waits for the task lock before publication failure without saving a PR link or changing Done status.
     def test_task_pr_create_reports_real_gh_failure(self):
         task = self.create_repo_task(
-            "PR failure", [self.primary], merge_targets={self.primary: "main"}, materialize=True
+            "PR failure", [self.primary], merge_targets={self.primary: "main"}
         )
+        self.assertEqual(task["status"], "Backlog")
+        persisted_backlog = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(persisted_backlog["status"], "Backlog")
+        self.complete_fixture_turn(task["id"])
+        task = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(task["repositoryWorktrees"][0]["mergeTarget"], "main")
         conflicts, _ = self.call_cli("task", "pr", "conflicts", task["id"])
         self.assertEqual(self.assert_success(conflicts)["repositories"], [])
