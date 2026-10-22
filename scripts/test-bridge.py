@@ -9,6 +9,7 @@ import plistlib
 import os
 import select
 import shutil
+import shlex
 import sqlite3
 import stat
 import subprocess
@@ -1269,6 +1270,66 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIsNone(record.get("pullRequestNumber"))
         self.assertIsNone(record.get("pullRequestURL"))
         self.assertEqual(current["status"], "Done")
+
+    # case-contract: test_review_pr_conflicts_probe_and_verify | Separate Review task cards probe their linked pull requests concurrently on app focus. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action beside its PR link; clicking it sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head.
+    def test_review_pr_conflicts_probe_and_verify(self):
+        task = self.create_repo_task("Review PR conflict probe", [self.primary, self.secondary], materialize=True)
+        self.assertEqual(task["status"], "Review")
+        self.assertEqual(self.assert_success(self.call_cli("task", "pr", "status", task["id"])[0]), [])
+        self.seed_done_task_pull_request(task["id"], number=123)
+        self.seed_done_task_pull_request(task["id"], number=456, repository_index=1)
+
+        directory = self.data_directory / "review-pr-gh-fixture"
+        directory.mkdir()
+        state = directory / "state"
+        state.write_text("123=CONFLICTING\n456=MERGEABLE\n", encoding="utf-8")
+        started = directory / "started"
+        started.mkdir()
+        executable = directory / "gh"
+        executable.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" != pr ] || [ \"$2\" != view ] || { [ \"$3\" != 123 ] && [ \"$3\" != 456 ]; } || [ \"$4\" != --json ] || [ \"$5\" != mergedAt,mergeable,headRefOid ]; then\n"
+            "  echo 'Unexpected gh fixture command' >&2\n"
+            "  exit 2\n"
+            "fi\n"
+            f"touch {shlex.quote(str(started))}/\"$3\"\n"
+            f"for attempt in $(seq 1 100); do [ -f {shlex.quote(str(started / '123'))} ] && [ -f {shlex.quote(str(started / '456'))} ] && break; sleep 0.02; done\n"
+            f"if [ ! -f {shlex.quote(str(started / '123'))} ] || [ ! -f {shlex.quote(str(started / '456'))} ]; then echo 'PR probes did not run in parallel' >&2; exit 3; fi\n"
+            f"mergeable=$(awk -F= -v number=\"$3\" '$1 == number {{ print $2 }}' {shlex.quote(str(state))})\n"
+            "head=$(git rev-parse HEAD)\n"
+            "if [ \"$mergeable\" = HEAD_MISMATCH ]; then head=remote-head-not-pushed; mergeable=MERGEABLE; fi\n"
+            "if [ \"$mergeable\" = CONFLICTING ]; then printf '{\"mergedAt\":null,\"mergeable\":\"CONFLICTING\",\"headRefOid\":\"%s\"}\\n' \"$head\"; else printf '{\"mergedAt\":null,\"mergeable\":\"MERGEABLE\",\"headRefOid\":\"%s\"}\\n' \"$head\"; fi\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
+        environment = {"PATH": f"{directory}:{os.environ.get('PATH', '')}"}
+        status, _ = self.call_cli("task", "pr", "status", task["id"], extra_environment=environment)
+        states = self.assert_success(status)
+        self.assertEqual({item["number"] for item in states}, {123, 456})
+        self.assertEqual({item["number"] for item in states if item["hasConflicts"]}, {123})
+        self.assertTrue(all(item["headRefOid"] == item["localHeadOid"] for item in states))
+        self.assertTrue((started / "123").is_file() and (started / "456").is_file(), "Both linked PR probes should overlap.")
+
+        (started / "123").unlink()
+        (started / "456").unlink()
+        still_conflicted, _ = self.call_cli("task", "pr", "verify", task["id"], extra_environment=environment)
+        self.assertEqual(self.assert_success(still_conflicted)["status"], "stillConflicted")
+        self.assertTrue((started / "123").is_file() and (started / "456").is_file())
+
+        state.write_text("123=MERGEABLE\n456=HEAD_MISMATCH\n", encoding="utf-8")
+        for number in (123, 456):
+            (started / str(number)).unlink()
+        mismatch, _ = self.call_cli("task", "pr", "verify", task["id"], extra_environment=environment)
+        self.assertEqual(self.assert_success(mismatch)["status"], "stillConflicted", "A mergeable PR with a remote head that is not pushed locally must retain the conflict indicator.")
+        mismatch_status, _ = self.call_cli("task", "pr", "status", task["id"], extra_environment=environment)
+        mismatch_state = next(item for item in self.assert_success(mismatch_status) if item["number"] == 456)
+        self.assertNotEqual(mismatch_state["headRefOid"], mismatch_state["localHeadOid"])
+
+        state.write_text("123=MERGEABLE\n456=MERGEABLE\n", encoding="utf-8")
+        for number in (123, 456):
+            (started / str(number)).unlink()
+        verification, _ = self.call_cli("task", "pr", "verify", task["id"], extra_environment=environment)
+        self.assertEqual(self.assert_success(verification)["status"], "resolved")
 
     # case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects conflicts without mutation, requires confirmation by default, honors saved keep without publishing, resolves staged conflicts locally without pushing, and commits and pushes a staged resolution without changing the target; unknown actions are rejected. The paired UI verifies unresolved conflicts stay uncommitted and unpublished, presents keep, resolve-only, and resolve-and-push with the remember checkbox, verifies remembered choices skip confirmation and persist in Settings, and confirms resolve-only commits staged resolution locally while the remote task branch remains absent.
     def test_task_pr_conflicts_detect_without_mutation(self):
