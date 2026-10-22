@@ -2,6 +2,12 @@
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+script_path="${repository_root}/scripts/test-e2e.sh"
+
+if [[ "${1:-}" != "--locked" ]]; then
+  exec "${repository_root}/scripts/with-e2e-lock.sh" -- bash "${script_path}" --locked "$@"
+fi
+shift
 source "${repository_root}/scripts/app-profile.sh"
 stationai_load_app_profile "${repository_root}"
 

@@ -507,7 +507,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(reopened["title"], "Profile restart")
         self.assertEqual(reopened["savedPrompt"], "Keep this draft after restart.")
 
-    # case-contract: test_task_creation_rejects_invalid_title_roots_and_missing_folder | New Task immediately opens an empty conversation with the repository picker focused; sending stays disabled until a working folder is added. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets.
+    # case-contract: test_task_creation_rejects_invalid_title_roots_and_missing_folder | New Task immediately opens an empty conversation with the repository picker focused and a visible red missing-working-folder warning; sending stays disabled until a working folder is added. A persisted empty-root task shows the same red warning when its conversation is reopened. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets.
     def test_task_creation_rejects_invalid_title_roots_and_missing_folder(self):
         response, _ = self.call_cli(
             "task", "create", "--title", "   ", "--root", self.primary,
@@ -919,7 +919,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertFalse(list(failure.glob(".store-import-*")))
         self.assertEqual(self.assert_success(self.call_cli("task", "list")[0])["tasks"][0]["title"], "Healthy board")
 
-    # case-contract: test_task_store_repairs_missing_pending_prompt_column | A real legacy SwiftData task store with old model metadata and no submitted-prompt column waits for the store-write lock while app and CLI/XPC open concurrently, is backed up before migration, and preserves its task and draft after a visible restart; metadata advances and later opens create no additional backup. The store is imported once into the protected filename and the legacy database remains unchanged. Committed WAL-only draft data survives import, and a subsequent edited draft survives restart without reimport.
+    # case-contract: test_task_store_repairs_missing_pending_prompt_column | A real legacy SwiftData task store with old model metadata and no submitted-prompt column waits for the store-write lock while CLI/XPC reads concurrently; migration backs up before repair, and the CLI preserves the task and draft. The visible app then opens against the migrated store and preserves the draft through a subsequent restart; metadata advances and later opens create no additional backup. The store is imported once into the protected filename and the legacy database remains unchanged. Committed WAL-only draft data survives import, and a subsequent edited draft survives restart without reimport.
     def test_task_store_repairs_missing_pending_prompt_column(self):
         seeded = subprocess.run(
             [str(arguments.legacy_store_seeder), str(self.data_directory)],
