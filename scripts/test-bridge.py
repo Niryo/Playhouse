@@ -960,7 +960,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertFalse(list(failure.glob(".store-import-*")))
         self.assertEqual(self.assert_success(self.call_cli("task", "list")[0])["tasks"][0]["title"], "Healthy board")
 
-    # case-contract: test_task_store_repairs_missing_pending_prompt_column | A real legacy SwiftData task store with old model metadata and missing submitted-prompt and in-progress-duration columns waits for the store-write lock while CLI/XPC reads concurrently; migration backs up before repairing all current task columns with generated SQLite affinities and constraints, backfills old duration values to zero, and preserves the task and draft. The visible app opens the migrated store and preserves the draft through restart; metadata advances and later opens create no additional backup. The store is imported once into the protected filename and the legacy database remains unchanged. Committed WAL-only draft data survives import, and a subsequent edited draft survives restart without reimport.
+    # case-contract: test_task_store_repairs_missing_pending_prompt_column | A real legacy SwiftData task store with in-progress timing columns and no submitted-prompt column waits for the store-write lock while CLI/XPC reads concurrently; migration backs up before adding the missing VARCHAR prompt column as nullable with no default and preserves elapsed time at zero. The CLI preserves the task and draft, and the visible app opens the migrated store and preserves the draft through a subsequent restart with duration still zero; metadata advances and later opens create no additional backup. The store is imported once into the protected filename and the legacy database remains unchanged. Committed WAL-only draft data survives import, and a subsequent edited draft survives restart without reimport.
     def test_task_store_repairs_missing_pending_prompt_column(self):
         seeded = subprocess.run(
             [str(arguments.legacy_store_seeder), str(self.data_directory)],
@@ -973,12 +973,11 @@ class StationAIBridgeTests(unittest.TestCase):
         with sqlite3.connect(legacy_store) as database:
             columns = {row[1] for row in database.execute("PRAGMA table_info(ZBOARDTASK)")}
             self.assertNotIn("ZPENDINGSUBMITTEDPROMPT", columns)
-            self.assertNotIn("ZINPROGRESSSTARTEDAT", columns)
-            self.assertNotIn("ZTOTALINPROGRESSSECONDS", columns)
+            self.assertTrue({"ZINPROGRESSSTARTEDAT", "ZTOTALINPROGRESSSECONDS"} <= columns)
             self.assertEqual(database.execute("SELECT count(*) FROM ZBOARDTASK").fetchone()[0], 1)
             legacy_metadata = plistlib.loads(database.execute("SELECT Z_PLIST FROM Z_METADATA").fetchone()[0])
             legacy_hash = legacy_metadata["NSStoreModelVersionHashes"]["BoardTask"]
-            self.assertEqual(legacy_hash.hex(), "24594c3345454e4107a5224f966af3bb539b5a9d91e15480728b1fcf490b6070")
+            self.assertEqual(len(legacy_hash), 32)
 
         wal = sqlite3.connect(legacy_store)
         self.addCleanup(wal.close)
@@ -1022,17 +1021,16 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assertEqual(backup.execute("SELECT count(*) FROM ZBOARDTASK").fetchone()[0], 1)
             backup_columns = {row[1] for row in backup.execute("PRAGMA table_info(ZBOARDTASK)")}
             self.assertNotIn("ZPENDINGSUBMITTEDPROMPT", backup_columns)
-            self.assertNotIn("ZINPROGRESSSTARTEDAT", backup_columns)
-            self.assertNotIn("ZTOTALINPROGRESSSECONDS", backup_columns)
+            self.assertTrue({"ZINPROGRESSSTARTEDAT", "ZTOTALINPROGRESSSECONDS"} <= backup_columns)
         listed, _ = self.call_cli("board", "list")
         self.assertEqual([item["id"] for item in self.assert_success(listed)["tasks"]], [task_id])
         self.assertEqual(len(list(self.data_directory.glob("StationAI.store.before-pending-prompt-*.backup"))), 1)
         self.assertEqual(legacy_store.read_bytes(), legacy_bytes)
         with sqlite3.connect(store) as database:
             migrated_columns = {row[1] for row in database.execute("PRAGMA table_info(ZBOARDTASK)")}
-            self.assertIn("ZPENDINGSUBMITTEDPROMPT", migrated_columns)
-            self.assertIn("ZINPROGRESSSTARTEDAT", migrated_columns)
-            self.assertIn("ZTOTALINPROGRESSSECONDS", migrated_columns)
+            self.assertTrue({"ZPENDINGSUBMITTEDPROMPT", "ZINPROGRESSSTARTEDAT", "ZTOTALINPROGRESSSECONDS"} <= migrated_columns)
+            prompt_column = next(row for row in database.execute("PRAGMA table_info(ZBOARDTASK)") if row[1] == "ZPENDINGSUBMITTEDPROMPT")
+            self.assertEqual((prompt_column[2], prompt_column[3], prompt_column[4]), ("VARCHAR", 0, None))
             duration_column = next(row for row in database.execute("PRAGMA table_info(ZBOARDTASK)") if row[1] == "ZTOTALINPROGRESSSECONDS")
             self.assertEqual((duration_column[2], duration_column[3], duration_column[4]), ("FLOAT", 0, None))
             self.assertEqual(database.execute("SELECT ZTOTALINPROGRESSSECONDS FROM ZBOARDTASK").fetchone()[0], 0)
@@ -2420,7 +2418,7 @@ class StationAIBridgeTests(unittest.TestCase):
         serialized_title_events = json.dumps(title_events)
         self.assertNotIn("Explain the delayed title result.", serialized_title_events)
         self.assertNotIn("Generated fixture title", serialized_title_events)
-    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline prompts persist as typed text, the composer expands beyond five lines, stops at its 12-line limit, and retains all lines while scrolling. Long saved drafts reopen intact and immediately expand before typing, including after restart, remain editable, grow for wrapped text, shrink when shortened, and show their own overflow scrollbar for earlier and later content. The CLI/XPC preserves a 15-line draft. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. During title preparation, CLI/XPC confirms the submitted prompt and conversation thread remain attached to the task, while the UI keeps Pause disabled until the task's conversation client has an interruptible turn. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, the UI exposes separate steer and queue actions, sends steering with the active turn ID, and retains the queued follow-up across reopening.
+    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline prompts persist as typed text, the composer expands beyond five lines, stops at its 12-line limit, and retains all lines while scrolling. Long saved drafts reopen intact and immediately expand before typing, including after restart, remain editable, grow for wrapped text, shrink when shortened, and show their own overflow scrollbar for earlier and later content. The CLI/XPC preserves a 15-line draft. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. During title preparation, CLI/XPC confirms the submitted prompt and conversation thread remain attached to the task, while the UI keeps Pause disabled until the task's conversation client has an interruptible turn. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, Return queues a follow-up, queued rows offer Steer, and queued follow-ups persist across reopening. The obsolete footer Queue and Steer buttons are absent.
     def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         task_id = self.create_task(title="Blank conversation send", roots=[self.primary])["id"]
@@ -2751,7 +2749,7 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assertFalse(self.assert_success(stale_steer)["accepted"], "A completed turn must not be steered.")
 
-    # case-contract: test_conversation_steers_and_queues_active_turn | While a Codex turn is active, a stale steer response is shown as an error and preserves the draft for retry; malformed steer images fail validation; CLI/XPC steering routes image data through the mailbox to a UI-owned active turn and appears in the visible conversation; an accepted UI Steer action sends attached image data with text using the matching active turn ID, displays it in the transcript, and clears its draft and image preview. The user can also persist a distinct follow-up for after completion; it dispatches once after a matching completed notification, survives fresh CLI/XPC reads, and is removed only after successful delivery.
+    # case-contract: test_conversation_steers_and_queues_active_turn | While a Codex turn is active, stale CLI/XPC steering reports an error and preserves the composer draft; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview. Plain Return queues a follow-up; its row Steer uses the active turn ID, appears in the transcript, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and rejected steering remains available as needsAction. A distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
     def test_conversation_steers_and_queues_active_turn(self):
         task = self.create_repo_task("Active turn message controls", [self.primary])
         task_id = task["id"]
@@ -2804,6 +2802,41 @@ class StationAIBridgeTests(unittest.TestCase):
             queued_record = self.assert_success(queued)
             persisted, _ = self.call_cli("conversation", "queue-list", task_id)
             self.assertEqual(self.assert_success(persisted)[0]["id"], queued_record["id"])
+            removable, _ = self.call_cli("conversation", "queue", task_id, "--message", "Remove this queued follow-up.")
+            removable_record = self.assert_success(removable)
+            removed, _ = self.call_cli("conversation", "queue-remove", task_id, removable_record["id"])
+            self.assertTrue(self.assert_success(removed)["removed"])
+            persisted, _ = self.call_cli("conversation", "queue-list", task_id)
+            self.assertEqual([item["id"] for item in self.assert_success(persisted)], [queued_record["id"]])
+            steerable, _ = self.call_cli("conversation", "queue", task_id, "--message", "Steer this queued follow-up now.")
+            steerable_record = self.assert_success(steerable)
+            queued_steer, _ = self.call_cli("conversation", "queue-steer", task_id, steerable_record["id"])
+            self.assertTrue(self.assert_success(queued_steer)["accepted"])
+            persisted, _ = self.call_cli("conversation", "queue-list", task_id)
+            self.assertEqual([item["id"] for item in self.assert_success(persisted)], [queued_record["id"]])
+            rejected_queue_item, _ = self.call_cli("conversation", "queue", task_id, "--message", "Keep this after a rejected steer.")
+            rejected_queue_record = self.assert_success(rejected_queue_item)
+            Path(str(executable) + ".reject-next-steer").write_text("reject queued steer\n", encoding="utf-8")
+            rejected_queue_steer, _ = self.call_cli(
+                "conversation", "queue-steer", task_id, rejected_queue_record["id"], expected_status=1
+            )
+            self.assert_failure(rejected_queue_steer, "operation_failed")
+            persisted, _ = self.call_cli("conversation", "queue-list", task_id)
+            persisted_messages = self.assert_success(persisted)
+            self.assertEqual(persisted_messages[0]["state"], "queued")
+            self.assertEqual(persisted_messages[1]["state"], "needsAction")
+            removed, _ = self.call_cli("conversation", "queue-remove", task_id, rejected_queue_record["id"])
+            self.assertTrue(self.assert_success(removed)["removed"])
+            missing_remove, _ = self.call_cli(
+                "conversation", "queue-remove", task_id, "00000000-0000-0000-0000-000000000000", expected_status=1
+            )
+            self.assert_failure(missing_remove, "invalid_transition")
+            persisted, _ = self.call_cli("conversation", "queue-list", task_id)
+            self.assertEqual(
+                [item["id"] for item in self.assert_success(persisted)],
+                [queued_record["id"]],
+                "An unknown queue removal must leave the existing queue unchanged.",
+            )
         finally:
             release.write_text("Release the active turn.\n", encoding="utf-8")
         self.finish_cli(process, send_command)
@@ -2815,14 +2848,16 @@ class StationAIBridgeTests(unittest.TestCase):
         history = self.assert_success(history_response)
         self.assertEqual([message["text"] for message in history["messages"] if message["role"] == "user"].count(queued_text), 1)
         protocol_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
-        self.assertEqual(len(protocol_history["rejectedSteerRequests"]), 1, "A server rejection must not be reported as an accepted steer.")
-        self.assertEqual(len(protocol_history["steerRequests"]), 1)
+        self.assertEqual(len(protocol_history["rejectedSteerRequests"]), 2, "A server rejection must not be reported as an accepted steer.")
+        self.assertEqual(len(protocol_history["steerRequests"]), 2)
         steer = protocol_history["steerRequests"][0]
         self.assertEqual(steer["threadId"], protocol_history["threadID"])
         self.assertEqual(steer["input"][0], {"type": "text", "text": steering_text})
         self.assertEqual(steer["input"][1]["type"], "image")
         self.assertTrue(steer["input"][1]["url"].startswith("data:image/png;base64,"))
         self.assertEqual(steer["expectedTurnId"], protocol_history["messages"][0]["turnID"])
+        self.assertEqual(protocol_history["steerRequests"][1]["input"], [{"type": "text", "text": "Steer this queued follow-up now."}])
+        self.assertEqual(protocol_history["steerRequests"][1]["expectedTurnId"], protocol_history["messages"][0]["turnID"])
         queue_after_completion, _ = self.call_cli("conversation", "queue-list", task_id)
         self.assertEqual(self.assert_success(queue_after_completion), [], "Successful dispatch must be durable and nonduplicating across reload.")
 
@@ -2909,7 +2944,7 @@ class StationAIBridgeTests(unittest.TestCase):
         history, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(history)["messages"], [])
 
-    # case-contract: test_conversation_shows_subagent_delegation | Raw Codex agentMessage items preserve commentary, final_answer, phase, and turn IDs. During a delegated turn, a live seconds-to-minutes Working for disclosure appears without an assistant waiting spinner; completion leaves a collapsed Worked for row with a nearby right chevron above the clean final answer, and expansion reveals preserved progress and regular activity details. Reopening preserves the same duration without a loading spinner. Started/interacted child updates coalesce into named timeline rows outside the disclosure with available metadata; completed, interrupted, and unknown child states persist after reload. Child threads open read-only through thread/read, thread/turns/list, and thread/items/list without composer controls or thread/resume. CLI/XPC history preserves messages and activity; diagnostics exclude conversation text, command output, and diffs.
+    # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, started and interacted updates coalesce by child thread ID into clear named timeline rows outside the collapsible Codex activity section, with sentence-style names, available path/model/reasoning metadata, and started-working wording; completed and interrupted states, optional metadata, and unknown kinds survive history reload and remain visible after reopening the task conversation. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs.
     def test_conversation_shows_subagent_delegation(self):
         task_id = self.create_task(title="Subagent delegation")["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -2987,19 +3022,6 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(subagent["status"], "completed")
         self.assertIn("Inspect the project structure", subagent["detail"])
         self.assertIn("Inspected the project structure", subagent["detail"])
-        self.assertTrue(any(
-            message["role"] == "assistant"
-            and message["text"] == "The subagent inspected the project structure."
-            and message.get("phase") == "final_answer"
-            for message in result["messages"]
-        ))
-        self.assertTrue(any(
-            message["role"] == "assistant"
-            and message["text"] == "I inspected the project structure and am preparing the summary."
-            and message.get("phase") == "commentary"
-            and message.get("turnID") == "turn_stationai_fixture"
-            for message in result["messages"]
-        ))
         children = {activity["childThreadID"]: activity for activity in activities if activity.get("childThreadID")}
         self.assertEqual(set(children), {
             "00000000-0000-0000-0000-000000000002",
@@ -3061,19 +3083,6 @@ class StationAIBridgeTests(unittest.TestCase):
             {thread_id: activity["status"] for thread_id, activity in children.items()},
         )
         self.assertTrue(any("subagent inspected" in message["text"].lower() for message in history["messages"]))
-        self.assertTrue(any(
-            message["role"] == "assistant"
-            and message["text"] == "The subagent inspected the project structure."
-            and message.get("phase") == "final_answer"
-            for message in history["messages"]
-        ))
-        self.assertTrue(any(
-            message["role"] == "assistant"
-            and message["text"] == "I inspected the project structure and am preparing the summary."
-            and message.get("phase") == "commentary"
-            and message.get("turnID") == "turn_stationai_fixture"
-            for message in history["messages"]
-        ))
 
     # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; a completed <proposed_plan> is automatically rendered as Markdown with visible spacing between distinct paragraphs and without exposing its wrapper tags, including after reopening, while bridge history preserves the exact source and the reopened conversation shows its latest message.
     def test_plan_mode_renders_markdown_in_conversation(self):

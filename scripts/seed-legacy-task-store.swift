@@ -12,6 +12,8 @@ import SwiftData
     var progressLabel: String?
     var progressDetail: String?
     var createdAt: Date
+    var inProgressStartedAt: Date?
+    var totalInProgressSeconds: Double
     var codexThreadID: String?
     var savedPrompt: String?
     var workspaceRootPathsData: Data?
@@ -27,6 +29,8 @@ import SwiftData
         progressLabel = nil
         progressDetail = nil
         createdAt = Date(timeIntervalSince1970: 1_700_000_000)
+        inProgressStartedAt = nil
+        totalInProgressSeconds = 0
         codexThreadID = nil
         savedPrompt = "Keep this draft through the store repair."
         workspaceRootPathsData = nil

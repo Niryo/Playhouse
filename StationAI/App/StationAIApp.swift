@@ -8,6 +8,9 @@ struct StationAIApp: App {
     @StateObject private var codexClient: CodexAppServerClient
 
     private var windowTitle: String {
+        let configuredTitle = ProcessInfo.processInfo.environment["STATIONAI_WINDOW_TITLE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let configuredTitle, !configuredTitle.isEmpty { return configuredTitle }
         let label = ProcessInfo.processInfo.environment["STATIONAI_WORKTREE_LABEL"]
             .flatMap { $0.isEmpty ? nil : $0 }
         return label.map { "StationAI — \($0)" } ?? "StationAI"
