@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import base64
 import errno
 import fcntl
 import json
@@ -431,20 +432,21 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("status")
         self.assertEqual(self.assert_success(response), {"bridgeVersion": 1, "service": "StationAI"})
 
-    # case-contract: test_app_override_rejects_incompatible_bundles | Explicit app overrides reject obsolete compatibility metadata, foreign worktree or bridge identities, and nonisolated test data before launching; the current app preserves a saved draft across restart.
+    # case-contract: test_app_override_rejects_incompatible_bundles | Explicit app overrides reject obsolete compatibility metadata, foreign worktree or bridge identities, test IDs that do not match the current worktree, and nonisolated test data before launching; the current app preserves a saved draft across restart.
     def test_app_override_rejects_incompatible_bundles(self):
         task = self.assert_success(self.call_cli("task", "create", "--title", "Protected store", "--root", self.primary)[0])
         self.assert_success(self.call_cli("task", "prompt", task["id"], "--text", "Protected draft", "--status", "Backlog")[0])
         root = Path(__file__).resolve().parent.parent
-        launch_check = subprocess.run(
+        launch_contract = subprocess.run(
             ["python3", str(root / "scripts/check-app-launch-contract.py"), str(self.cli.parent.parent.parent), str(root), str(self.data_directory)],
+            check=False,
             capture_output=True,
             text=True,
         )
         self.assertEqual(
-            launch_check.returncode,
+            launch_contract.returncode,
             0,
-            f"App launch contract check failed: {launch_check.stdout}\n{launch_check.stderr}",
+            f"App launch contract check failed: {launch_contract.stdout}\n{launch_contract.stderr}",
         )
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["savedPrompt"], "Protected draft")
 
@@ -485,7 +487,7 @@ class StationAIBridgeTests(unittest.TestCase):
             ["bash", "-c", verify_build, "profile-check", str(script), str(linked), primary_profile["bundleID"]],
             capture_output=True, text=True,
         ).returncode, 0)
-        self.assertEqual(subprocess.run(
+        self.assertNotEqual(subprocess.run(
             ["bash", "-c", verify_build, "profile-check", str(script), str(self.primary), linked_profile["bundleID"] + ".e2e.fixture"],
             capture_output=True, text=True,
         ).returncode, 0)
@@ -2051,7 +2053,7 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "get", task_id, expected_status=3)
         self.assert_failure(response, "not_found")
 
-    # case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while backing out saves an unsent prompt; reopening restores the draft without creating a branch or worktree, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
+    # case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while the composer automatically saves an unsent prompt as it is typed; clearing the composer clears the stored draft, backing out needs no Save button, and reopening restores the draft without creating a branch or worktree. Blank drafts cannot be stored, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
     def test_task_prompt_draft_persists_after_back(self):
         suggestions, _ = self.call_cli("workspace", "suggest", "--parent", self.fixture / "suggested-parent")
         self.assertIn(str(self.primary), self.assert_success(suggestions)["repositories"])
@@ -2075,6 +2077,10 @@ class StationAIBridgeTests(unittest.TestCase):
         reopened_task = self.assert_success(reopened)
         self.assertEqual(reopened_task["savedPrompt"], prompt)
         self.assertEqual(reopened_task["status"], "Backlog")
+        cleared, _ = self.call_cli("task", "prompt", task_id, "--text", "")
+        self.assertIsNone(self.assert_success(cleared).get("savedPrompt"))
+        restored, _ = self.call_cli("task", "prompt", task_id, "--text", prompt)
+        self.assertEqual(self.assert_success(restored)["savedPrompt"], prompt)
         self.assertEqual(reopened_task["title"], "Stable draft title")
 
         delayed_task = self.create_task(title="Untitled task", roots=[self.primary])
@@ -2132,7 +2138,7 @@ class StationAIBridgeTests(unittest.TestCase):
         serialized_title_events = json.dumps(title_events)
         self.assertNotIn("Explain the delayed title result.", serialized_title_events)
         self.assertNotIn("Generated fixture title", serialized_title_events)
-    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors.
+    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text and the composer expands beyond five lines before scrolling. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. During title preparation, CLI/XPC confirms the submitted prompt and conversation thread remain attached to the task, while the UI keeps Pause disabled until the task's conversation client has an interruptible turn. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors.
     def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
         task_id = self.create_task(title="Blank conversation send", roots=[self.primary])["id"]
         response, _ = self.call_cli(
@@ -2167,7 +2173,7 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-title-success"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        title_prompt = "Explain the workspace layout briefly."
+        title_prompt = "Transcript entry " + ("Readable chat content for scrolling. " * 120).rstrip()
         sent, _ = self.call_cli(
             "conversation", "send", title_task["id"], "--message", title_prompt,
             extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
@@ -2261,6 +2267,7 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assertEqual(pending_record["title"], "Generating title…")
             self.assertEqual(pending_record["savedPrompt"], pending_prompt)
             self.assertEqual(pending_record["pendingSubmittedPrompt"], pending_prompt)
+            self.assertTrue(pending_record.get("codexThreadID"), "The pending conversation thread should remain attached to the task.")
         finally:
             pending_release.write_text("Release title generation.\n", encoding="utf-8")
         self.finish_cli(pending_send, ["conversation", "send", pending_task["id"], "--message", pending_prompt])
@@ -2379,7 +2386,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(completed["codexThreadID"], thread_id)
         self.assertEqual(completed["status"], "Review")
 
-    # case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history. Diagnostics record image MIME and encoded size without storing image payloads.
+    # case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history. Diagnostics record image MIME and encoded size without storing image payloads.
     def test_conversation_sends_image_attachments(self):
         task_id = self.create_task(title="Image conversation") ["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -2400,6 +2407,16 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(len(sent["images"]), 1)
         self.assertTrue(sent["images"][0].startswith("data:image/png;base64,"))
         self.assertEqual(sent["imageInputs"], [{"type": "image", "url": sent["images"][0]}])
+        jpeg = self.data_directory / "tiny.jpg"
+        subprocess.run(["sips", "-s", "format", "jpeg", str(image), "--out", str(jpeg)], check=True, capture_output=True)
+        jpeg_result, _ = self.call_cli(
+            "conversation", "send", task_id, "--image", str(jpeg),
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        self.assert_success(jpeg_result)
+        sent = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        self.assertTrue(sent["images"][0].startswith("data:image/jpeg;base64,"))
+        self.assertLessEqual(len(base64.b64decode(sent["images"][0].split(",", 1)[1])), 10_000_000)
         text_prompt = "Describe this screenshot."
         mixed, _ = self.call_cli(
             "conversation", "send", task_id, "--message", text_prompt, "--image", str(image),
