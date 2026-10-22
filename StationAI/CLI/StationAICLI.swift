@@ -93,10 +93,19 @@ enum StationAICLI {
                     "allowUnmergedPullRequests": .boolean(tail.count == 3)
                 ])
             case "pr":
-                guard tail.count == 2, tail[0] == "create" else {
-                    throw CLIError.usage("Use: stationai task pr create <task-id>")
+                guard tail.count >= 2 else {
+                    throw CLIError.usage("Use: stationai task pr create|conflicts|resolve <task-id> [action]")
                 }
-                return BridgeRequest(command: "task.pr.create", arguments: ["taskID": .string(tail[1])])
+                switch tail[0] {
+                case "create" where tail.count == 2:
+                    return BridgeRequest(command: "task.pr.create", arguments: ["taskID": .string(tail[1])])
+                case "conflicts" where tail.count == 2:
+                    return BridgeRequest(command: "task.pr.conflicts", arguments: ["taskID": .string(tail[1])])
+                case "resolve" where tail.count == 3:
+                    return BridgeRequest(command: "task.pr.resolve", arguments: ["taskID": .string(tail[1]), "action": .string(tail[2])])
+                default:
+                    throw CLIError.usage("Use: stationai task pr create|conflicts|resolve <task-id> [resolve-and-push|resolve-only|keep]")
+                }
             case "progress":
                 guard let action = tail.first else { throw CLIError.usage("Use: stationai task progress publish|custom|clear <task-id> ...") }
                 let values = Array(tail.dropFirst())
@@ -246,6 +255,9 @@ enum StationAICLI {
             case "set-appearance":
                 guard rest.count == 2 else { throw CLIError.usage("Use: stationai settings set-appearance <dark|light>") }
                 return BridgeRequest(command: "settings.set-appearance", arguments: ["appearance": .string(rest[1])])
+            case "set-pr-conflict-action":
+                guard rest.count == 2 else { throw CLIError.usage("Use: stationai settings set-pr-conflict-action <ask|resolve-and-push|resolve-only|keep>") }
+                return BridgeRequest(command: "settings.set-pr-conflict-action", arguments: ["action": .string(rest[1])])
             case "set-parent":
                 guard rest.count == 2 else { throw CLIError.usage("Use: stationai settings set-parent <path>") }
                 return BridgeRequest(command: "settings.set-parent", arguments: ["path": .string(rest[1])])
