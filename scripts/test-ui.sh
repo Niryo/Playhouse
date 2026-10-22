@@ -75,14 +75,14 @@ codex_fixtures=(
   title-success title-failure title-success-wait hold
   progress-hold-release progress-hold-release-failed progress-hold-release-interrupted
   progress-question success-wait store-write-success-wait concurrent-serial-success-wait
-  status-transition-ui nonblocking-slow subagent tool-activity markdown steer-queue-serial-success-wait
+  status-transition-ui nonblocking-slow subagent context-compaction tool-activity markdown steer-queue-serial-success-wait
 )
 for fixture in "${codex_fixtures[@]}"; do
   fixture_path="${fixture_root}/codex-fixture-${fixture}"
   cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_path}"
   chmod 755 "${fixture_path}"
 done
-for fixture in subagent tool-activity markdown; do
+for fixture in subagent context-compaction tool-activity markdown; do
   fixture_path="${fixture_root}/codex-fixture-${fixture}"
   xattr -d com.apple.quarantine "${fixture_path}" 2>/dev/null || true
   xattr -d com.apple.provenance "${fixture_path}" 2>/dev/null || true

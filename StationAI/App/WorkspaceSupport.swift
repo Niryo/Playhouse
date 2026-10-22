@@ -148,6 +148,67 @@ struct CodexActivity: Codable, Identifiable, Equatable {
     var server: String? = nil
     var tool: String? = nil
     var durationMs: Int? = nil
+    var isContextCompaction: Bool = false
+    var turnID: String? = nil
+    var timelineOrder: Int? = nil
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, detail, status, childThreadID, agentPath, model, reasoningEffort
+        case toolKind, server, tool, durationMs, isContextCompaction, turnID, timelineOrder
+    }
+
+    init(
+        id: String,
+        title: String,
+        detail: String,
+        status: String,
+        childThreadID: String? = nil,
+        agentPath: String? = nil,
+        model: String? = nil,
+        reasoningEffort: String? = nil,
+        toolKind: String? = nil,
+        server: String? = nil,
+        tool: String? = nil,
+        durationMs: Int? = nil,
+        isContextCompaction: Bool = false,
+        turnID: String? = nil,
+        timelineOrder: Int? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.detail = detail
+        self.status = status
+        self.childThreadID = childThreadID
+        self.agentPath = agentPath
+        self.model = model
+        self.reasoningEffort = reasoningEffort
+        self.toolKind = toolKind
+        self.server = server
+        self.tool = tool
+        self.durationMs = durationMs
+        self.isContextCompaction = isContextCompaction
+        self.turnID = turnID
+        self.timelineOrder = timelineOrder
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        title = try values.decode(String.self, forKey: .title)
+        detail = try values.decode(String.self, forKey: .detail)
+        status = try values.decode(String.self, forKey: .status)
+        childThreadID = try values.decodeIfPresent(String.self, forKey: .childThreadID)
+        agentPath = try values.decodeIfPresent(String.self, forKey: .agentPath)
+        model = try values.decodeIfPresent(String.self, forKey: .model)
+        reasoningEffort = try values.decodeIfPresent(String.self, forKey: .reasoningEffort)
+        toolKind = try values.decodeIfPresent(String.self, forKey: .toolKind)
+        server = try values.decodeIfPresent(String.self, forKey: .server)
+        tool = try values.decodeIfPresent(String.self, forKey: .tool)
+        durationMs = try values.decodeIfPresent(Int.self, forKey: .durationMs)
+        isContextCompaction = try values.decodeIfPresent(Bool.self, forKey: .isContextCompaction) ?? false
+        turnID = try values.decodeIfPresent(String.self, forKey: .turnID)
+        timelineOrder = try values.decodeIfPresent(Int.self, forKey: .timelineOrder)
+    }
 
     var isSubagent: Bool { childThreadID != nil }
 
@@ -171,10 +232,22 @@ struct CodexActivity: Codable, Identifiable, Equatable {
         }
     }
 
-    static func from(item: [String: Any]) -> CodexActivity? {
+    static func from(item: [String: Any], lifecycle: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil) -> CodexActivity? {
         guard let id = item["id"] as? String, let type = item["type"] as? String else { return nil }
-        let status = item["status"] as? String ?? "inProgress"
+        let status = lifecycle ?? (item["status"] as? String ?? "inProgress")
         switch type {
+        case "contextCompaction":
+            // The installed app-server schema currently supplies only id/type.
+            // Never serialize unknown machine fields into user-visible prose.
+            return CodexActivity(
+                id: id,
+                title: "Context compacted",
+                detail: "",
+                status: status,
+                isContextCompaction: true,
+                turnID: turnID,
+                timelineOrder: timelineOrder
+            )
         case "subAgentActivity":
             guard let childThreadID = item["agentThreadId"] as? String else { return nil }
             let kind = item["kind"] as? String ?? "unknown"

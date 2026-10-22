@@ -14,17 +14,19 @@ struct CodexChatMessage: Codable, Identifiable, Equatable {
     var imageDataURLs: [String]
     var phase: String?
     var turnID: String?
+    var timelineOrder: Int?
 
-    init(id: String, role: CodexChatRole, text: String, imageDataURLs: [String] = [], phase: String? = nil, turnID: String? = nil) {
+    init(id: String, role: CodexChatRole, text: String, imageDataURLs: [String] = [], phase: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil) {
         self.id = id
         self.role = role
         self.text = text
         self.imageDataURLs = imageDataURLs
         self.phase = phase
         self.turnID = turnID
+        self.timelineOrder = timelineOrder
     }
 
-    private enum CodingKeys: String, CodingKey { case id, role, text, imageDataURLs, phase, turnID }
+    private enum CodingKeys: String, CodingKey { case id, role, text, imageDataURLs, phase, turnID, timelineOrder }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
@@ -33,6 +35,7 @@ struct CodexChatMessage: Codable, Identifiable, Equatable {
         imageDataURLs = try container.decodeIfPresent([String].self, forKey: .imageDataURLs) ?? []
         phase = try container.decodeIfPresent(String.self, forKey: .phase)
         turnID = try container.decodeIfPresent(String.self, forKey: .turnID)
+        timelineOrder = try container.decodeIfPresent(Int.self, forKey: .timelineOrder)
     }
 }
 
@@ -782,12 +785,16 @@ final class CodexAppServerClient: ObservableObject {
     private func readMessages(threadID: String) async throws -> CodexThreadHistory {
         var messages: [CodexChatMessage] = []
         var latestTurnItems: [[String: Any]] = []
+        var compactionHistory: [(item: [String: Any], turnID: String?, order: Int)] = []
+        var historicalToolItems: [[String: Any]] = []
+        var toolItemIndexes: [String: Int] = [:]
         var historicalSubagentItems: [[String: Any]] = []
         var subagentIndexes: [String: Int] = [:]
         var lastAssistantTurnID: String?
         var lastAssistantPhase: String?
         var cursor: String?
         var visitedCursors = Set<String>()
+        var historyItemOrder = 0
 
         repeat {
             var params: [String: Any] = [
@@ -804,6 +811,22 @@ final class CodexAppServerClient: ObservableObject {
             let data = response["data"] as? [[String: Any]] ?? []
             for entry in data {
                 guard let item = entry["item"] as? [String: Any] else { continue }
+                if item["type"] as? String == "contextCompaction" {
+                    compactionHistory.append((item, entry["turnId"] as? String, historyItemOrder))
+                    // Preserve the event boundary between same-phase assistant
+                    // items so timeline ordering is not collapsed into one bubble.
+                    lastAssistantTurnID = nil
+                    lastAssistantPhase = nil
+                }
+                if ["mcpToolCall", "dynamicToolCall"].contains(item["type"] as? String ?? ""),
+                   let itemID = item["id"] as? String {
+                    if let index = toolItemIndexes[itemID] {
+                        historicalToolItems[index] = item
+                    } else {
+                        toolItemIndexes[itemID] = historicalToolItems.count
+                        historicalToolItems.append(item)
+                    }
+                }
                 if item["type"] as? String == "subAgentActivity",
                    let activity = CodexActivity.from(item: item),
                    let childThreadID = activity.childThreadID {
@@ -825,7 +848,8 @@ final class CodexAppServerClient: ObservableObject {
                     lastAssistantPhase = nil
                 }
                 latestTurnItems.append(item)
-                if let message = Self.chatMessage(from: entry) {
+                if var message = Self.chatMessage(from: entry) {
+                    message.timelineOrder = historyItemOrder
                     if message.role == .assistant,
                        let turnID = entry["turnId"] as? String,
                        turnID == lastAssistantTurnID,
@@ -839,6 +863,7 @@ final class CodexAppServerClient: ObservableObject {
                     lastAssistantTurnID = message.role == .assistant ? entry["turnId"] as? String : nil
                     lastAssistantPhase = message.role == .assistant ? message.phase : nil
                 }
+                historyItemOrder += 1
             }
             cursor = response["nextCursor"] as? String
 
@@ -849,7 +874,10 @@ final class CodexAppServerClient: ObservableObject {
 
         var activityIndexes: [String: Int] = [:]
         var activities: [CodexActivity] = []
-        for activity in (latestTurnItems + historicalSubagentItems).compactMap(CodexActivity.from) {
+        for record in compactionHistory {
+            guard var activity = CodexActivity.from(item: record.item, lifecycle: "completed") else { continue }
+            activity.turnID = record.turnID
+            activity.timelineOrder = record.order
             let key = activity.childThreadID ?? activity.id
             if let index = activityIndexes[key] {
                 activities[index] = activity
@@ -857,6 +885,24 @@ final class CodexAppServerClient: ObservableObject {
                 activityIndexes[key] = activities.count
                 activities.append(activity)
             }
+        }
+        for activity in historicalToolItems.compactMap({ CodexActivity.from(item: $0) }) {
+            let key = activity.childThreadID ?? activity.id
+            if let index = activityIndexes[key] { activities[index] = activity }
+            else { activityIndexes[key] = activities.count; activities.append(activity) }
+        }
+        for activity in latestTurnItems
+            .filter({ $0["type"] as? String != "contextCompaction" })
+            .filter({ !["mcpToolCall", "dynamicToolCall"].contains($0["type"] as? String ?? "") })
+            .compactMap({ CodexActivity.from(item: $0) }) {
+            let key = activity.childThreadID ?? activity.id
+            if let index = activityIndexes[key] { activities[index] = activity }
+            else { activityIndexes[key] = activities.count; activities.append(activity) }
+        }
+        for activity in historicalSubagentItems.compactMap({ CodexActivity.from(item: $0) }) {
+            let key = activity.childThreadID ?? activity.id
+            if let index = activityIndexes[key] { activities[index] = activity }
+            else { activityIndexes[key] = activities.count; activities.append(activity) }
         }
         return CodexThreadHistory(
             messages: messages,
@@ -1064,7 +1110,11 @@ final class CodexAppServerClient: ObservableObject {
                     activeFinalMessageHandler?(text)
                 }
             }
-            guard let activity = CodexActivity.from(item: item) else { return }
+            guard let activity = CodexActivity.from(
+                item: item,
+                lifecycle: method == "item/completed" ? "completed" : "inProgress",
+                turnID: params["turnId"] as? String
+            ) else { return }
             activeActivities[activity.id] = activity
             activeActivityHandler?(activity)
         case "item/commandExecution/outputDelta":
@@ -1124,13 +1174,14 @@ final class CodexAppServerClient: ObservableObject {
     private func handleServerRequest(method: String, params: [String: Any], requestID: Any) async {
         let normalizedMethod = method.lowercased()
         if normalizedMethod.contains("approval") || normalizedMethod.contains("item/tool/") ||
-            normalizedMethod.contains("elicitation"), method != "item/tool/requestUserInput" {
+            normalizedMethod.contains("elicitation"),
+           method != "item/tool/requestUserInput", method != "tool/requestUserInput" {
             actionRequestHandler?()
         }
 
         let result: [String: Any]
         switch method {
-        case "item/tool/requestUserInput":
+        case "item/tool/requestUserInput", "tool/requestUserInput":
             guard let questionsRaw = params["questions"] as? [[String: Any]],
                   let threadID = params["threadId"] as? String,
                   let requestIDString = requestID as? String ?? (requestID as? NSNumber)?.stringValue else {

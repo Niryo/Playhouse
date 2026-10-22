@@ -1114,6 +1114,17 @@ struct TaskConversationView: View {
                                 }
                                 messageBubble(message)
                                     .id(message.id)
+                                let nextOrder = conversationMessages.first(where: {
+                                    guard let current = message.timelineOrder, let candidate = $0.timelineOrder else { return false }
+                                    return candidate > current
+                                })?.timelineOrder
+                                ForEach(activities.filter {
+                                    guard $0.isContextCompaction, let eventOrder = $0.timelineOrder,
+                                          let messageOrder = message.timelineOrder, eventOrder > messageOrder else { return false }
+                                    return nextOrder.map { eventOrder < $0 } ?? true
+                                }) { activity in
+                                    contextCompactionTimelineRow(activity)
+                                }
                             }
                             if shouldShowActivityDisclosure, activityDisclosureAnchorID == nil {
                                 activityList
@@ -1130,6 +1141,9 @@ struct TaskConversationView: View {
                     }
                     ForEach(activities.filter { $0.toolKind != nil }) { activity in
                         activityRow(activity)
+                    }
+                    ForEach(activities.filter { $0.isContextCompaction && $0.timelineOrder == nil }) { activity in
+                        contextCompactionTimelineRow(activity)
                     }
                     // Keep a stable scroll target outside the LazyVStack. A newly
                     // loaded last message may not have been materialized yet when
@@ -1284,6 +1298,29 @@ struct TaskConversationView: View {
         .accessibilityLabel("\(activity.title), \(activity.statusLabel)")
         .accessibilityValue(displayDetail)
         .accessibilityIdentifier(activity.isSubagent ? "codex-subagent-row-\(activity.childThreadID ?? activity.id)" : "codex-activity-row-\(activity.id)")
+    }
+
+    private func contextCompactionTimelineRow(_ activity: CodexActivity) -> some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(activity.status == "inProgress" ? "Compacting context…" : "Context compacted")
+                    .font(.system(size: 12, weight: .medium))
+                if !activity.detail.isEmpty {
+                    Text(activity.detail)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(4)
+                        .accessibilityIdentifier("context-compaction-summary-\(activity.id)")
+                }
+            }
+        }
+        .padding(.vertical, 5)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Context compaction, \(activity.statusLabel)")
+        .accessibilityValue(activity.statusLabel)
+        .accessibilityIdentifier("context-compaction-row-\(activity.id)")
     }
 
     private func openSubagent(_ activity: CodexActivity) {

@@ -2944,7 +2944,7 @@ class StationAIBridgeTests(unittest.TestCase):
         history, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(history)["messages"], [])
 
-    # case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; in-progress, completed, and failed statuses, server/tool identity, and optional duration render and survive history reload without duplicate rows. Missing optional duration remains absent. Arguments and raw result text are never exposed; only safe result summaries are shown.
+    # case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; in-progress, completed, and failed statuses, server/tool identity, and optional duration render and survive history reload without duplicate rows, even when later-turn items follow the calls in history. Missing optional duration remains absent. Arguments and raw result text are never exposed; only safe result summaries are shown.
     def test_conversation_shows_mcp_and_dynamic_tool_activity(self):
         task_id = self.create_task(title="Tool activity")['id']
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -3021,8 +3021,8 @@ class StationAIBridgeTests(unittest.TestCase):
         serialized = json.dumps(activities)
         self.assertNotIn("RAW_ARGUMENT_SECRET", serialized)
         self.assertNotIn("RAW_RESULT_SECRET", serialized)
-        reloaded, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
-        reloaded_rows = self.assert_success(reloaded)["activities"]
+        reloaded_response, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        reloaded_rows = self.assert_success(reloaded_response)["activities"]
         reloaded_mcp = [row for row in reloaded_rows if row["id"] == "item_fixture_mcp_call"]
         reloaded_dynamic = [row for row in reloaded_rows if row["id"] == "item_fixture_dynamic_call"]
         reloaded_legacy = [row for row in reloaded_rows if row["id"] == "item_fixture_dynamic_legacy"]
@@ -3033,8 +3033,74 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(reloaded_dynamic[0]["tool"], "summarize")
         self.assertEqual(reloaded_dynamic[0]["durationMs"], 37)
         self.assertNotIn("durationMs", reloaded_legacy[0])
+        reloaded_serialized = json.dumps(reloaded_rows)
+        self.assertNotIn("RAW_ARGUMENT_SECRET", reloaded_serialized)
+        self.assertNotIn("RAW_RESULT_SECRET", reloaded_serialized)
+        reloaded_result = self.assert_success(reloaded_response)
+        self.assertIn("A later turn starts.", [message["text"] for message in reloaded_result["messages"]])
 
-    # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, started and interacted updates coalesce by child thread ID into clear named timeline rows outside the collapsible Codex activity section, with sentence-style names, available path/model/reasoning metadata, and started-working wording; completed and interrupted states, optional metadata, and unknown kinds survive history reload and remain visible after reopening the task conversation. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs.
+    # case-contract: test_conversation_shows_context_compaction | contextCompaction item/started and item/completed coalesce into one concise timeline event; missing summaries ignore malformed opaque payload fields and never render their data, and the event survives thread history reload with correct prompt/response ordering.
+    def test_conversation_shows_context_compaction(self):
+        task_id = self.create_task(title="Context compaction")["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-context-compaction"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable), "STATIONAI_FIXTURE_WORKSPACE": str(self.primary)}
+        command = ("conversation", "send", task_id, "--message", "Compact the context.")
+        process = self.start_cli(*command, extra_environment=env, binary_output=True)
+        ready = Path(str(executable) + ".compaction-ready")
+        release = Path(str(executable) + ".compaction-release")
+        captured, buffer, active = [], bytearray(), []
+        try:
+            deadline = time.monotonic() + 20
+            while (not ready.exists() or not active) and time.monotonic() < deadline:
+                if process.stdout is not None:
+                    readable, _, _ = select.select([process.stdout], [], [], 0.02)
+                    if readable:
+                        buffer.extend(os.read(process.stdout.fileno(), 65536))
+                        while b"\n" in buffer:
+                            line, _, remainder = buffer.partition(b"\n")
+                            buffer = bytearray(remainder)
+                            if not line.strip():
+                                continue
+                            captured.append(line.decode("utf-8"))
+                            event = json.loads(line)
+                            activity = event.get("payload", {}).get("activity", {})
+                            if event.get("type") == "activity" and activity.get("isContextCompaction"):
+                                active.append(activity)
+            self.assertTrue(ready.exists())
+            self.assertEqual(len(active), 1)
+            self.assertEqual(active[0]["status"], "inProgress")
+            release.write_text("Release compaction completion.\n", encoding="utf-8")
+            stdout, stderr = process.communicate(timeout=60)
+            self.assertEqual(process.returncode, 0, f"CLI exit mismatch for {command}: {stderr!r}")
+            sent = json.loads(("\n".join(captured).encode() + b"\n" + stdout).splitlines()[-1])
+        finally:
+            if process.poll() is None:
+                release.write_text("Release compaction after assertion failure.\n", encoding="utf-8")
+                process.communicate(timeout=30)
+        result = self.assert_success(sent)
+        rows = [item for item in result["activities"] if item.get("isContextCompaction")]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "item_stationai_compaction")
+        self.assertEqual(rows[0]["status"], "completed")
+        self.assertEqual(rows[0]["detail"], "")
+        reloaded_response, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        reloaded = self.assert_success(reloaded_response)
+        reloaded_rows = [item for item in reloaded["activities"] if item.get("isContextCompaction")]
+        self.assertEqual(len(reloaded_rows), 1)
+        self.assertEqual(reloaded_rows[0]["status"], "completed")
+        self.assertNotIn("COMPACTION_OPAQUE_SENTINEL", json.dumps(reloaded_rows))
+        user = next(item for item in reloaded["messages"] if item.get("role") == "user")
+        assistant = next(item for item in reloaded["messages"] if item.get("role") == "assistant")
+        self.assertLess(user["timelineOrder"], reloaded_rows[0]["timelineOrder"])
+        self.assertLess(reloaded_rows[0]["timelineOrder"], assistant["timelineOrder"])
+
+    # case-contract: test_conversation_shows_subagent_delegation | Started and interacted updates coalesce by child thread ID into clear named timeline rows outside the collapsible Codex activity section, with sentence-style names, available path/model/reasoning metadata, and started-working wording; completed and interrupted states, optional metadata, and unknown kinds survive history reload and remain visible after reopening the task conversation. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs.
     def test_conversation_shows_subagent_delegation(self):
         task_id = self.create_task(title="Subagent delegation")["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -3218,7 +3284,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(history)["messages"], [])
         self.assertEqual(self.assert_success(history)["activities"], [])
 
-    # case-contract: test_codex_questions_can_be_answered_over_cli_xpc | Structured questions raised in Plan mode move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome.
+    # case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode use the existing question path, move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome.
     def test_codex_questions_can_be_answered_over_cli_xpc(self):
         task_id = self.create_task("Codex questions", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
