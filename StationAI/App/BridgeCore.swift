@@ -1245,7 +1245,23 @@ final class BoardTaskManager {
         }
     }
 
-    func createPullRequests(_ id: UUID, client: CodexAppServerClient) async throws -> BoardTaskRecord {
+    func createPullRequests(_ id: UUID, client: CodexAppServerClient, conflictAction: String = "ask") async throws -> BoardTaskRecord {
+        let conflicts = try await pullRequestConflictRepositories(id)
+        if !conflicts.isEmpty {
+            switch conflictAction {
+            case "ask":
+                throw BridgeCommandError(code: "conflicts_require_confirmation", message: "Pull request conflicts were found. Choose how to resolve them in StationAI.")
+            case "keep":
+                return try get(id)
+            case "resolve-only":
+                _ = try await resolvePullRequestConflicts(id, action: conflictAction, client: client)
+                return try get(id)
+            case "resolve-and-push":
+                _ = try await resolvePullRequestConflicts(id, action: conflictAction, client: client)
+            default:
+                throw BridgeCommandError(code: "invalid_argument", message: "Unknown pull request conflict action '\(conflictAction)'.")
+            }
+        }
         let lookup = try await withTaskOperationLock(id) {
             let initialTask = try requireTask(id)
             let originalRecords = initialTask.repositoryWorktrees
@@ -1349,6 +1365,78 @@ final class BoardTaskManager {
                 try await saveTaskContext(taskID: id)
                 expectedRecords = updatedRecords
             }
+            return try get(id)
+        }
+    }
+
+    func pullRequestConflictRepositories(_ id: UUID) async throws -> [String] {
+        try await withTaskOperationLock(id) {
+            try await pullRequestConflictRepositoriesUnlocked(id)
+        }
+    }
+
+    private func pullRequestConflictRepositoriesUnlocked(_ id: UUID) async throws -> [String] {
+        let task = try requireTask(id)
+        guard !task.repositoryWorktrees.isEmpty else { return [] }
+        var conflicts: [String] = []
+        for record in task.repositoryWorktrees where !record.isPending && record.pullRequestNumber == nil {
+            if try await worktreeService.hasMergeConflicts(record) { conflicts.append(record.repositoryPath) }
+        }
+        return conflicts
+    }
+
+    func resolvePullRequestConflicts(_ id: UUID, action: String, client: CodexAppServerClient) async throws -> BoardTaskRecord {
+        guard ["resolve-and-push", "resolve-only", "keep"].contains(action) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Choose resolve-and-push, resolve-only, or keep.")
+        }
+        if action == "keep" { return try get(id) }
+        return try await withTaskOperationLock(id) {
+            let records = try requireTask(id).repositoryWorktrees.filter { !$0.isPending && $0.pullRequestNumber == nil }
+            let conflicted = try await pullRequestConflictRepositoriesUnlocked(id)
+            guard !conflicted.isEmpty else { return try get(id) }
+            let affected = records.filter { conflicted.contains($0.repositoryPath) }
+            let roots = try CodexWorkspaceContext(roots: affected.map { URL(fileURLWithPath: $0.worktreePath, isDirectory: true) })
+            for record in affected {
+                guard let target = record.mergeTarget else { continue }
+                // A prior Codex attempt may have left Git's merge in progress,
+                // including after every conflict file was staged. Resume it.
+                if try await worktreeService.hasMergeInProgress(record) == false {
+                    try await worktreeService.mergeTarget(record, target: target)
+                }
+            }
+            var finalMessage = ""
+            var needsCodexResolution = false
+            for record in affected {
+                if try await worktreeService.hasUnmergedFiles(record) {
+                    needsCodexResolution = true
+                    break
+                }
+            }
+            if needsCodexResolution {
+                let thread = try await client.startThread(workspace: roots, modelID: CodexAppServerClient.modelID)
+                try await client.sendMessage(
+                    "Resolve every Git merge conflict in the current workspace. Preserve the intended changes from both sides, inspect the resulting files, and stage the resolved files. Do not commit or push. Report which conflicts you resolved.",
+                    mode: .code,
+                    modelID: CodexAppServerClient.modelID,
+                    threadID: thread,
+                    workspace: roots,
+                    onDelta: { _ in },
+                    onFinalMessage: { finalMessage = $0 },
+                    onActivity: { _ in }, onDiff: { _ in }, onHistory: { _ in },
+                    onActionRequest: {}, onUserInput: { _ in }
+                )
+            }
+            for record in affected {
+                guard try await worktreeService.hasUnmergedFiles(record) == false else {
+                    throw BridgeCommandError(code: "operation_failed", message: "Codex couldn't resolve every merge conflict. The task branch was left available for manual resolution.")
+                }
+                try await worktreeService.commitChanges(record, message: "Resolve merge conflicts with \(record.mergeTarget ?? "target")")
+                if action == "resolve-and-push" { try await worktreeService.publishBranch(record) }
+            }
+            StationAIDiagnostics.record("task.pr.conflicts.resolved", fields: [
+                "taskID": id.uuidString, "repositoryCount": String(affected.count), "pushed": String(action == "resolve-and-push"),
+                "hasCodexSummary": String(!finalMessage.isEmpty)
+            ])
             return try get(id)
         }
     }
@@ -2010,6 +2098,18 @@ final class WorkspaceSettingsManager {
         let appearance = value == "light" ? "light" : "dark"
         StationAIDiagnostics.record("settings.read", fields: ["setting": "appearance", "value": appearance])
         return appearance
+    }
+
+    var pullRequestConflictAction: String {
+        let value = defaults.string(forKey: WorkspaceSettings.pullRequestConflictActionKey) ?? "ask"
+        return ["ask", "resolve-and-push", "resolve-only", "keep"].contains(value) ? value : "ask"
+    }
+
+    func setPullRequestConflictAction(_ value: String) throws {
+        guard ["ask", "resolve-and-push", "resolve-only", "keep"].contains(value) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Pull request conflict action must be ask, resolve-and-push, resolve-only, or keep.")
+        }
+        defaults.set(value, forKey: WorkspaceSettings.pullRequestConflictActionKey)
     }
 
     func setAppearance(_ value: String) throws {
@@ -2745,6 +2845,14 @@ final class StationAIBridgeRuntime {
             case "task.pr.create":
                 result = try Self.value(await taskManager.createPullRequests(
                     request.requiredUUID("taskID"),
+                    client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string),
+                    conflictAction: settings.pullRequestConflictAction
+                ))
+            case "task.pr.conflicts":
+                result = .object(["repositories": .array(try await taskManager.pullRequestConflictRepositories(request.requiredUUID("taskID")).map(BridgeValue.string))])
+            case "task.pr.resolve":
+                result = try Self.value(await taskManager.resolvePullRequestConflicts(
+                    request.requiredUUID("taskID"), action: request.requiredString("action"),
                     client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
                 ))
             case "task.progress.publish":
@@ -2833,8 +2941,12 @@ final class StationAIBridgeRuntime {
                     "defaultParentFolder": settings.defaultParentFolderPath.isEmpty ? .null : .string(settings.defaultParentFolderPath),
                     "defaultParentAvailable": .boolean(settings.defaultParentFolderURL != nil),
                     "lastSelectedRepositories": .array(settings.lastSelectedRepositories.map(BridgeValue.string)),
-                    "appearance": .string(settings.appearance)
+                    "appearance": .string(settings.appearance),
+                    "pullRequestConflictAction": .string(settings.pullRequestConflictAction)
                 ])
+            case "settings.set-pr-conflict-action":
+                try settings.setPullRequestConflictAction(request.requiredString("action"))
+                result = .object(["pullRequestConflictAction": .string(settings.pullRequestConflictAction)])
             case "settings.set-appearance":
                 try settings.setAppearance(request.requiredString("appearance"))
                 result = .object(["appearance": .string(settings.appearance)])

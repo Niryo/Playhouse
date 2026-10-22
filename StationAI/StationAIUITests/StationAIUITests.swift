@@ -1313,7 +1313,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Done preserves the task worktree without merging")
     }
 
-    // case-contract: test_task_pr_create_reports_real_gh_failure | A repository-backed task exposes an active-card PR action and a Done-task archive PR action with distinct hover emphasis and useful help; it preserves the configured merge target, waits for the task operation lock, commits and publishes the branch before GitHub lookup, and reports publication failure without saving a PR link or changing Done status when no usable remote exists.
+    // case-contract: test_task_pr_create_reports_real_gh_failure | A repository-backed task checks its configured merge target for conflicts before PR creation; the clean path returns no conflicts, and the active-card and Done-archive PR controls retain their help and wait for the task lock before publication failure without saving a PR link or changing Done status.
     func test_task_pr_create_reports_real_gh_failure() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -1324,6 +1324,7 @@ final class StationAIUITests: XCTestCase {
         let taskID = try XCTUnwrap(created["id"] as? String)
         let createdRecord = try XCTUnwrap((created["repositoryWorktrees"] as? [[String: Any]])?.first)
         XCTAssertEqual(createdRecord["mergeTarget"] as? String, "main")
+        XCTAssertEqual((try runCLI(["task", "pr", "conflicts", taskID])["result"] as? [String: Any])?["repositories"] as? [String], [])
         openTask(named: "PR failure UI")
         element("conversation-repository-badge-primary").click()
         let mergeTargetValue = element("conversation-repository-merge-target-value")
@@ -1367,6 +1368,86 @@ final class StationAIUITests: XCTestCase {
         XCTAssertNil(record["pullRequestURL"])
         XCTAssertEqual(record["mergeTarget"] as? String, "main")
         XCTAssertEqual(current["status"] as? String, "Done")
+    }
+
+    // case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects a merge conflict without mutation, requires confirmation by default, honors saved keep without publishing, and successfully commits and locally pushes a staged conflict resolution through XPC without changing the target; unknown actions are rejected. The paired UI dispatches resolve-only and resolve-and-push on an actual conflict, verifies unresolved conflicts remain uncommitted and unpublished, presents all three choices and the remember checkbox, verifies remembered keep skips the next confirmation, and changes the saved action in Settings.
+    func test_task_pr_conflicts_detect_without_mutation() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        launchApp(defaultParent: fixture.parent.path)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "PR conflict choice UI", "--repo", fixture.primary.path,
+            "--merge-target", "\(fixture.primary.path)=main",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        _ = try XCTUnwrap((created["repositoryWorktrees"] as? [[String: Any]])?.first)
+        openTask(named: "PR conflict choice UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "PR conflict choice UI")
+        let completedRecord = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(completedRecord["worktreePath"] as? String), isDirectory: true)
+
+        let conflictPath = "stationai-pr-conflict-fixture.txt"
+        try "target branch version\n".write(to: fixture.primary.appendingPathComponent(conflictPath), atomically: true, encoding: .utf8)
+        try runGit(fixture.primary, "add", conflictPath)
+        try runGit(fixture.primary, "commit", "-m", "Update PR target fixture")
+        try "task branch version\n".write(to: worktree.appendingPathComponent(conflictPath), atomically: true, encoding: .utf8)
+        try runGit(worktree, "add", conflictPath)
+        try runGit(worktree, "commit", "-m", "Update task branch fixture")
+        let branchHead = try runGitOutput(worktree, "rev-parse", "HEAD")
+        let targetHead = try runGitOutput(fixture.primary, "rev-parse", "main")
+        let conflictResult = try runCLI(["task", "pr", "conflicts", taskID])["result"] as? [String: Any]
+        XCTAssertEqual(conflictResult?["repositories"] as? [String], [fixture.primary.path])
+        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), branchHead, "Conflict detection must leave the task branch unchanged.")
+        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetHead, "Conflict detection must leave the target branch unchanged.")
+        XCTAssertEqual(try String(contentsOf: worktree.appendingPathComponent(conflictPath), encoding: .utf8), "task branch version\n")
+        XCTAssertEqual(try String(contentsOf: fixture.primary.appendingPathComponent(conflictPath), encoding: .utf8), "target branch version\n")
+
+        element("back-to-board-button").click()
+        let prButton = element("task-create-pr-\(taskID)")
+        XCTAssertTrue(prButton.waitForExistence(timeout: 5))
+        prButton.click()
+        XCTAssertTrue(element("pr-conflict-confirmation").waitForExistence(timeout: 10), "The PR action should ask how to handle actual merge conflicts.")
+        XCTAssertTrue(element("pr-conflict-resolve-push-button").exists)
+        XCTAssertTrue(element("pr-conflict-keep-button").exists)
+        element("pr-conflict-resolve-only-button").click()
+        XCTAssertTrue(waitUntil({ !element("pr-conflict-confirmation").exists }, timeout: 10))
+        let unresolvedAlert = app.alerts["Couldn't create pull request"]
+        XCTAssertTrue(unresolvedAlert.waitForExistence(timeout: 20), "Resolve without pushing should run conflict resolution and report that unresolved files remain.")
+        XCTAssertTrue((unresolvedAlert.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "couldn't resolve every merge conflict")).firstMatch).exists)
+        unresolvedAlert.buttons["OK"].click()
+        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), branchHead, "Resolve without pushing must not advance the task branch when conflicts remain unresolved.")
+        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetHead)
+
+        prButton.click()
+        XCTAssertTrue(element("pr-conflict-confirmation").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("pr-conflict-resolve-push-button").exists)
+        XCTAssertTrue(element("pr-conflict-resolve-only-button").exists)
+        let remember = element("pr-conflict-remember-choice")
+        remember.click()
+        element("pr-conflict-resolve-push-button").click()
+        XCTAssertTrue(waitUntil({ !element("pr-conflict-confirmation").exists }, timeout: 10))
+        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["pullRequestConflictAction"] as? String, "resolve-and-push", "The push choice should persist its own policy before starting resolution.")
+        XCTAssertTrue(unresolvedAlert.waitForExistence(timeout: 20))
+        XCTAssertTrue((unresolvedAlert.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "couldn't resolve every merge conflict")).firstMatch).exists)
+        unresolvedAlert.buttons["OK"].click()
+        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), branchHead, "An unresolved conflict must not be committed or pushed.")
+        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetHead)
+        try runCLI(["settings", "set-pr-conflict-action", "ask"])
+
+        prButton.click()
+        XCTAssertTrue(element("pr-conflict-confirmation").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("pr-conflict-resolve-push-button").exists)
+        XCTAssertTrue(element("pr-conflict-resolve-only-button").exists)
+        XCTAssertTrue(remember.exists)
+        remember.click()
+        element("pr-conflict-keep-button").click()
+        XCTAssertTrue(waitUntil({ !element("pr-conflict-confirmation").exists }, timeout: 10))
+        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["pullRequestConflictAction"] as? String, "keep")
+        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), branchHead)
+        XCTAssertTrue(waitUntil({ prButton.isEnabled }, timeout: 10))
+        prButton.click()
+        XCTAssertFalse(element("pr-conflict-confirmation").waitForExistence(timeout: 1), "A remembered action should skip the confirmation next time.")
+        let finalRecord = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        XCTAssertNil(finalRecord["pullRequestNumber"])
     }
 
     // case-contract: test_done_archive_displays_existing_pull_request_link | A Done task's real SwiftData record retains a linked PR number and URL across fresh CLI/XPC reads so the archive renders the PR link with distinct hover emphasis and useful help; an active repository-backed task card renders a saved PR link with the same hover indication.
@@ -2427,11 +2508,12 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Failed task deletion can be retried after repository recovery")
     }
 
-    // case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. In the UI, the conversation picker keeps a Change parent affordance visible after a valid parent is selected, and choosing another folder refreshes suggestions and persists the new parent. Dark and Light appearance choices persist and log successful writes, an external CLI appearance write updates the open Settings picker, and Dark renders the workspace canvas as #1E1E1E in the VS Code Dark+ palette.
+    // case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, and the ask-each-time, resolve-and-push, resolve-only, and keep-PR conflict preferences validate and persist across fresh CLI/XPC reads and are editable in Settings; appearance changes update the open Settings picker.
     func test_default_parent_settings_read_write_clear_and_validation() throws {
         launchApp(defaultParent: nil)
         let initialSettings = try runCLI(["settings", "get"])["result"] as? [String: Any]
         XCTAssertNil(initialSettings?["defaultParentFolder"] as? String)
+        XCTAssertEqual(initialSettings?["pullRequestConflictAction"] as? String, "ask")
         openNewTaskConversation()
         XCTAssertEqual(try tasksFromBoardList().count, 1, "New Task should create its pending conversation before folder discovery.")
         element("choose-repository-suggestion-parent-button").click()
@@ -2463,6 +2545,19 @@ final class StationAIUITests: XCTestCase {
         let appearancePicker = preferencesWindow.descendants(matching: .any)
             .matching(identifier: "appearance-picker").firstMatch
         XCTAssertTrue(appearancePicker.waitForExistence(timeout: 5), "Workspace Settings should expose the Dark and Light theme choices.")
+        let conflictPicker = preferencesWindow.descendants(matching: .any).matching(identifier: "pr-conflict-action-picker").firstMatch
+        XCTAssertTrue(conflictPicker.waitForExistence(timeout: 5), "Workspace Settings should expose the saved PR conflict behavior.")
+        conflictPicker.click()
+        let resolveOnlyChoice = preferencesWindow.menuItems["Resolve without pushing"]
+        if resolveOnlyChoice.waitForExistence(timeout: 2) {
+            resolveOnlyChoice.click()
+        } else {
+            preferencesWindow.buttons["Resolve without pushing"].click()
+        }
+        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["pullRequestConflictAction"] as? String, "resolve-only")
+        _ = try runCLI(["settings", "set-pr-conflict-action", "resolve-only"])
+        XCTAssertTrue(waitUntil({ conflictPicker.value as? String == "resolve-only" }, timeout: 5), "An external CLI write should update the saved conflict behavior picker.")
+        _ = try runCLI(["settings", "set-pr-conflict-action", "ask"])
         XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["appearance"] as? String, "dark")
         try runCLI(["settings", "set-appearance", "light"])
         XCTAssertTrue(waitUntil({ appearancePicker.value as? String == "light" }, timeout: 5), "An external settings write should update the open appearance picker.")

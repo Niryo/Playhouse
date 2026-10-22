@@ -2,6 +2,8 @@
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${repository_root}/scripts/app-profile.sh"
+stationai_load_app_profile "${repository_root}"
 
 selected_cases=()
 while (( $# > 0 )); do
@@ -23,7 +25,7 @@ done
 
 test_output_dir="$(mktemp -d /tmp/stationai-bridge.XXXXXX)"
 architecture="$(uname -m)"
-e2e_bundle_identifier="com.stationai.app.e2e.$$.${RANDOM}"
+e2e_bundle_identifier="${STATIONAI_PROFILE_BUNDLE_ID}.e2e.$$.${RANDOM}"
 derived_data_dir="${test_output_dir}/DerivedData"
 app_bundle="${derived_data_dir}/Build/Products/Debug/StationAI.app"
 cli_path="${app_bundle}/Contents/MacOS/stationai-cli"
