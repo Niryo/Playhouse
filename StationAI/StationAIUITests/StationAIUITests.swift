@@ -4222,7 +4222,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Conversation shows and opens a subagent")
     }
 
-    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; the first plan delta is visible before completion, and the completed plan item renders automatically as Markdown with visible spacing between distinct paragraphs, including after reopening, while CLI events and bridge history preserve the exact plan text as the latest assistant message.
+    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; the first plan delta is visible before completion, and the completed plan item renders automatically as Markdown with visible spacing between distinct paragraphs and can be selected and copied as one complete text view, including after reopening, while CLI events and bridge history preserve the exact plan text as the latest assistant message.
     func test_plan_mode_renders_markdown_in_conversation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -4283,32 +4283,18 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(reloadedAssistant.waitForExistence(timeout: 10), "The completed plan should appear automatically after reopening.")
         XCTAssertFalse(reloadedAssistant.label.contains("<proposed_plan>"), "The reloaded plan should hide its opening protocol wrapper.")
         XCTAssertFalse(reloadedAssistant.label.contains("</proposed_plan>"), "The reloaded plan should hide its closing protocol wrapper.")
-        let heading = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "assistant-markdown-heading-"))
-            .firstMatch
-        let listItems = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "assistant-markdown-list-item-"))
-        let firstListItem = listItems.element(boundBy: 0)
-        let secondListItem = listItems.element(boundBy: 1)
-        XCTAssertTrue(heading.waitForExistence(timeout: 10), "Plan headings should render as distinct elements after reopening.")
-        XCTAssertTrue(accessibleLabelOrValue(of: heading).contains("Implementation plan"), "The rendered heading should retain the plan title after reopening.")
-        let firstParagraph = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-markdown-paragraph-", "workspace model"))
-            .firstMatch
-        let secondParagraph = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-markdown-paragraph-", "separate paragraph confirms"))
-            .firstMatch
-        XCTAssertTrue(firstParagraph.waitForExistence(timeout: 5), "The first plan paragraph should render after reopening.")
-        XCTAssertTrue(secondParagraph.waitForExistence(timeout: 5), "The separate plan paragraph should render after reopening.")
-        XCTAssertGreaterThanOrEqual(
-            secondParagraph.frame.minY - firstParagraph.frame.maxY,
-            8,
-            "Distinct Markdown paragraphs should have visible vertical separation."
-        )
-        XCTAssertTrue(firstListItem.waitForExistence(timeout: 5), "The first plan list entry should render after reopening.")
-        XCTAssertTrue(accessibleLabelOrValue(of: firstListItem).contains("Implementation detail 01"))
-        XCTAssertTrue(secondListItem.waitForExistence(timeout: 5), "The second plan list entry should render after reopening.")
-        XCTAssertTrue(accessibleLabelOrValue(of: secondListItem).contains("Implementation detail 02"))
+        let markdownContent = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Implementation plan")
+        ).firstMatch
+        XCTAssertTrue(markdownContent.waitForExistence(timeout: 5), "The plan should render as one selectable Markdown text view.")
+        markdownContent.click()
+        markdownContent.typeKey("a", modifierFlags: .command)
+        markdownContent.typeKey("c", modifierFlags: .command)
+        let copiedPlan = NSPasteboard.general.string(forType: .string) ?? ""
+        XCTAssertTrue(copiedPlan.contains("Implementation plan"), "Selecting all should include the plan heading.")
+        XCTAssertTrue(copiedPlan.contains("Implementation detail 01"), "Selecting all should include the first list item.")
+        XCTAssertTrue(copiedPlan.contains("Implementation detail 15"), "Selecting all should include content from the middle of the plan.")
+        XCTAssertTrue(copiedPlan.contains("Final verification: confirm the latest message is visible after reopening"), "Selecting all should include the final plan item.")
         let latestListItem = app.descendants(matching: .any)
             .matching(NSPredicate(format: "label CONTAINS %@", "Final verification: confirm the latest message is visible after reopening"))
             .firstMatch
