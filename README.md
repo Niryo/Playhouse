@@ -40,7 +40,7 @@ Run just the CLI/XPC suite with:
 ./scripts/test-e2e.sh
 ```
 
-The visible UI suite launches StationAI and exercises the same named cases through the real interface:
+The visible UI suite launches StationAI and exercises the same named cases through the real interface. UI tests always run inside the Tart macOS VM; direct `test-ui.sh` invocations on the host hand off to the VM runner:
 
 ```sh
 ./scripts/test-ui.sh
@@ -52,18 +52,29 @@ For a focused UI safety pass, select the paired case IDs:
 ./scripts/test-ui.sh --case test_task_creation_persists_ordered_roots_across_fresh_connections
 ```
 
+To run a UI case in a Tart macOS VM while continuing to work in the host checkout, create a VM with Xcode 26.5 (matching the project's current Xcode), then run:
+
+```sh
+./scripts/setup-ui-tart-vm.sh
+./scripts/test-ui-tart.sh --case test_task_creation_persists_ordered_roots_across_fresh_connections
+```
+
+The setup script clones the Cirrus Labs Xcode 26.5 image and configures a 6 CPU, 12 GB VM. It requires at least 110 GiB free in Tart storage. The runner starts the stopped VM with the checkout mounted read-only, copies the source into a VM-local snapshot, and runs the existing UI suite there. Test data and build products stay in the guest during the run; logs and `.xcresult` bundles are copied to `${TMPDIR}/stationai-ui-tart-artifacts/`, then the per-run guest snapshot is removed. The VM is stopped when the run finishes. Use `--show-vm` to open the display and pause before testing so you can grant Xcode Helper Accessibility permission if needed; this option requires an interactive terminal. Set `STATIONAI_UI_TART_VM` or pass `--vm` to select a different VM.
+
 For full end-to-end coverage, the combined script checks that the CLI and UI tests have exactly matching case names and shared expectation text, runs CLI/XPC first, then launches the UI suite:
 
 ```sh
 ./scripts/test-full-e2e.sh
 ```
 
-The fast verifier runs all CLI/XPC cases and checks that the UI suite has the exact same case IDs and expectations. After the CLI gate passes, the UI verifier runs only the paired cases affected by the change. Keep `./scripts/test-full-e2e.sh` for deliberate full E2E runs across every CLI and UI case. Add the same named case and shared expectation to both suites for each new behavior; `scripts/check-test-parity.py` rejects unmatched, duplicate, or mismatched cases. The UI suite needs a logged-in macOS desktop session with XCTest UI automation available. It does not require Codex sign-in.
+The fast verifier runs all CLI/XPC cases and checks that the UI suite has the exact same case IDs and expectations. After the CLI gate passes, the UI coverage reviewer inspects only the paired cases affected by the change and does not execute tests. Any UI execution, including full E2E runs, happens in the Tart VM. Keep `./scripts/test-full-e2e.sh` for deliberate full E2E runs across every CLI and UI case. Add the same named case and shared expectation to both suites for each new behavior; `scripts/check-test-parity.py` rejects unmatched, duplicate, or mismatched cases. The VM needs XCTest UI automation available. It does not require Codex sign-in.
 
-Real Codex turns use a separate opt-in suite that requires a working `codex login` and Luna access:
+Real Codex turns use a separate opt-in suite that requires a working host `codex login` and Luna access. Its live UI case also runs in Tart; the VM must have the Codex CLI installed and a separate guest login. Use `--show-vm` on the direct Tart command when you need to sign in interactively:
 
 ```sh
 STATIONAI_RUN_CODEX_INTEGRATION=1 ./scripts/test-codex-integration.sh
 ```
+
+For a focused live UI case after guest sign-in, run `scripts/test-ui-tart.sh --live-codex --case test_conversation_composer_rejects_blank_and_supports_live_turn_controls`.
 
 See `AGENTS.md` for the development testing, Git, and task-verification rules.

@@ -223,12 +223,14 @@ struct KanbanBoardView: View {
                         }
                     }
                 }
+                .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 30)
                 .padding(.top, 22)
                 .padding(.bottom, 28)
             }
             .scrollIndicators(.visible)
             .background(WorkspaceTheme.windowBackground)
+            .scrollContentBackground(.hidden)
             .accessibilityIdentifier("board-columns-scroll-view")
             .overlay(alignment: .trailing) {
                 if draggedTaskID != nil {
@@ -255,7 +257,6 @@ struct KanbanBoardView: View {
                     .shadow(color: .black.opacity(0.16), radius: 18, x: -6, y: 0)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
                     .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("done-archive-panel")
             }
         }
         .animation(.easeInOut(duration: 0.24), value: isShowingDoneArchive)
@@ -699,7 +700,6 @@ private struct KanbanColumnView: View {
                 }
             }
 
-            Spacer(minLength: 0)
         }
         .padding(14)
         .frame(maxWidth: .infinity, minHeight: minHeight, alignment: .topLeading)
