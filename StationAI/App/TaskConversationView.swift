@@ -1486,22 +1486,82 @@ struct TaskConversationView: View {
             }
 
             if !queuedMessages.isEmpty {
-                VStack(alignment: .leading, spacing: 5) {
+                VStack(alignment: .leading, spacing: 0) {
                     ForEach(queuedMessages) { queued in
-                        HStack {
-                            Text(queued.state == .needsAction ? "Follow-up needs your action" : "Queued for after this turn")
-                            Spacer()
+                        HStack(spacing: 12) {
+                            Image(systemName: "text.line.first.and.arrowtriangle.forward")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(.secondary)
+                            Text(queued.text)
+                                .font(.system(size: 14))
+                                .lineLimit(1)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .accessibilityIdentifier("queued-message-text-\(queued.id.uuidString)")
                             if queued.state == .needsAction {
-                                Button("Retry") { retryQueuedMessage(queued) }
+                                Text("Needs action")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                                    .accessibilityLabel("Follow-up needs your action")
+                                    .accessibilityIdentifier("queued-message-needs-action-\(queued.id.uuidString)")
+                                Button { retryQueuedMessage(queued) } label: {
+                                    Image(systemName: "arrow.clockwise")
+                                        .font(.system(size: 13, weight: .medium))
+                                }
+                                .buttonHoverPointer()
+                                .help("Retry this follow-up")
+                                .accessibilityLabel("Retry follow-up")
+                                .accessibilityIdentifier("retry-queued-message-\(queued.id.uuidString)")
+                            } else {
+                                Button("Steer") { steerQueuedMessage(queued) }
+                                    .disabled(isSubmittingLiveMessage)
                                     .buttonHoverPointer()
-                                    .help("Retry this follow-up")
-                                    .accessibilityIdentifier("retry-queued-message-\(queued.id.uuidString)")
+                                    .help("Send this follow-up to the active turn now")
+                                    .accessibilityIdentifier("steer-queued-message-\(queued.id.uuidString)")
                             }
+                            Button { removeQueuedMessage(queued) } label: {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 13, weight: .medium))
+                            }
+                            .buttonHoverPointer()
+                            .help("Remove this follow-up")
+                            .accessibilityLabel("Remove follow-up")
+                            .accessibilityIdentifier("remove-queued-message-\(queued.id.uuidString)")
+                            Menu {
+                                Button("Copy text") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(queued.text, forType: .string)
+                                }
+                                .buttonHoverPointer()
+                                .help("Copy this follow-up")
+                                Button("Remove follow-up", role: .destructive) { removeQueuedMessage(queued) }
+                                    .buttonHoverPointer()
+                                    .help("Remove this follow-up")
+                            } label: {
+                                Image(systemName: "ellipsis")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .frame(width: 24, height: 24)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonHoverPointer()
+                            .help("More follow-up actions")
+                            .menuStyle(.borderlessButton)
+                            .accessibilityLabel("More follow-up actions")
+                            .accessibilityIdentifier("queued-message-more-\(queued.id.uuidString)")
                         }
-                        .font(.system(size: 11, weight: .medium))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 11)
+                        .contentShape(Rectangle())
+                        .accessibilityElement(children: .contain)
                         .accessibilityIdentifier("queued-message-\(queued.id.uuidString)")
                     }
                 }
+                .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("queued-follow-ups")
             }
 
             VStack(alignment: .leading, spacing: 10) {
@@ -1512,9 +1572,22 @@ struct TaskConversationView: View {
                     isEnabled: !isReadOnly && !isLoadingHistory,
                     accessibilityHelp: isReadOnly
                         ? "Archived conversation, read-only."
-                         : (isResponding ? "Enter a follow-up to steer the active turn or queue it for later."
+                         : (isResponding ? "Press Return to queue this follow-up. Press Command-Return to steer the active turn, or use a queued row's Steer action."
                             : (isLoadingHistory ? "Composer unavailable while conversation history loads." : "")),
-                    onSubmit: { sendMessage() },
+                    onSubmit: {
+                        if isResponding, codexClient.isTurnActive(threadID: task.codexThreadID ?? "") {
+                            queueDraftForAfterTurn()
+                        } else if isResponding {
+                            errorMessage = "The active turn is finishing; try again when follow-ups are available."
+                        } else {
+                            sendMessage()
+                        }
+                    },
+                    onSteerSubmit: {
+                        if isResponding, codexClient.isTurnActive(threadID: task.codexThreadID ?? "") {
+                            steerCurrentTurn()
+                        }
+                    },
                     onPasteImage: { image in
                         do { try addImage(image) }
                         catch { errorMessage = error.localizedDescription }
@@ -1523,13 +1596,13 @@ struct TaskConversationView: View {
                     .frame(height: composerHeight)
                     .overlay(alignment: .topLeading) {
                         if draft.isEmpty {
-                            Text("Message…")
-                                .font(.system(size: 14))
+                            Text(isResponding ? "Ask for follow-up changes" : "Message…")
+                                .font(.system(size: 15))
                                 .foregroundStyle(.tertiary)
                                 .padding(.horizontal, 5)
                                 .padding(.top, 4)
                                 .allowsHitTesting(false)
-                                .accessibilityHidden(true)
+                                .accessibilityIdentifier("composer-placeholder")
                         }
                     }
                     .onChange(of: draft) { _, newValue in
@@ -1601,20 +1674,8 @@ struct TaskConversationView: View {
                     .accessibilityIdentifier("model-picker-menu")
 
                     if isResponding {
-                        if codexClient.isTurnActive(threadID: task.codexThreadID ?? "") {
-                            Button("Queue") { queueDraftForAfterTurn() }
-                                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSubmittingLiveMessage)
-                                .buttonHoverPointer()
-                                .help("Send this message after the current turn finishes")
-                                .accessibilityIdentifier("queue-message-after-turn-button")
-                            Button("Steer") { steerCurrentTurn() }
-                                .disabled((draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty) || isSubmittingLiveMessage)
-                                .buttonHoverPointer()
-                                .help("Send this message to the active turn now")
-                                .accessibilityIdentifier("steer-current-turn-button")
-                        }
                         Button(action: pauseResponse) {
-                            Image(systemName: "pause.fill")
+                            Image(systemName: "stop.fill")
                                 .font(.system(size: 11, weight: .bold))
                                 .foregroundStyle(.white)
                                 .frame(width: 31, height: 31)
@@ -1624,7 +1685,7 @@ struct TaskConversationView: View {
                         .help("Pause Codex response")
                         .buttonStyle(.plain)
                         .disabled(isPausingResponse || !canPauseResponse)
-                        .accessibilityLabel("Pause response")
+                        .accessibilityLabel("Stop response")
                         .accessibilityIdentifier("pause-response-button")
                     } else if hasPausedResponse {
                         Button(action: continueResponse) {
@@ -1937,6 +1998,33 @@ struct TaskConversationView: View {
         } catch { errorMessage = error.localizedDescription }
     }
 
+    private func removeQueuedMessage(_ message: QueuedConversationMessage) {
+        do {
+            try conversationManager.removeQueuedMessage(taskID: task.id, messageID: message.id)
+            refreshQueuedMessages()
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    private func steerQueuedMessage(_ message: QueuedConversationMessage) {
+        isSubmittingLiveMessage = true
+        Task { @MainActor in
+            defer { isSubmittingLiveMessage = false }
+            do {
+                let outcome = try await conversationManager.steerQueuedMessage(taskID: task.id, messageID: message.id)
+                refreshQueuedMessages()
+                guard outcome.accepted else {
+                    throw BridgeCommandError(code: "invalid_transition", message: "The active turn changed before the steering message could be sent.")
+                }
+                messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: outcome.message))
+                refreshQueuedMessages()
+                errorMessage = nil
+            } catch {
+                refreshQueuedMessages()
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     private func steerCurrentTurn() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let imageDataURLs = pendingImages.map(\.dataURL)
@@ -1952,7 +2040,10 @@ struct TaskConversationView: View {
                 draft = ""
                 pendingImages.removeAll()
                 errorMessage = nil
-            } catch { errorMessage = error.localizedDescription }
+            } catch {
+                refreshQueuedMessages()
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -2341,6 +2432,7 @@ private struct NativeChatEditor: NSViewRepresentable {
     let isEnabled: Bool
     let accessibilityHelp: String
     let onSubmit: () -> Void
+    let onSteerSubmit: () -> Void
     let onPasteImage: (NSImage) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -2388,6 +2480,7 @@ private struct NativeChatEditor: NSViewRepresentable {
         context.coordinator.parent = self
         guard let editor = scroll.documentView as? ChatEditorTextView else { return }
         editor.onSubmit = onSubmit
+        editor.onSteerSubmit = onSteerSubmit
         editor.onPasteImage = onPasteImage
         editor.isEditable = isEnabled
         editor.isSelectable = isEnabled
@@ -2472,6 +2565,7 @@ private final class ChatEditorTextView: NSTextView {
     }
 
     var onSubmit: (() -> Void)?
+    var onSteerSubmit: (() -> Void)?
     var onPasteImage: ((NSImage) -> Void)?
 
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
@@ -2486,6 +2580,8 @@ private final class ChatEditorTextView: NSTextView {
         if (event.keyCode == 36 || event.keyCode == 76), !hasMarkedText(), isEditable {
             if event.modifierFlags.contains(.shift) {
                 insertNewlineIgnoringFieldEditor(nil)
+            } else if event.modifierFlags.contains(.command) {
+                onSteerSubmit?()
             } else {
                 onSubmit?()
             }
