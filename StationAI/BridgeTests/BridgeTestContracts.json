@@ -145,11 +145,15 @@
   },
   {
     "id": "test_conversation_composer_rejects_blank_and_supports_live_turn_controls",
-    "expectation": "Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text and the composer expands beyond five lines before scrolling. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. During title preparation, CLI/XPC confirms the submitted prompt and conversation thread remain attached to the task, while the UI keeps Pause disabled until the task's conversation client has an interruptible turn. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors."
+    "expectation": "Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, and the CLI/XPC preserves a 15-line draft, and the UI composer expands beyond five lines, stops growing at its 12-line limit, and retains the complete draft while scrolling. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. During title preparation, CLI/XPC confirms the submitted prompt and conversation thread remain attached to the task, while the UI keeps Pause disabled until the task's conversation client has an interruptible turn. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, the UI exposes separate steer and queue actions, sends steering with the active turn ID, and retains the queued follow-up across reopening."
   },
   {
     "id": "test_conversation_serializes_concurrent_sends",
     "expectation": "Two concurrent sends for the same task are serialized across the app and CLI/XPC paths against the local Codex app-server fixture; the second waits for the first, both complete on the persisted thread, and the task remains In Progress while a send is active."
+  },
+  {
+    "id": "test_conversation_steers_and_queues_active_turn",
+    "expectation": "While a Codex turn is active, a stale steer response is shown as an error and preserves the draft for retry; CLI/XPC steering routes to a UI-owned active turn and appears in the visible conversation; a subsequent accepted UI Steer action uses the matching active turn ID, appears in the transcript, and clears its draft. The user can also persist a distinct follow-up for after completion; it dispatches once after a matching completed notification, survives fresh CLI/XPC reads, and is removed only after successful delivery."
   },
   {
     "id": "test_conversation_sends_image_attachments",
@@ -181,7 +185,7 @@
   },
   {
     "id": "test_codex_interrupted_turn_blocks_with_reason_and_can_retry",
-    "expectation": "Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes persist Blocked across connections, and diagnostics identify the failed turn phase and store path; a new prompt can finish in Review."
+    "expectation": "Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes persist Blocked across connections, and diagnostics identify the failed turn phase and store path; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt."
   },
   {
     "id": "test_codex_empty_question_request_is_rejected",
@@ -201,7 +205,7 @@
   },
   {
     "id": "test_task_pr_conflicts_detect_without_mutation",
-    "expectation": "The real Git CLI detects a merge conflict without mutation, requires confirmation by default, honors saved keep without publishing, and successfully commits and locally pushes a staged conflict resolution through XPC without changing the target; unknown actions are rejected. The paired UI dispatches resolve-only and resolve-and-push on an actual conflict, verifies unresolved conflicts remain uncommitted and unpublished, presents all three choices and the remember checkbox, verifies remembered keep skips the next confirmation, and changes the saved action in Settings."
+    "expectation": "The real Git CLI detects a merge conflict without mutation, requires confirmation by default, honors saved keep without publishing, and successfully commits and locally pushes a staged conflict resolution through XPC without changing the target; unknown actions are rejected. The paired UI dispatches resolve-only and resolve-and-push on an actual conflict, verifies unresolved conflicts do not advance the task or target commits, presents all three choices and the remember checkbox, and verifies remembered keep skips the next confirmation."
   },
   {
     "id": "test_done_archive_displays_existing_pull_request_link",
