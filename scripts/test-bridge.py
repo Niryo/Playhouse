@@ -1091,7 +1091,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(all(record["repositoryWorktrees"][0]["worktreePath"] == str(self.primary) for record in records))
         self.assertTrue(all(record["status"] == "Backlog" for record in records))
 
-    # case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR; an unmerged PR keeps its link and suppresses the completion button. After all PRs merge, focus replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files without loading conversation histories, while the visible archive loads the newest 40 first and reveals older tasks as the user scrolls.
+    # case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR; an unmerged PR keeps its link and suppresses the completion button. After all PRs merge, focus replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls.
     def test_task_done_preserves_worktree_and_branch(self):
         task = self.create_repo_task("Untitled task", [self.primary, self.secondary])
         draft = "Please update the README and add concise setup steps for first time contributors tomorrow."
@@ -1179,11 +1179,18 @@ class StationAIBridgeTests(unittest.TestCase):
         sessions = self.data_directory / "codex-home" / "sessions" / "2026" / "10" / "22"
         sessions.mkdir(parents=True)
         session_file = sessions / f"rollout-2026-10-22T00-00-00-{thread_id}.jsonl"
-        session_file.write_text(json.dumps({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "text", "text": "LOCAL-SESSION-ONLY-token"}]}}) + "\n", encoding="utf-8")
+        session_file.write_text(
+            json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "LOCAL-SESSION-ONLY-user-token"}]}})
+            + "\n"
+            + json.dumps({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "LOCAL-SESSION-ONLY-assistant-token"}]}})
+            + "\n",
+            encoding="utf-8",
+        )
         search_env = {"CODEX_HOME": str(self.data_directory / "codex-home")}
-        search, _ = self.call_cli("archive", "search", "local-session-only-TOKEN", extra_environment=search_env)
-        search_results = self.assert_success(search)
-        self.assertEqual([result["id"] for result in search_results], [task["id"]], "Archive search should find conversation text from the task's local session file.")
+        for query in ("local-session-only-user-TOKEN", "local-session-only-assistant-TOKEN"):
+            search, _ = self.call_cli("archive", "search", query, extra_environment=search_env)
+            search_results = self.assert_success(search)
+            self.assertEqual([result["id"] for result in search_results], [task["id"]], "Archive search should find current Codex input_text/output_text content in the task's local session file.")
         invalid_search, _ = self.call_cli("archive", "search", "   ", expected_status=2, extra_environment=search_env)
         self.assert_failure(invalid_search, "invalid_argument")
         filler_ids = []

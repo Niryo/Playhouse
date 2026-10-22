@@ -1234,7 +1234,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
     }
 
-    // case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR; an unmerged PR keeps its link and suppresses the completion button. After all PRs merge, focus replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files without loading conversation histories, while the visible archive loads the newest 40 first and reveals older tasks as the user scrolls.
+    // case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR; an unmerged PR keeps its link and suppresses the completion button. After all PRs merge, focus replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls.
     func test_task_done_preserves_worktree_and_branch() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture()
@@ -1395,9 +1395,12 @@ final class StationAIUITests: XCTestCase {
         let sessions = dataDirectory.appendingPathComponent("codex-home/sessions/2026/10/22", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         let sessionFile = sessions.appendingPathComponent("rollout-2026-10-22T00-00-00-\(threadID).jsonl")
-        let sessionLine: [String: Any] = ["type": "response_item", "payload": ["type": "message", "role": "assistant", "content": [["type": "text", "text": "LOCAL-SESSION-ONLY-token"]]]]
-        let sessionData = try JSONSerialization.data(withJSONObject: sessionLine)
-        try (sessionData + Data([0x0A])).write(to: sessionFile, options: .atomic)
+        let sessionLines: [[String: Any]] = [
+            ["type": "response_item", "payload": ["type": "message", "role": "user", "content": [["type": "input_text", "text": "LOCAL-SESSION-ONLY-input-token"]]]],
+            ["type": "response_item", "payload": ["type": "message", "role": "assistant", "content": [["type": "output_text", "text": "LOCAL-SESSION-ONLY-output-token"]]]]
+        ]
+        let sessionData = try sessionLines.map { try JSONSerialization.data(withJSONObject: $0) + Data([0x0A]) }.reduce(into: Data()) { $0.append($1) }
+        try sessionData.write(to: sessionFile, options: .atomic)
 
         let archiveButton = element("done-archive-button")
         archiveButton.click()
@@ -1419,9 +1422,11 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(archiveResult.waitForExistence(timeout: 10), "Searching saved conversation text should find the completed task.")
         XCTAssertLessThan(titleMatchResult.frame.minY, archiveResult.frame.minY, "Title matches should precede conversation-only matches.")
         element("clear-archive-search-button").click()
-        archiveSearch.typeText("local-session-only-TOKEN")
-        XCTAssertTrue(archiveResult.waitForExistence(timeout: 10), "Searching text found only in the local JSONL file should find its completed task.")
-        XCTAssertFalse(titleMatchResult.exists, "A conversation-only query should not return a task whose title does not match.")
+        archiveSearch.typeText("local-session-only-output-TOKEN")
+        XCTAssertTrue(waitUntil({ archiveResult.exists && !titleMatchResult.exists }, timeout: 10), "Searching assistant output_text should show its conversation match and filter out unrelated title matches.")
+        element("clear-archive-search-button").click()
+        archiveSearch.typeText("local-session-only-input-TOKEN")
+        XCTAssertTrue(waitUntil({ archiveResult.exists && !titleMatchResult.exists }, timeout: 10), "Searching user input_text should show its conversation match and filter out unrelated title matches.")
         element("clear-archive-search-button").click()
         archiveSearch.typeText("FiXtUrE-SeCrEt")
         XCTAssertTrue(titleMatchResult.waitForExistence(timeout: 10))
