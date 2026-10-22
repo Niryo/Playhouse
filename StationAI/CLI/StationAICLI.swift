@@ -282,6 +282,12 @@ enum StationAICLI {
             case "queue-retry":
                 guard tail.count == 2 else { throw CLIError.usage("Use: stationai conversation queue-retry <task-id> <message-id>") }
                 return BridgeRequest(command: "conversation.queue.retry", arguments: ["taskID": .string(id), "messageID": .string(tail[1])])
+            case "queue-remove":
+                guard tail.count == 2 else { throw CLIError.usage("Use: stationai conversation queue-remove <task-id> <message-id>") }
+                return BridgeRequest(command: "conversation.queue.remove", arguments: ["taskID": .string(id), "messageID": .string(tail[1])])
+            case "queue-steer":
+                guard tail.count == 2 else { throw CLIError.usage("Use: stationai conversation queue-steer <task-id> <message-id>") }
+                return BridgeRequest(command: "conversation.queue.steer", arguments: ["taskID": .string(id), "messageID": .string(tail[1])])
             case "steer":
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message"])
                 return BridgeRequest(command: "conversation.steer", arguments: ["taskID": .string(id), "message": .string(flags["--message"]?.first ?? "")])
@@ -412,6 +418,8 @@ enum StationAICLI {
       stationai conversation queue <task-id> --message <text>
       stationai conversation queue-list <task-id>
       stationai conversation queue-retry <task-id> <message-id>
+      stationai conversation queue-remove <task-id> <message-id>
+      stationai conversation queue-steer <task-id> <message-id>
       stationai conversation steer <task-id> --message <text>
       stationai conversation models <task-id>
       stationai conversation send <task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...]

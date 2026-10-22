@@ -175,8 +175,11 @@ def main():
         elif message.get("method") == "turn/start":
             saw_turn = True
             saw_question = True
+            turn_input = message.get("params", {}).get("input", [])
+            turn_message = next((item.get("text") for item in turn_input if item.get("type") == "text"), None)
+            is_title_request = (turn_message or "").startswith("Write a concise task title of at most 8 words")
             serial_first_turn = False
-            if serial_mode:
+            if serial_mode and not is_title_request:
                 TURN_ID = f"turn-{uuid.uuid4()}"
                 first_turn_marker = Path(str(sys.argv[0]) + ".serial-first-turn")
                 try:
@@ -186,13 +189,10 @@ def main():
                 else:
                     os.close(descriptor)
                     serial_first_turn = True
-            turn_input = message.get("params", {}).get("input", [])
             turn_thread_id = message.get("params", {}).get("threadId")
             if serial_mode and turn_thread_id != THREAD_ID:
                 write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32003, "message": "The turn must use the active fixture thread."}})
                 continue
-            turn_message = next((item.get("text") for item in turn_input if item.get("type") == "text"), None)
-            is_title_request = (turn_message or "").startswith("Write a concise task title of at most 8 words")
             if is_title_request:
                 if mode.endswith("-title-failure"):
                     write({"jsonrpc": "2.0", "id": message["id"], "error": {
@@ -269,7 +269,10 @@ def main():
                 ready = Path(str(sys.argv[0]) + ".resolve-ready")
                 resume = Path(str(sys.argv[0]) + ".resolve-continue")
                 ready.write_text("The first serialized fixture turn is active.\n", encoding="utf-8")
-                deadline = time.monotonic() + 30
+                # The UI case exercises several XPC/UI round trips while the
+                # turn remains active. Keep the deterministic fixture held
+                # long enough for that interaction sequence in Tart.
+                deadline = time.monotonic() + 120
                 steer_requests = []
                 rejected_steer_requests = []
                 while not resume.exists() and time.monotonic() < deadline:
@@ -279,7 +282,9 @@ def main():
                             steer_request = json.loads(sys.stdin.readline())
                         except json.JSONDecodeError:
                             continue
-                        if steer_request.get("method") == "turn/steer":
+                        if steer_request.get("method") == "thread/items/list":
+                            write({"jsonrpc": "2.0", "id": steer_request.get("id"), "result": {"data": [], "nextCursor": None}})
+                        elif steer_request.get("method") == "turn/steer":
                             params = steer_request.get("params", {})
                             reject_marker = Path(str(sys.argv[0]) + ".reject-next-steer")
                             if reject_marker.exists():

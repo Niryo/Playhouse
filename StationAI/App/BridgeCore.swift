@@ -826,6 +826,37 @@ final class BoardTaskManager {
         }
     }
 
+    func removeQueuedMessage(taskID: UUID, messageID: UUID) throws {
+        try mutateQueuedMessages(taskID: taskID) { items in
+            guard let index = items.firstIndex(where: { $0.id == messageID }),
+                  items[index].state != .dispatching else {
+                throw BridgeCommandError(code: "invalid_transition", message: "That follow-up can no longer be removed.")
+            }
+            items.remove(at: index)
+        }
+    }
+
+    func reserveQueuedMessageForSteering(taskID: UUID, messageID: UUID) throws {
+        try mutateQueuedMessages(taskID: taskID) { items in
+            guard let index = items.firstIndex(where: { $0.id == messageID && $0.state == .queued }) else {
+                throw BridgeCommandError(code: "invalid_transition", message: "That follow-up is no longer available to steer.")
+            }
+            items[index].state = .dispatching
+            items[index].dispatchingProcessID = Int32(ProcessInfo.processInfo.processIdentifier)
+        }
+    }
+
+    func finishQueuedMessageSteering(taskID: UUID, messageID: UUID, accepted: Bool) throws {
+        try mutateQueuedMessages(taskID: taskID) { items in
+            guard let index = items.firstIndex(where: { $0.id == messageID && $0.state == .dispatching }) else { return }
+            if accepted { items.remove(at: index) }
+            else {
+                items[index].state = .needsAction
+                items[index].dispatchingProcessID = nil
+            }
+        }
+    }
+
     func retainQueuedMessagesForUserAction(taskID: UUID, threadID: String) throws {
         try mutateQueuedMessages(taskID: taskID) { items in
             for index in items.indices where items[index].threadID == threadID && items[index].state == .queued {
@@ -2593,6 +2624,26 @@ final class CodexConversationManager {
         )
     }
 
+    func removeQueuedMessage(taskID: UUID, messageID: UUID) throws {
+        try tasks.removeQueuedMessage(taskID: taskID, messageID: messageID)
+    }
+
+    func steerQueuedMessage(taskID: UUID, messageID: UUID) async throws -> (message: String, accepted: Bool) {
+        let item = try tasks.queuedConversationMessages(taskID: taskID).first { $0.id == messageID }
+        guard let item, item.state == .queued else {
+            throw BridgeCommandError(code: "invalid_transition", message: "That follow-up is no longer available to steer.")
+        }
+        try tasks.reserveQueuedMessageForSteering(taskID: taskID, messageID: messageID)
+        do {
+            let accepted = try await steer(taskID: taskID, text: item.text)
+            try tasks.finishQueuedMessageSteering(taskID: taskID, messageID: messageID, accepted: accepted)
+            return (item.text, accepted)
+        } catch {
+            try? tasks.finishQueuedMessageSteering(taskID: taskID, messageID: messageID, accepted: false)
+            throw error
+        }
+    }
+
     func retryQueuedMessage(
         taskID: UUID,
         messageID: UUID,
@@ -3216,7 +3267,7 @@ final class StationAIBridgeRuntime {
                 let codexClient = CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
                 let conversations = CodexConversationManager(tasks: taskManager, client: codexClient)
                 result = .object(["models": .array(try await conversations.models(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })])
-            case "conversation.queue", "conversation.queue.list", "conversation.queue.retry", "conversation.steer":
+            case "conversation.queue", "conversation.queue.list", "conversation.queue.retry", "conversation.queue.remove", "conversation.queue.steer", "conversation.steer":
                 let taskID = try request.requiredUUID("taskID")
                 let conversations = CodexConversationManager(tasks: taskManager, client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string))
                 switch request.command {
@@ -3225,6 +3276,12 @@ final class StationAIBridgeRuntime {
                 case "conversation.queue.retry":
                     let retried = try await conversations.retryQueuedMessage(taskID: taskID, messageID: request.requiredUUID("messageID"))
                     result = .object(["retried": .boolean(retried)])
+                case "conversation.queue.remove":
+                    try conversations.removeQueuedMessage(taskID: taskID, messageID: request.requiredUUID("messageID"))
+                    result = .object(["removed": .boolean(true)])
+                case "conversation.queue.steer":
+                    let steered = try await conversations.steerQueuedMessage(taskID: taskID, messageID: request.requiredUUID("messageID"))
+                    result = .object(["text": .string(steered.message), "accepted": .boolean(steered.accepted)])
                 default:
                     let accepted = try await conversations.steer(taskID: taskID, text: request.requiredString("message"))
                     result = .object(["accepted": .boolean(accepted)])

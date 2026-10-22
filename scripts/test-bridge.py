@@ -2272,7 +2272,7 @@ class StationAIBridgeTests(unittest.TestCase):
         serialized_title_events = json.dumps(title_events)
         self.assertNotIn("Explain the delayed title result.", serialized_title_events)
         self.assertNotIn("Generated fixture title", serialized_title_events)
-    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline prompts persist as typed text, the composer expands beyond five lines, stops at its 12-line limit, and retains all lines while scrolling. Long saved drafts reopen intact and immediately expand before typing, including after restart, remain editable, grow for wrapped text, shrink when shortened, and show their own overflow scrollbar for earlier and later content. The CLI/XPC preserves a 15-line draft. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. During title preparation, CLI/XPC confirms the submitted prompt and conversation thread remain attached to the task, while the UI keeps Pause disabled until the task's conversation client has an interruptible turn. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, the UI exposes separate steer and queue actions, sends steering with the active turn ID, and retains the queued follow-up across reopening.
+    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline prompts persist as typed text, the composer expands beyond five lines, stops at its 12-line limit, and retains all lines while scrolling. Long saved drafts reopen intact and immediately expand before typing, including after restart, remain editable, grow for wrapped text, shrink when shortened, and show their own overflow scrollbar for earlier and later content. The CLI/XPC preserves a 15-line draft. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. During title preparation, CLI/XPC confirms the submitted prompt and conversation thread remain attached to the task, while the UI keeps Pause disabled until the task's conversation client has an interruptible turn. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, Return queues a follow-up, queued rows offer Steer, and queued follow-ups persist across reopening. The obsolete footer Queue and Steer buttons are absent.
     def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         task_id = self.create_task(title="Blank conversation send", roots=[self.primary])["id"]
@@ -2603,7 +2603,7 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assertFalse(self.assert_success(stale_steer)["accepted"], "A completed turn must not be steered.")
 
-    # case-contract: test_conversation_steers_and_queues_active_turn | While a Codex turn is active, a stale steer response is shown as an error and preserves the draft for retry; CLI/XPC steering routes to a UI-owned active turn and appears in the visible conversation; a subsequent accepted UI Steer action uses the matching active turn ID, appears in the transcript, and clears its draft. The user can also persist a distinct follow-up for after completion; it dispatches once after a matching completed notification, survives fresh CLI/XPC reads, and is removed only after successful delivery.
+    # case-contract: test_conversation_steers_and_queues_active_turn | While a Codex turn is active, a stale CLI/XPC steer response returns an error and leaves the composer draft unchanged; CLI/XPC steering routes to a UI-owned active turn and appears in the visible conversation; Return queues a follow-up; its row Steer action uses the matching active turn ID, appears in the transcript, and removes it only after acceptance. The old footer Queue and Steer buttons are absent, and the active response control is labeled Stop response. The user can also persist a distinct follow-up for after completion; it dispatches once after a matching completed notification, survives fresh CLI/XPC reads, and is removed only after successful delivery. Queued follow-ups display their text in the composer stack, expose per-row Steer, delete, and more actions, and the active composer shows its follow-up placeholder. Per-row Steer reaches the active turn and removes the queued item only after acceptance; rejected queued steering remains available as needsAction, and removal rejects unknown IDs without changing the queue.
     def test_conversation_steers_and_queues_active_turn(self):
         task = self.create_repo_task("Active turn message controls", [self.primary])
         task_id = task["id"]
@@ -2646,6 +2646,35 @@ class StationAIBridgeTests(unittest.TestCase):
             queued_record = self.assert_success(queued)
             persisted, _ = self.call_cli("conversation", "queue-list", task_id)
             self.assertEqual(self.assert_success(persisted)[0]["id"], queued_record["id"])
+            removable, _ = self.call_cli("conversation", "queue", task_id, "--message", "Remove this queued follow-up.")
+            removable_record = self.assert_success(removable)
+            removed, _ = self.call_cli("conversation", "queue-remove", task_id, removable_record["id"])
+            self.assertTrue(self.assert_success(removed)["removed"])
+            persisted, _ = self.call_cli("conversation", "queue-list", task_id)
+            self.assertEqual([item["id"] for item in self.assert_success(persisted)], [queued_record["id"]])
+            steerable, _ = self.call_cli("conversation", "queue", task_id, "--message", "Steer this queued follow-up now.")
+            steerable_record = self.assert_success(steerable)
+            queued_steer, _ = self.call_cli("conversation", "queue-steer", task_id, steerable_record["id"])
+            self.assertTrue(self.assert_success(queued_steer)["accepted"])
+            persisted, _ = self.call_cli("conversation", "queue-list", task_id)
+            self.assertEqual([item["id"] for item in self.assert_success(persisted)], [queued_record["id"]])
+            rejected_queue_item, _ = self.call_cli("conversation", "queue", task_id, "--message", "Keep this after a rejected steer.")
+            rejected_queue_record = self.assert_success(rejected_queue_item)
+            Path(str(executable) + ".reject-next-steer").write_text("reject queued steer\n", encoding="utf-8")
+            rejected_queue_steer, _ = self.call_cli(
+                "conversation", "queue-steer", task_id, rejected_queue_record["id"], expected_status=1
+            )
+            self.assert_failure(rejected_queue_steer, "operation_failed")
+            persisted, _ = self.call_cli("conversation", "queue-list", task_id)
+            persisted_messages = self.assert_success(persisted)
+            self.assertEqual(persisted_messages[0]["state"], "queued")
+            self.assertEqual(persisted_messages[1]["state"], "needsAction")
+            removed, _ = self.call_cli("conversation", "queue-remove", task_id, rejected_queue_record["id"])
+            self.assertTrue(self.assert_success(removed)["removed"])
+            missing_remove, _ = self.call_cli(
+                "conversation", "queue-remove", task_id, "00000000-0000-0000-0000-000000000000", expected_status=1
+            )
+            self.assert_failure(missing_remove, "invalid_transition")
         finally:
             release.write_text("Release the active turn.\n", encoding="utf-8")
         self.finish_cli(process, send_command)
@@ -2657,12 +2686,13 @@ class StationAIBridgeTests(unittest.TestCase):
         history = self.assert_success(history_response)
         self.assertEqual([message["text"] for message in history["messages"] if message["role"] == "user"].count(queued_text), 1)
         protocol_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
-        self.assertEqual(len(protocol_history["rejectedSteerRequests"]), 1, "A server rejection must not be reported as an accepted steer.")
-        self.assertEqual(len(protocol_history["steerRequests"]), 1)
+        self.assertEqual(len(protocol_history["rejectedSteerRequests"]), 2, "A server rejection must not be reported as an accepted steer.")
+        self.assertEqual(len(protocol_history["steerRequests"]), 2)
         steer = protocol_history["steerRequests"][0]
         self.assertEqual(steer["threadId"], protocol_history["threadID"])
         self.assertEqual(steer["input"], [{"type": "text", "text": steering_text}])
         self.assertEqual(steer["expectedTurnId"], protocol_history["messages"][0]["turnID"])
+        self.assertEqual(protocol_history["steerRequests"][1]["input"], [{"type": "text", "text": "Steer this queued follow-up now."}])
         queue_after_completion, _ = self.call_cli("conversation", "queue-list", task_id)
         self.assertEqual(self.assert_success(queue_after_completion), [], "Successful dispatch must be durable and nonduplicating across reload.")
 

@@ -37,7 +37,7 @@ struct StationAIApp: App {
     }
 
     var body: some Scene {
-        Window("StationAI", id: "main") {
+        Window(windowTitle, id: "main") {
             mainWindowContent
         }
         .defaultSize(width: 1280, height: 820)
@@ -47,6 +47,12 @@ struct StationAIApp: App {
             WorkspaceSettingsView()
                 .defaultAppStorage(appPreferences)
         }
+    }
+
+    private var windowTitle: String {
+        let configuredTitle = ProcessInfo.processInfo.environment["STATIONAI_WINDOW_TITLE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return configuredTitle.flatMap { $0.isEmpty ? nil : $0 } ?? "StationAI"
     }
 
     private var mainWindowContent: some View {
