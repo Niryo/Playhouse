@@ -1157,7 +1157,7 @@ private struct TaskCardView: View {
         }
         .accessibilityElement(children: .contain)
         .overlay(alignment: .topTrailing) {
-            if !task.repositoryWorktrees.isEmpty {
+            if task.status != .backlog && !task.repositoryWorktrees.isEmpty {
                 HStack(spacing: 5) {
                     let linked = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
                     if linked.isEmpty {
