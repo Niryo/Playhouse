@@ -7,6 +7,12 @@ struct StationAIApp: App {
     private let appPreferences: UserDefaults
     @StateObject private var codexClient: CodexAppServerClient
 
+    private var windowTitle: String {
+        let label = ProcessInfo.processInfo.environment["STATIONAI_WORKTREE_LABEL"]
+            .flatMap { $0.isEmpty ? nil : $0 }
+        return label.map { "StationAI — \($0)" } ?? "StationAI"
+    }
+
     init() {
         let environment = ProcessInfo.processInfo.environment
         _codexClient = StateObject(wrappedValue: CodexAppServerClient(
@@ -37,7 +43,7 @@ struct StationAIApp: App {
     }
 
     var body: some Scene {
-        Window("StationAI", id: "main") {
+        Window(windowTitle, id: "main") {
             mainWindowContent
         }
         .defaultSize(width: 1280, height: 820)

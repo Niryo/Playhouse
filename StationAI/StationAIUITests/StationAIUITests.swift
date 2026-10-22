@@ -327,11 +327,15 @@ final class StationAIUITests: XCTestCase {
         try FileManager.default.removeItem(at: runDirectory)
     }
 
-    // case-contract: test_service_reports_bridge_version | StationAI opens one main board window and the bridge reports API version 1.
+    // case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label and the bridge reports API version 1.
     func test_service_reports_bridge_version() throws {
         launchApp(defaultParent: fixture.parent.path)
         XCTAssertEqual(app.windows.count, 1, "StationAI should open one board window on launch.")
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 15), "The StationAI window did not open.")
+        XCTAssertEqual(app.windows.firstMatch.title, "StationAI — StationAI UI Test Worktree")
+        relaunchApp()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 15), "The board should reopen after relaunch.")
+        XCTAssertEqual(app.windows.firstMatch.title, "StationAI — StationAI UI Test Worktree")
         let response = try runCLI(["status"])
         XCTAssertEqual(response["ok"] as? Bool, true)
         let result = try XCTUnwrap(response["result"] as? [String: Any])
@@ -1749,6 +1753,7 @@ final class StationAIUITests: XCTestCase {
         process.arguments = ["conversation", "send", taskID, "--message", "Work on this task."]
         var environment = ProcessInfo.processInfo.environment
         environment["STATIONAI_DATA_DIRECTORY"] = dataDirectory.path
+        environment["STATIONAI_WORKTREE_LABEL"] = "StationAI UI Test Worktree"
         environment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         environment["STATIONAI_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         environment["STATIONAI_BRIDGE_SERVICE_NAME"] = serviceName
@@ -4278,6 +4283,7 @@ final class StationAIUITests: XCTestCase {
         let bundleIdentifier = Bundle(url: appBundle)?.bundleIdentifier ?? "com.stationai.app.e2e"
         app = XCUIApplication(bundleIdentifier: bundleIdentifier)
         app.launchEnvironment["STATIONAI_DATA_DIRECTORY"] = dataDirectory.path
+        app.launchEnvironment["STATIONAI_WORKTREE_LABEL"] = "StationAI UI Test Worktree"
         app.launchEnvironment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         app.launchEnvironment["STATIONAI_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         app.launchEnvironment["STATIONAI_E2E_DEFAULT_PARENT_FOLDER"] = defaultParent ?? "__unset__"
@@ -4318,6 +4324,7 @@ final class StationAIUITests: XCTestCase {
         opener.arguments = [
             "-n",
             "--env", "STATIONAI_DATA_DIRECTORY=\(dataDirectory.path)",
+            "--env", "STATIONAI_WORKTREE_LABEL=StationAI UI Test Worktree",
             "--env", "STATIONAI_E2E_WORKTREE_DIRECTORY=\(dataDirectory.appendingPathComponent("worktrees").path)",
             "--env", "STATIONAI_E2E_DEFAULTS_SUITE=\(preferencesSuiteName!)",
             "--env", "STATIONAI_E2E_DEFAULT_PARENT_FOLDER=\(launchDefaultParent ?? "__unset__")"
