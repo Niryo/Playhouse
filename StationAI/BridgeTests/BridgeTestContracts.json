@@ -37,7 +37,7 @@
   },
   {
     "id": "test_task_store_serializes_cross_process_writes",
-    "expectation": "If another process holds the shared task-store write lock when a Codex turn completes, final status persistence waits and then saves Review status and full history across fresh CLI/XPC reads. Correlated persistence diagnostics include task ID, store path, lock wait, attempts, and retry count; task reads correlate started and completed events by read ID and store path, while failed reads include store file and sidecar state. Reopening the conversation in the UI shows the saved exchange without a store error."
+    "expectation": "If another process holds the shared task-store write lock when a Codex turn completes after an explicit completed outcome, final status persistence waits and then saves Review status and full history across fresh CLI/XPC reads. Correlated persistence diagnostics include task ID, store path, lock wait, attempts, and retry count; task reads correlate started and completed events by read ID and store path, while failed reads include store file and sidecar state. Reopening the conversation in the UI shows the saved exchange without a store error."
   },
   {
     "id": "test_persistence_store_open_failure_records_detailed_error",
@@ -73,15 +73,15 @@
   },
   {
     "id": "test_task_status_transitions_and_rejects_unknown_status",
-    "expectation": "With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Task card titles use slightly expanded letter spacing and line spacing."
+    "expectation": "With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; \u2318F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing."
   },
   {
     "id": "test_task_progress_reports_publish_persist_and_clear",
-    "expectation": "The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, clears explicitly and at turn completion, and the board card shows the built-in icon, label, and detail without changing lifecycle status; each new task thread receives hidden CLI usage instructions that persist with the thread."
+    "expectation": "The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Only an explicit completed outcome reaches Review."
   },
   {
     "id": "test_task_progress_reports_clear_on_failed_turns_and_questions",
-    "expectation": "Progress reports clear when turns fail or are interrupted and when Codex requests user input; the task card removes the report while lifecycle states remain Blocked or Waiting Response, and answering the question resumes the task successfully."
+    "expectation": "Progress reports clear when turns fail or are interrupted and when Codex requests user input; a staged completed outcome is discarded if its turn fails, leaving the task Blocked. The task card removes the report while lifecycle states remain Blocked or Waiting Response, and answering the question resumes the task successfully."
   },
   {
     "id": "test_task_rename_persists_and_rejects_blank_title",
@@ -153,7 +153,7 @@
   },
   {
     "id": "test_conversation_serializes_concurrent_sends",
-    "expectation": "Two concurrent sends for the same task are serialized across the app and CLI/XPC paths against the local Codex app-server fixture; the second waits for the first, both complete on the persisted thread, and the task remains In Progress while a send is active."
+    "expectation": "Two concurrent sends for the same task are serialized across the app and CLI/XPC paths against the local Codex app-server fixture; the second waits for the first, both complete on the persisted thread, the task remains In Progress while a send is active, and successful turns without outcome calls finish in Waiting Response."
   },
   {
     "id": "test_conversation_steers_and_queues_active_turn",
@@ -181,11 +181,11 @@
   },
   {
     "id": "test_codex_questions_can_be_answered_over_cli_xpc",
-    "expectation": "Structured questions raised in Plan mode move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and successful completion moves it to Review."
+    "expectation": "Structured questions raised in Plan mode move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome."
   },
   {
     "id": "test_codex_nonblocking_question_keeps_task_in_progress",
-    "expectation": "Non-blocking structured questions remain visible without moving the task out of In Progress, then successful completion moves it to Review."
+    "expectation": "Non-blocking structured questions remain visible without moving the task out of In Progress, then the answered turn returns to Waiting Response without an explicit completed outcome."
   },
   {
     "id": "test_codex_interrupted_turn_blocks_with_reason_and_can_retry",
@@ -193,7 +193,7 @@
   },
   {
     "id": "test_codex_empty_question_request_is_rejected",
-    "expectation": "A failed turn preserves its blocked reason and appears in the compact Blocked section above Backlog with a user-intervention indication; retrying clears that section and completes the task into Review."
+    "expectation": "A failed turn preserves its blocked reason and appears in the compact Blocked section above Backlog with a user-intervention indication; retrying clears that section, and the successful retry returns to Waiting Response without an explicit completed outcome."
   },
   {
     "id": "test_task_workspace_changes_group_staged_and_unstaged_diffs",

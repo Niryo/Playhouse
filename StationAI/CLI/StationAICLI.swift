@@ -134,6 +134,13 @@ enum StationAICLI {
                 default:
                     throw CLIError.usage("Unknown task progress operation '\(action)'.")
                 }
+            case "outcome":
+                guard tail.count == 2 else {
+                    throw CLIError.usage("Use: stationai task outcome <task-id> <completed|waiting-response>")
+                }
+                return BridgeRequest(command: "task.outcome", arguments: [
+                    "taskID": .string(tail[0]), "outcome": .string(tail[1])
+                ])
             case "rename":
                 guard let id = tail.first else { throw CLIError.usage("Use: stationai task rename <task-id> --title <title>") }
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--title"])
@@ -401,6 +408,7 @@ enum StationAICLI {
       stationai task progress publish <task-id> --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail <text>]
       stationai task progress custom <task-id> --label <label> [--detail <text>]
       stationai task progress clear <task-id>
+      stationai task outcome <task-id> <completed|waiting-response>
       stationai task rename <task-id> --title <title>
       stationai task repository add <task-id> --repo <path>
       stationai task repository add-batch <task-id> --repo <path> [--repo <path>...]

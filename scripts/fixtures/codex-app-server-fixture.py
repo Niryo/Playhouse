@@ -163,6 +163,9 @@ def main():
                     continue
                 THREAD_ID = history["threadID"]
                 history["events"].append({"method": "thread/resume", "threadID": THREAD_ID})
+                history.setdefault("threadResumeDeveloperInstructions", []).append(
+                    message.get("params", {}).get("developerInstructions")
+                )
                 history_path.write_text(json.dumps(history), encoding="utf-8")
             else:
                 history = serial_history()
@@ -170,6 +173,9 @@ def main():
                     "threadID": THREAD_ID,
                     "threadResumeCount": history.get("threadResumeCount", 0) + 1,
                 })
+                history.setdefault("threadResumeDeveloperInstructions", []).append(
+                    message.get("params", {}).get("developerInstructions")
+                )
                 history_path.write_text(json.dumps(history), encoding="utf-8")
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": "gpt-6-luna"}})
         elif message.get("method") == "turn/start":
@@ -246,7 +252,23 @@ def main():
                 saved_history["turns"] = turns
                 history_path.write_text(json.dumps(saved_history), encoding="utf-8")
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": TURN_ID, "status": "inProgress"}}})
-            if mode.endswith("-abort"):
+            if Path(str(sys.argv[0]) + ".hold-release").exists():
+                active = Path(str(sys.argv[0]) + ".turn-active")
+                release = Path(str(sys.argv[0]) + ".turn-release")
+                active.write_text("The fixture turn is active for a CLI outcome report.\n", encoding="utf-8")
+                deadline = time.monotonic() + 30
+                while not release.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                was_released = release.exists()
+                active.unlink(missing_ok=True)
+                release.unlink(missing_ok=True)
+                if not was_released:
+                    return 3
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": THREAD_ID,
+                    "turn": {"id": TURN_ID, "status": "completed"},
+                }})
+            elif mode.endswith("-abort"):
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "interrupted", "error": {"message": "Fixture interrupted the conflict-resolution turn."}},
@@ -401,6 +423,18 @@ def main():
                 "color": {"answers": ["Blue"]},
                 "token": {"answers": ["fixture-secret"]},
             }
+            if not failed and Path(str(sys.argv[0]) + ".outcome-hold").exists():
+                active = Path(str(sys.argv[0]) + ".outcome-active")
+                release = Path(str(sys.argv[0]) + ".outcome-release")
+                active.write_text("The answered fixture turn is waiting for its explicit outcome.\n", encoding="utf-8")
+                deadline = time.monotonic() + 30
+                while not release.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                was_released = release.exists()
+                active.unlink(missing_ok=True)
+                release.unlink(missing_ok=True)
+                if not was_released:
+                    return 3
             write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                 "threadId": THREAD_ID,
                 "turn": {"id": TURN_ID, "status": "interrupted" if mode.endswith("-interrupted") else ("failed" if failed else "completed"),

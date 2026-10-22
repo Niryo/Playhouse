@@ -180,10 +180,11 @@ final class CodexAppServerClient: ObservableObject {
     func loadThread(
         id threadID: String,
         workspace: CodexWorkspaceContext,
+        developerInstructions: String? = nil,
         onActionRequest: @escaping () -> Void
     ) async throws -> CodexThreadHistory {
         actionRequestHandler = onActionRequest
-        try await resumeThreadIfNeeded(id: threadID, workspace: workspace)
+        try await resumeThreadIfNeeded(id: threadID, workspace: workspace, developerInstructions: developerInstructions)
         return try await readMessages(threadID: threadID)
     }
 
@@ -377,6 +378,7 @@ final class CodexAppServerClient: ObservableObject {
         modelID: String,
         threadID: String,
         workspace: CodexWorkspaceContext,
+        developerInstructions: String? = nil,
         onDelta: @escaping (String) -> Void,
         onFinalMessage: @escaping (String) -> Void,
         onActivity: @escaping (CodexActivity) -> Void,
@@ -388,8 +390,12 @@ final class CodexAppServerClient: ObservableObject {
     ) async throws {
         actionRequestHandler = onActionRequest
         userInputHandler = onUserInput
-        try await resumeThreadIfNeeded(id: threadID, workspace: workspace, modelID: modelID)
-
+        try await resumeThreadIfNeeded(
+            id: threadID,
+            workspace: workspace,
+            modelID: modelID,
+            developerInstructions: developerInstructions
+        )
         activeThreadID = threadID
         Self.activeClientsByThreadID[threadID] = self
         activeTurnID = nil
@@ -435,8 +441,7 @@ final class CodexAppServerClient: ObservableObject {
                     "mode": mode.rawValue,
                     "settings": [
                         "model": modelID,
-                        "reasoningEffort": NSNull(),
-                        "developerInstructions": NSNull()
+                        "reasoningEffort": NSNull()
                     ]
                 ]
             ]
@@ -713,7 +718,12 @@ final class CodexAppServerClient: ObservableObject {
         }
     }
 
-    private func resumeThreadIfNeeded(id threadID: String, workspace: CodexWorkspaceContext, modelID: String = CodexAppServerClient.modelID) async throws {
+    private func resumeThreadIfNeeded(
+        id threadID: String,
+        workspace: CodexWorkspaceContext,
+        modelID: String = CodexAppServerClient.modelID,
+        developerInstructions: String? = nil
+    ) async throws {
         if resumedThreadIDs.contains(threadID), process?.isRunning == true, initialized {
             return
         }
@@ -724,9 +734,7 @@ final class CodexAppServerClient: ObservableObject {
         ]))
         let response: [String: Any]
         do {
-            response = try await request(
-                method: "thread/resume",
-                params: [
+            var params: [String: Any] = [
                     "threadId": threadID,
                     "model": modelID,
                     "cwd": workspace.cwd.path,
@@ -735,7 +743,10 @@ final class CodexAppServerClient: ObservableObject {
                     "approvalsReviewer": "user",
                     "runtimeWorkspaceRoots": workspace.roots.map(\.path)
                 ]
-            )
+            if let developerInstructions {
+                params["developerInstructions"] = developerInstructions
+            }
+            response = try await request(method: "thread/resume", params: params)
         } catch {
             var fields = StationAIDiagnostics.errorFields(error)
             fields["threadID"] = threadID
@@ -1310,7 +1321,11 @@ enum TaskProgressReportInstructions {
         \(quotedExecutable) task progress publish \(id) --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail \"short detail\"]
         \(quotedExecutable) task progress custom \(id) --label \"short label\" [--detail \"short detail\"]
         \(quotedExecutable) task progress clear \(id)
-        Progress reports are hidden from the conversation and shown on the task card. Keep details brief. Do not use lifecycle task status commands for progress; StationAI clears the report when the turn finishes or requests user input.
+        Progress reports are hidden from the conversation and shown on the task card. Keep details brief. Do not use lifecycle task status commands for progress.
+
+        At the very end of every turn, make exactly one definitive outcome call using this task ID:
+        \(quotedExecutable) task outcome \(id) <completed|waiting-response>
+        Use completed only when all work for this turn is finished and no user decision or response is needed. If you need the user to answer, choose between options, provide missing information, or take another action before you can continue, use waiting-response. The outcome call must be your final CLI action for the turn. StationAI moves the task to Review only for completed. If you omit the outcome call, StationAI moves it to Waiting Response.
         """
     }
 
