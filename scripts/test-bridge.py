@@ -2603,7 +2603,7 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assertFalse(self.assert_success(stale_steer)["accepted"], "A completed turn must not be steered.")
 
-    # case-contract: test_conversation_steers_and_queues_active_turn | While a Codex turn is active, a stale steer response is shown as an error and preserves the draft for retry; CLI/XPC steering routes to a UI-owned active turn and appears in the visible conversation; a subsequent accepted UI Steer action uses the matching active turn ID, appears in the transcript, and clears its draft. The user can also persist a distinct follow-up for after completion; it dispatches once after a matching completed notification, survives fresh CLI/XPC reads, and is removed only after successful delivery.
+    # case-contract: test_conversation_steers_and_queues_active_turn | While a Codex turn is active, a stale steer response is shown as an error and preserves the draft for retry; malformed steer images fail validation; CLI/XPC steering routes image data through the mailbox to a UI-owned active turn and appears in the visible conversation; an accepted UI Steer action sends attached image data with text using the matching active turn ID, displays it in the transcript, and clears its draft and image preview. The user can also persist a distinct follow-up for after completion; it dispatches once after a matching completed notification, survives fresh CLI/XPC reads, and is removed only after successful delivery.
     def test_conversation_steers_and_queues_active_turn(self):
         task = self.create_repo_task("Active turn message controls", [self.primary])
         task_id = task["id"]
@@ -2631,14 +2631,24 @@ class StationAIBridgeTests(unittest.TestCase):
                 time.sleep(0.02)
             self.assertTrue(ready.exists(), "The fixture should hold the first turn active for steering and queueing.")
             time.sleep(0.1)
+            invalid_image = self.data_directory / "invalid-steer.png"
+            invalid_image.write_bytes(b"not an image")
+            invalid_steer, _ = self.call_cli(
+                "conversation", "steer", task_id, "--message", steering_text, "--image", str(invalid_image),
+                expected_status=2,
+                extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            )
+            self.assertEqual(invalid_steer["error"]["code"], "invalid_argument")
             rejected_steer, _ = self.call_cli(
                 "conversation", "steer", task_id, "--message", steering_text,
                 expected_status=1,
                 extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
             )
             self.assert_failure(rejected_steer, "operation_failed")
+            steer_image = self.data_directory / "steer.png"
+            steer_image.write_bytes(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"))
             steered, _ = self.call_cli(
-                "conversation", "steer", task_id, "--message", steering_text,
+                "conversation", "steer", task_id, "--message", steering_text, "--image", str(steer_image),
                 extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
             )
             self.assertTrue(self.assert_success(steered)["accepted"])
@@ -2661,16 +2671,18 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(len(protocol_history["steerRequests"]), 1)
         steer = protocol_history["steerRequests"][0]
         self.assertEqual(steer["threadId"], protocol_history["threadID"])
-        self.assertEqual(steer["input"], [{"type": "text", "text": steering_text}])
+        self.assertEqual(steer["input"][0], {"type": "text", "text": steering_text})
+        self.assertEqual(steer["input"][1]["type"], "image")
+        self.assertTrue(steer["input"][1]["url"].startswith("data:image/png;base64,"))
         self.assertEqual(steer["expectedTurnId"], protocol_history["messages"][0]["turnID"])
         queue_after_completion, _ = self.call_cli("conversation", "queue-list", task_id)
         self.assertEqual(self.assert_success(queue_after_completion), [], "Successful dispatch must be durable and nonduplicating across reload.")
 
-    # case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history. Diagnostics record image MIME and encoded size without storing image payloads.
+    # case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. Diagnostics record image MIME and encoded size without storing image payloads.
     def test_conversation_sends_image_attachments(self):
         task_id = self.create_task(title="Image conversation") ["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
-        executable = self.data_directory / "codex-fixture-success"
+        executable = self.data_directory / "codex-fixture-image-serial-success"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
         (self.data_directory / ".stationai-codex-fixture-owner").write_text(
@@ -2682,11 +2694,13 @@ class StationAIBridgeTests(unittest.TestCase):
             "conversation", "send", task_id, "--image", str(image),
             extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
         )
-        self.assert_success(result)
+        initial_history = self.assert_success(result)
         sent = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
         self.assertEqual(len(sent["images"]), 1)
         self.assertTrue(sent["images"][0].startswith("data:image/png;base64,"))
         self.assertEqual(sent["imageInputs"], [{"type": "image", "url": sent["images"][0]}])
+        first_user_message = next(message for message in initial_history["messages"] if message["role"] == "user")
+        self.assertEqual(first_user_message["imageDataURLs"], sent["images"], "History should expose inline images through Codex's `url` field.")
         jpeg = self.data_directory / "tiny.jpg"
         subprocess.run(["sips", "-s", "format", "jpeg", str(image), "--out", str(jpeg)], check=True, capture_output=True)
         jpeg_result, _ = self.call_cli(
@@ -2707,6 +2721,15 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(sent["userMessage"], text_prompt)
         self.assertEqual(len(sent["images"]), 1)
         self.assertEqual(sent["imageInputs"], [{"type": "image", "url": sent["images"][0]}])
+        followup, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Continue using the earlier image as context.",
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        followed_history = self.assert_success(followup)
+        restored_messages = [message for message in followed_history["messages"] if message["role"] == "user"]
+        self.assertEqual(len(restored_messages), 4)
+        self.assertTrue(all(message["imageDataURLs"] for message in restored_messages[:3]), "History refresh after a later text turn must retain every earlier image.")
+        self.assertEqual(restored_messages[2]["text"], text_prompt)
         invalid, _ = self.call_cli(
             "conversation", "send", task_id, "--message", "image", "--image", str(self.data_directory / "missing.png"),
             expected_status=2,

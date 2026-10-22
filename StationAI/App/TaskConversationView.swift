@@ -1454,7 +1454,7 @@ struct TaskConversationView: View {
                                 .help("Send this message after the current turn finishes")
                                 .accessibilityIdentifier("queue-message-after-turn-button")
                             Button("Steer") { steerCurrentTurn() }
-                                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSubmittingLiveMessage)
+                                .disabled((draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty) || isSubmittingLiveMessage)
                                 .buttonHoverPointer()
                                 .help("Send this message to the active turn now")
                                 .accessibilityIdentifier("steer-current-turn-button")
@@ -1732,9 +1732,8 @@ struct TaskConversationView: View {
                     case "queue_changed":
                         refreshQueuedMessages()
                     case "steered_message":
-                        guard let message = update.message else { return }
-                        messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: message))
-                        if draft == message { draft = "" }
+                        messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: update.message ?? "", imageDataURLs: update.imageDataURLs ?? []))
+                        if let message = update.message, draft == message { draft = "" }
                     case "action_notice":
                         actionNotice = update.message
                     default:
@@ -1786,16 +1785,18 @@ struct TaskConversationView: View {
 
     private func steerCurrentTurn() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        let imageDataURLs = pendingImages.map(\.dataURL)
+        guard !text.isEmpty || !imageDataURLs.isEmpty else { return }
         isSubmittingLiveMessage = true
         Task { @MainActor in
             defer { isSubmittingLiveMessage = false }
             do {
-                guard try await conversationManager.steer(taskID: task.id, text: text) else {
+                guard try await conversationManager.steer(taskID: task.id, text: text, imageDataURLs: imageDataURLs) else {
                     throw BridgeCommandError(code: "invalid_transition", message: "The active turn changed before the steering message could be sent. Try again after the current turn is active.")
                 }
-                messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: text))
+                messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: text, imageDataURLs: imageDataURLs))
                 draft = ""
+                pendingImages.removeAll()
                 errorMessage = nil
             } catch { errorMessage = error.localizedDescription }
         }

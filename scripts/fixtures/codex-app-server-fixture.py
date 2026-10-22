@@ -106,7 +106,7 @@ def main():
     saw_turn = False
     turn_message = None
     history_path = Path(str(sys.argv[0]) + ".history")
-    serial_mode = mode.endswith("-serial-success-wait")
+    serial_mode = mode.endswith("-serial-success-wait") or mode.endswith("-serial-success")
     if serial_mode:
         saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
         THREAD_ID = saved_history.get("threadID")
@@ -235,6 +235,7 @@ def main():
                 turn_history["threadID"] = THREAD_ID
                 messages.append(turn_history)
                 saved_history["messages"] = messages
+                saved_history.update(turn_history)
                 saved_history["events"].append({"method": "turn/start", "threadID": THREAD_ID, "turnID": TURN_ID, "userMessage": turn_message})
                 history_path.write_text(json.dumps(saved_history), encoding="utf-8")
             else:
@@ -265,7 +266,7 @@ def main():
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
-            elif serial_mode and serial_first_turn:
+            elif serial_mode and serial_first_turn and mode.endswith("-serial-success-wait"):
                 ready = Path(str(sys.argv[0]) + ".resolve-ready")
                 resume = Path(str(sys.argv[0]) + ".resolve-continue")
                 ready.write_text("The first serialized fixture turn is active.\n", encoding="utf-8")
@@ -418,7 +419,20 @@ def main():
                     user_message = saved_turn.get("userMessage")
                     user_images = saved_turn.get("images", [])
                     user_content = ([{"type": "text", "text": user_message}] if user_message else []) + [
-                        {"type": "image", "image_url": image_url} for image_url in user_images
+                        {"type": "image", "url": image_url} for image_url in user_images
+                    ]
+                    if user_content:
+                        contents.extend([
+                            {"id": f"item_user_fixture_{index}", "type": "userMessage", "content": user_content},
+                            {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."},
+                        ])
+            elif saved_history.get("turns"):
+                contents = []
+                for index, saved_turn in enumerate(saved_history["turns"], start=1):
+                    user_message = saved_turn.get("userMessage")
+                    user_images = saved_turn.get("images", [])
+                    user_content = ([{"type": "text", "text": user_message}] if user_message else []) + [
+                        {"type": "image", "url": image_url} for image_url in user_images
                     ]
                     if user_content:
                         contents.extend([
@@ -429,7 +443,7 @@ def main():
                 user_message = saved_history.get("userMessage") or (turn_message if answers else None)
                 user_images = saved_history.get("images", [])
                 user_content = ([{"type": "text", "text": user_message}] if user_message else []) + [
-                    {"type": "image", "image_url": image_url} for image_url in user_images
+                    {"type": "image", "url": image_url} for image_url in user_images
                 ]
                 contents = ([
                     {"id": "item_user_fixture", "type": "userMessage", "content": user_content},

@@ -56,6 +56,7 @@ private struct ConversationSteerMailboxRequest: Codable {
     let threadID: String
     let expectedTurnID: String
     let text: String
+    var imageDataURLs: [String]? = []
 }
 
 private struct ConversationSteerMailboxActiveTurn: Codable {
@@ -146,7 +147,7 @@ final class CodexAppServerClient: ObservableObject {
     private(set) var wasLastTurnInterrupted = false
     private var activeDeltaHandler: ((String) -> Void)?
     private var activeFinalMessageHandler: ((String) -> Void)?
-    private var activeSteerMessageHandler: ((String) -> Void)?
+    private var activeSteerMessageHandler: ((String, [String]) -> Void)?
     private var activeActivityHandler: ((CodexActivity) -> Void)?
     private var activeDiffHandler: ((CodexTurnDiff) -> Void)?
     private var activeActivities: [String: CodexActivity] = [:]
@@ -247,27 +248,27 @@ final class CodexAppServerClient: ObservableObject {
         }
     }
 
-    func steerActiveTurn(threadID expectedThreadID: String, text: String) async throws -> Bool {
+    func steerActiveTurn(threadID expectedThreadID: String, text: String, imageDataURLs: [String] = []) async throws -> Bool {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { throw StationAIManagerError.invalidMessage }
+        guard !normalized.isEmpty || !imageDataURLs.isEmpty else { throw StationAIManagerError.invalidMessage }
         guard let target = Self.activeClientsByThreadID[expectedThreadID] else {
-            return try await requestSteerFromTurnOwner(threadID: expectedThreadID, text: normalized)
+            return try await requestSteerFromTurnOwner(threadID: expectedThreadID, text: normalized, imageDataURLs: imageDataURLs)
         }
         guard let threadID = target.activeThreadID, threadID == expectedThreadID,
               let turnID = target.activeTurnID, target.isTurnActive else { return false }
-        return try await target.sendSteerRequest(threadID: threadID, turnID: turnID, text: normalized)
+        return try await target.sendSteerRequest(threadID: threadID, turnID: turnID, text: normalized, imageDataURLs: imageDataURLs)
     }
 
     static func configureSteerMailbox(directory: URL) {
         steerMailboxDirectory = directory
     }
 
-    private func sendSteerRequest(threadID: String, turnID: String, text: String) async throws -> Bool {
+    private func sendSteerRequest(threadID: String, turnID: String, text: String, imageDataURLs: [String] = []) async throws -> Bool {
         // Verified against `codex-cli 0.162.1` app-server schemas: params require
         // threadId/input/expectedTurnId and the response requires turnId.
         let response = try await request(method: "turn/steer", params: [
             "threadId": threadID,
-            "input": [["type": "text", "text": text]],
+            "input": (text.isEmpty ? [] : [["type": "text", "text": text]]) + imageDataURLs.map { ["type": "image", "url": $0] },
             "expectedTurnId": turnID
         ])
         guard response["turnId"] as? String == turnID else {
@@ -276,7 +277,7 @@ final class CodexAppServerClient: ObservableObject {
         return true
     }
 
-    private func requestSteerFromTurnOwner(threadID: String, text: String) async throws -> Bool {
+    private func requestSteerFromTurnOwner(threadID: String, text: String, imageDataURLs: [String]) async throws -> Bool {
         guard let directory = Self.steerMailboxDirectory else { return false }
         let activeURL = Self.activeTurnMailboxURL(threadID: threadID, directory: directory)
         guard FileManager.default.fileExists(atPath: activeURL.path) else { return false }
@@ -291,7 +292,7 @@ final class CodexAppServerClient: ObservableObject {
         let requestID = UUID().uuidString
         let requestURL = directory.appendingPathComponent("\(requestID).request.json")
         let responseURL = directory.appendingPathComponent("\(requestID).response.json")
-        let request = ConversationSteerMailboxRequest(id: requestID, threadID: threadID, expectedTurnID: activeTurn.turnID, text: text)
+        let request = ConversationSteerMailboxRequest(id: requestID, threadID: threadID, expectedTurnID: activeTurn.turnID, text: text, imageDataURLs: imageDataURLs)
         try JSONEncoder().encode(request).write(to: requestURL, options: .atomic)
         _ = Darwin.chmod(requestURL.path, mode_t(0o600))
         defer {
@@ -326,8 +327,9 @@ final class CodexAppServerClient: ObservableObject {
                 response = ConversationSteerMailboxResponse(accepted: false, error: "The active turn changed before the steering message could be sent.")
             } else {
                 do {
-                    _ = try await sendSteerRequest(threadID: threadID, turnID: turnID, text: request.text)
-                    activeSteerMessageHandler?(request.text)
+                    let images = request.imageDataURLs ?? []
+                    _ = try await sendSteerRequest(threadID: threadID, turnID: turnID, text: request.text, imageDataURLs: images)
+                    activeSteerMessageHandler?(request.text, images)
                     response = ConversationSteerMailboxResponse(accepted: true, error: nil)
                 } catch {
                     response = ConversationSteerMailboxResponse(accepted: false, error: error.localizedDescription)
@@ -382,7 +384,7 @@ final class CodexAppServerClient: ObservableObject {
         onHistory: @escaping (CodexThreadHistory) -> Void,
         onActionRequest: @escaping () -> Void,
         onUserInput: @escaping (CodexUserInputRequest) async -> Void,
-        onSteerMessage: @escaping (String) -> Void = { _ in }
+        onSteerMessage: @escaping (String, [String]) -> Void = { _, _ in }
     ) async throws {
         actionRequestHandler = onActionRequest
         userInputHandler = onUserInput
@@ -1199,7 +1201,7 @@ final class CodexAppServerClient: ObservableObject {
             }.joined()
             let images = content.compactMap { part -> String? in
                 guard part["type"] as? String == "image" else { return nil }
-                return part["image_url"] as? String
+                return part["url"] as? String ?? part["image_url"] as? String
             }
             guard !text.isEmpty || !images.isEmpty else { return nil }
             return CodexChatMessage(id: itemID, role: .user, text: text, imageDataURLs: images)

@@ -283,8 +283,15 @@ enum StationAICLI {
                 guard tail.count == 2 else { throw CLIError.usage("Use: stationai conversation queue-retry <task-id> <message-id>") }
                 return BridgeRequest(command: "conversation.queue.retry", arguments: ["taskID": .string(id), "messageID": .string(tail[1])])
             case "steer":
-                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message"])
-                return BridgeRequest(command: "conversation.steer", arguments: ["taskID": .string(id), "message": .string(flags["--message"]?.first ?? "")])
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--image"])
+                let images = try (flags["--image"] ?? []).map { path -> BridgeValue in
+                    let url = URL(fileURLWithPath: path)
+                    let data = try Data(contentsOf: url)
+                    guard data.count <= 10_000_000 else { throw CLIError.usage("Each image must be smaller than 10 MB.") }
+                    let mime = ["jpg", "jpeg"].contains(url.pathExtension.lowercased()) ? "image/jpeg" : "image/png"
+                    return .string("data:\(mime);base64,\(data.base64EncodedString())")
+                }
+                return BridgeRequest(command: "conversation.steer", arguments: ["taskID": .string(id), "message": .string(flags["--message"]?.first ?? ""), "images": .array(images)])
             case "send":
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode", "--model", "--answer", "--image"])
                 var answers: [String: [String]] = [:]
@@ -412,7 +419,7 @@ enum StationAICLI {
       stationai conversation queue <task-id> --message <text>
       stationai conversation queue-list <task-id>
       stationai conversation queue-retry <task-id> <message-id>
-      stationai conversation steer <task-id> --message <text>
+      stationai conversation steer <task-id> --message <text> [--image <path>]...
       stationai conversation models <task-id>
       stationai conversation send <task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...]
 

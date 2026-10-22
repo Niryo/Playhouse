@@ -2486,6 +2486,7 @@ struct ConversationUpdate: Codable {
     var diff: String?
     var history: CodexThreadHistory?
     var message: String?
+    var imageDataURLs: [String]?
     var userInputRequest: CodexUserInputRequest?
     var taskStatus: String?
 }
@@ -2574,10 +2575,15 @@ final class CodexConversationManager {
         return interrupted
     }
 
-    func steer(taskID: UUID, text: String) async throws -> Bool {
+    func steer(taskID: UUID, text: String, imageDataURLs: [String] = []) async throws -> Bool {
+        let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedText.isEmpty || !imageDataURLs.isEmpty else { throw StationAIManagerError.invalidMessage }
+        guard imageDataURLs.count <= 8, imageDataURLs.allSatisfy(Self.isValidImageDataURL) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
+        }
         let task = try tasks.taskModel(taskID)
         guard let threadID = task.codexThreadID else { return false }
-        return try await client.steerActiveTurn(threadID: threadID, text: text)
+        return try await client.steerActiveTurn(threadID: threadID, text: normalizedText, imageDataURLs: imageDataURLs)
     }
 
     func queuedMessages(taskID: UUID) throws -> [QueuedConversationMessage] {
@@ -2857,8 +2863,8 @@ final class CodexConversationManager {
                     }
                     await onUserInput(request)
                 },
-                onSteerMessage: { message in
-                    onUpdate(ConversationUpdate(type: "steered_message", message: message))
+                onSteerMessage: { message, images in
+                    onUpdate(ConversationUpdate(type: "steered_message", message: message, imageDataURLs: images))
                 }
             )
             phase = "worktree-finalization"
@@ -3226,7 +3232,7 @@ final class StationAIBridgeRuntime {
                     let retried = try await conversations.retryQueuedMessage(taskID: taskID, messageID: request.requiredUUID("messageID"))
                     result = .object(["retried": .boolean(retried)])
                 default:
-                    let accepted = try await conversations.steer(taskID: taskID, text: request.requiredString("message"))
+                    let accepted = try await conversations.steer(taskID: taskID, text: request.arguments["message"]?.string ?? "", imageDataURLs: request.arguments["images"]?.strings ?? [])
                     result = .object(["accepted": .boolean(accepted)])
                 }
             case "conversation.send":
