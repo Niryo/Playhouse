@@ -1,7 +1,7 @@
 [
   {
     "id": "test_service_reports_bridge_version",
-    "expectation": "StationAI opens one main board window and the bridge reports API version 1."
+    "expectation": "StationAI opens one main board window titled with its worktree label and the bridge reports API version 1."
   },
   {
     "id": "test_worktree_app_profiles_isolate_identity_and_store",
