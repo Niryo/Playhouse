@@ -998,11 +998,7 @@ struct TaskConversationView: View {
 
     private var safetyNotice: some View {
         VStack(alignment: .leading, spacing: 7) {
-            if workspaceRootURLs.isEmpty {
-                Text("No working folders are set. Add one or more folders before sending a message.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            } else {
+            if !workspaceRootURLs.isEmpty {
                 let folderLabels = workspaceRootURLs.map { url in
                     task.repositoryWorktrees.first(where: { URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == url.path })
                         .map { "\(URL(fileURLWithPath: $0.repositoryPath).lastPathComponent) · \($0.branch)" } ?? url.lastPathComponent
@@ -1310,7 +1306,18 @@ struct TaskConversationView: View {
                     .accessibilityIdentifier("codex-action-notice")
             }
 
-            if let errorMessage {
+            if workspaceRootURLs.isEmpty {
+                Label("Choose at least one working folder before sending a message.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Choose at least one working folder before sending a message.")
+                    .accessibilityIdentifier("no-working-folders-error")
+            }
+
+            if let errorMessage,
+               errorMessage != WorkspaceError.noRoots.localizedDescription {
                 Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.red)
@@ -1477,6 +1484,8 @@ struct TaskConversationView: View {
         .padding(.bottom, 22)
         .frame(maxWidth: 820)
         .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("chat-composer")
     }
 
     private func userInputForm(_ request: CodexUserInputRequest) -> some View {
