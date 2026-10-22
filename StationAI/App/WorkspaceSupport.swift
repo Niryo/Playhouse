@@ -59,6 +59,7 @@ enum WorkspaceSettings {
     static let defaultParentFolderKey = "defaultWorkspaceParentFolderPath"
     static let lastSelectedRepositoriesKey = "lastSelectedRepositories"
     static let appearanceKey = "appearance"
+    static let pullRequestConflictActionKey = "pullRequestConflictAction"
 
     static var preferencesStore: UserDefaults {
         #if DEBUG
@@ -518,6 +519,53 @@ enum StationAIWorktreeManager {
         return !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    static func hasMergeConflicts(_ record: RepositoryWorktreeRecord) throws -> Bool {
+        guard record.mergeTarget?.isEmpty == false else { return false }
+        let targetRef = try mergeTargetRef(record)
+        let merge = try git(record.worktreePath, ["merge-tree", "--write-tree", "HEAD", targetRef], allowFailure: true)
+        guard merge.status == 0 || merge.status == 1 else {
+            throw BridgeCommandError(code: "operation_failed", message: merge.output.isEmpty ? "Git couldn't check the configured merge target." : merge.output)
+        }
+        return merge.status == 1
+    }
+
+    static func mergeTarget(_ record: RepositoryWorktreeRecord, target: String) throws {
+        let targetRef = try mergeTargetRef(record)
+        let result = try git(record.worktreePath, ["merge", "--no-commit", "--no-ff", targetRef], allowFailure: true)
+        guard result.status == 0 || result.status == 1 else {
+            throw BridgeCommandError(code: "operation_failed", message: result.output.isEmpty ? "Git couldn't merge the target branch." : result.output)
+        }
+    }
+
+    private static func mergeTargetRef(_ record: RepositoryWorktreeRecord) throws -> String {
+        guard let target = record.mergeTarget, !target.isEmpty else {
+            throw BridgeCommandError(code: "invalid_transition", message: "This repository has no configured merge target.")
+        }
+        let remotes = Set(try git(record.worktreePath, ["remote"]).output.split(whereSeparator: \.isNewline).map(String.init))
+        let configured = try git(record.worktreePath, ["config", "--get", "branch.\(target).remote"], allowFailure: true)
+            .output.trimmingCharacters(in: .whitespacesAndNewlines)
+        let remote = remotes.contains(configured) ? configured : (remotes.contains("origin") ? "origin" : nil)
+        if let remote {
+            _ = try git(record.worktreePath, ["fetch", "--quiet", remote, target])
+            return "FETCH_HEAD"
+        }
+        let localTarget = try git(record.worktreePath, ["rev-parse", "--verify", "refs/heads/\(target)"], allowFailure: true)
+        guard localTarget.status == 0 else {
+            throw BridgeCommandError(code: "operation_failed", message: "The configured merge target '\(target)' is not available locally or on a configured remote.")
+        }
+        return target
+    }
+
+    static func hasUnmergedFiles(_ record: RepositoryWorktreeRecord) throws -> Bool {
+        let result = try git(record.worktreePath, ["diff", "--name-only", "--diff-filter=U"])
+        return !result.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    static func hasMergeInProgress(_ record: RepositoryWorktreeRecord) throws -> Bool {
+        let result = try git(record.worktreePath, ["rev-parse", "--verify", "MERGE_HEAD"], allowFailure: true)
+        return result.status == 0
+    }
+
     static func removeAfterConfirmation(_ record: RepositoryWorktreeRecord) throws {
         guard record.createdByStationAI,
               FileManager.default.fileExists(atPath: record.worktreePath) else { return }
@@ -829,6 +877,32 @@ struct StationAIWorktreeService {
         }
     }
 
+    func hasMergeConflicts(_ record: RepositoryWorktreeRecord) async throws -> Bool {
+        try await perform("git.check_merge_conflicts", record: record, fields: ["mergeTarget": record.mergeTarget ?? ""]) {
+            try await StationAIBackgroundOperation.run {
+                try StationAIWorktreeManager.hasMergeConflicts(record)
+            }
+        }
+    }
+
+    func mergeTarget(_ record: RepositoryWorktreeRecord, target: String) async throws {
+        try await perform("git.merge_target", record: record, fields: ["mergeTarget": target]) {
+            try await StationAIBackgroundOperation.run { try StationAIWorktreeManager.mergeTarget(record, target: target) }
+        }
+    }
+
+    func hasUnmergedFiles(_ record: RepositoryWorktreeRecord) async throws -> Bool {
+        try await perform("git.check_unmerged_files", record: record) {
+            try await StationAIBackgroundOperation.run { try StationAIWorktreeManager.hasUnmergedFiles(record) }
+        }
+    }
+
+    func hasMergeInProgress(_ record: RepositoryWorktreeRecord) async throws -> Bool {
+        try await perform("git.check_merge_in_progress", record: record) {
+            try await StationAIBackgroundOperation.run { try StationAIWorktreeManager.hasMergeInProgress(record) }
+        }
+    }
+
     func remove(_ record: RepositoryWorktreeRecord) async throws {
         try await perform("worktree.remove", record: record) {
             try await StationAIBackgroundOperation.run {
@@ -1052,6 +1126,7 @@ struct FlowLayout: Layout {
 struct WorkspaceSettingsView: View {
     @AppStorage(WorkspaceSettings.defaultParentFolderKey, store: WorkspaceSettings.preferencesStore) private var defaultParentFolderPath = ""
     @AppStorage(WorkspaceSettings.appearanceKey, store: WorkspaceSettings.preferencesStore) private var appearance = "dark"
+    @AppStorage(WorkspaceSettings.pullRequestConflictActionKey, store: WorkspaceSettings.preferencesStore) private var pullRequestConflictAction = "ask"
     @State private var pickerError: String?
 
     private var parentFolderURL: URL? {
@@ -1112,14 +1187,34 @@ struct WorkspaceSettingsView: View {
                         .foregroundStyle(.orange)
                 }
             }
+            Section("Pull request conflicts") {
+                Picker("When conflicts are found", selection: Binding(
+                    get: { WorkspaceSettingsManager().pullRequestConflictAction },
+                    set: { value in
+                        do {
+                            try WorkspaceSettingsManager().setPullRequestConflictAction(value)
+                            pullRequestConflictAction = value
+                        } catch {
+                            pickerError = error.localizedDescription
+                        }
+                    }
+                )) {
+                    Text("Ask each time").tag("ask")
+                    Text("Resolve and push").tag("resolve-and-push")
+                    Text("Resolve without pushing").tag("resolve-only")
+                    Text("Keep the PR as is").tag("keep")
+                }
+                .accessibilityIdentifier("pr-conflict-action-picker")
+                .accessibilityValue(pullRequestConflictAction)
+            }
             Section {
-                Text("Changing this setting affects suggestions for new tasks. It does not change the working folders saved on existing tasks.")
+                    Text("Workspace suggestions affect new tasks. Pull request conflict behavior controls how StationAI handles conflicts when creating a pull request.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
-        .frame(width: 560, height: 320)
+        .frame(width: 560, height: 420)
         .preferredColorScheme(appearance == "light" ? .light : .dark)
         .alert("Couldn't choose folder", isPresented: Binding(
             get: { pickerError != nil },
