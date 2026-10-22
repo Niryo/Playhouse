@@ -69,7 +69,7 @@ final class BoardTask {
     var progressDetail: String?
     var createdAt: Date
     var inProgressStartedAt: Date?
-    var totalInProgressSeconds: Double
+    var totalInProgressSeconds: Double = 0
     var codexThreadID: String?
     var savedPrompt: String?
     var pendingSubmittedPrompt: String?

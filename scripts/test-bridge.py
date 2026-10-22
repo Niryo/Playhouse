@@ -960,7 +960,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertFalse(list(failure.glob(".store-import-*")))
         self.assertEqual(self.assert_success(self.call_cli("task", "list")[0])["tasks"][0]["title"], "Healthy board")
 
-    # case-contract: test_task_store_repairs_missing_pending_prompt_column | A real legacy SwiftData task store matching the master model before pendingSubmittedPrompt was added, with in-progress timing columns and no submitted-prompt column, waits for the store-write lock while CLI/XPC reads concurrently; migration backs up before adding the missing column and preserves elapsed time at zero. The CLI preserves the task and draft, and the visible app opens the migrated store and preserves the draft through a subsequent restart; metadata advances and later opens create no additional backup. The store is imported once into the protected filename and the legacy database remains unchanged. Committed WAL-only draft data survives import, and a subsequent edited draft survives restart without reimport.
+    # case-contract: test_task_store_repairs_missing_pending_prompt_column | A real legacy SwiftData task store with in-progress timing columns and no submitted-prompt column waits for the store-write lock while CLI/XPC reads concurrently; migration backs up before adding the missing VARCHAR prompt column as nullable with no default and preserves elapsed time at zero. The CLI preserves the task and draft, and the visible app opens the migrated store and preserves the draft through a subsequent restart with duration still zero; metadata advances and later opens create no additional backup. The store is imported once into the protected filename and the legacy database remains unchanged. Committed WAL-only draft data survives import, and a subsequent edited draft survives restart without reimport.
     def test_task_store_repairs_missing_pending_prompt_column(self):
         seeded = subprocess.run(
             [str(arguments.legacy_store_seeder), str(self.data_directory)],
@@ -1029,6 +1029,10 @@ class StationAIBridgeTests(unittest.TestCase):
         with sqlite3.connect(store) as database:
             migrated_columns = {row[1] for row in database.execute("PRAGMA table_info(ZBOARDTASK)")}
             self.assertTrue({"ZPENDINGSUBMITTEDPROMPT", "ZINPROGRESSSTARTEDAT", "ZTOTALINPROGRESSSECONDS"} <= migrated_columns)
+            prompt_column = next(row for row in database.execute("PRAGMA table_info(ZBOARDTASK)") if row[1] == "ZPENDINGSUBMITTEDPROMPT")
+            self.assertEqual((prompt_column[2], prompt_column[3], prompt_column[4]), ("VARCHAR", 0, None))
+            duration_column = next(row for row in database.execute("PRAGMA table_info(ZBOARDTASK)") if row[1] == "ZTOTALINPROGRESSSECONDS")
+            self.assertEqual((duration_column[2], duration_column[3], duration_column[4]), ("FLOAT", 0, None))
             self.assertEqual(database.execute("SELECT ZTOTALINPROGRESSSECONDS FROM ZBOARDTASK").fetchone()[0], 0)
             migrated_metadata = plistlib.loads(database.execute("SELECT Z_PLIST FROM Z_METADATA").fetchone()[0])
             self.assertNotEqual(migrated_metadata["NSStoreModelVersionHashes"]["BoardTask"], legacy_hash)

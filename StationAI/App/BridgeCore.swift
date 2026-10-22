@@ -344,7 +344,12 @@ enum StationAIStore {
             guard columns.contains("ZID"), columns.contains("ZTITLE"), columns.contains("ZSAVEDPROMPT") else {
                 return false
             }
-            return !columns.contains("ZPENDINGSUBMITTEDPROMPT")
+            let requiredColumns = [
+                "ZPENDINGSUBMITTEDPROMPT",
+                "ZINPROGRESSSTARTEDAT",
+                "ZTOTALINPROGRESSSECONDS"
+            ]
+            return requiredColumns.contains { !columns.contains($0) }
         }
     }
 
@@ -402,9 +407,42 @@ enum StationAIStore {
                 throw StoreSchemaRepairError(String(cString: sqlite3_errmsg(database)))
             }
             do {
-                guard sqlite3_exec(database,
-                                   "ALTER TABLE ZBOARDTASK ADD COLUMN ZPENDINGSUBMITTEDPROMPT VARCHAR",
-                                   nil, nil, nil) == SQLITE_OK else {
+                var statement: OpaquePointer?
+                guard sqlite3_prepare_v2(database, "PRAGMA table_info(ZBOARDTASK)", -1, &statement, nil) == SQLITE_OK else {
+                    throw StoreSchemaRepairError(String(cString: sqlite3_errmsg(database)))
+                }
+                defer { sqlite3_finalize(statement) }
+                var columns = Set<String>()
+                var stepStatus = sqlite3_step(statement)
+                while stepStatus == SQLITE_ROW {
+                    if let name = sqlite3_column_text(statement, 1) {
+                        columns.insert(String(cString: name))
+                    }
+                    stepStatus = sqlite3_step(statement)
+                }
+                guard stepStatus == SQLITE_DONE else {
+                    throw StoreSchemaRepairError(String(cString: sqlite3_errmsg(database)))
+                }
+                sqlite3_finalize(statement)
+                statement = nil
+                let requiredColumns: [(String, String)] = [
+                    ("ZPENDINGSUBMITTEDPROMPT", "VARCHAR"),
+                    ("ZINPROGRESSSTARTEDAT", "TIMESTAMP"),
+                    ("ZTOTALINPROGRESSSECONDS", "FLOAT")
+                ]
+                for (column, declaration) in requiredColumns where !columns.contains(column) {
+                    let sql = "ALTER TABLE ZBOARDTASK ADD COLUMN \(column) \(declaration)"
+                    guard sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK else {
+                        throw StoreSchemaRepairError(String(cString: sqlite3_errmsg(database)))
+                    }
+                }
+                guard sqlite3_exec(
+                    database,
+                    "UPDATE ZBOARDTASK SET ZTOTALINPROGRESSSECONDS = 0 WHERE ZTOTALINPROGRESSSECONDS IS NULL",
+                    nil,
+                    nil,
+                    nil
+                ) == SQLITE_OK else {
                     throw StoreSchemaRepairError(String(cString: sqlite3_errmsg(database)))
                 }
                 guard sqlite3_exec(database, "COMMIT", nil, nil, nil) == SQLITE_OK else {
@@ -2605,6 +2643,8 @@ final class WorkspaceManager {
 struct ConversationUpdate: Codable {
     let type: String
     var text: String?
+    var itemID: String?
+    var phase: String?
     var activity: CodexActivity?
     var diff: String?
     var history: CodexThreadHistory?
@@ -3109,6 +3149,14 @@ final class CodexConversationManager {
                 },
                 onSteerMessage: { message, images in
                     onUpdate(ConversationUpdate(type: "steered_message", message: message, imageDataURLs: images))
+                },
+                onProgressMessage: { message in
+                    onUpdate(ConversationUpdate(
+                        type: "assistant_progress",
+                        text: message.text,
+                        itemID: message.id,
+                        phase: message.phase
+                    ))
                 }
             )
             phase = "worktree-finalization"

@@ -12,21 +12,27 @@ struct CodexChatMessage: Codable, Identifiable, Equatable {
     let role: CodexChatRole
     var text: String
     var imageDataURLs: [String]
+    var phase: String?
+    var turnID: String?
 
-    init(id: String, role: CodexChatRole, text: String, imageDataURLs: [String] = []) {
+    init(id: String, role: CodexChatRole, text: String, imageDataURLs: [String] = [], phase: String? = nil, turnID: String? = nil) {
         self.id = id
         self.role = role
         self.text = text
         self.imageDataURLs = imageDataURLs
+        self.phase = phase
+        self.turnID = turnID
     }
 
-    private enum CodingKeys: String, CodingKey { case id, role, text, imageDataURLs }
+    private enum CodingKeys: String, CodingKey { case id, role, text, imageDataURLs, phase, turnID }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
         role = try container.decode(CodexChatRole.self, forKey: .role)
         text = try container.decode(String.self, forKey: .text)
         imageDataURLs = try container.decodeIfPresent([String].self, forKey: .imageDataURLs) ?? []
+        phase = try container.decodeIfPresent(String.self, forKey: .phase)
+        turnID = try container.decodeIfPresent(String.self, forKey: .turnID)
     }
 }
 
@@ -147,6 +153,7 @@ final class CodexAppServerClient: ObservableObject {
     private(set) var wasLastTurnInterrupted = false
     private var activeDeltaHandler: ((String) -> Void)?
     private var activeFinalMessageHandler: ((String) -> Void)?
+    private var activeProgressMessageHandler: ((CodexChatMessage) -> Void)?
     private var activeSteerMessageHandler: ((String, [String]) -> Void)?
     private var activeActivityHandler: ((CodexActivity) -> Void)?
     private var activeDiffHandler: ((CodexTurnDiff) -> Void)?
@@ -394,7 +401,8 @@ final class CodexAppServerClient: ObservableObject {
         onHistory: @escaping (CodexThreadHistory) -> Void,
         onActionRequest: @escaping () -> Void,
         onUserInput: @escaping (CodexUserInputRequest) async -> Void,
-        onSteerMessage: @escaping (String, [String]) -> Void = { _, _ in }
+        onSteerMessage: @escaping (String, [String]) -> Void = { _, _ in },
+        onProgressMessage: @escaping (CodexChatMessage) -> Void = { _ in }
     ) async throws {
         actionRequestHandler = onActionRequest
         userInputHandler = onUserInput
@@ -412,6 +420,7 @@ final class CodexAppServerClient: ObservableObject {
         wasLastTurnInterrupted = false
         activeDeltaHandler = onDelta
         activeFinalMessageHandler = onFinalMessage
+        activeProgressMessageHandler = onProgressMessage
         activeSteerMessageHandler = onSteerMessage
         activeActivityHandler = onActivity
         activeDiffHandler = onDiff
@@ -428,6 +437,7 @@ final class CodexAppServerClient: ObservableObject {
             isTurnActive = false
             activeDeltaHandler = nil
             activeFinalMessageHandler = nil
+            activeProgressMessageHandler = nil
             activeSteerMessageHandler = nil
             activeActivityHandler = nil
             activeDiffHandler = nil
@@ -775,6 +785,7 @@ final class CodexAppServerClient: ObservableObject {
         var historicalSubagentItems: [[String: Any]] = []
         var subagentIndexes: [String: Int] = [:]
         var lastAssistantTurnID: String?
+        var lastAssistantPhase: String?
         var cursor: String?
         var visitedCursors = Set<String>()
 
@@ -797,7 +808,12 @@ final class CodexAppServerClient: ObservableObject {
                    let activity = CodexActivity.from(item: item),
                    let childThreadID = activity.childThreadID {
                     if let index = subagentIndexes[childThreadID] {
-                        historicalSubagentItems[index] = item
+                        var mergedItem = item
+                        for metadataKey in ["agentPath", "model", "reasoningEffort"]
+                        where mergedItem[metadataKey] == nil {
+                            mergedItem[metadataKey] = historicalSubagentItems[index][metadataKey]
+                        }
+                        historicalSubagentItems[index] = mergedItem
                     } else {
                         subagentIndexes[childThreadID] = historicalSubagentItems.count
                         historicalSubagentItems.append(item)
@@ -805,12 +821,15 @@ final class CodexAppServerClient: ObservableObject {
                 }
                 if item["type"] as? String == "userMessage" {
                     latestTurnItems.removeAll()
+                    lastAssistantTurnID = nil
+                    lastAssistantPhase = nil
                 }
                 latestTurnItems.append(item)
                 if let message = Self.chatMessage(from: entry) {
                     if message.role == .assistant,
                        let turnID = entry["turnId"] as? String,
                        turnID == lastAssistantTurnID,
+                       message.phase == lastAssistantPhase,
                        let lastIndex = messages.indices.last,
                        messages[lastIndex].role == .assistant {
                         messages[lastIndex].text += "\n\n" + message.text
@@ -818,6 +837,7 @@ final class CodexAppServerClient: ObservableObject {
                         messages.append(message)
                     }
                     lastAssistantTurnID = message.role == .assistant ? entry["turnId"] as? String : nil
+                    lastAssistantPhase = message.role == .assistant ? message.phase : nil
                 }
             }
             cursor = response["nextCursor"] as? String
@@ -1032,7 +1052,17 @@ final class CodexAppServerClient: ObservableObject {
                item["type"] as? String == "agentMessage",
                let text = item["text"] as? String,
                !text.isEmpty {
-                activeFinalMessageHandler?(text)
+                if item["phase"] as? String == "commentary" {
+                    activeProgressMessageHandler?(CodexChatMessage(
+                        id: item["id"] as? String ?? UUID().uuidString,
+                        role: .assistant,
+                        text: text,
+                        phase: "commentary",
+                        turnID: params["turnId"] as? String
+                    ))
+                } else {
+                    activeFinalMessageHandler?(text)
+                }
             }
             guard let activity = CodexActivity.from(item: item) else { return }
             activeActivities[activity.id] = activity
@@ -1245,10 +1275,10 @@ final class CodexAppServerClient: ObservableObject {
                 return part["url"] as? String ?? part["image_url"] as? String
             }
             guard !text.isEmpty || !images.isEmpty else { return nil }
-            return CodexChatMessage(id: itemID, role: .user, text: text, imageDataURLs: images)
+            return CodexChatMessage(id: itemID, role: .user, text: text, imageDataURLs: images, turnID: entry["turnId"] as? String)
         case "agentMessage":
             guard let text = item["text"] as? String, !text.isEmpty else { return nil }
-            return CodexChatMessage(id: itemID, role: .assistant, text: text)
+            return CodexChatMessage(id: itemID, role: .assistant, text: text, phase: item["phase"] as? String, turnID: entry["turnId"] as? String)
         default:
             return nil
         }

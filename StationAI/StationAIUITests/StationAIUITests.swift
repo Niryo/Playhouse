@@ -867,7 +867,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(element("message-composer").value as? String, "Still usable")
     }
 
-    // case-contract: test_task_store_repairs_missing_pending_prompt_column | A real legacy SwiftData task store matching the master model before pendingSubmittedPrompt was added, with in-progress timing columns and no submitted-prompt column, waits for the store-write lock while CLI/XPC reads concurrently; migration backs up before adding the missing column and preserves elapsed time at zero. The CLI preserves the task and draft, and the visible app opens the migrated store and preserves the draft through a subsequent restart; metadata advances and later opens create no additional backup. The store is imported once into the protected filename and the legacy database remains unchanged. Committed WAL-only draft data survives import, and a subsequent edited draft survives restart without reimport.
+    // case-contract: test_task_store_repairs_missing_pending_prompt_column | A real legacy SwiftData task store with in-progress timing columns and no submitted-prompt column waits for the store-write lock while CLI/XPC reads concurrently; migration backs up before adding the missing VARCHAR prompt column as nullable with no default and preserves elapsed time at zero. The CLI preserves the task and draft, and the visible app opens the migrated store and preserves the draft through a subsequent restart with duration still zero; metadata advances and later opens create no additional backup. The store is imported once into the protected filename and the legacy database remains unchanged. Committed WAL-only draft data survives import, and a subsequent edited draft survives restart without reimport.
     func test_task_store_repairs_missing_pending_prompt_column() throws {
         let title = "Legacy pending prompt store"
         let draft = "Committed WAL draft must survive import."
@@ -941,6 +941,19 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(migratedColumns.contains("ZPENDINGSUBMITTEDPROMPT"))
         XCTAssertTrue(migratedColumns.contains("ZINPROGRESSSTARTEDAT"))
         XCTAssertTrue(migratedColumns.contains("ZTOTALINPROGRESSSECONDS"))
+        let migratedColumnRows = migratedColumns
+            .split(whereSeparator: \.isNewline)
+            .map { $0.split(separator: "|", omittingEmptySubsequences: false).map(String.init) }
+        let promptColumn = try XCTUnwrap(migratedColumnRows.first { $0.count >= 6 && $0[1] == "ZPENDINGSUBMITTEDPROMPT" })
+        XCTAssertEqual(promptColumn[2], "VARCHAR")
+        XCTAssertEqual(promptColumn[3], "0")
+        XCTAssertEqual(promptColumn[4], "")
+        let durationColumn = try XCTUnwrap(
+            migratedColumnRows.first { $0.count >= 6 && $0[1] == "ZTOTALINPROGRESSSECONDS" }
+        )
+        XCTAssertEqual(durationColumn[2], "FLOAT")
+        XCTAssertEqual(durationColumn[3], "0")
+        XCTAssertEqual(durationColumn[4], "")
         XCTAssertEqual(try sqlite("SELECT ZTOTALINPROGRESSSECONDS FROM ZBOARDTASK", at: store).trimmingCharacters(in: .whitespacesAndNewlines), "0")
         XCTAssertNotEqual(try sqlite("SELECT hex(Z_PLIST) FROM Z_METADATA", at: store), legacyMetadata)
         XCTAssertEqual(try Data(contentsOf: legacyStore), legacyBytes)
@@ -965,6 +978,7 @@ final class StationAIUITests: XCTestCase {
         assertTaskVisible(title, inColumn: "Backlog")
         openTask(named: title)
         XCTAssertEqual(element("message-composer").value as? String, "Edited after import")
+        XCTAssertEqual(try sqlite("SELECT ZTOTALINPROGRESSSECONDS FROM ZBOARDTASK", at: store).trimmingCharacters(in: .whitespacesAndNewlines), "0")
         XCTAssertEqual(try diagnosticEvents().filter { $0["event"] as? String == "persistence.store.legacy_imported" }.count, 1)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(at: dataDirectory, includingPropertiesForKeys: nil)
             .filter { $0.lastPathComponent.hasPrefix("StationAI.store.before-pending-prompt-") && $0.pathExtension == "backup" }.count, 1)

@@ -49,7 +49,7 @@
   },
   {
     "id": "test_task_store_repairs_missing_pending_prompt_column",
-    "expectation": "A real legacy SwiftData task store matching the master model before pendingSubmittedPrompt was added, with in-progress timing columns and no submitted-prompt column, waits for the store-write lock while CLI/XPC reads concurrently; migration backs up before adding the missing column and preserves elapsed time at zero. The CLI preserves the task and draft, and the visible app opens the migrated store and preserves the draft through a subsequent restart; metadata advances and later opens create no additional backup. The store is imported once into the protected filename and the legacy database remains unchanged. Committed WAL-only draft data survives import, and a subsequent edited draft survives restart without reimport."
+    "expectation": "A real legacy SwiftData task store with in-progress timing columns and no submitted-prompt column waits for the store-write lock while CLI/XPC reads concurrently; migration backs up before adding the missing VARCHAR prompt column as nullable with no default and preserves elapsed time at zero. The CLI preserves the task and draft, and the visible app opens the migrated store and preserves the draft through a subsequent restart with duration still zero; metadata advances and later opens create no additional backup. The store is imported once into the protected filename and the legacy database remains unchanged. Committed WAL-only draft data survives import, and a subsequent edited draft survives restart without reimport."
   },
   {
     "id": "test_test_bundle_rejects_unisolated_data_directory",

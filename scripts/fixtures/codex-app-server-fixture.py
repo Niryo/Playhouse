@@ -84,8 +84,9 @@ def subagent_activity(kind, child_thread_id, agent_path, *, model=None, reasonin
         "type": "subAgentActivity",
         "kind": kind,
         "agentThreadId": child_thread_id,
-        "agentPath": agent_path,
     }
+    if agent_path is not None:
+        item["agentPath"] = agent_path
     if model is not None:
         item["model"] = model
     if reasoning_effort is not None:
@@ -378,7 +379,19 @@ def main():
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
-            elif mode.endswith("-subagent"):
+            elif mode.endswith("-subagent") or mode.endswith("-subagent-wait"):
+                if mode.endswith("-subagent-wait"):
+                    active = Path(str(sys.argv[0]) + ".turn-active")
+                    release = Path(str(sys.argv[0]) + ".turn-release")
+                    active.write_text("The subagent fixture turn is active before assistant output.\n", encoding="utf-8")
+                    deadline = time.monotonic() + 90
+                    while not release.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    was_released = release.exists()
+                    active.unlink(missing_ok=True)
+                    release.unlink(missing_ok=True)
+                    if not was_released:
+                        return 3
                 write({"jsonrpc": "2.0", "method": "item/started", "params": {
                     "threadId": THREAD_ID, "item": subagent_item("inProgress"),
                 }})
@@ -415,10 +428,8 @@ def main():
                 release.unlink(missing_ok=True)
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID,
-                    "item": subagent_activity(
-                        "completed", CHILD_THREAD_ID, "/agents/Sandbox review",
-                        model="gpt-6-sol", reasoning_effort="high",
-                    ),
+                    # A terminal event may omit metadata reported by the start.
+                    "item": subagent_activity("completed", CHILD_THREAD_ID, None),
                 }})
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID,
@@ -438,6 +449,45 @@ def main():
                     write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                         "threadId": THREAD_ID, "item": action_item,
                     }})
+                progress_text = "I inspected the project structure and am preparing the summary."
+                for phase, item_id, text in [("commentary", "item_stationai_commentary", progress_text)]:
+                    item = {"id": item_id, "type": "agentMessage", "text": "", "phase": phase}
+                    write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                        "threadId": THREAD_ID, "turnId": TURN_ID, "item": item,
+                    }})
+                    write({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {
+                        "threadId": THREAD_ID, "turnId": TURN_ID, "itemId": item_id, "delta": text,
+                    }})
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                        "threadId": THREAD_ID,
+                        "turnId": TURN_ID,
+                        "item": {**item, "text": text},
+                    }})
+                if mode.endswith("-subagent-wait"):
+                    active = Path(str(sys.argv[0]) + ".commentary-active")
+                    release = Path(str(sys.argv[0]) + ".commentary-release")
+                    active.write_text("The subagent fixture turn has live commentary.\n", encoding="utf-8")
+                    deadline = time.monotonic() + 90
+                    while not release.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    was_released = release.exists()
+                    active.unlink(missing_ok=True)
+                    release.unlink(missing_ok=True)
+                    if not was_released:
+                        return 3
+                phase, item_id, text = ("final_answer", "item_stationai_final", "The subagent inspected the project structure.")
+                item = {"id": item_id, "type": "agentMessage", "text": "", "phase": phase}
+                write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID, "item": item,
+                }})
+                write({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID, "itemId": item_id, "delta": text,
+                }})
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": THREAD_ID,
+                    "turnId": TURN_ID,
+                    "item": {**item, "text": text},
+                }})
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
@@ -576,10 +626,11 @@ def main():
                     {"id": "item_user_fixture", "type": "userMessage", "content": user_content},
                     {"id": "item_assistant_fixture", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."},
                 ] if user_content and not mode.endswith("-empty") else [])
-            if mode.endswith("-subagent"):
+            if mode.endswith("-subagent") or mode.endswith("-subagent-wait"):
                 contents = [
                     {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": "Delegate this task."}]},
-                    {"id": "item_assistant_fixture", "type": "agentMessage", "text": "The subagent inspected the project structure."},
+                    {"id": "item_stationai_commentary", "type": "agentMessage", "phase": "commentary", "text": "I inspected the project structure and am preparing the summary."},
+                    {"id": "item_stationai_final", "type": "agentMessage", "phase": "final_answer", "text": "The subagent inspected the project structure."},
                     subagent_item("completed"),
                     subagent_activity("completed", CHILD_THREAD_ID, "/agents/Sandbox review", model="gpt-6-sol", reasoning_effort="high"),
                     subagent_activity("interrupted", "00000000-0000-0000-0000-000000000003", "/agents/some_agent"),
