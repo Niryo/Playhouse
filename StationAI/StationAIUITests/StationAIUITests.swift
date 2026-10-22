@@ -1583,13 +1583,26 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Lifecycle rollout clears tasks and reports a retained dirty worktree")
     }
 
-    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status.
+    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards.
     func test_task_status_transitions_and_rejects_unknown_status() throws {
         let waitingFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-status-transition-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: waitingFixture.path))
         codexFixtureExecutable = waitingFixture.path
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Status transitions", roots: [fixture.primary.path])
+        try createTaskFixture(title: "Searchable board card", roots: [fixture.alternate.path])
+        XCTAssertFalse(element("board-search-field").exists, "Board search should stay hidden until requested.")
+        app.typeKey("f", modifierFlags: .command)
+        let boardSearch = element("board-search-field")
+        XCTAssertTrue(boardSearch.waitForExistence(timeout: 5), "Command+F should reveal the prominent board search.")
+        XCTAssertLessThan(element("board-search-bar").frame.maxY, element("board-columns-scroll-view").frame.minY, "Board search should sit above the task columns.")
+        boardSearch.typeText("Searchable")
+        XCTAssertTrue(app.buttons["Searchable board card"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Status transitions"].exists, "Nonmatching task cards should be filtered out.")
+        element("close-board-search-button").click()
+        XCTAssertFalse(element("board-search-field").exists)
+        XCTAssertTrue(app.buttons["Status transitions"].exists)
+        XCTAssertTrue(app.buttons["Searchable board card"].exists)
         let columns = ["backlog", "in-progress", "review"]
         for column in columns { XCTAssertTrue(element("column-heading-\(column)").exists, "Missing \(column) board column.") }
         XCTAssertFalse(element("column-heading-done").exists, "Done tasks should live in the archive, not a board column.")
