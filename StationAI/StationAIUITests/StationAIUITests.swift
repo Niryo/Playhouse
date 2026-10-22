@@ -340,7 +340,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "StationAI board opened with a healthy bridge")
     }
 
-    // case-contract: test_app_override_rejects_incompatible_bundles | Explicit app overrides reject obsolete compatibility metadata, foreign worktree or bridge identities, and nonisolated test data before launching; the current app preserves a saved draft across restart.
+    // case-contract: test_app_override_rejects_incompatible_bundles | Explicit app overrides reject obsolete compatibility metadata, foreign worktree or bridge identities, test IDs that do not match the current worktree, and nonisolated test data before launching; the current app preserves a saved draft across restart.
     func test_app_override_rejects_incompatible_bundles() throws {
         let root = repositoryRoot.path
         launchApp(defaultParent: fixture.parent.path)
@@ -2161,11 +2161,26 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Concurrent repository removal rejects a stale settings save")
     }
 
-    // case-contract: test_task_repository_removal_preserves_state_on_dirty_worktree | Removing a pending repository preserves the source repository and other context folders; removing a clean managed worktree waits for an active conversation turn and then succeeds, while a dirty worktree rejects removal and preserves its task record and files.
+    // case-contract: test_task_repository_removal_preserves_state_on_dirty_worktree | Removing the only pending repository leaves the task with no workspace and preserves the source repository; removing a pending repository preserves other context folders; removing a clean managed worktree waits for an active conversation turn and then succeeds, while a dirty worktree rejects removal and preserves its task record and files.
     func test_task_repository_removal_preserves_state_on_dirty_worktree() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
 
+        let soleTitle = "Sole repository removal through UI"
+        let sole = try runCLI(["task", "create", "--title", soleTitle, "--repo", fixture.primary.path])["result"] as? [String: Any]
+        let soleID = try XCTUnwrap(sole?["id"] as? String)
+        openTask(named: soleTitle)
+        element("conversation-repository-badge-primary").click()
+        element("remove-conversation-repository-button").click()
+        XCTAssertTrue(waitUntil({
+            guard let result = try? self.taskRecord(id: soleID),
+                  let records = result["repositoryWorktrees"] as? [Any] else { return false }
+            return records.isEmpty
+        }, timeout: 10), "Removing the only pending repository should leave the task without a workspace.")
+        XCTAssertEqual(try taskRecord(id: soleID)?["workspaceRoots"] as? [String], [])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.primary.path))
+
+        element("back-to-board-button").click()
         let pendingTitle = "Pending repository removal through UI"
         let pending = try runCLI([
             "task", "create", "--title", pendingTitle,
@@ -2722,7 +2737,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "New conversation shows its empty state")
     }
 
-    // case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while backing out saves an unsent prompt; reopening restores the draft without creating a branch or worktree, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
+    // case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while the composer automatically saves an unsent prompt as it is typed; clearing the composer clears the stored draft, backing out needs no Save button, and reopening restores the draft without creating a branch or worktree. Blank drafts cannot be stored, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
     func test_task_prompt_draft_persists_after_back() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-title-success-wait").path
         launchApp(defaultParent: fixture.parent.path)
@@ -2730,6 +2745,7 @@ final class StationAIUITests: XCTestCase {
         chooseRepositorySuggestion("primary")
         let composer = element("message-composer")
         XCTAssertTrue(composer.waitForExistence(timeout: 10), "Task creation should open its conversation immediately.")
+        XCTAssertFalse(element("save-task-prompt-button").exists, "Drafts should save automatically without a separate Save button.")
         let initialTask = try XCTUnwrap(tasksFromBoardList().first)
         let selectedRepository = try XCTUnwrap((initialTask["repositoryWorktrees"] as? [[String: Any]])?.first?["repositoryPath"] as? String)
         XCTAssertEqual(selectedRepository, fixture.primary.path)
@@ -2740,6 +2756,19 @@ final class StationAIUITests: XCTestCase {
         let prompt = "Please update the README and explain the change."
         composer.click()
         composer.typeText(prompt)
+        let taskID = try XCTUnwrap(initialTask["id"] as? String)
+        XCTAssertTrue(waitUntil({
+            ((try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) ?? nil) == prompt
+        }, timeout: 10), "The draft should persist while it is being typed.")
+        composer.typeKey("a", modifierFlags: .command)
+        composer.typeKey(.delete, modifierFlags: [])
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) == nil
+        }, timeout: 10), "Clearing the composer should clear the persisted draft.")
+        composer.typeText(prompt)
+        XCTAssertTrue(waitUntil({
+            ((try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) ?? nil) == prompt
+        }, timeout: 10), "Typing again should autosave the replacement draft.")
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
         let titleGenerationReady = URL(fileURLWithPath: codexFixtureExecutable! + ".resolve-ready")
@@ -2747,7 +2776,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: titleGenerationReady.path) }, timeout: 10), "The real app-server fixture should confirm that title generation is in flight.")
         let tasks = try tasksFromBoardList()
         let task = try XCTUnwrap(tasks.first)
-        let taskID = try XCTUnwrap(task["id"] as? String)
+        XCTAssertEqual(task["id"] as? String, taskID)
         let response = try runCLI(["task", "get", taskID])["result"] as? [String: Any]
         XCTAssertEqual(response?["savedPrompt"] as? String, prompt)
         XCTAssertEqual(response?["status"] as? String, "Backlog")
@@ -2784,7 +2813,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Unsent task prompt is saved after returning to backlog")
     }
 
-    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors.
+    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text and the composer expands beyond five lines before scrolling. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. During title preparation, CLI/XPC confirms the submitted prompt and conversation thread remain attached to the task, while the UI keeps Pause disabled until the task's conversation client has an interruptible turn. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors.
     func test_conversation_composer_rejects_blank_and_supports_live_turn_controls() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Blank message", roots: [fixture.primary.path])
@@ -2807,6 +2836,19 @@ final class StationAIUITests: XCTestCase {
         composer.typeKey(.return, modifierFlags: .shift)
         composer.typeText("Second line")
         XCTAssertEqual(composer.value as? String, "First line\nSecond line", "Shift+Enter should add a line without submitting the composer.")
+        let twoLineHeight = composer.frame.height
+        for index in 3...5 {
+            composer.typeKey(.return, modifierFlags: .shift)
+            composer.typeText("Line \(index)")
+        }
+        let fiveLineHeight = composer.frame.height
+        for index in 6...9 {
+            composer.typeKey(.return, modifierFlags: .shift)
+            composer.typeText("Line \(index)")
+        }
+        XCTAssertGreaterThan(composer.frame.height, twoLineHeight, "The composer should grow as a draft gains lines, up to its expanded limit.")
+        XCTAssertGreaterThan(composer.frame.height, fiveLineHeight, "The composer should expand beyond the previous five-line limit.")
+        XCTAssertTrue(element("conversation-scroll-view").exists, "The transcript should expose its scroll view for reading the full conversation.")
         XCTAssertTrue(sendButton.isEnabled)
         XCTAssertEqual(((try runCLI(["conversation", "history", taskID(named: "Blank message")])["result"] as? [String: Any])?["messages"] as? [Any])?.count, 0, "Adding a line must not send a conversation message.")
         composer.typeKey("a", modifierFlags: .command)
@@ -2844,7 +2886,8 @@ final class StationAIUITests: XCTestCase {
             openTask(named: "Untitled task")
             let titleComposer = element("message-composer")
             XCTAssertTrue(titleComposer.waitForExistence(timeout: 10))
-            let titlePrompt = "Explain the workspace layout briefly."
+            let titlePrompt = "Transcript entry " + String(repeating: "Readable chat content for scrolling. ", count: 120)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             titleComposer.click()
             titleComposer.typeText(titlePrompt)
             element("send-message-button").click()
@@ -2864,6 +2907,7 @@ final class StationAIUITests: XCTestCase {
             XCTAssertEqual(element("message-composer").value as? String, "", "A submitted prompt must not reappear as a draft after returning during title generation.")
             XCTAssertTrue(app.staticTexts[titlePrompt].waitForExistence(timeout: 5), "The submitted prompt should remain visible as a conversation message after reopening.")
             XCTAssertTrue(element("pause-response-button").exists, "The reopened task should retain its active-send controls while the Codex thread is being prepared.")
+            XCTAssertFalse(element("pause-response-button").isEnabled, "Pause must stay disabled until this task has an interruptible Codex turn.")
             XCTAssertFalse(element("send-message-button").exists, "A second message must not be sent while the submitted prompt is still active.")
             try Data("continue\n".utf8).write(to: URL(fileURLWithPath: titleFixtureExecutable + ".resolve-continue"))
             XCTAssertTrue(waitUntil({
@@ -2889,6 +2933,16 @@ final class StationAIUITests: XCTestCase {
             let serializedTitleEvents = String(data: try JSONSerialization.data(withJSONObject: titleEvents), encoding: .utf8) ?? ""
             XCTAssertFalse(serializedTitleEvents.contains(titlePrompt), "Title diagnostics must not include conversation text.")
             XCTAssertFalse(serializedTitleEvents.contains("Generated fixture title"), "Title diagnostics must not include generated title text.")
+            let transcriptScrollView = element("conversation-scroll-view")
+            let longPromptMessage = app.staticTexts[titlePrompt]
+            XCTAssertTrue(longPromptMessage.waitForExistence(timeout: 5), "The full long prompt should remain present in conversation history.")
+            XCTAssertTrue(app.scrollBars.firstMatch.waitForExistence(timeout: 5), "An overflowing transcript should expose a visible scrollbar.")
+            let latestPosition = longPromptMessage.frame.minY
+            transcriptScrollView.swipeDown()
+            XCTAssertTrue(waitUntil({ longPromptMessage.frame.minY > latestPosition + 20 }, timeout: 5), "Scrolling up should reveal earlier content in the long message.")
+            let earlierPosition = longPromptMessage.frame.minY
+            transcriptScrollView.swipeUp()
+            XCTAssertTrue(waitUntil({ longPromptMessage.frame.minY < earlierPosition - 20 }, timeout: 5), "Scrolling down should return to later content in the long message.")
             _ = try runCLI(["task", "rename", titleTaskID, "--title", "Generated title success"])
             element("back-to-board-button").click()
 
@@ -3142,7 +3196,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts[secondPrompt].waitForExistence(timeout: 10), "Reopening the task should load the completed second send from the real app-server thread.")
     }
 
-    // case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, sends image-only or text-and-image prompts to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history. Diagnostics record image MIME and encoded size without storing image payloads.
+    // case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history. Diagnostics record image MIME and encoded size without storing image payloads.
     func test_conversation_sends_image_attachments() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -3192,8 +3246,28 @@ final class StationAIUITests: XCTestCase {
         try createTaskFixture(title: "Pasted image conversation", roots: [fixture.primary.path])
         openTask(named: "Pasted image conversation")
 
+        let largeBitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 3000, pixelsHigh: 1500, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        let pixelBytes = try XCTUnwrap(largeBitmap.bitmapData)
+        var pixelState: UInt32 = 0x5EED1234
+        for y in 0..<1500 {
+            for x in 0..<3000 {
+                let offset = y * largeBitmap.bytesPerRow + x * 4
+                pixelState = pixelState &* 1_664_525 &+ 1_013_904_223
+                pixelBytes[offset] = UInt8(truncatingIfNeeded: pixelState >> 24)
+                pixelState = pixelState &* 1_664_525 &+ 1_013_904_223
+                pixelBytes[offset + 1] = UInt8(truncatingIfNeeded: pixelState >> 24)
+                pixelState = pixelState &* 1_664_525 &+ 1_013_904_223
+                pixelBytes[offset + 2] = UInt8(truncatingIfNeeded: pixelState >> 24)
+            pixelBytes[offset + 3] = 0xFF
+            }
+        }
+        let rawClipboardPNG = try XCTUnwrap(largeBitmap.representation(using: .png, properties: [:]))
+        XCTAssertGreaterThan(rawClipboardPNG.count, 10_000_000, "The clipboard source PNG should exceed the encoded payload limit.")
+        XCTAssertGreaterThan(try XCTUnwrap(largeBitmap.tiffRepresentation).count, 10_000_000, "The clipboard TIFF representation should exceed the raw limit that previously caused rejection.")
+        let largeImage = NSImage(size: NSSize(width: 3000, height: 1500))
+        largeImage.addRepresentation(largeBitmap)
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects([try XCTUnwrap(NSImage(contentsOf: image))])
+        NSPasteboard.general.writeObjects([largeImage])
         let pastedComposer = element("message-composer")
         pastedComposer.click()
         pastedComposer.typeKey("v", modifierFlags: .command)
@@ -3212,9 +3286,16 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(pastedTurn["userMessage"] is NSNull, "The fixture should receive no text for the pasted image-only turn.")
         XCTAssertEqual((pastedTurn["images"] as? [String])?.count, 1, "The fixture should receive the pasted image.")
         let pastedImage = try XCTUnwrap((pastedTurn["images"] as? [String])?.first)
-        XCTAssertTrue(pastedImage.hasPrefix("data:image/png;base64,"), "The pasted image should reach Codex as a data URL.")
+        XCTAssertTrue(pastedImage.hasPrefix("data:image/jpeg;base64,"), "An oversized clipboard image should be compressed and reach Codex as JPEG.")
+        let pastedPayload = try XCTUnwrap(Data(base64Encoded: String(pastedImage.split(separator: ",", maxSplits: 1)[1])))
+        XCTAssertLessThanOrEqual(pastedPayload.count, 10_000_000, "The full-size clipboard image should fit the 10 MB payload limit.")
         XCTAssertEqual(pastedTurn["imageInputs"] as? [[String: String]], [["type": "image", "url": pastedImage]], "Image-only requests should use the tagged image URL payload.")
         imageDiagnostics = try diagnosticEvents()
+        XCTAssertTrue(imageDiagnostics.contains {
+            $0["event"] as? String == "bridge.request.succeeded"
+                && $0["command"] as? String == "conversation.send"
+                && $0["argument.images.0.mime"] as? String == "image/jpeg"
+        }, "The compressed image-only request should retain JPEG MIME metadata in diagnostics.")
         let serializedImageDiagnostics = String(data: try JSONSerialization.data(withJSONObject: imageDiagnostics), encoding: .utf8) ?? ""
         XCTAssertFalse(serializedImageDiagnostics.contains(pickedImage))
         XCTAssertFalse(serializedImageDiagnostics.contains(pastedImage))
@@ -3962,8 +4043,8 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15), "The direct-created task should expose its conversation composer.")
         composer.click()
         composer.typeText(prompt ?? title)
-        element("save-task-prompt-button").click()
-        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "Saving the task prompt should return to the board.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "Returning to the board should preserve the automatically saved prompt.")
         guard let task = try? tasksFromBoardList().first, let taskID = task["id"] as? String else {
             XCTFail("The created task should remain in Backlog after saving its prompt.")
             return

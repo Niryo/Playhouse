@@ -392,6 +392,10 @@ final class CodexAppServerClient: ObservableObject {
             || pendingUserInputThreadID == threadID
     }
 
+    func canInterruptActiveTurn(threadID: String) -> Bool {
+        activeThreadID == threadID && activeTurnID != nil
+    }
+
     func markTurnStarting(threadID: String) {
         startingThreadIDs.insert(threadID)
         activeThreadID = threadID

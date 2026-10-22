@@ -149,6 +149,7 @@ else
 fi
 derived_data_dir="${derived_data_root}/stationai-ui-derived-data-${xcode_version}-${architecture}-${repository_cache_key}"
 test_run_identifier="$(basename "${test_output_dir}" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')"
+source_bundle_identifier="$("${repository_root}/scripts/app-profile.sh" "${repository_root}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["bundleID"])')"
 task_pr_seeder="${fixture_root}/seed-task-pr-link"
 xcrun swiftc -module-name StationAI \
   "${repository_root}/StationAI/App/BoardTask.swift" \
@@ -222,7 +223,7 @@ for (( batch_index=0; batch_index<batch_count; batch_index++ )); do
   result_bundle="${test_output_dir}/StationAI-UI-batch-${batch_tag}.xcresult"
   summary_path="${test_output_dir}/test-summary-batch-${batch_tag}.json"
   dashboard_log="${test_output_dir}/xcodebuild-batch-${batch_tag}.log"
-  app_bundle_identifier="com.stationai.app.e2e.${test_run_identifier}.b${batch_tag}"
+  app_bundle_identifier="${source_bundle_identifier}.e2e.${test_run_identifier}.b${batch_tag}"
   for ui_case in "${batch_cases[@]}"; do
     if [[ "${ui_case}" == "test_worktree_app_profiles_isolate_identity_and_store" ]]; then
       linked_profile_key="$("${repository_root}/scripts/app-profile.sh" "${fixture_root}/existing-worktree" | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])')"
