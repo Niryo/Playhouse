@@ -960,6 +960,53 @@ final class BoardTaskManager {
         return lock.l_type != Int16(F_UNLCK)
     }
 
+    private func conversationTurnOutcomeURL(_ id: UUID) throws -> URL {
+        guard let conversationTurnLockDirectory else {
+            throw BridgeFileLockError(message: "Couldn't determine the task-store location for the conversation outcome.")
+        }
+        return conversationTurnLockDirectory.appendingPathComponent("\(id.uuidString).outcome")
+    }
+
+    private func conversationTurnActiveURL(_ id: UUID) throws -> URL {
+        guard let conversationTurnLockDirectory else {
+            throw BridgeFileLockError(message: "Couldn't determine the task-store location for the active conversation turn.")
+        }
+        return conversationTurnLockDirectory.appendingPathComponent("\(id.uuidString).active")
+    }
+
+    func prepareConversationTurnOutcome(_ id: UUID) throws {
+        for marker in [try conversationTurnOutcomeURL(id), try conversationTurnActiveURL(id)]
+        where FileManager.default.fileExists(atPath: marker.path) {
+            try FileManager.default.removeItem(at: marker)
+        }
+    }
+
+    func activateConversationTurnOutcome(_ id: UUID) throws {
+        guard try hasConversationTurnReservation(id) else {
+            throw BridgeCommandError(code: "invalid_transition", message: "A turn outcome requires an active conversation turn.")
+        }
+        let marker = try conversationTurnActiveURL(id)
+        try FileManager.default.createDirectory(at: marker.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data().write(to: marker, options: .atomic)
+    }
+
+    func clearConversationTurnOutcome(_ id: UUID) {
+        try? FileManager.default.removeItem(at: try conversationTurnOutcomeURL(id))
+        try? FileManager.default.removeItem(at: try conversationTurnActiveURL(id))
+    }
+
+    func finishConversationTurnOutcome(_ id: UUID) async throws -> String? {
+        let outcomeURL = try conversationTurnOutcomeURL(id)
+        let activeURL = try conversationTurnActiveURL(id)
+        let lockURL = outcomeURL.appendingPathExtension("lock")
+        return try await withExclusiveFileLocks(at: [lockURL], purpose: "conversation-outcome") {
+            try? FileManager.default.removeItem(at: activeURL)
+            defer { try? FileManager.default.removeItem(at: outcomeURL) }
+            guard let data = try? Data(contentsOf: outcomeURL) else { return nil }
+            return String(data: data, encoding: .utf8)
+        }
+    }
+
     private func withRepositoryAllocationLocks<T>(
         _ repositoryPaths: [String],
         operation: @MainActor () async throws -> T
@@ -1612,6 +1659,37 @@ final class BoardTaskManager {
                 "status": task.status.rawValue
             ])
             return BoardTaskRecord(task: task)
+        }
+    }
+
+    func reportTurnOutcome(_ id: UUID, outcome: String) async throws -> String {
+        switch outcome {
+        case "completed", "waiting-response": break
+        default:
+            throw BridgeCommandError(
+                code: "invalid_argument",
+                message: "Unknown turn outcome '\(outcome)'. Valid outcomes: completed, waiting-response."
+            )
+        }
+        let outcomeURL = try conversationTurnOutcomeURL(id)
+        let activeURL = try conversationTurnActiveURL(id)
+        let lockURL = outcomeURL.appendingPathExtension("lock")
+        return try await withExclusiveFileLocks(at: [lockURL], purpose: "conversation-outcome") {
+            guard try self.hasConversationTurnReservation(id), FileManager.default.fileExists(atPath: activeURL.path) else {
+                throw BridgeCommandError(
+                    code: "invalid_transition",
+                    message: "Turn outcomes can only be reported during an active conversation turn."
+                )
+            }
+            let task = try requireTask(id)
+            guard task.status == .inProgress else {
+                throw BridgeCommandError(
+                    code: "invalid_transition",
+                    message: "Turn outcomes can only be reported while a task is In Progress."
+                )
+            }
+            try Data(outcome.utf8).write(to: outcomeURL, options: .atomic)
+            return outcome
         }
     }
 
@@ -2522,7 +2600,12 @@ final class CodexConversationManager {
             "taskStatus": task.status.rawValue
         ]))
         do {
-            let history = try await client.loadThread(id: threadID, workspace: workspace, onActionRequest: onActionRequest)
+            let history = try await client.loadThread(
+                id: threadID,
+                workspace: workspace,
+                developerInstructions: TaskProgressReportInstructions.make(taskID: taskID),
+                onActionRequest: onActionRequest
+            )
             StationAIDiagnostics.record("conversation.history.succeeded", fields: client.diagnosticFields([
                 "taskID": taskID.uuidString,
                 "threadID": threadID,
@@ -2709,6 +2792,8 @@ final class CodexConversationManager {
         guard Self.isValidModelID(modelID) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
         }
+        try tasks.prepareConversationTurnOutcome(taskID)
+        defer { tasks.clearConversationTurnOutcome(taskID) }
         var task = try tasks.taskModel(taskID)
         var persistedThreadID = task.codexThreadID
         StationAIDiagnostics.record("conversation.send.started", fields: client.diagnosticFields([
@@ -2820,6 +2905,7 @@ final class CodexConversationManager {
                 onTurnStarting?()
             }
             phase = "codex-turn"
+            try tasks.activateConversationTurnOutcome(taskID)
             try await client.sendMessage(
                 normalizedText,
                 imageDataURLs: imageDataURLs,
@@ -2827,6 +2913,7 @@ final class CodexConversationManager {
                 modelID: modelID,
                 threadID: threadID,
                 workspace: workspace,
+                developerInstructions: TaskProgressReportInstructions.make(taskID: taskID),
                 onDelta: { delta in onUpdate(ConversationUpdate(type: "text_delta", text: delta)) },
                 onFinalMessage: { message in onUpdate(ConversationUpdate(type: "assistant_final", text: message)) },
                 onActivity: { activity in onUpdate(ConversationUpdate(type: "activity", activity: activity)) },
@@ -2869,7 +2956,9 @@ final class CodexConversationManager {
             )
             phase = "worktree-finalization"
             phase = "review-status-persistence"
-            _ = try await tasks.setLifecycleStatus(taskID, to: .review)
+            let reportedOutcome = try await tasks.finishConversationTurnOutcome(taskID)
+            let finalStatus: TaskStatus = reportedOutcome == "completed" ? .review : .waitingResponse
+            _ = try await tasks.setLifecycleStatus(taskID, to: finalStatus)
         } catch {
             await titleGeneration?.value
             var fields = StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
@@ -3117,6 +3206,13 @@ final class StationAIBridgeRuntime {
                 ))
             case "task.progress.clear":
                 result = try Self.value(try await taskManager.clearProgressReport(request.requiredUUID("taskID")))
+            case "task.outcome":
+                let taskID = try request.requiredUUID("taskID")
+                let outcome = try await taskManager.reportTurnOutcome(taskID, outcome: request.requiredString("outcome"))
+                result = .object([
+                    "outcome": .string(outcome),
+                    "taskStatus": .string(try taskManager.taskModel(taskID).status.rawValue)
+                ])
             case "task.rename":
                 let taskID = try request.requiredUUID("taskID")
                 let title = try request.requiredString("title")
