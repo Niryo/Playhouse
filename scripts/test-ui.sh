@@ -5,6 +5,20 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export STATIONAI_REPOSITORY_ROOT="${repository_root}"
 script_path="${repository_root}/scripts/test-ui.sh"
 
+# Visible UI automation must run in the isolated Tart guest. The VM runner
+# supplies this marker only inside its source snapshot on virtual Mac hardware.
+vm_model="$(sysctl -n hw.model 2>/dev/null || true)"
+if [[ "${STATIONAI_UI_TART_GUEST:-}" != "1" || "$vm_model" != VirtualMac* ]]; then
+	if [[ "${1:-}" == "--locked" ]]; then
+		shift
+		export STATIONAI_UI_TART_HOST_LOCKED=1
+	fi
+	if [[ "${STATIONAI_RUN_CODEX_INTEGRATION:-0}" == "1" ]]; then
+		exec "${repository_root}/scripts/test-ui-tart.sh" --live-codex "$@"
+	fi
+	exec "${repository_root}/scripts/test-ui-tart.sh" "$@"
+fi
+
 if [[ "${1:-}" != "--locked" ]]; then
 	exec "${repository_root}/scripts/with-e2e-lock.sh" -- bash "${script_path}" --locked "$@"
 fi
@@ -60,7 +74,8 @@ codex_fixtures=(
   ui empty nonblocking slow plan-slow interrupted abort success
   title-success title-failure title-success-wait hold
   progress-hold-release progress-hold-release-failed progress-hold-release-interrupted
-  progress-question success-wait store-write-success-wait nonblocking-slow subagent markdown
+  progress-question success-wait store-write-success-wait concurrent-serial-success-wait
+  status-transition-ui nonblocking-slow subagent markdown
 )
 for fixture in "${codex_fixtures[@]}"; do
   fixture_path="${fixture_root}/codex-fixture-${fixture}"
@@ -125,8 +140,14 @@ python3 "${dashboard_script}" "${dashboard_arguments[@]}" >/dev/null
 
 architecture="$(uname -m)"
 xcode_version="$(xcodebuild -version | awk '/^Xcode / {print $2}')"
-repository_cache_key="$(printf '%s' "${repository_root}" | shasum -a 256 | cut -c 1-12)"
-derived_data_dir="${TMPDIR:-/tmp}/stationai-ui-derived-data-${xcode_version}-${architecture}-${repository_cache_key}"
+if [[ "${STATIONAI_UI_TART_GUEST:-0}" == "1" ]]; then
+  repository_cache_key="tart-vm-v3"
+  derived_data_root="${HOME}/StationAIUITestRuns/DerivedData"
+else
+  repository_cache_key="$(printf '%s' "${repository_root}" | shasum -a 256 | cut -c 1-12)"
+  derived_data_root="${TMPDIR:-/tmp}"
+fi
+derived_data_dir="${derived_data_root}/stationai-ui-derived-data-${xcode_version}-${architecture}-${repository_cache_key}"
 test_run_identifier="$(basename "${test_output_dir}" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')"
 task_pr_seeder="${fixture_root}/seed-task-pr-link"
 xcrun swiftc -module-name StationAI \

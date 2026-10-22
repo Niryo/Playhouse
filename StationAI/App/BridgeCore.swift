@@ -111,7 +111,8 @@ enum StationAIStore {
         StationAIDiagnostics.useDataDirectory(dataDirectory)
         do {
             try FileManager.default.createDirectory(at: storeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if (try? storeNeedsPendingPromptColumn(storeURL)) == true || FileManager.default.fileExists(atPath: storeURL.deletingLastPathComponent().appendingPathComponent("StationAI.store").path) {
+            let legacyStoreURL = storeURL.deletingLastPathComponent().appendingPathComponent("StationAI.store")
+            if FileManager.default.fileExists(atPath: legacyStoreURL.path) || (try? storeNeedsPendingPromptColumn(storeURL)) == true {
                 StationAIDiagnostics.recordAndFlush("persistence.store.schema_migration.waiting_for_schema_lock", fields: [
                     "storePath": storeURL.path
                 ])
