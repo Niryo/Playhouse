@@ -47,7 +47,7 @@ def main():
     ))
     cli = app_bundle / "Contents/MacOS/stationai-cli"
     service_info = app_bundle / "Contents/XPCServices/StationAIBridge.xpc/Contents/Info.plist"
-    fixture = Path("/tmp/stationai-bridge-workspaces")
+    fixture = Path(os.environ.get("STATIONAI_BRIDGE_TEST_FIXTURE_ROOT", "/tmp/stationai-bridge-workspaces"))
     require(cli.is_file(), f"Bundled CLI is missing: {cli}; run scripts/run.sh first.")
     bridge_fixture_marker = fixture / ".stationai-bridge-fixture"
     require(

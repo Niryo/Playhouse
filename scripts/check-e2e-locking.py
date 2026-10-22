@@ -15,7 +15,8 @@ runner = (root / "scripts/test-e2e.sh").read_text()
 assert "with-e2e-lock.sh" not in runner
 assert ".bridge-run.lock" in runner
 assert "with-e2e-lock.sh" in (root / "scripts/test-ui-tart.sh").read_text()
-assert "with-e2e-lock.sh" in (root / "scripts/stationai.sh").read_text()
+assert "with-e2e-lock.sh" not in (root / "scripts/stationai.sh").read_text()
+assert "with-e2e-lock.sh" not in (root / "scripts/test-codex-integration.sh").read_text()
 
 with tempfile.TemporaryDirectory(prefix="stationai-lock-check-") as directory:
     lock = Path(directory) / "session.lock"
