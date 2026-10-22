@@ -5,7 +5,7 @@ import SwiftUI
 struct KanbanBoardView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var codexClient: CodexAppServerClient
-    @Query(sort: \BoardTask.createdAt, order: .reverse) private var tasks: [BoardTask]
+    @Query(filter: #Predicate<BoardTask> { $0.statusRawValue != "Done" }, sort: \BoardTask.createdAt, order: .reverse) private var tasks: [BoardTask]
     @State private var isCreatingNewTask = false
     @State private var saveError: String?
     @State private var lifecycleResetNotice: String?
@@ -18,9 +18,16 @@ struct KanbanBoardView: View {
     @State private var isDoneTargetActive = false
     @State private var isShowingDoneArchive = false
     @State private var archiveSearchText = ""
-    @State private var archivedConversationText: [UUID: String] = [:]
     @State private var isIndexingArchive = false
+    @State private var archiveSearchResults: [BoardTask]?
+    @State private var archiveTasks: [BoardTask] = []
+    @State private var archiveOffset = 0
+    @State private var archiveHasMore = true
+    @State private var isLoadingArchivePage = false
     @State private var taskCreatingPullRequests = Set<UUID>()
+    @State private var mergedReviewTaskIDs = Set<UUID>()
+    @State private var checkingMergedPullRequests = false
+    @State private var mergedPullRequestCheckPending = false
     @State private var taskAwaitingUnmergedConfirmation: UUID?
     @State private var taskAwaitingPRConflictChoice: BoardTask?
     @State private var rememberPRConflictAction = false
@@ -45,12 +52,16 @@ struct KanbanBoardView: View {
         .background(WorkspaceTheme.windowBackground)
         .frame(minWidth: 980, minHeight: 640)
         .onAppear {
+            checkMergedReviewPullRequests()
             let retained = StationAIStore.takeLifecycleResetNotice(
                 dataDirectory: ProcessInfo.processInfo.environment["STATIONAI_DATA_DIRECTORY"]
             )
             if !retained.isEmpty {
                 lifecycleResetNotice = "Existing tasks were cleared. These dirty managed worktrees were kept:\n\n" + retained.joined(separator: "\n")
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            checkMergedReviewPullRequests()
         }
         .sheet(isPresented: Binding(
             get: { taskBeingRenamed != nil },
@@ -109,7 +120,7 @@ struct KanbanBoardView: View {
         } message: {
             Text(saveError ?? "Please try again.")
         }
-        .alert("Couldn't create pull request", isPresented: Binding(
+        .alert("Pull request operation failed", isPresented: Binding(
             get: { pullRequestError != nil },
             set: { if !$0 { pullRequestError = nil } }
         )) {
@@ -318,7 +329,28 @@ struct KanbanBoardView: View {
             }
         }
         .animation(.easeInOut(duration: 0.24), value: isShowingDoneArchive)
-        .task(id: "\(isShowingDoneArchive)-\(tasks.filter { $0.status == .done }.count)") { await indexDoneConversationsIfNeeded() }
+        .task(id: "\(isShowingDoneArchive)-\(archiveSearchText)") {
+            guard isShowingDoneArchive else { return }
+            if archiveTasks.isEmpty && archiveHasMore { loadNextArchivePage() }
+            let query = archiveSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !query.isEmpty else { archiveSearchResults = nil; return }
+            archiveSearchResults = nil
+            isIndexingArchive = true
+            defer { isIndexingArchive = false }
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled else { return }
+                let manager = CodexConversationManager(tasks: BoardTaskManager(modelContext: modelContext), client: codexClient)
+                let records = try await manager.searchArchive(query: query)
+                guard !Task.isCancelled else { return }
+                archiveSearchResults = records.compactMap { try? BoardTaskManager(modelContext: modelContext).taskModel($0.id) }
+            } catch is CancellationError {
+                return
+            } catch {
+                saveError = error.localizedDescription
+                archiveSearchResults = []
+            }
+        }
     }
 
     @ViewBuilder
@@ -331,6 +363,7 @@ struct KanbanBoardView: View {
             onMoveTask: { id, status in moveTask(id: id, to: status) },
             onCreatePullRequests: { createPullRequests(for: $0) },
             creatingPullRequestTaskIDs: taskCreatingPullRequests,
+            mergedReviewTaskIDs: mergedReviewTaskIDs,
             onAddTask: openNewTask,
             onOpenTask: { selectedTask = $0 },
             onRenameTask: { taskBeingRenamed = $0 },
@@ -475,23 +508,13 @@ struct KanbanBoardView: View {
 
     private var doneArchivePanel: some View {
         let query = archiveSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let completed = tasks.filter { $0.status == .done }
-        let titleMatches = completed.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) }
-        let conversationMatches = completed.filter { task in
-            !query.isEmpty && !titleMatches.contains(where: { $0.id == task.id }) &&
-                (archivedConversationText[task.id]?.localizedCaseInsensitiveContains(query) ?? false)
-        }
-        let results = (titleMatches + conversationMatches).sorted { lhs, rhs in
-            let lhsTitle = query.isEmpty || lhs.title.localizedCaseInsensitiveContains(query)
-            let rhsTitle = query.isEmpty || rhs.title.localizedCaseInsensitiveContains(query)
-            if lhsTitle != rhsTitle { return lhsTitle }
-            return lhs.createdAt > rhs.createdAt
-        }
+        let completed = query.isEmpty ? archiveTasks : (archiveSearchResults ?? [])
+        let results = completed
         return VStack(spacing: 0) {
             HStack {
                 Text("Done tasks").font(.system(size: 14, weight: .semibold))
                 Spacer()
-                Button { withAnimation { isShowingDoneArchive = false } } label: { Image(systemName: "xmark") }
+                Button { closeDoneArchive() } label: { Image(systemName: "xmark") }
                 .buttonHoverPointer()
                 .help("Close done tasks")
                     .buttonStyle(.plain).accessibilityLabel("Close done tasks")
@@ -512,10 +535,7 @@ struct KanbanBoardView: View {
                 }
             }
             .padding(10).background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 9)).padding(12)
-            if isIndexingArchive {
-                ProgressView("Searching conversations…").controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .accessibilityIdentifier("done-archive-indexing")
-            } else if results.isEmpty {
+            if results.isEmpty && (query.isEmpty ? !archiveHasMore && !isLoadingArchivePage : archiveSearchResults != nil) && !isIndexingArchive {
                 Text(query.isEmpty ? "No completed tasks" : "No matching tasks")
                     .font(.system(size: 12)).foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
                     .accessibilityIdentifier("done-archive-empty-state")
@@ -524,7 +544,7 @@ struct KanbanBoardView: View {
                     LazyVStack(spacing: 5) {
                         ForEach(results) { task in
                             Button {
-                                isShowingDoneArchive = false
+                                closeDoneArchive()
                                 selectedTask = task
                                 isSelectedTaskNew = false
                             } label: {
@@ -542,6 +562,9 @@ struct KanbanBoardView: View {
                             .help("Open task: \(task.title)")
                             .buttonStyle(.plain)
                             .accessibilityIdentifier("done-archive-task-\(task.id.uuidString)")
+                            .onAppear {
+                                if query.isEmpty && task.id == archiveTasks.last?.id { loadNextArchivePage() }
+                            }
                             .overlay(alignment: .trailing) {
                                 if !task.repositoryWorktrees.isEmpty {
                                     archivedTaskPullRequestControl(task)
@@ -552,9 +575,13 @@ struct KanbanBoardView: View {
                         }
                     }
                     .padding(.horizontal, 10)
+                    if isLoadingArchivePage || isIndexingArchive {
+                        ProgressView().controlSize(.small).padding(12)
+                    }
                 }
                 .scrollIndicators(.visible)
                 .accessibilityIdentifier("done-archive-list")
+                .accessibilityValue("\(archiveTasks.count) tasks loaded")
             }
         }
     }
@@ -594,21 +621,34 @@ struct KanbanBoardView: View {
     }
 
     @MainActor
-    private func indexDoneConversationsIfNeeded() async {
-        guard isShowingDoneArchive,
-              tasks.contains(where: { $0.status == .done && archivedConversationText[$0.id] == nil }) else { return }
-        isIndexingArchive = true
-        defer { isIndexingArchive = false }
-        let manager = CodexConversationManager(tasks: BoardTaskManager(modelContext: modelContext), client: codexClient)
-        for task in tasks where task.status == .done && archivedConversationText[task.id] == nil {
-            guard !Task.isCancelled else { return }
-            do {
-                let history = try await manager.history(taskID: task.id)
-                archivedConversationText[task.id] = history.messages.map(\.text).joined(separator: "\n")
-            } catch {
-                archivedConversationText[task.id] = ""
-            }
+    private func loadNextArchivePage() {
+        guard isShowingDoneArchive, archiveHasMore, !isLoadingArchivePage else { return }
+        isLoadingArchivePage = true
+        var descriptor = FetchDescriptor<BoardTask>(
+            predicate: #Predicate { $0.statusRawValue == "Done" },
+            sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
+        )
+        descriptor.fetchOffset = archiveOffset
+        descriptor.fetchLimit = 40
+        do {
+            let page = try modelContext.fetch(descriptor)
+            archiveTasks.append(contentsOf: page)
+            archiveOffset += page.count
+            archiveHasMore = page.count == 40
+        } catch {
+            saveError = error.localizedDescription
+            archiveHasMore = false
         }
+        isLoadingArchivePage = false
+    }
+
+    @MainActor
+    private func closeDoneArchive() {
+        isShowingDoneArchive = false
+        archiveTasks = []
+        archiveSearchResults = nil
+        archiveOffset = 0
+        archiveHasMore = true
     }
 
     private var isShowingSaveError: Binding<Bool> {
@@ -671,6 +711,50 @@ struct KanbanBoardView: View {
                 taskAwaitingUnmergedConfirmation = id
             } catch {
                 doneMoveError = error.localizedDescription
+            }
+        }
+    }
+
+    private func checkMergedReviewPullRequests() {
+        guard !checkingMergedPullRequests else {
+            mergedPullRequestCheckPending = true
+            return
+        }
+        checkingMergedPullRequests = true
+        Task { @MainActor in
+            defer {
+                checkingMergedPullRequests = false
+                if mergedPullRequestCheckPending {
+                    mergedPullRequestCheckPending = false
+                    checkMergedReviewPullRequests()
+                }
+            }
+            var merged = Set<UUID>()
+            let reviewTasks = tasks.filter { task in
+                task.status == .review && task.repositoryWorktrees.contains { !$0.isPending && $0.pullRequestNumber != nil }
+            }
+            guard !reviewTasks.isEmpty else {
+                mergedReviewTaskIDs = []
+                return
+            }
+            do {
+                let service = StationAIPullRequestService()
+                let executable = try service.resolveExecutable()
+                for task in reviewTasks {
+                    let linked = task.repositoryWorktrees.filter { !$0.isPending && $0.pullRequestNumber != nil }
+                    guard !linked.isEmpty else { continue }
+                    var allMerged = true
+                    for repository in linked {
+                        if try await !service.isMerged(repository, executable: executable) {
+                            allMerged = false
+                        }
+                    }
+                    if allMerged { merged.insert(task.id) }
+                }
+                mergedReviewTaskIDs = merged
+            } catch {
+                mergedReviewTaskIDs = merged
+                pullRequestError = error.localizedDescription
             }
         }
     }
@@ -794,6 +878,7 @@ private struct KanbanColumnView: View {
     let onMoveTask: (UUID, TaskStatus) -> Void
     let onCreatePullRequests: (BoardTask) -> Void
     let creatingPullRequestTaskIDs: Set<UUID>
+    let mergedReviewTaskIDs: Set<UUID>
     let onAddTask: () -> Void
     let onOpenTask: (BoardTask) -> Void
     let onRenameTask: (BoardTask) -> Void
@@ -898,6 +983,7 @@ private struct KanbanColumnView: View {
             onDelete: { onDeleteTask(task) },
             onCreatePullRequests: { onCreatePullRequests(task) },
             isCreatingPullRequests: creatingPullRequestTaskIDs.contains(task.id),
+            isPullRequestMerged: mergedReviewTaskIDs.contains(task.id),
             onMoveToDone: task.status == .review ? { onMoveTask(task.id, .done) } : nil
         )
 
@@ -1059,6 +1145,7 @@ private struct TaskCardView: View {
     let onDelete: () -> Void
     let onCreatePullRequests: () -> Void
     let isCreatingPullRequests: Bool
+    let isPullRequestMerged: Bool
     let onMoveToDone: (() -> Void)?
 
     var body: some View {
@@ -1115,8 +1202,10 @@ private struct TaskCardView: View {
             HStack(spacing: 6) {
                 if task.title == "Generating title…" { ProgressView().controlSize(.small) }
                 Text(task.title)
+                    .lineSpacing(2)
             }
                 .font(.system(size: 13, weight: .semibold))
+                .tracking(0.35)
                 .foregroundStyle(WorkspaceTheme.conversationText)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("task-title-\(task.id.uuidString)")
@@ -1124,8 +1213,16 @@ private struct TaskCardView: View {
             HStack(spacing: 6) {
                 Image(systemName: "clock")
                     .font(.system(size: 10))
-                Text(task.createdAt.formatted(date: .abbreviated, time: .omitted))
-                    .font(.system(size: 10))
+                if task.status == .inProgress {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(workingDuration(at: context.date))
+                            .font(.system(size: 10))
+                            .accessibilityIdentifier("task-working-duration-\(task.id.uuidString)")
+                    }
+                } else {
+                    Text(task.createdAt.formatted(date: .abbreviated, time: .omitted))
+                        .font(.system(size: 10))
+                }
             }
             .foregroundStyle(.tertiary)
         }
@@ -1155,7 +1252,7 @@ private struct TaskCardView: View {
         }
         .accessibilityElement(children: .contain)
         .overlay(alignment: .topTrailing) {
-            if !task.repositoryWorktrees.isEmpty {
+            if task.status != .backlog && !task.repositoryWorktrees.isEmpty {
                 HStack(spacing: 5) {
                     let linked = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
                     if linked.isEmpty {
@@ -1172,14 +1269,27 @@ private struct TaskCardView: View {
                         .disabled(isCreatingPullRequests)
                         .accessibilityIdentifier("task-create-pr-\(task.id.uuidString)")
                     } else {
-                        ForEach(linked, id: \.repositoryPath) { record in
-                            if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
-                                Link("#\(number)", destination: url)
-                                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                    .buttonHoverPointer()
-                                    .actionButtonHoverEmphasis()
-                                    .help("Open pull request #\(number) in your browser")
-                                    .accessibilityIdentifier("task-pr-link-\(task.id.uuidString)-\(number)")
+                        if isPullRequestMerged, let onMoveToDone {
+                            Button(action: onMoveToDone) {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(.green)
+                            }
+                            .buttonHoverPointer()
+                            .actionButtonHoverEmphasis()
+                            .help("Complete task: all linked pull requests have merged")
+                            .accessibilityLabel("Green checkmark. Complete task, all linked pull requests merged")
+                            .accessibilityIdentifier("task-complete-merged-pr-\(task.id.uuidString)")
+                        } else {
+                            ForEach(linked, id: \.repositoryPath) { record in
+                                if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
+                                    Link("#\(number)", destination: url)
+                                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                        .buttonHoverPointer()
+                                        .actionButtonHoverEmphasis()
+                                        .help("Open pull request #\(number) in your browser")
+                                        .accessibilityIdentifier("task-pr-link-\(task.id.uuidString)-\(number)")
+                                }
                             }
                         }
                     }
@@ -1205,6 +1315,23 @@ private struct TaskCardView: View {
             .help("Delete Task")
                 .accessibilityIdentifier("delete-task-menu-item")
         }
+    }
+
+    private func workingDuration(at date: Date) -> String {
+        let activeInterval = task.inProgressStartedAt.map { max(0, date.timeIntervalSince($0)) } ?? 0
+        let activeText = Self.shortDuration(activeInterval)
+        guard task.totalInProgressSeconds > 0 else { return "Working for \(activeText)" }
+        return "Working for \(activeText) (\(Self.shortDuration(task.totalInProgressSeconds + activeInterval)) total)"
+    }
+
+    private static func shortDuration(_ seconds: TimeInterval) -> String {
+        if seconds < 60 { return "\(Int(seconds))s" }
+        let minutes = Int(seconds / 60)
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h\(minutes % 60 == 0 ? "" : " \(minutes % 60)m")" }
+        let days = hours / 24
+        return "\(days)d\(hours % 24 == 0 ? "" : " \(hours % 24)h")"
     }
 }
 

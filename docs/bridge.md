@@ -1,6 +1,6 @@
 # StationAI CLI and XPC bridge
 
-The `stationai-cli` executable is bundled at `StationAI.app/Contents/MacOS/stationai-cli` beside the GUI executable. Its distinct filename avoids macOS case-insensitive name collisions while keeping it in the application bundle's executable directory for private XPC service discovery. It connects to the app's private on-demand XPC service in `Contents/XPCServices/StationAIBridge.xpc`. Run it through `scripts/stationai.sh`, which builds the app if needed and serializes each command through `.e2e.lock`.
+The `stationai-cli` executable is bundled at `StationAI.app/Contents/MacOS/stationai-cli` beside the GUI executable. Its distinct filename avoids macOS case-insensitive name collisions while keeping it in the application bundle's executable directory for private XPC service discovery. It connects to the app's private on-demand XPC service in `Contents/XPCServices/StationAIBridge.xpc`. Run it through `scripts/stationai.sh`, which builds the app if needed. CLI calls and app instances do not acquire the UI test lock; worktree profiles isolate app identity, XPC identity, data stores, logs, and build paths.
 
 The service accepts a versioned JSON request, returns a versioned JSON response, and uses a reverse XPC callback for streamed conversation events. Errors include a stable code and a readable message; the CLI exits nonzero for failed operations.
 

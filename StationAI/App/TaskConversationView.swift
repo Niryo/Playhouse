@@ -55,6 +55,10 @@ struct TaskConversationView: View {
     @State private var messages: [CodexChatMessage] = []
     @State private var activities: [CodexActivity] = []
     @State private var isActivityExpanded = false
+    @State private var selectedSubagent: CodexActivity?
+    @State private var subagentHistory: CodexThreadHistory?
+    @State private var isLoadingSubagent = false
+    @State private var subagentError: String?
     @State private var changeInventory = WorkspaceChangeInventory(staged: [], working: [])
     @State private var isLoadingChanges = false
     @State private var changesNeedRefresh = false
@@ -416,11 +420,18 @@ struct TaskConversationView: View {
                     composer
                 }
             }
+            .accessibilityHidden(selectedSubagent != nil)
 
             if isDiffPresented {
                 fileDiffOverlay
                     .transition(.move(edge: .leading))
                     .zIndex(1)
+            }
+
+            if let selectedSubagent {
+                subagentConversation(selectedSubagent)
+                    .transition(.move(edge: .trailing))
+                    .zIndex(2)
             }
         }
         .clipped()
@@ -1057,7 +1068,11 @@ struct TaskConversationView: View {
                         }
                     }
 
-                    if !activities.isEmpty || isResponding {
+                    ForEach(activities.filter(\.isSubagent)) { activity in
+                        subagentTimelineRow(activity)
+                    }
+
+                    if !activities.filter({ !$0.isSubagent }).isEmpty || isResponding {
                         activityList
                     }
 
@@ -1088,7 +1103,8 @@ struct TaskConversationView: View {
     }
 
     private var activityList: some View {
-        let runningCount = activities.filter { $0.status == "inProgress" || $0.status == "running" }.count
+        let regularActivities = activities.filter { !$0.isSubagent }
+        let runningCount = regularActivities.filter { $0.status == "inProgress" || $0.status == "running" }.count
         return VStack(alignment: .leading, spacing: 8) {
             Button {
                 withAnimation(.easeInOut(duration: 0.16)) {
@@ -1110,7 +1126,7 @@ struct TaskConversationView: View {
                                 .accessibilityIdentifier("codex-thinking-indicator")
                         }
                     } else {
-                        Text(runningCount > 0 ? "Running \(runningCount) task\(runningCount == 1 ? "" : "s")…" : "Codex activity · \(activities.count) task\(activities.count == 1 ? "" : "s")")
+                        Text(runningCount > 0 ? "Running \(runningCount) task\(runningCount == 1 ? "" : "s")…" : "Codex activity · \(regularActivities.count) task\(regularActivities.count == 1 ? "" : "s")")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
@@ -1121,46 +1137,156 @@ struct TaskConversationView: View {
             .buttonHoverPointer()
             .help("Show or hide Codex activity details")
             .buttonStyle(.plain)
-            .accessibilityLabel(isResponding && runningCount == 0 ? "Thinking" : runningCount > 0 ? "Running \(runningCount) task\(runningCount == 1 ? "" : "s")" : "Codex activity, \(activities.count) task\(activities.count == 1 ? "" : "s")")
+            .accessibilityLabel(isResponding && runningCount == 0 ? "Thinking" : runningCount > 0 ? "Running \(runningCount) task\(runningCount == 1 ? "" : "s")" : "Codex activity, \(regularActivities.count) task\(regularActivities.count == 1 ? "" : "s")")
             .accessibilityIdentifier("codex-activity-disclosure")
 
             if isActivityExpanded {
                 VStack(alignment: .leading, spacing: 7) {
-                    ForEach(activities) { activity in
-                        VStack(alignment: .leading, spacing: 3) {
-                            HStack(spacing: 7) {
-                                Image(systemName: activity.status == "completed" ? "checkmark.circle.fill" : "gearshape.2.fill")
-                                    .foregroundStyle(activity.status == "completed" ? .green : .accentColor)
-                                Text(activity.title)
-                                    .font(.system(size: 11, weight: .medium))
-                                    .textSelection(.enabled)
-                                Spacer(minLength: 4)
-                                Text(activity.statusLabel)
-                                    .font(.system(size: 10, weight: .medium))
-                                    .foregroundStyle(.secondary)
-                            }
-                            if !activity.detail.isEmpty {
-                                Text(activity.detail)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .textSelection(.enabled)
-                                    .lineLimit(4)
-                                    .accessibilityIdentifier("codex-activity-detail-\(activity.id)")
-                                    .accessibilityLabel(activity.detail)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(9)
-                        .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 8))
-                        .accessibilityElement(children: .contain)
-                        .accessibilityLabel("\(activity.title), \(activity.statusLabel)")
-                        .accessibilityValue(activity.detail)
-                        .accessibilityIdentifier("codex-activity-row-\(activity.id)")
+                    ForEach(regularActivities) { activity in
+                        activityRow(activity)
                     }
                 }
                 .padding(.top, 6)
             }
         }
+    }
+
+    private func subagentTimelineRow(_ activity: CodexActivity) -> some View {
+        Button {
+            openSubagent(activity)
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Image("SubagentIcon")
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(width: 20, height: 20)
+                    .accessibilityLabel("\(activity.title) agent icon")
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("\(activity.title) \(activity.timelineStatus)")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    let metadata = [activity.agentPath, activity.model, activity.reasoningEffort]
+                        .compactMap { $0 }
+                        .filter { !$0.isEmpty }
+                    if !metadata.isEmpty {
+                        Text(metadata.joined(separator: " · "))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .contentShape(Rectangle())
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 5)
+            .accessibilityElement(children: .contain)
+        }
+        .buttonHoverPointer()
+        .help("Open the read-only conversation for this agent")
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(activity.title) \(activity.timelineStatus)")
+        .accessibilityValue(activity.detail)
+        .accessibilityIdentifier("codex-subagent-row-\(activity.childThreadID ?? activity.id)")
+    }
+
+    private func activityRow(_ activity: CodexActivity) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 7) {
+                Image(systemName: activity.status == "completed" ? "checkmark.circle.fill" : activity.status == "interrupted" ? "pause.circle.fill" : "gearshape.2.fill")
+                    .foregroundStyle(activity.status == "completed" ? .green : activity.status == "interrupted" ? .orange : .accentColor)
+                Text(activity.title)
+                    .font(.system(size: 11, weight: .medium))
+                    .textSelection(.enabled)
+                Spacer(minLength: 4)
+                Text(activity.statusLabel)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            if !activity.detail.isEmpty {
+                Text(activity.detail)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .lineLimit(4)
+                    .accessibilityIdentifier("codex-activity-detail-\(activity.id)")
+                    .accessibilityLabel(activity.detail)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(9)
+        .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(activity.title), \(activity.statusLabel)")
+        .accessibilityValue(activity.detail)
+        .accessibilityIdentifier(activity.isSubagent ? "codex-subagent-row-\(activity.childThreadID ?? activity.id)" : "codex-activity-row-\(activity.id)")
+    }
+
+    private func openSubagent(_ activity: CodexActivity) {
+        selectedSubagent = activity
+        subagentHistory = nil
+        subagentError = nil
+        isLoadingSubagent = true
+        guard let threadID = activity.childThreadID else { return }
+        Task { @MainActor in
+            do {
+                let roots = task.workspaceRootPaths.isEmpty && task.status == .done
+                    ? task.repositoryWorktrees.map { URL(fileURLWithPath: $0.repositoryPath, isDirectory: true) }
+                    : workspaceRootURLs
+                let workspace = try CodexWorkspaceContext(roots: roots)
+                subagentHistory = try await codexClient.inspectThreadReadOnly(id: threadID, workspace: workspace)
+            } catch {
+                subagentError = "Couldn't load this agent conversation: \(error.localizedDescription)"
+            }
+            isLoadingSubagent = false
+        }
+    }
+
+    private func subagentConversation(_ activity: CodexActivity) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                Button {
+                    selectedSubagent = nil
+                    subagentHistory = nil
+                } label: {
+                    Label("Back", systemImage: "arrow.left")
+                }
+                .buttonHoverPointer()
+                .help("Return to the parent conversation")
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("subagent-back-button")
+                Text(activity.title).font(.system(size: 14, weight: .semibold))
+                Spacer()
+                Text("Read only").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+            Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 1)
+            if isLoadingSubagent {
+                ProgressView("Loading agent conversation…").frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let subagentError {
+                Text(subagentError).foregroundStyle(.secondary).padding(24)
+            } else if let subagentHistory {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 16) {
+                        ForEach(subagentHistory.messages) { message in messageBubble(message) }
+                        if subagentHistory.messages.isEmpty {
+                            Text("No conversation content is available yet.").foregroundStyle(.secondary).padding(20)
+                        }
+                    }
+                    .padding(24)
+                    .frame(maxWidth: 820)
+                    .frame(maxWidth: .infinity)
+                }
+                .accessibilityIdentifier("subagent-conversation-scroll-view")
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(WorkspaceTheme.windowBackground)
+        .accessibilityIdentifier("subagent-conversation-panel")
     }
 
     @ViewBuilder
@@ -1260,6 +1386,7 @@ struct TaskConversationView: View {
                 case .paragraph:
                     Text(Self.markdownAttributedText(block.text))
                         .accessibilityIdentifier("assistant-markdown-paragraph-\(block.id)")
+                        .padding(.bottom, 5)
                 }
             }
         }
@@ -1269,19 +1396,46 @@ struct TaskConversationView: View {
     }
 
     private static func markdownBlocks(_ markdown: String) -> [AssistantMarkdownBlock] {
-        markdown.components(separatedBy: .newlines).enumerated().compactMap { index, rawLine in
+        var blocks: [AssistantMarkdownBlock] = []
+        var paragraphLines: [String] = []
+        var paragraphStart: Int?
+
+        func flushParagraph() {
+            guard let start = paragraphStart, !paragraphLines.isEmpty else { return }
+            blocks.append(AssistantMarkdownBlock(
+                id: start,
+                kind: .paragraph,
+                text: paragraphLines.joined(separator: " ")
+            ))
+            paragraphLines.removeAll()
+            paragraphStart = nil
+        }
+
+        for (index, rawLine) in markdown.components(separatedBy: .newlines).enumerated() {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard !line.isEmpty else { return nil }
+            guard !line.isEmpty else {
+                flushParagraph()
+                continue
+            }
             let headingPrefix = line.prefix(while: { $0 == "#" })
             if !headingPrefix.isEmpty, headingPrefix.count <= 6,
                line.dropFirst(headingPrefix.count).first == " " {
-                return AssistantMarkdownBlock(id: index, kind: .heading(headingPrefix.count), text: String(line.dropFirst(headingPrefix.count + 1)))
+                flushParagraph()
+                blocks.append(AssistantMarkdownBlock(
+                    id: index,
+                    kind: .heading(headingPrefix.count),
+                    text: String(line.dropFirst(headingPrefix.count + 1))
+                ))
+            } else if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
+                flushParagraph()
+                blocks.append(AssistantMarkdownBlock(id: index, kind: .listItem, text: String(line.dropFirst(2))))
+            } else {
+                paragraphStart = paragraphStart ?? index
+                paragraphLines.append(line)
             }
-            if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
-                return AssistantMarkdownBlock(id: index, kind: .listItem, text: String(line.dropFirst(2)))
-            }
-            return AssistantMarkdownBlock(id: index, kind: .paragraph, text: line)
         }
+        flushParagraph()
+        return blocks
     }
 
     private var composer: some View {
@@ -1418,7 +1572,7 @@ struct TaskConversationView: View {
                     isEnabled: !isReadOnly && !isLoadingHistory,
                     accessibilityHelp: isReadOnly
                         ? "Archived conversation, read-only."
-                         : (isResponding ? "Press Return to queue this follow-up. Use its Steer action to send it to the active turn."
+                         : (isResponding ? "Press Return to queue this follow-up. Press Command-Return to steer the active turn, or use a queued row's Steer action."
                             : (isLoadingHistory ? "Composer unavailable while conversation history loads." : "")),
                     onSubmit: {
                         if isResponding, codexClient.isTurnActive(threadID: task.codexThreadID ?? "") {
@@ -1427,6 +1581,11 @@ struct TaskConversationView: View {
                             errorMessage = "The active turn is finishing; try again when follow-ups are available."
                         } else {
                             sendMessage()
+                        }
+                    },
+                    onSteerSubmit: {
+                        if isResponding, codexClient.isTurnActive(threadID: task.codexThreadID ?? "") {
+                            steerCurrentTurn()
                         }
                     },
                     onPasteImage: { image in
@@ -1788,9 +1947,8 @@ struct TaskConversationView: View {
                     case "queue_changed":
                         refreshQueuedMessages()
                     case "steered_message":
-                        guard let message = update.message else { return }
-                        messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: message))
-                        if draft == message { draft = "" }
+                        messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: update.message ?? "", imageDataURLs: update.imageDataURLs ?? []))
+                        if let message = update.message, draft == message { draft = "" }
                     case "action_notice":
                         actionNotice = update.message
                     default:
@@ -1859,6 +2017,28 @@ struct TaskConversationView: View {
                 }
                 messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: outcome.message))
                 refreshQueuedMessages()
+                errorMessage = nil
+            } catch {
+                refreshQueuedMessages()
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func steerCurrentTurn() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let imageDataURLs = pendingImages.map(\.dataURL)
+        guard !text.isEmpty || !imageDataURLs.isEmpty else { return }
+        isSubmittingLiveMessage = true
+        Task { @MainActor in
+            defer { isSubmittingLiveMessage = false }
+            do {
+                guard try await conversationManager.steer(taskID: task.id, text: text, imageDataURLs: imageDataURLs) else {
+                    throw BridgeCommandError(code: "invalid_transition", message: "The active turn changed before the steering message could be sent. Try again after the current turn is active.")
+                }
+                messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: text, imageDataURLs: imageDataURLs))
+                draft = ""
+                pendingImages.removeAll()
                 errorMessage = nil
             } catch {
                 refreshQueuedMessages()
@@ -2252,6 +2432,7 @@ private struct NativeChatEditor: NSViewRepresentable {
     let isEnabled: Bool
     let accessibilityHelp: String
     let onSubmit: () -> Void
+    let onSteerSubmit: () -> Void
     let onPasteImage: (NSImage) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -2299,6 +2480,7 @@ private struct NativeChatEditor: NSViewRepresentable {
         context.coordinator.parent = self
         guard let editor = scroll.documentView as? ChatEditorTextView else { return }
         editor.onSubmit = onSubmit
+        editor.onSteerSubmit = onSteerSubmit
         editor.onPasteImage = onPasteImage
         editor.isEditable = isEnabled
         editor.isSelectable = isEnabled
@@ -2383,6 +2565,7 @@ private final class ChatEditorTextView: NSTextView {
     }
 
     var onSubmit: (() -> Void)?
+    var onSteerSubmit: (() -> Void)?
     var onPasteImage: ((NSImage) -> Void)?
 
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
@@ -2397,6 +2580,8 @@ private final class ChatEditorTextView: NSTextView {
         if (event.keyCode == 36 || event.keyCode == 76), !hasMarkedText(), isEditable {
             if event.modifierFlags.contains(.shift) {
                 insertNewlineIgnoringFieldEditor(nil)
+            } else if event.modifierFlags.contains(.command) {
+                onSteerSubmit?()
             } else {
                 onSubmit?()
             }

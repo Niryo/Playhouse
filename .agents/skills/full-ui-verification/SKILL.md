@@ -19,4 +19,4 @@ Use this skill only when explicitly invoked. It runs the full StationAI UI suite
 
 ## Verification and reporting
 
-Serialize UI and live/shared-app verification sessions through the repository-root `.e2e.lock`; use the provided test scripts, which acquire the lock. Report the initial full UI result, each focused repair run, any CLI/parity checks, the final full UI result, changed files, and commit/push outcome. If you pause for the user's decision about a possibly accidental feature removal, state the relevant history evidence and do not commit or push the unresolved change.
+Serialize visible UI test sessions through the repository-root `.e2e.lock`; the provided UI scripts acquire it for the full Tart session. CLI/XPC checks and direct app sessions do not use this lock. Report the initial full UI result, each focused repair run, any CLI/parity checks, the final full UI result, changed files, and commit/push outcome. If you pause for the user's decision about a possibly accidental feature removal, state the relevant history evidence and do not commit or push the unresolved change.

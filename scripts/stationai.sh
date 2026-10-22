@@ -34,4 +34,4 @@ export STATIONAI_DATA_DIRECTORY
 service_info="${app_bundle}/Contents/XPCServices/StationAIBridge.xpc/Contents/Info.plist"
 export STATIONAI_BRIDGE_SERVICE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${service_info}")"
 
-exec "${repository_root}/scripts/with-e2e-lock.sh" -- "${cli_path}" "$@"
+exec "${cli_path}" "$@"

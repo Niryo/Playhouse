@@ -6,7 +6,7 @@ script_path="${repository_root}/scripts/test-ui-tart.sh"
 vm_name="${STATIONAI_UI_TART_VM:-stationai-ui}"
 artifact_root="${STATIONAI_UI_TART_ARTIFACTS:-${TMPDIR:-/tmp}/stationai-ui-tart-artifacts}"
 
-# Hold the host checkout's shared app-verification lock for the entire VM run.
+# Hold the host checkout's UI-test lock for the entire VM run.
 # test-ui.sh sets the marker only when its caller already owns that host lock.
 if [[ "${STATIONAI_UI_TART_HOST_LOCKED:-0}" != "1" ]]; then
 	exec "${repository_root}/scripts/with-e2e-lock.sh" -- env STATIONAI_UI_TART_HOST_LOCKED=1 bash "${script_path}" "$@"
@@ -19,7 +19,7 @@ Usage: scripts/test-ui-tart.sh [--vm <tart-vm>] [--show-vm] [--live-codex] [--ca
 Runs visible UI tests in a stopped Tart macOS VM. It snapshots the checkout
 inside the VM and copies test artifacts back to the host.
 Pass --show-vm to open the VM display through Screen Sharing.
-The runner holds the host repository's .e2e.lock for the full VM session.
+The runner holds the host repository's .e2e.lock for the full UI test session.
 Pass --live-codex only when the guest has Codex CLI access and a Codex login.
 
 Environment:

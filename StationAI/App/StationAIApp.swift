@@ -7,6 +7,15 @@ struct StationAIApp: App {
     private let appPreferences: UserDefaults
     @StateObject private var codexClient: CodexAppServerClient
 
+    private var windowTitle: String {
+        let configuredTitle = ProcessInfo.processInfo.environment["STATIONAI_WINDOW_TITLE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let configuredTitle, !configuredTitle.isEmpty { return configuredTitle }
+        let label = ProcessInfo.processInfo.environment["STATIONAI_WORKTREE_LABEL"]
+            .flatMap { $0.isEmpty ? nil : $0 }
+        return label.map { "StationAI — \($0)" } ?? "StationAI"
+    }
+
     init() {
         let environment = ProcessInfo.processInfo.environment
         _codexClient = StateObject(wrappedValue: CodexAppServerClient(
@@ -47,12 +56,6 @@ struct StationAIApp: App {
             WorkspaceSettingsView()
                 .defaultAppStorage(appPreferences)
         }
-    }
-
-    private var windowTitle: String {
-        let configuredTitle = ProcessInfo.processInfo.environment["STATIONAI_WINDOW_TITLE"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return configuredTitle.flatMap { $0.isEmpty ? nil : $0 } ?? "StationAI"
     }
 
     private var mainWindowContent: some View {

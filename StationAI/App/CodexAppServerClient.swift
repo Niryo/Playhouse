@@ -56,6 +56,7 @@ private struct ConversationSteerMailboxRequest: Codable {
     let threadID: String
     let expectedTurnID: String
     let text: String
+    var imageDataURLs: [String]? = []
 }
 
 private struct ConversationSteerMailboxActiveTurn: Codable {
@@ -146,7 +147,7 @@ final class CodexAppServerClient: ObservableObject {
     private(set) var wasLastTurnInterrupted = false
     private var activeDeltaHandler: ((String) -> Void)?
     private var activeFinalMessageHandler: ((String) -> Void)?
-    private var activeSteerMessageHandler: ((String) -> Void)?
+    private var activeSteerMessageHandler: ((String, [String]) -> Void)?
     private var activeActivityHandler: ((CodexActivity) -> Void)?
     private var activeDiffHandler: ((CodexTurnDiff) -> Void)?
     private var activeActivities: [String: CodexActivity] = [:]
@@ -179,10 +180,19 @@ final class CodexAppServerClient: ObservableObject {
     func loadThread(
         id threadID: String,
         workspace: CodexWorkspaceContext,
+        developerInstructions: String? = nil,
         onActionRequest: @escaping () -> Void
     ) async throws -> CodexThreadHistory {
         actionRequestHandler = onActionRequest
-        try await resumeThreadIfNeeded(id: threadID, workspace: workspace)
+        try await resumeThreadIfNeeded(id: threadID, workspace: workspace, developerInstructions: developerInstructions)
+        return try await readMessages(threadID: threadID)
+    }
+
+    /// Reads a child thread without resuming it or changing its turn state.
+    func inspectThreadReadOnly(id threadID: String, workspace: CodexWorkspaceContext) async throws -> CodexThreadHistory {
+        try await ensureInitialized(workspace: workspace)
+        _ = try await request(method: "thread/read", params: ["threadId": threadID])
+        _ = try await request(method: "thread/turns/list", params: ["threadId": threadID, "limit": 100])
         return try await readMessages(threadID: threadID)
     }
 
@@ -247,27 +257,27 @@ final class CodexAppServerClient: ObservableObject {
         }
     }
 
-    func steerActiveTurn(threadID expectedThreadID: String, text: String) async throws -> Bool {
+    func steerActiveTurn(threadID expectedThreadID: String, text: String, imageDataURLs: [String] = []) async throws -> Bool {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { throw StationAIManagerError.invalidMessage }
+        guard !normalized.isEmpty || !imageDataURLs.isEmpty else { throw StationAIManagerError.invalidMessage }
         guard let target = Self.activeClientsByThreadID[expectedThreadID] else {
-            return try await requestSteerFromTurnOwner(threadID: expectedThreadID, text: normalized)
+            return try await requestSteerFromTurnOwner(threadID: expectedThreadID, text: normalized, imageDataURLs: imageDataURLs)
         }
         guard let threadID = target.activeThreadID, threadID == expectedThreadID,
               let turnID = target.activeTurnID, target.isTurnActive else { return false }
-        return try await target.sendSteerRequest(threadID: threadID, turnID: turnID, text: normalized)
+        return try await target.sendSteerRequest(threadID: threadID, turnID: turnID, text: normalized, imageDataURLs: imageDataURLs)
     }
 
     static func configureSteerMailbox(directory: URL) {
         steerMailboxDirectory = directory
     }
 
-    private func sendSteerRequest(threadID: String, turnID: String, text: String) async throws -> Bool {
+    private func sendSteerRequest(threadID: String, turnID: String, text: String, imageDataURLs: [String] = []) async throws -> Bool {
         // Verified against `codex-cli 0.162.1` app-server schemas: params require
         // threadId/input/expectedTurnId and the response requires turnId.
         let response = try await request(method: "turn/steer", params: [
             "threadId": threadID,
-            "input": [["type": "text", "text": text]],
+            "input": (text.isEmpty ? [] : [["type": "text", "text": text]]) + imageDataURLs.map { ["type": "image", "url": $0] },
             "expectedTurnId": turnID
         ])
         guard response["turnId"] as? String == turnID else {
@@ -276,7 +286,7 @@ final class CodexAppServerClient: ObservableObject {
         return true
     }
 
-    private func requestSteerFromTurnOwner(threadID: String, text: String) async throws -> Bool {
+    private func requestSteerFromTurnOwner(threadID: String, text: String, imageDataURLs: [String]) async throws -> Bool {
         guard let directory = Self.steerMailboxDirectory else { return false }
         let activeURL = Self.activeTurnMailboxURL(threadID: threadID, directory: directory)
         guard FileManager.default.fileExists(atPath: activeURL.path) else { return false }
@@ -291,7 +301,7 @@ final class CodexAppServerClient: ObservableObject {
         let requestID = UUID().uuidString
         let requestURL = directory.appendingPathComponent("\(requestID).request.json")
         let responseURL = directory.appendingPathComponent("\(requestID).response.json")
-        let request = ConversationSteerMailboxRequest(id: requestID, threadID: threadID, expectedTurnID: activeTurn.turnID, text: text)
+        let request = ConversationSteerMailboxRequest(id: requestID, threadID: threadID, expectedTurnID: activeTurn.turnID, text: text, imageDataURLs: imageDataURLs)
         try JSONEncoder().encode(request).write(to: requestURL, options: .atomic)
         _ = Darwin.chmod(requestURL.path, mode_t(0o600))
         defer {
@@ -326,8 +336,9 @@ final class CodexAppServerClient: ObservableObject {
                 response = ConversationSteerMailboxResponse(accepted: false, error: "The active turn changed before the steering message could be sent.")
             } else {
                 do {
-                    _ = try await sendSteerRequest(threadID: threadID, turnID: turnID, text: request.text)
-                    activeSteerMessageHandler?(request.text)
+                    let images = request.imageDataURLs ?? []
+                    _ = try await sendSteerRequest(threadID: threadID, turnID: turnID, text: request.text, imageDataURLs: images)
+                    activeSteerMessageHandler?(request.text, images)
                     response = ConversationSteerMailboxResponse(accepted: true, error: nil)
                 } catch {
                     response = ConversationSteerMailboxResponse(accepted: false, error: error.localizedDescription)
@@ -375,6 +386,7 @@ final class CodexAppServerClient: ObservableObject {
         modelID: String,
         threadID: String,
         workspace: CodexWorkspaceContext,
+        developerInstructions: String? = nil,
         onDelta: @escaping (String) -> Void,
         onFinalMessage: @escaping (String) -> Void,
         onActivity: @escaping (CodexActivity) -> Void,
@@ -382,12 +394,16 @@ final class CodexAppServerClient: ObservableObject {
         onHistory: @escaping (CodexThreadHistory) -> Void,
         onActionRequest: @escaping () -> Void,
         onUserInput: @escaping (CodexUserInputRequest) async -> Void,
-        onSteerMessage: @escaping (String) -> Void = { _ in }
+        onSteerMessage: @escaping (String, [String]) -> Void = { _, _ in }
     ) async throws {
         actionRequestHandler = onActionRequest
         userInputHandler = onUserInput
-        try await resumeThreadIfNeeded(id: threadID, workspace: workspace, modelID: modelID)
-
+        try await resumeThreadIfNeeded(
+            id: threadID,
+            workspace: workspace,
+            modelID: modelID,
+            developerInstructions: developerInstructions
+        )
         activeThreadID = threadID
         Self.activeClientsByThreadID[threadID] = self
         activeTurnID = nil
@@ -433,8 +449,7 @@ final class CodexAppServerClient: ObservableObject {
                     "mode": mode.rawValue,
                     "settings": [
                         "model": modelID,
-                        "reasoningEffort": NSNull(),
-                        "developerInstructions": NSNull()
+                        "reasoningEffort": NSNull()
                     ]
                 ]
             ]
@@ -711,7 +726,12 @@ final class CodexAppServerClient: ObservableObject {
         }
     }
 
-    private func resumeThreadIfNeeded(id threadID: String, workspace: CodexWorkspaceContext, modelID: String = CodexAppServerClient.modelID) async throws {
+    private func resumeThreadIfNeeded(
+        id threadID: String,
+        workspace: CodexWorkspaceContext,
+        modelID: String = CodexAppServerClient.modelID,
+        developerInstructions: String? = nil
+    ) async throws {
         if resumedThreadIDs.contains(threadID), process?.isRunning == true, initialized {
             return
         }
@@ -722,9 +742,7 @@ final class CodexAppServerClient: ObservableObject {
         ]))
         let response: [String: Any]
         do {
-            response = try await request(
-                method: "thread/resume",
-                params: [
+            var params: [String: Any] = [
                     "threadId": threadID,
                     "model": modelID,
                     "cwd": workspace.cwd.path,
@@ -733,7 +751,10 @@ final class CodexAppServerClient: ObservableObject {
                     "approvalsReviewer": "user",
                     "runtimeWorkspaceRoots": workspace.roots.map(\.path)
                 ]
-            )
+            if let developerInstructions {
+                params["developerInstructions"] = developerInstructions
+            }
+            response = try await request(method: "thread/resume", params: params)
         } catch {
             var fields = StationAIDiagnostics.errorFields(error)
             fields["threadID"] = threadID
@@ -751,6 +772,8 @@ final class CodexAppServerClient: ObservableObject {
     private func readMessages(threadID: String) async throws -> CodexThreadHistory {
         var messages: [CodexChatMessage] = []
         var latestTurnItems: [[String: Any]] = []
+        var historicalSubagentItems: [[String: Any]] = []
+        var subagentIndexes: [String: Int] = [:]
         var lastAssistantTurnID: String?
         var cursor: String?
         var visitedCursors = Set<String>()
@@ -770,6 +793,16 @@ final class CodexAppServerClient: ObservableObject {
             let data = response["data"] as? [[String: Any]] ?? []
             for entry in data {
                 guard let item = entry["item"] as? [String: Any] else { continue }
+                if item["type"] as? String == "subAgentActivity",
+                   let activity = CodexActivity.from(item: item),
+                   let childThreadID = activity.childThreadID {
+                    if let index = subagentIndexes[childThreadID] {
+                        historicalSubagentItems[index] = item
+                    } else {
+                        subagentIndexes[childThreadID] = historicalSubagentItems.count
+                        historicalSubagentItems.append(item)
+                    }
+                }
                 if item["type"] as? String == "userMessage" {
                     latestTurnItems.removeAll()
                 }
@@ -794,7 +827,17 @@ final class CodexAppServerClient: ObservableObject {
             }
         } while cursor != nil
 
-        let activities = latestTurnItems.compactMap(CodexActivity.from)
+        var activityIndexes: [String: Int] = [:]
+        var activities: [CodexActivity] = []
+        for activity in (latestTurnItems + historicalSubagentItems).compactMap(CodexActivity.from) {
+            let key = activity.childThreadID ?? activity.id
+            if let index = activityIndexes[key] {
+                activities[index] = activity
+            } else {
+                activityIndexes[key] = activities.count
+                activities.append(activity)
+            }
+        }
         return CodexThreadHistory(
             messages: messages,
             activities: activities,
@@ -1199,7 +1242,7 @@ final class CodexAppServerClient: ObservableObject {
             }.joined()
             let images = content.compactMap { part -> String? in
                 guard part["type"] as? String == "image" else { return nil }
-                return part["image_url"] as? String
+                return part["url"] as? String ?? part["image_url"] as? String
             }
             guard !text.isEmpty || !images.isEmpty else { return nil }
             return CodexChatMessage(id: itemID, role: .user, text: text, imageDataURLs: images)
@@ -1308,7 +1351,11 @@ enum TaskProgressReportInstructions {
         \(quotedExecutable) task progress publish \(id) --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail \"short detail\"]
         \(quotedExecutable) task progress custom \(id) --label \"short label\" [--detail \"short detail\"]
         \(quotedExecutable) task progress clear \(id)
-        Progress reports are hidden from the conversation and shown on the task card. Keep details brief. Do not use lifecycle task status commands for progress; StationAI clears the report when the turn finishes or requests user input.
+        Progress reports are hidden from the conversation and shown on the task card. Keep details brief. Do not use lifecycle task status commands for progress.
+
+        At the very end of every turn, make exactly one definitive outcome call using this task ID:
+        \(quotedExecutable) task outcome \(id) <completed|waiting-response>
+        Use completed only when all work for this turn is finished and no user decision or response is needed. If you need the user to answer, choose between options, provide missing information, or take another action before you can continue, use waiting-response. The outcome call must be your final CLI action for the turn. StationAI moves the task to Review only for completed. If you omit the outcome call, StationAI moves it to Waiting Response.
         """
     }
 

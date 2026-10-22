@@ -13,6 +13,10 @@ if [[ "${STATIONAI_PROFILE_KIND}" == "linked" && -n "${STATIONAI_DATA_DIRECTORY:
   exit 2
 fi
 launch_data_directory="${STATIONAI_DATA_DIRECTORY:-${STATIONAI_PROFILE_DATA_DIRECTORY}}"
+worktree_label="$(git -C "${repository_root}" branch --show-current)"
+if [[ -z "${worktree_label}" ]]; then
+  worktree_label="$(basename "${repository_root}")"
+fi
 
 terminate_running_stationai() {
   local running_pids process_id attempt
@@ -90,4 +94,7 @@ if [[ "${app_executable}" -ef "${cli_executable}" ]]; then
   printf 'StationAI CLI and app executable resolve to the same file: %s\n' "${app_executable}" >&2
   exit 1
 fi
-open -n --env "STATIONAI_DATA_DIRECTORY=${launch_data_directory}" "${app_bundle}"
+open -n \
+  --env "STATIONAI_DATA_DIRECTORY=${launch_data_directory}" \
+  --env "STATIONAI_WORKTREE_LABEL=${worktree_label}" \
+  "${app_bundle}"

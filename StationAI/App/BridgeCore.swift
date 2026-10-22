@@ -340,27 +340,32 @@ enum StationAIStore {
     private static func storeNeedsPendingPromptColumn(_ url: URL) throws -> Bool {
         guard FileManager.default.fileExists(atPath: url.path) else { return false }
         return try withSQLite(at: url) { database in
-            var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(database, "PRAGMA table_info(ZBOARDTASK)", -1, &statement, nil) == SQLITE_OK else {
-                throw StoreSchemaRepairError(String(cString: sqlite3_errmsg(database)))
-            }
-            defer { sqlite3_finalize(statement) }
-            var columns = Set<String>()
-            var stepStatus = sqlite3_step(statement)
-            while stepStatus == SQLITE_ROW {
-                if let name = sqlite3_column_text(statement, 1) {
-                    columns.insert(String(cString: name))
-                }
-                stepStatus = sqlite3_step(statement)
-            }
-            guard stepStatus == SQLITE_DONE else {
-                throw StoreSchemaRepairError(String(cString: sqlite3_errmsg(database)))
-            }
+            let columns = try taskStoreColumns(in: database)
             guard columns.contains("ZID"), columns.contains("ZTITLE"), columns.contains("ZSAVEDPROMPT") else {
                 return false
             }
             return !columns.contains("ZPENDINGSUBMITTEDPROMPT")
         }
+    }
+
+    private static func taskStoreColumns(in database: OpaquePointer) throws -> Set<String> {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "PRAGMA table_info(ZBOARDTASK)", -1, &statement, nil) == SQLITE_OK else {
+            throw StoreSchemaRepairError(String(cString: sqlite3_errmsg(database)))
+        }
+        defer { sqlite3_finalize(statement) }
+        var columns = Set<String>()
+        var stepStatus = sqlite3_step(statement)
+        while stepStatus == SQLITE_ROW {
+            if let name = sqlite3_column_text(statement, 1) {
+                columns.insert(String(cString: name))
+            }
+            stepStatus = sqlite3_step(statement)
+        }
+        guard stepStatus == SQLITE_DONE else {
+            throw StoreSchemaRepairError(String(cString: sqlite3_errmsg(database)))
+        }
+        return columns
     }
 
     private static func repairPendingPromptColumn(at url: URL) throws -> URL {
@@ -991,6 +996,53 @@ final class BoardTaskManager {
         return lock.l_type != Int16(F_UNLCK)
     }
 
+    private func conversationTurnOutcomeURL(_ id: UUID) throws -> URL {
+        guard let conversationTurnLockDirectory else {
+            throw BridgeFileLockError(message: "Couldn't determine the task-store location for the conversation outcome.")
+        }
+        return conversationTurnLockDirectory.appendingPathComponent("\(id.uuidString).outcome")
+    }
+
+    private func conversationTurnActiveURL(_ id: UUID) throws -> URL {
+        guard let conversationTurnLockDirectory else {
+            throw BridgeFileLockError(message: "Couldn't determine the task-store location for the active conversation turn.")
+        }
+        return conversationTurnLockDirectory.appendingPathComponent("\(id.uuidString).active")
+    }
+
+    func prepareConversationTurnOutcome(_ id: UUID) throws {
+        for marker in [try conversationTurnOutcomeURL(id), try conversationTurnActiveURL(id)]
+        where FileManager.default.fileExists(atPath: marker.path) {
+            try FileManager.default.removeItem(at: marker)
+        }
+    }
+
+    func activateConversationTurnOutcome(_ id: UUID) throws {
+        guard try hasConversationTurnReservation(id) else {
+            throw BridgeCommandError(code: "invalid_transition", message: "A turn outcome requires an active conversation turn.")
+        }
+        let marker = try conversationTurnActiveURL(id)
+        try FileManager.default.createDirectory(at: marker.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data().write(to: marker, options: .atomic)
+    }
+
+    func clearConversationTurnOutcome(_ id: UUID) {
+        try? FileManager.default.removeItem(at: try conversationTurnOutcomeURL(id))
+        try? FileManager.default.removeItem(at: try conversationTurnActiveURL(id))
+    }
+
+    func finishConversationTurnOutcome(_ id: UUID) async throws -> String? {
+        let outcomeURL = try conversationTurnOutcomeURL(id)
+        let activeURL = try conversationTurnActiveURL(id)
+        let lockURL = outcomeURL.appendingPathExtension("lock")
+        return try await withExclusiveFileLocks(at: [lockURL], purpose: "conversation-outcome") {
+            try? FileManager.default.removeItem(at: activeURL)
+            defer { try? FileManager.default.removeItem(at: outcomeURL) }
+            guard let data = try? Data(contentsOf: outcomeURL) else { return nil }
+            return String(data: data, encoding: .utf8)
+        }
+    }
+
     private func withRepositoryAllocationLocks<T>(
         _ repositoryPaths: [String],
         operation: @MainActor () async throws -> T
@@ -1071,8 +1123,17 @@ final class BoardTaskManager {
         return try await operation()
     }
 
-    func list() throws -> [BoardTaskRecord] {
-        let descriptor = FetchDescriptor<BoardTask>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+    func list(status: TaskStatus? = nil) throws -> [BoardTaskRecord] {
+        let descriptor: FetchDescriptor<BoardTask>
+        if let status {
+            let statusRawValue = status.rawValue
+            descriptor = FetchDescriptor(
+                predicate: #Predicate { $0.statusRawValue == statusRawValue },
+                sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
+            )
+        } else {
+            descriptor = FetchDescriptor(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+        }
         let readFields = persistenceReadFields(operation: "BoardTaskManager.list")
         let readStartedAt = DispatchTime.now().uptimeNanoseconds
         StationAIDiagnostics.record("persistence.read.started", fields: readFields)
@@ -1643,6 +1704,37 @@ final class BoardTaskManager {
                 "status": task.status.rawValue
             ])
             return BoardTaskRecord(task: task)
+        }
+    }
+
+    func reportTurnOutcome(_ id: UUID, outcome: String) async throws -> String {
+        switch outcome {
+        case "completed", "waiting-response": break
+        default:
+            throw BridgeCommandError(
+                code: "invalid_argument",
+                message: "Unknown turn outcome '\(outcome)'. Valid outcomes: completed, waiting-response."
+            )
+        }
+        let outcomeURL = try conversationTurnOutcomeURL(id)
+        let activeURL = try conversationTurnActiveURL(id)
+        let lockURL = outcomeURL.appendingPathExtension("lock")
+        return try await withExclusiveFileLocks(at: [lockURL], purpose: "conversation-outcome") {
+            guard try self.hasConversationTurnReservation(id), FileManager.default.fileExists(atPath: activeURL.path) else {
+                throw BridgeCommandError(
+                    code: "invalid_transition",
+                    message: "Turn outcomes can only be reported during an active conversation turn."
+                )
+            }
+            let task = try requireTask(id)
+            guard task.status == .inProgress else {
+                throw BridgeCommandError(
+                    code: "invalid_transition",
+                    message: "Turn outcomes can only be reported while a task is In Progress."
+                )
+            }
+            try Data(outcome.utf8).write(to: outcomeURL, options: .atomic)
+            return outcome
         }
     }
 
@@ -2517,6 +2609,7 @@ struct ConversationUpdate: Codable {
     var diff: String?
     var history: CodexThreadHistory?
     var message: String?
+    var imageDataURLs: [String]?
     var userInputRequest: CodexUserInputRequest?
     var taskStatus: String?
 }
@@ -2552,7 +2645,12 @@ final class CodexConversationManager {
             "taskStatus": task.status.rawValue
         ]))
         do {
-            let history = try await client.loadThread(id: threadID, workspace: workspace, onActionRequest: onActionRequest)
+            let history = try await client.loadThread(
+                id: threadID,
+                workspace: workspace,
+                developerInstructions: TaskProgressReportInstructions.make(taskID: taskID),
+                onActionRequest: onActionRequest
+            )
             StationAIDiagnostics.record("conversation.history.succeeded", fields: client.diagnosticFields([
                 "taskID": taskID.uuidString,
                 "threadID": threadID,
@@ -2569,6 +2667,98 @@ final class CodexConversationManager {
             StationAIDiagnostics.record("conversation.history.failed", fields: fields)
             throw error
         }
+    }
+
+    func searchArchive(query: String, codexHomePath: String? = nil) async throws -> [BoardTaskRecord] {
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedQuery.isEmpty else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Archive search query can't be blank.")
+        }
+        let completed = try tasks.list(status: .done)
+        let titleMatches = completed.filter { $0.title.localizedCaseInsensitiveContains(normalizedQuery) }
+        let titleIDs = Set(titleMatches.map(\.id))
+        let root: URL
+        if let codexHomePath, !codexHomePath.isEmpty {
+            root = URL(fileURLWithPath: codexHomePath, isDirectory: true)
+        } else if let environmentRoot = ProcessInfo.processInfo.environment["CODEX_HOME"], !environmentRoot.isEmpty {
+            root = URL(fileURLWithPath: environmentRoot, isDirectory: true)
+        } else {
+            root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
+        }
+        let roots = [root.appendingPathComponent("sessions", isDirectory: true), root.appendingPathComponent("archived_sessions", isDirectory: true)]
+        let taskByThread = Dictionary(completed.compactMap { task -> (String, UUID)? in
+            guard !titleIDs.contains(task.id), let threadID = task.codexThreadID else { return nil }
+            return (threadID, task.id)
+        }, uniquingKeysWith: { first, _ in first })
+        let scanTask = Task.detached(priority: .userInitiated) {
+            try Self.searchSessionFiles(query: normalizedQuery, taskByThread: taskByThread, roots: roots)
+        }
+        let conversationIDs = try await withTaskCancellationHandler {
+            try await scanTask.value
+        } onCancel: {
+            scanTask.cancel()
+        }
+        let byID = Dictionary(uniqueKeysWithValues: completed.map { ($0.id, $0) })
+        let titles = titleMatches.sorted { $0.createdAt > $1.createdAt }
+        let conversations = conversationIDs.compactMap { byID[$0] }.sorted { $0.createdAt > $1.createdAt }
+        return titles + conversations
+    }
+
+    nonisolated private static func searchSessionFiles(query: String, taskByThread: [String: UUID], roots: [URL]) throws -> Set<UUID> {
+        var filesByThread: [String: [URL]] = [:]
+        for sessionsRoot in roots {
+            guard let enumerator = FileManager.default.enumerator(at: sessionsRoot, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else { continue }
+            for case let fileURL as URL in enumerator where fileURL.pathExtension == "jsonl" {
+                try Task.checkCancellation()
+                let basename = fileURL.deletingPathExtension().lastPathComponent
+                guard let threadID = taskByThread.keys.first(where: { basename.hasSuffix("-\($0)") }) else { continue }
+                filesByThread[threadID, default: []].append(fileURL)
+            }
+        }
+        var conversationIDs = Set<UUID>()
+        for (threadID, taskID) in taskByThread {
+            for fileURL in filesByThread[threadID] ?? [] {
+                try Task.checkCancellation()
+                if try sessionFile(fileURL, contains: query) {
+                    conversationIDs.insert(taskID)
+                    break
+                }
+            }
+        }
+        return conversationIDs
+    }
+
+    nonisolated private static func sessionFile(_ url: URL, contains query: String) throws -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        var pending = Data()
+        let needle = query.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        while let chunk = try? handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
+            try Task.checkCancellation()
+            pending.append(chunk)
+            while let newline = pending.firstRange(of: Data([0x0A])) {
+                let line = pending.subdata(in: pending.startIndex..<newline.lowerBound)
+                pending.removeSubrange(pending.startIndex..<newline.upperBound)
+                if Self.messageText(in: line).contains(where: { $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).contains(needle) }) { return true }
+            }
+        }
+        if !pending.isEmpty, Self.messageText(in: pending).contains(where: { $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).contains(needle) }) { return true }
+        return false
+    }
+
+    nonisolated private static func messageText(in line: Data) -> [String] {
+        guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+              let type = object["type"] as? String,
+              let payload = object["payload"] as? [String: Any] else { return [] }
+        if type == "response_item", let itemType = payload["type"] as? String, itemType == "message",
+           let role = payload["role"] as? String, role == "user" || role == "assistant",
+           let content = payload["content"] as? [[String: Any]] {
+            return content.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
+        }
+        if type == "event_msg", let eventType = payload["type"] as? String,
+           eventType == "UserMessage" || eventType == "AgentMessage",
+           let message = payload["message"] as? String { return [message] }
+        return []
     }
 
     func models(taskID: UUID) async throws -> [CodexModelOption] {
@@ -2605,10 +2795,15 @@ final class CodexConversationManager {
         return interrupted
     }
 
-    func steer(taskID: UUID, text: String) async throws -> Bool {
+    func steer(taskID: UUID, text: String, imageDataURLs: [String] = []) async throws -> Bool {
+        let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedText.isEmpty || !imageDataURLs.isEmpty else { throw StationAIManagerError.invalidMessage }
+        guard imageDataURLs.count <= 8, imageDataURLs.allSatisfy(Self.isValidImageDataURL) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
+        }
         let task = try tasks.taskModel(taskID)
         guard let threadID = task.codexThreadID else { return false }
-        return try await client.steerActiveTurn(threadID: threadID, text: text)
+        return try await client.steerActiveTurn(threadID: threadID, text: normalizedText, imageDataURLs: imageDataURLs)
     }
 
     func queuedMessages(taskID: UUID) throws -> [QueuedConversationMessage] {
@@ -2754,6 +2949,8 @@ final class CodexConversationManager {
         guard Self.isValidModelID(modelID) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
         }
+        try tasks.prepareConversationTurnOutcome(taskID)
+        defer { tasks.clearConversationTurnOutcome(taskID) }
         var task = try tasks.taskModel(taskID)
         var persistedThreadID = task.codexThreadID
         StationAIDiagnostics.record("conversation.send.started", fields: client.diagnosticFields([
@@ -2865,6 +3062,7 @@ final class CodexConversationManager {
                 onTurnStarting?()
             }
             phase = "codex-turn"
+            try tasks.activateConversationTurnOutcome(taskID)
             try await client.sendMessage(
                 normalizedText,
                 imageDataURLs: imageDataURLs,
@@ -2872,6 +3070,7 @@ final class CodexConversationManager {
                 modelID: modelID,
                 threadID: threadID,
                 workspace: workspace,
+                developerInstructions: TaskProgressReportInstructions.make(taskID: taskID),
                 onDelta: { delta in onUpdate(ConversationUpdate(type: "text_delta", text: delta)) },
                 onFinalMessage: { message in onUpdate(ConversationUpdate(type: "assistant_final", text: message)) },
                 onActivity: { activity in onUpdate(ConversationUpdate(type: "activity", activity: activity)) },
@@ -2908,13 +3107,15 @@ final class CodexConversationManager {
                     }
                     await onUserInput(request)
                 },
-                onSteerMessage: { message in
-                    onUpdate(ConversationUpdate(type: "steered_message", message: message))
+                onSteerMessage: { message, images in
+                    onUpdate(ConversationUpdate(type: "steered_message", message: message, imageDataURLs: images))
                 }
             )
             phase = "worktree-finalization"
             phase = "review-status-persistence"
-            _ = try await tasks.setLifecycleStatus(taskID, to: .review)
+            let reportedOutcome = try await tasks.finishConversationTurnOutcome(taskID)
+            let finalStatus: TaskStatus = reportedOutcome == "completed" ? .review : .waitingResponse
+            _ = try await tasks.setLifecycleStatus(taskID, to: finalStatus)
         } catch {
             await titleGeneration?.value
             var fields = StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
@@ -3118,6 +3319,12 @@ final class StationAIBridgeRuntime {
                 result = .object(["service": .string("StationAI"), "bridgeVersion": .integer(BridgeContract.currentVersion)])
             case "board.list", "task.list":
                 result = try Self.value(["tasks": taskManager.list()])
+            case "archive.search":
+                let conversations = CodexConversationManager(tasks: taskManager, client: CodexAppServerClient())
+                result = try Self.value(await conversations.searchArchive(
+                    query: request.requiredString("query"),
+                    codexHomePath: request.arguments["codexHome"]?.string
+                ))
             case "task.create":
                 let title = try request.requiredString("title")
                 let roots = try request.requiredStrings("roots")
@@ -3162,6 +3369,13 @@ final class StationAIBridgeRuntime {
                 ))
             case "task.progress.clear":
                 result = try Self.value(try await taskManager.clearProgressReport(request.requiredUUID("taskID")))
+            case "task.outcome":
+                let taskID = try request.requiredUUID("taskID")
+                let outcome = try await taskManager.reportTurnOutcome(taskID, outcome: request.requiredString("outcome"))
+                result = .object([
+                    "outcome": .string(outcome),
+                    "taskStatus": .string(try taskManager.taskModel(taskID).status.rawValue)
+                ])
             case "task.rename":
                 let taskID = try request.requiredUUID("taskID")
                 let title = try request.requiredString("title")
@@ -3283,7 +3497,7 @@ final class StationAIBridgeRuntime {
                     let steered = try await conversations.steerQueuedMessage(taskID: taskID, messageID: request.requiredUUID("messageID"))
                     result = .object(["text": .string(steered.message), "accepted": .boolean(steered.accepted)])
                 default:
-                    let accepted = try await conversations.steer(taskID: taskID, text: request.requiredString("message"))
+                    let accepted = try await conversations.steer(taskID: taskID, text: request.arguments["message"]?.string ?? "", imageDataURLs: request.arguments["images"]?.strings ?? [])
                     result = .object(["accepted": .boolean(accepted)])
                 }
             case "conversation.send":
