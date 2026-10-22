@@ -187,10 +187,19 @@ final class CodexAppServerClient: ObservableObject {
     func loadThread(
         id threadID: String,
         workspace: CodexWorkspaceContext,
+        developerInstructions: String? = nil,
         onActionRequest: @escaping () -> Void
     ) async throws -> CodexThreadHistory {
         actionRequestHandler = onActionRequest
-        try await resumeThreadIfNeeded(id: threadID, workspace: workspace)
+        try await resumeThreadIfNeeded(id: threadID, workspace: workspace, developerInstructions: developerInstructions)
+        return try await readMessages(threadID: threadID)
+    }
+
+    /// Reads a child thread without resuming it or changing its turn state.
+    func inspectThreadReadOnly(id threadID: String, workspace: CodexWorkspaceContext) async throws -> CodexThreadHistory {
+        try await ensureInitialized(workspace: workspace)
+        _ = try await request(method: "thread/read", params: ["threadId": threadID])
+        _ = try await request(method: "thread/turns/list", params: ["threadId": threadID, "limit": 100])
         return try await readMessages(threadID: threadID)
     }
 
@@ -384,6 +393,7 @@ final class CodexAppServerClient: ObservableObject {
         modelID: String,
         threadID: String,
         workspace: CodexWorkspaceContext,
+        developerInstructions: String? = nil,
         onDelta: @escaping (String) -> Void,
         onFinalMessage: @escaping (String) -> Void,
         onActivity: @escaping (CodexActivity) -> Void,
@@ -396,8 +406,12 @@ final class CodexAppServerClient: ObservableObject {
     ) async throws {
         actionRequestHandler = onActionRequest
         userInputHandler = onUserInput
-        try await resumeThreadIfNeeded(id: threadID, workspace: workspace, modelID: modelID)
-
+        try await resumeThreadIfNeeded(
+            id: threadID,
+            workspace: workspace,
+            modelID: modelID,
+            developerInstructions: developerInstructions
+        )
         activeThreadID = threadID
         Self.activeClientsByThreadID[threadID] = self
         activeTurnID = nil
@@ -445,8 +459,7 @@ final class CodexAppServerClient: ObservableObject {
                     "mode": mode.rawValue,
                     "settings": [
                         "model": modelID,
-                        "reasoningEffort": NSNull(),
-                        "developerInstructions": NSNull()
+                        "reasoningEffort": NSNull()
                     ]
                 ]
             ]
@@ -723,7 +736,12 @@ final class CodexAppServerClient: ObservableObject {
         }
     }
 
-    private func resumeThreadIfNeeded(id threadID: String, workspace: CodexWorkspaceContext, modelID: String = CodexAppServerClient.modelID) async throws {
+    private func resumeThreadIfNeeded(
+        id threadID: String,
+        workspace: CodexWorkspaceContext,
+        modelID: String = CodexAppServerClient.modelID,
+        developerInstructions: String? = nil
+    ) async throws {
         if resumedThreadIDs.contains(threadID), process?.isRunning == true, initialized {
             return
         }
@@ -734,9 +752,7 @@ final class CodexAppServerClient: ObservableObject {
         ]))
         let response: [String: Any]
         do {
-            response = try await request(
-                method: "thread/resume",
-                params: [
+            var params: [String: Any] = [
                     "threadId": threadID,
                     "model": modelID,
                     "cwd": workspace.cwd.path,
@@ -745,7 +761,10 @@ final class CodexAppServerClient: ObservableObject {
                     "approvalsReviewer": "user",
                     "runtimeWorkspaceRoots": workspace.roots.map(\.path)
                 ]
-            )
+            if let developerInstructions {
+                params["developerInstructions"] = developerInstructions
+            }
+            response = try await request(method: "thread/resume", params: params)
         } catch {
             var fields = StationAIDiagnostics.errorFields(error)
             fields["threadID"] = threadID
@@ -763,6 +782,10 @@ final class CodexAppServerClient: ObservableObject {
     private func readMessages(threadID: String) async throws -> CodexThreadHistory {
         var messages: [CodexChatMessage] = []
         var latestTurnItems: [[String: Any]] = []
+        var historicalSubagentItems: [[String: Any]] = []
+        var subagentIndexes: [String: Int] = [:]
+        var lastAssistantTurnID: String?
+        var lastAssistantPhase: String?
         var cursor: String?
         var visitedCursors = Set<String>()
 
@@ -781,12 +804,40 @@ final class CodexAppServerClient: ObservableObject {
             let data = response["data"] as? [[String: Any]] ?? []
             for entry in data {
                 guard let item = entry["item"] as? [String: Any] else { continue }
+                if item["type"] as? String == "subAgentActivity",
+                   let activity = CodexActivity.from(item: item),
+                   let childThreadID = activity.childThreadID {
+                    if let index = subagentIndexes[childThreadID] {
+                        var mergedItem = item
+                        for metadataKey in ["agentPath", "model", "reasoningEffort"]
+                        where mergedItem[metadataKey] == nil {
+                            mergedItem[metadataKey] = historicalSubagentItems[index][metadataKey]
+                        }
+                        historicalSubagentItems[index] = mergedItem
+                    } else {
+                        subagentIndexes[childThreadID] = historicalSubagentItems.count
+                        historicalSubagentItems.append(item)
+                    }
+                }
                 if item["type"] as? String == "userMessage" {
                     latestTurnItems.removeAll()
+                    lastAssistantTurnID = nil
+                    lastAssistantPhase = nil
                 }
                 latestTurnItems.append(item)
                 if let message = Self.chatMessage(from: entry) {
-                    messages.append(message)
+                    if message.role == .assistant,
+                       let turnID = entry["turnId"] as? String,
+                       turnID == lastAssistantTurnID,
+                       message.phase == lastAssistantPhase,
+                       let lastIndex = messages.indices.last,
+                       messages[lastIndex].role == .assistant {
+                        messages[lastIndex].text += "\n\n" + message.text
+                    } else {
+                        messages.append(message)
+                    }
+                    lastAssistantTurnID = message.role == .assistant ? entry["turnId"] as? String : nil
+                    lastAssistantPhase = message.role == .assistant ? message.phase : nil
                 }
             }
             cursor = response["nextCursor"] as? String
@@ -796,7 +847,17 @@ final class CodexAppServerClient: ObservableObject {
             }
         } while cursor != nil
 
-        let activities = latestTurnItems.compactMap(CodexActivity.from)
+        var activityIndexes: [String: Int] = [:]
+        var activities: [CodexActivity] = []
+        for activity in (latestTurnItems + historicalSubagentItems).compactMap(CodexActivity.from) {
+            let key = activity.childThreadID ?? activity.id
+            if let index = activityIndexes[key] {
+                activities[index] = activity
+            } else {
+                activityIndexes[key] = activities.count
+                activities.append(activity)
+            }
+        }
         return CodexThreadHistory(
             messages: messages,
             activities: activities,
@@ -1320,7 +1381,11 @@ enum TaskProgressReportInstructions {
         \(quotedExecutable) task progress publish \(id) --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail \"short detail\"]
         \(quotedExecutable) task progress custom \(id) --label \"short label\" [--detail \"short detail\"]
         \(quotedExecutable) task progress clear \(id)
-        Progress reports are hidden from the conversation and shown on the task card. Keep details brief. Do not use lifecycle task status commands for progress; StationAI clears the report when the turn finishes or requests user input.
+        Progress reports are hidden from the conversation and shown on the task card. Keep details brief. Do not use lifecycle task status commands for progress.
+
+        At the very end of every turn, make exactly one definitive outcome call using this task ID:
+        \(quotedExecutable) task outcome \(id) <completed|waiting-response>
+        Use completed only when all work for this turn is finished and no user decision or response is needed. If you need the user to answer, choose between options, provide missing information, or take another action before you can continue, use waiting-response. The outcome call must be your final CLI action for the turn. StationAI moves the task to Review only for completed. If you omit the outcome call, StationAI moves it to Waiting Response.
         """
     }
 

@@ -68,6 +68,8 @@ final class BoardTask {
     var progressLabel: String?
     var progressDetail: String?
     var createdAt: Date
+    var inProgressStartedAt: Date?
+    var totalInProgressSeconds: Double = 0
     var codexThreadID: String?
     var savedPrompt: String?
     var pendingSubmittedPrompt: String?
@@ -97,7 +99,20 @@ final class BoardTask {
 
     var status: TaskStatus {
         get { TaskStatus(rawValue: statusRawValue) ?? .backlog }
-        set { statusRawValue = newValue.rawValue }
+        set {
+            let previous = status
+            guard previous != newValue else { return }
+            if previous == .inProgress, let startedAt = inProgressStartedAt {
+                totalInProgressSeconds += max(0, Date.now.timeIntervalSince(startedAt))
+                inProgressStartedAt = nil
+            }
+            statusRawValue = newValue.rawValue
+            if newValue == .inProgress { inProgressStartedAt = .now }
+        }
+    }
+
+    var currentInProgressSeconds: Double {
+        totalInProgressSeconds + (status == .inProgress ? max(0, Date.now.timeIntervalSince(inProgressStartedAt ?? .now)) : 0)
     }
 
     init(title: String, status: TaskStatus = .backlog, workspaceRootPaths: [String] = []) {
@@ -109,6 +124,8 @@ final class BoardTask {
         progressLabel = nil
         progressDetail = nil
         createdAt = .now
+        inProgressStartedAt = status == .inProgress ? .now : nil
+        totalInProgressSeconds = 0
         codexThreadID = nil
         savedPrompt = nil
         pendingSubmittedPrompt = nil

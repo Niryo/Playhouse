@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Deterministic app-server peer for StationAI's structured-question tests."""
+"""Deterministic app-server peer for StationAI's protocol integration tests."""
 
 import json
 import os
@@ -76,6 +76,30 @@ def subagent_item(status):
         },
         "status": status,
     }
+
+
+def subagent_activity(kind, child_thread_id, agent_path, *, model=None, reasoning_effort=None):
+    item = {
+        "id": f"item_activity_{child_thread_id}",
+        "type": "subAgentActivity",
+        "kind": kind,
+        "agentThreadId": child_thread_id,
+    }
+    if agent_path is not None:
+        item["agentPath"] = agent_path
+    if model is not None:
+        item["model"] = model
+    if reasoning_effort is not None:
+        item["reasoningEffort"] = reasoning_effort
+    return item
+
+
+CHILD_THREAD_ID = "00000000-0000-0000-0000-000000000002"
+CHILD_TURN_ID = "turn_stationai_child_fixture"
+CHILD_MESSAGES = [
+    {"id": "item_child_user", "type": "userMessage", "content": [{"type": "text", "text": "Inspect StationAI entitlements."}]},
+    {"id": "item_child_assistant", "type": "agentMessage", "text": "Sandbox review read StationAIEntitlements.entitlements and found the required profile."},
+]
 
 
 def diagnostic_action_items(cwd):
@@ -163,6 +187,9 @@ def main():
                     continue
                 THREAD_ID = history["threadID"]
                 history["events"].append({"method": "thread/resume", "threadID": THREAD_ID})
+                history.setdefault("threadResumeDeveloperInstructions", []).append(
+                    message.get("params", {}).get("developerInstructions")
+                )
                 history_path.write_text(json.dumps(history), encoding="utf-8")
             else:
                 history = serial_history()
@@ -170,6 +197,9 @@ def main():
                     "threadID": THREAD_ID,
                     "threadResumeCount": history.get("threadResumeCount", 0) + 1,
                 })
+                history.setdefault("threadResumeDeveloperInstructions", []).append(
+                    message.get("params", {}).get("developerInstructions")
+                )
                 history_path.write_text(json.dumps(history), encoding="utf-8")
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": "gpt-6-luna"}})
         elif message.get("method") == "turn/start":
@@ -246,7 +276,23 @@ def main():
                 saved_history["turns"] = turns
                 history_path.write_text(json.dumps(saved_history), encoding="utf-8")
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": TURN_ID, "status": "inProgress"}}})
-            if mode.endswith("-abort"):
+            if Path(str(sys.argv[0]) + ".hold-release").exists():
+                active = Path(str(sys.argv[0]) + ".turn-active")
+                release = Path(str(sys.argv[0]) + ".turn-release")
+                active.write_text("The fixture turn is active for a CLI outcome report.\n", encoding="utf-8")
+                deadline = time.monotonic() + 30
+                while not release.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                was_released = release.exists()
+                active.unlink(missing_ok=True)
+                release.unlink(missing_ok=True)
+                if not was_released:
+                    return 3
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": THREAD_ID,
+                    "turn": {"id": TURN_ID, "status": "completed"},
+                }})
+            elif mode.endswith("-abort"):
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "interrupted", "error": {"message": "Fixture interrupted the conflict-resolution turn."}},
@@ -343,6 +389,50 @@ def main():
                         return 3
                 write({"jsonrpc": "2.0", "method": "item/started", "params": {
                     "threadId": THREAD_ID, "item": subagent_item("inProgress"),
+                }})
+                first_child_started = subagent_activity(
+                    "started", CHILD_THREAD_ID, "/agents/Sandbox review",
+                    model="gpt-6-sol", reasoning_effort="high",
+                )
+                second_child_id = "00000000-0000-0000-0000-000000000003"
+                second_child_started = subagent_activity(
+                    "started", second_child_id, "/agents/some_agent",
+                )
+                for child_item in [first_child_started, second_child_started]:
+                    write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                        "threadId": THREAD_ID, "item": child_item,
+                    }})
+                write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                    "threadId": THREAD_ID,
+                    "item": subagent_activity(
+                        "interacted", CHILD_THREAD_ID, "/agents/Sandbox review",
+                        model="gpt-6-sol", reasoning_effort="high",
+                    ),
+                }})
+                ready = Path(str(sys.argv[0]) + ".subagent-ready")
+                release = Path(str(sys.argv[0]) + ".subagent-release")
+                ready.unlink(missing_ok=True)
+                release.unlink(missing_ok=True)
+                ready.write_text("Subagent activities are active.\n", encoding="utf-8")
+                deadline = time.monotonic() + 30
+                while not release.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                ready.unlink(missing_ok=True)
+                if not release.exists():
+                    return 3
+                release.unlink(missing_ok=True)
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": THREAD_ID,
+                    # A terminal event may omit metadata reported by the start.
+                    "item": subagent_activity("completed", CHILD_THREAD_ID, None),
+                }})
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": THREAD_ID,
+                    "item": subagent_activity("interrupted", second_child_id, "/agents/some_agent"),
+                }})
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": THREAD_ID,
+                    "item": subagent_activity("futureKind", "00000000-0000-0000-0000-000000000004", "/agents/Future review"),
                 }})
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID, "item": subagent_item("completed"),
@@ -452,6 +542,18 @@ def main():
                 "color": {"answers": ["Blue"]},
                 "token": {"answers": ["fixture-secret"]},
             }
+            if not failed and Path(str(sys.argv[0]) + ".outcome-hold").exists():
+                active = Path(str(sys.argv[0]) + ".outcome-active")
+                release = Path(str(sys.argv[0]) + ".outcome-release")
+                active.write_text("The answered fixture turn is waiting for its explicit outcome.\n", encoding="utf-8")
+                deadline = time.monotonic() + 30
+                while not release.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                was_released = release.exists()
+                active.unlink(missing_ok=True)
+                release.unlink(missing_ok=True)
+                if not was_released:
+                    return 3
             write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                 "threadId": THREAD_ID,
                 "turn": {"id": TURN_ID, "status": "interrupted" if mode.endswith("-interrupted") else ("failed" if failed else "completed"),
@@ -459,7 +561,26 @@ def main():
             }})
         elif message.get("method") == "turn/interrupt":
             write({"jsonrpc": "2.0", "id": message["id"], "result": {}})
+        elif message.get("method") == "thread/read":
+            if message.get("params", {}).get("threadId") != CHILD_THREAD_ID:
+                write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32005, "message": "Unknown fixture child thread."}})
+                continue
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": CHILD_THREAD_ID, "turns": []}}})
+        elif message.get("method") == "thread/turns/list":
+            if message.get("params", {}).get("threadId") != CHILD_THREAD_ID:
+                write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32005, "message": "Unknown fixture child thread."}})
+                continue
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {
+                "data": [{"id": CHILD_TURN_ID, "status": "completed"}],
+                "nextCursor": None,
+            }})
         elif message.get("method") == "thread/items/list":
+            if message.get("params", {}).get("threadId") == CHILD_THREAD_ID:
+                write({"jsonrpc": "2.0", "id": message["id"], "result": {
+                    "data": [{"item": item, "turnId": CHILD_TURN_ID} for item in CHILD_MESSAGES],
+                    "nextCursor": None,
+                }})
+                continue
             saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
             if serial_mode and message.get("params", {}).get("threadId") != saved_history.get("threadID"):
                 write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32004, "message": "History can only be read from the persisted fixture thread."}})
@@ -506,13 +627,16 @@ def main():
                     {"id": "item_stationai_commentary", "type": "agentMessage", "phase": "commentary", "text": "I inspected the project structure and am preparing the summary."},
                     {"id": "item_stationai_final", "type": "agentMessage", "phase": "final_answer", "text": "The subagent inspected the project structure."},
                     subagent_item("completed"),
+                    subagent_activity("completed", CHILD_THREAD_ID, "/agents/Sandbox review", model="gpt-6-sol", reasoning_effort="high"),
+                    subagent_activity("interrupted", "00000000-0000-0000-0000-000000000003", "/agents/some_agent"),
+                    subagent_activity("futureKind", "00000000-0000-0000-0000-000000000004", "/agents/Future review"),
                     *diagnostic_action_items(os.environ.get("STATIONAI_FIXTURE_WORKSPACE", os.getcwd())),
                 ]
             if mode.endswith("-markdown"):
                 saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
                 contents = [
                     {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": saved_history.get("userMessage", "Plan the task.")} ]},
-                    {"id": "item_assistant_fixture", "type": "agentMessage", "text": "<proposed_plan>\n## Implementation plan\n\nStart with the **workspace model**.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening\n</proposed_plan>"},
+                    {"id": "item_assistant_fixture", "type": "agentMessage", "text": "<proposed_plan>\n## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening\n</proposed_plan>"},
                 ]
             write({"jsonrpc": "2.0", "id": message["id"], "result": {
                 "data": [{"item": item, "turnId": TURN_ID} for item in contents],

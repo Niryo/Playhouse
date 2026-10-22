@@ -55,6 +55,11 @@ enum StationAICLI {
         case "board":
             guard rest == ["list"] else { throw CLIError.usage("Use: stationai board list") }
             return BridgeRequest(command: "board.list")
+        case "archive":
+            guard rest.count == 2, rest[0] == "search" else { throw CLIError.usage("Use: stationai archive search <query>") }
+            var arguments: [String: BridgeValue] = ["query": .string(rest[1])]
+            if let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"] { arguments["codexHome"] = .string(codexHome) }
+            return BridgeRequest(command: "archive.search", arguments: arguments)
         case "task":
             guard let operation = rest.first else { throw CLIError.usage("Missing task operation.") }
             let tail = Array(rest.dropFirst())
@@ -134,6 +139,13 @@ enum StationAICLI {
                 default:
                     throw CLIError.usage("Unknown task progress operation '\(action)'.")
                 }
+            case "outcome":
+                guard tail.count == 2 else {
+                    throw CLIError.usage("Use: stationai task outcome <task-id> <completed|waiting-response>")
+                }
+                return BridgeRequest(command: "task.outcome", arguments: [
+                    "taskID": .string(tail[0]), "outcome": .string(tail[1])
+                ])
             case "rename":
                 guard let id = tail.first else { throw CLIError.usage("Use: stationai task rename <task-id> --title <title>") }
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--title"])
@@ -392,6 +404,7 @@ enum StationAICLI {
     Usage:
       stationai status
       stationai board list
+      stationai archive search <query>
       stationai task list|get <task-id>
       stationai task create --title <title> --root <path> [--root <path>...]
       stationai task create --title <title> --repo <path> [--repo <path>...] [--branch <repo-path>=<name>] [--branch-from <repo-path>=<ref>] [--merge-target <repo-path>=<local-branch>]
@@ -401,6 +414,7 @@ enum StationAICLI {
       stationai task progress publish <task-id> --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail <text>]
       stationai task progress custom <task-id> --label <label> [--detail <text>]
       stationai task progress clear <task-id>
+      stationai task outcome <task-id> <completed|waiting-response>
       stationai task rename <task-id> --title <title>
       stationai task repository add <task-id> --repo <path>
       stationai task repository add-batch <task-id> --repo <path> [--repo <path>...]

@@ -58,6 +58,10 @@ struct TaskConversationView: View {
     @State private var responseStartedAt: Date?
     @State private var completedResponseDuration: Int?
     @State private var collapsedProgressTurnIDs = Set<String>()
+    @State private var selectedSubagent: CodexActivity?
+    @State private var subagentHistory: CodexThreadHistory?
+    @State private var isLoadingSubagent = false
+    @State private var subagentError: String?
     @State private var changeInventory = WorkspaceChangeInventory(staged: [], working: [])
     @State private var isLoadingChanges = false
     @State private var changesNeedRefresh = false
@@ -468,11 +472,18 @@ struct TaskConversationView: View {
                     composer
                 }
             }
+            .accessibilityHidden(selectedSubagent != nil)
 
             if isDiffPresented {
                 fileDiffOverlay
                     .transition(.move(edge: .leading))
                     .zIndex(1)
+            }
+
+            if let selectedSubagent {
+                subagentConversation(selectedSubagent)
+                    .transition(.move(edge: .trailing))
+                    .zIndex(2)
             }
         }
         .clipped()
@@ -1110,6 +1121,13 @@ struct TaskConversationView: View {
                         }
                     }
 
+                    if messages.isEmpty && shouldShowActivityDisclosure {
+                        activityList
+                    }
+
+                    ForEach(activities.filter(\.isSubagent)) { activity in
+                        subagentTimelineRow(activity)
+                    }
                     // Keep a stable scroll target outside the LazyVStack. A newly
                     // loaded last message may not have been materialized yet when
                     // SwiftUI delivers the messages change notification.
@@ -1178,41 +1196,151 @@ struct TaskConversationView: View {
                                 .accessibilityIdentifier("codex-progress-message-\(message.id)")
                         }
                     }
-                    ForEach(activities) { activity in
-                        VStack(alignment: .leading, spacing: 3) {
-                            HStack(spacing: 7) {
-                                Image(systemName: activity.status == "completed" ? "checkmark.circle.fill" : "gearshape.2.fill")
-                                    .foregroundStyle(activity.status == "completed" ? .green : .accentColor)
-                                Text(activity.title)
-                                    .font(.system(size: 11, weight: .medium))
-                                    .textSelection(.enabled)
-                                Spacer(minLength: 4)
-                                Text(activity.statusLabel)
-                                    .font(.system(size: 10, weight: .medium))
-                                    .foregroundStyle(.secondary)
-                            }
-                            if !activity.detail.isEmpty {
-                                Text(activity.detail)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .textSelection(.enabled)
-                                    .lineLimit(4)
-                                    .accessibilityIdentifier("codex-activity-detail-\(activity.id)")
-                                    .accessibilityLabel(activity.detail)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(9)
-                        .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 8))
-                        .accessibilityElement(children: .contain)
-                        .accessibilityLabel("\(activity.title), \(activity.statusLabel)")
-                        .accessibilityValue(activity.detail)
-                        .accessibilityIdentifier("codex-activity-row-\(activity.id)")
+                    ForEach(activities.filter { !$0.isSubagent }) { activity in
+                        activityRow(activity)
                     }
                 }
                 .padding(.top, 6)
             }
         }
+    }
+
+    private func subagentTimelineRow(_ activity: CodexActivity) -> some View {
+        Button {
+            openSubagent(activity)
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Image("SubagentIcon")
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(width: 20, height: 20)
+                    .accessibilityLabel("\(activity.title) agent icon")
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("\(activity.title) \(activity.timelineStatus)")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    let metadata = [activity.agentPath, activity.model, activity.reasoningEffort]
+                        .compactMap { $0 }
+                        .filter { !$0.isEmpty }
+                    if !metadata.isEmpty {
+                        Text(metadata.joined(separator: " · "))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .contentShape(Rectangle())
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 5)
+            .accessibilityElement(children: .contain)
+        }
+        .buttonHoverPointer()
+        .help("Open the read-only conversation for this agent")
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(activity.title) \(activity.timelineStatus)")
+        .accessibilityValue(activity.detail)
+        .accessibilityIdentifier("codex-subagent-row-\(activity.childThreadID ?? activity.id)")
+    }
+
+    private func activityRow(_ activity: CodexActivity) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 7) {
+                Image(systemName: activity.status == "completed" ? "checkmark.circle.fill" : activity.status == "interrupted" ? "pause.circle.fill" : "gearshape.2.fill")
+                    .foregroundStyle(activity.status == "completed" ? .green : activity.status == "interrupted" ? .orange : .accentColor)
+                Text(activity.title)
+                    .font(.system(size: 11, weight: .medium))
+                    .textSelection(.enabled)
+                Spacer(minLength: 4)
+                Text(activity.statusLabel)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            if !activity.detail.isEmpty {
+                Text(activity.detail)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .lineLimit(4)
+                    .accessibilityIdentifier("codex-activity-detail-\(activity.id)")
+                    .accessibilityLabel(activity.detail)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(9)
+        .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(activity.title), \(activity.statusLabel)")
+        .accessibilityValue(activity.detail)
+        .accessibilityIdentifier(activity.isSubagent ? "codex-subagent-row-\(activity.childThreadID ?? activity.id)" : "codex-activity-row-\(activity.id)")
+    }
+
+    private func openSubagent(_ activity: CodexActivity) {
+        selectedSubagent = activity
+        subagentHistory = nil
+        subagentError = nil
+        isLoadingSubagent = true
+        guard let threadID = activity.childThreadID else { return }
+        Task { @MainActor in
+            do {
+                let roots = task.workspaceRootPaths.isEmpty && task.status == .done
+                    ? task.repositoryWorktrees.map { URL(fileURLWithPath: $0.repositoryPath, isDirectory: true) }
+                    : workspaceRootURLs
+                let workspace = try CodexWorkspaceContext(roots: roots)
+                subagentHistory = try await codexClient.inspectThreadReadOnly(id: threadID, workspace: workspace)
+            } catch {
+                subagentError = "Couldn't load this agent conversation: \(error.localizedDescription)"
+            }
+            isLoadingSubagent = false
+        }
+    }
+
+    private func subagentConversation(_ activity: CodexActivity) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                Button {
+                    selectedSubagent = nil
+                    subagentHistory = nil
+                } label: {
+                    Label("Back", systemImage: "arrow.left")
+                }
+                .buttonHoverPointer()
+                .help("Return to the parent conversation")
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("subagent-back-button")
+                Text(activity.title).font(.system(size: 14, weight: .semibold))
+                Spacer()
+                Text("Read only").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+            Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 1)
+            if isLoadingSubagent {
+                ProgressView("Loading agent conversation…").frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let subagentError {
+                Text(subagentError).foregroundStyle(.secondary).padding(24)
+            } else if let subagentHistory {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 16) {
+                        ForEach(subagentHistory.messages) { message in messageBubble(message) }
+                        if subagentHistory.messages.isEmpty {
+                            Text("No conversation content is available yet.").foregroundStyle(.secondary).padding(20)
+                        }
+                    }
+                    .padding(24)
+                    .frame(maxWidth: 820)
+                    .frame(maxWidth: .infinity)
+                }
+                .accessibilityIdentifier("subagent-conversation-scroll-view")
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(WorkspaceTheme.windowBackground)
+        .accessibilityIdentifier("subagent-conversation-panel")
     }
 
     @ViewBuilder
@@ -1349,6 +1477,7 @@ struct TaskConversationView: View {
                 case .paragraph:
                     Text(Self.markdownAttributedText(block.text))
                         .accessibilityIdentifier("assistant-markdown-paragraph-\(block.id)")
+                        .padding(.bottom, 5)
                 }
             }
         }
@@ -1358,19 +1487,46 @@ struct TaskConversationView: View {
     }
 
     private static func markdownBlocks(_ markdown: String) -> [AssistantMarkdownBlock] {
-        markdown.components(separatedBy: .newlines).enumerated().compactMap { index, rawLine in
+        var blocks: [AssistantMarkdownBlock] = []
+        var paragraphLines: [String] = []
+        var paragraphStart: Int?
+
+        func flushParagraph() {
+            guard let start = paragraphStart, !paragraphLines.isEmpty else { return }
+            blocks.append(AssistantMarkdownBlock(
+                id: start,
+                kind: .paragraph,
+                text: paragraphLines.joined(separator: " ")
+            ))
+            paragraphLines.removeAll()
+            paragraphStart = nil
+        }
+
+        for (index, rawLine) in markdown.components(separatedBy: .newlines).enumerated() {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard !line.isEmpty else { return nil }
+            guard !line.isEmpty else {
+                flushParagraph()
+                continue
+            }
             let headingPrefix = line.prefix(while: { $0 == "#" })
             if !headingPrefix.isEmpty, headingPrefix.count <= 6,
                line.dropFirst(headingPrefix.count).first == " " {
-                return AssistantMarkdownBlock(id: index, kind: .heading(headingPrefix.count), text: String(line.dropFirst(headingPrefix.count + 1)))
+                flushParagraph()
+                blocks.append(AssistantMarkdownBlock(
+                    id: index,
+                    kind: .heading(headingPrefix.count),
+                    text: String(line.dropFirst(headingPrefix.count + 1))
+                ))
+            } else if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
+                flushParagraph()
+                blocks.append(AssistantMarkdownBlock(id: index, kind: .listItem, text: String(line.dropFirst(2))))
+            } else {
+                paragraphStart = paragraphStart ?? index
+                paragraphLines.append(line)
             }
-            if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
-                return AssistantMarkdownBlock(id: index, kind: .listItem, text: String(line.dropFirst(2)))
-            }
-            return AssistantMarkdownBlock(id: index, kind: .paragraph, text: line)
         }
+        flushParagraph()
+        return blocks
     }
 
     private var composer: some View {
