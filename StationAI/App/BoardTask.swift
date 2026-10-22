@@ -76,6 +76,7 @@ final class BoardTask {
     var workspaceRootPathsData: Data?
     var repositoryWorktreesData: Data?
     var contextFolderPathsData: Data?
+    var draftImageDataURLsData: Data?
 
     var workspaceRootPaths: [String] {
         get {
@@ -95,6 +96,11 @@ final class BoardTask {
     var contextFolderPaths: [String] {
         get { guard let contextFolderPathsData else { return workspaceRootPaths }; return (try? JSONDecoder().decode([String].self, from: contextFolderPathsData)) ?? [] }
         set { contextFolderPathsData = try? JSONEncoder().encode(newValue) }
+    }
+
+    var draftImageDataURLs: [String] {
+        get { guard let draftImageDataURLsData else { return [] }; return (try? JSONDecoder().decode([String].self, from: draftImageDataURLsData)) ?? [] }
+        set { draftImageDataURLsData = try? JSONEncoder().encode(newValue) }
     }
 
     var status: TaskStatus {
@@ -132,6 +138,7 @@ final class BoardTask {
         workspaceRootPathsData = try? JSONEncoder().encode(workspaceRootPaths)
         repositoryWorktreesData = nil
         contextFolderPathsData = nil
+        draftImageDataURLsData = nil
     }
 }
 

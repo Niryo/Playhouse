@@ -3885,7 +3885,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 10))
     }
 
-    // case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. Diagnostics record image MIME and encoded size without storing image payloads.
+    // case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. Diagnostics record image MIME and encoded size without storing image payloads.
 
     func test_conversation_sends_image_attachments() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
@@ -3905,6 +3905,24 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(goToSheet.waitForExistence(timeout: 5))
         try chooseFile(in: picker, goToSheet: goToSheet, file: image)
         XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "The chosen image should appear in the composer preview.")
+        let imageTask = try XCTUnwrap(taskRecord(named: "Image conversation"))
+        let imageTaskID = try XCTUnwrap(imageTask["id"] as? String)
+        let freshImageTask = try XCTUnwrap(try runCLI(["task", "get", imageTaskID])["result"] as? [String: Any])
+        let draftImages = try XCTUnwrap(freshImageTask["draftImageDataURLs"] as? [String])
+        XCTAssertEqual(draftImages.count, 1, "The backlog task should persist its unsent image attachment.")
+        XCTAssertTrue(draftImages[0].hasPrefix("data:image/png;base64,"))
+        let excessImageArguments = (0..<9).flatMap { _ in ["--image", image.path] }
+        let rejectedDraft = try runCLI(
+            ["task", "prompt", imageTaskID, "--text", ""] + excessImageArguments,
+            expectedStatus: 2
+        )
+        XCTAssertEqual((rejectedDraft["error"] as? [String: Any])?["code"] as? String, "invalid_argument")
+        let preservedImageTask = try XCTUnwrap(try taskRecord(id: imageTaskID))
+        XCTAssertEqual(preservedImageTask["draftImageDataURLs"] as? [String], draftImages)
+        XCTAssertEqual(freshImageTask["draftImageDataURLs"] as? [String], draftImages)
+        element("back-to-board-button").click()
+        openTask(named: "Image conversation")
+        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "Reopening a backlog task should restore its image preview.")
         let composer = element("message-composer")
         composer.click()
         composer.typeText("What is shown in this screenshot?")

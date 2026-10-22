@@ -222,7 +222,8 @@ enum StationAIStore {
                    t0.ZPROGRESSTYPERAWVALUE, t0.ZPROGRESSLABEL, t0.ZPROGRESSDETAIL,
                    t0.ZCREATEDAT, t0.ZCODEXTHREADID, t0.ZSAVEDPROMPT,
                    t0.ZPENDINGSUBMITTEDPROMPT, t0.ZWORKSPACEROOTPATHSDATA,
-                   t0.ZREPOSITORYWORKTREESDATA, t0.ZCONTEXTFOLDERPATHSDATA
+                   t0.ZREPOSITORYWORKTREESDATA, t0.ZCONTEXTFOLDERPATHSDATA,
+                   t0.ZDRAFTIMAGEDATAURLSDATA
             FROM ZBOARDTASK t0 LIMIT 0
             """
         var statement: OpaquePointer?
@@ -347,7 +348,8 @@ enum StationAIStore {
             let requiredColumns = [
                 "ZPENDINGSUBMITTEDPROMPT",
                 "ZINPROGRESSSTARTEDAT",
-                "ZTOTALINPROGRESSSECONDS"
+                "ZTOTALINPROGRESSSECONDS",
+                "ZDRAFTIMAGEDATAURLSDATA"
             ]
             return requiredColumns.contains { !columns.contains($0) }
         }
@@ -428,7 +430,8 @@ enum StationAIStore {
                 let requiredColumns: [(String, String)] = [
                     ("ZPENDINGSUBMITTEDPROMPT", "VARCHAR"),
                     ("ZINPROGRESSSTARTEDAT", "TIMESTAMP"),
-                    ("ZTOTALINPROGRESSSECONDS", "FLOAT")
+                    ("ZTOTALINPROGRESSSECONDS", "FLOAT"),
+                    ("ZDRAFTIMAGEDATAURLSDATA", "BLOB")
                 ]
                 for (column, declaration) in requiredColumns where !columns.contains(column) {
                     let sql = "ALTER TABLE ZBOARDTASK ADD COLUMN \(column) \(declaration)"
@@ -601,8 +604,9 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let workspaceRoots: [String]
     let repositoryWorktrees: [RepositoryWorktreeRecord]
     let contextFolders: [String]
+    let draftImageDataURLs: [String]?
 
-    init(task: BoardTask) {
+    init(task: BoardTask, includeDraftImages: Bool = true) {
         id = task.id
         title = task.title
         status = task.status.rawValue
@@ -617,6 +621,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         workspaceRoots = task.workspaceRootPaths
         repositoryWorktrees = task.repositoryWorktrees
         contextFolders = task.contextFolderPaths
+        draftImageDataURLs = includeDraftImages ? task.draftImageDataURLs : nil
     }
 }
 
@@ -1176,7 +1181,7 @@ final class BoardTaskManager {
         let readStartedAt = DispatchTime.now().uptimeNanoseconds
         StationAIDiagnostics.record("persistence.read.started", fields: readFields)
         do {
-            let tasks = try modelContext.fetch(descriptor).map(BoardTaskRecord.init(task:))
+            let tasks = try modelContext.fetch(descriptor).map { BoardTaskRecord(task: $0, includeDraftImages: false) }
             var fields = readFields
             fields["resultCount"] = String(tasks.count)
             fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - readStartedAt) / 1_000_000)
@@ -1924,7 +1929,7 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func savePrompt(_ id: UUID, prompt: String, status: TaskStatus? = nil, submitted: Bool = false) async throws -> BoardTaskRecord {
+    func savePrompt(_ id: UUID, prompt: String, status: TaskStatus? = nil, submitted: Bool = false, imageDataURLs: [String]? = nil) async throws -> BoardTaskRecord {
         StationAIDiagnostics.record("task.prompt.write.started", fields: [
             "taskID": id.uuidString,
             "promptByteCount": String(prompt.utf8.count),
@@ -1937,9 +1942,13 @@ final class BoardTaskManager {
         if submitted, status != .inProgress {
             throw StationAIManagerError.invalidTransition("A submitted prompt must place the task in Progress.")
         }
+        if let imageDataURLs, imageDataURLs.count > 8 || imageDataURLs.contains(where: { !CodexConversationManager.isValidImageDataURL($0) }) {
+            throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
+        }
         return try await withTaskOperationLock(id) {
             let task = try requireTask(id)
             task.savedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : prompt
+            if let imageDataURLs { task.draftImageDataURLs = imageDataURLs }
             task.pendingSubmittedPrompt = submitted ? prompt : nil
             if let status {
                 task.status = status
@@ -3283,7 +3292,7 @@ final class CodexConversationManager {
         }
     }
 
-    private static func isValidImageDataURL(_ value: String) -> Bool {
+    static func isValidImageDataURL(_ value: String) -> Bool {
         guard let separator = value.firstIndex(of: ",") else { return false }
         let mime = String(value[..<separator])
         guard let data = Data(base64Encoded: String(value[value.index(after: separator)...])), data.count <= 10_000_000 else { return false }
@@ -3467,7 +3476,8 @@ final class StationAIBridgeRuntime {
                     request.requiredUUID("taskID"),
                     prompt: prompt,
                     status: status,
-                    submitted: submitted
+                    submitted: submitted,
+                    imageDataURLs: request.arguments["images"]?.strings
                 ))
             case "task.delete":
                 try await taskManager.delete(request.requiredUUID("taskID"))

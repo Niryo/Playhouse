@@ -1538,7 +1538,10 @@ struct TaskConversationView: View {
                             Image(nsImage: attachment.image).resizable().scaledToFill()
                                 .frame(width: 64, height: 52).clipShape(RoundedRectangle(cornerRadius: 8))
                                 .overlay(alignment: .topTrailing) {
-                                    Button { pendingImages.removeAll { $0.id == attachment.id } } label: {
+                                    Button {
+                                        pendingImages.removeAll { $0.id == attachment.id }
+                                        persistDraftImages()
+                                    } label: {
                                         Image(systemName: "xmark.circle.fill").foregroundStyle(.white, .black.opacity(0.7))
                                     }
                                     .buttonHoverPointer()
@@ -1940,6 +1943,14 @@ struct TaskConversationView: View {
                 messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: submittedPrompt))
             }
             draft = promptWasSent || hasPendingSubmittedPrompt ? "" : (task.savedPrompt ?? "")
+            if !promptWasSent && !hasPendingSubmittedPrompt {
+                pendingImages = task.draftImageDataURLs.compactMap { dataURL in
+                    guard let comma = dataURL.firstIndex(of: ","),
+                          let data = Data(base64Encoded: String(dataURL[dataURL.index(after: comma)...])),
+                          let image = NSImage(data: data) else { return nil }
+                    return PendingImage(dataURL: dataURL, image: image)
+                }
+            }
             isResponding = hasPendingSubmittedPrompt
                 && (task.status == .inProgress || task.status == .waitingResponse)
             if let threadID = task.codexThreadID {
@@ -2270,6 +2281,16 @@ struct TaskConversationView: View {
             throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images that fit within 10 MB after encoding.")
         }
         pendingImages.append(PendingImage(dataURL: "data:\(encoded.mimeType);base64,\(encoded.data.base64EncodedString())", image: previewImage))
+        persistDraftImages()
+    }
+
+    private func persistDraftImages() {
+        let images = pendingImages.map(\.dataURL)
+        Task { @MainActor in
+            do {
+                _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: draft, imageDataURLs: images)
+            } catch { errorMessage = error.localizedDescription }
+        }
     }
 
     private static func encodedImage(_ bitmap: NSBitmapImageRep) -> (data: Data, mimeType: String)? {
@@ -2320,7 +2341,7 @@ struct TaskConversationView: View {
         draftAutosaveTask?.cancel()
         if isReadOnly { onBack(); return }
         if isResponding { onBack(); return }
-        if isNewTask, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+        if isNewTask, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, pendingImages.isEmpty,
            messages.isEmpty, activities.isEmpty, !isLoadingHistory {
             Task { @MainActor in
                 do {
