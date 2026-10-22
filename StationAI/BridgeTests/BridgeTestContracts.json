@@ -169,7 +169,7 @@
   },
   {
     "id": "test_conversation_shows_subagent_delegation",
-    "expectation": "When Codex delegates a task to a subagent, the conversation activity shows the delegated task and its completion status during the turn and after history reload. Diagnostics record Codex RPC outcomes and command working directory and file-change paths while excluding conversation text, command output, and diffs."
+    "expectation": "Raw Codex agentMessage items keep their commentary, final_answer, and turn IDs separate. During a delegated turn before assistant output, a “Working for …” disclosure appears without an assistant waiting spinner and updates by seconds until whole minutes; once commentary arrives, the disclosure remains above it. When the turn completes, a collapsed “Worked for …” row with a right-pointing chevron remains above the clean final_answer, with an accessible divider between them; its accessibility value exposes the collapsed/right-chevron and expanded/down-chevron states. Expanding it reveals preserved progress and completed subagent details. After leaving and reopening the completed conversation, the UI still shows the same “Worked for …” duration and no assistant waiting spinner; CLI/XPC history preserves phase-tagged messages, turn IDs, and activity details across reload. Diagnostics record Codex RPC outcomes and command working directory and file-change paths while excluding conversation text, command output, and diffs."
   },
   {
     "id": "test_plan_mode_renders_markdown_in_conversation",

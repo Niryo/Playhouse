@@ -2761,7 +2761,7 @@ class StationAIBridgeTests(unittest.TestCase):
         history, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(history)["messages"], [])
 
-    # case-contract: test_conversation_shows_subagent_delegation | When Codex delegates a task to a subagent, the conversation activity shows the delegated task and its completion status during the turn and after history reload. Diagnostics record Codex RPC outcomes and command working directory and file-change paths while excluding conversation text, command output, and diffs.
+    # case-contract: test_conversation_shows_subagent_delegation | Raw Codex agentMessage items keep their commentary, final_answer, and turn IDs separate. During a delegated turn before assistant output, a “Working for …” disclosure appears without an assistant waiting spinner and updates by seconds until whole minutes; once commentary arrives, the disclosure remains above it. When the turn completes, a collapsed “Worked for …” row with a right-pointing chevron remains above the clean final_answer, with an accessible divider between them; its accessibility value exposes the collapsed/right-chevron and expanded/down-chevron states. Expanding it reveals preserved progress and completed subagent details. After leaving and reopening the completed conversation, the UI still shows the same “Worked for …” duration and no assistant waiting spinner; CLI/XPC history preserves phase-tagged messages, turn IDs, and activity details across reload. Diagnostics record Codex RPC outcomes and command working directory and file-change paths while excluding conversation text, command output, and diffs.
     def test_conversation_shows_subagent_delegation(self):
         task_id = self.create_task(title="Subagent delegation")["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -2785,6 +2785,19 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(subagent["status"], "completed")
         self.assertIn("Inspect the project structure", subagent["detail"])
         self.assertIn("Inspected the project structure", subagent["detail"])
+        self.assertTrue(any(
+            message["role"] == "assistant"
+            and message["text"] == "The subagent inspected the project structure."
+            and message.get("phase") == "final_answer"
+            for message in result["messages"]
+        ))
+        self.assertTrue(any(
+            message["role"] == "assistant"
+            and message["text"] == "I inspected the project structure and am preparing the summary."
+            and message.get("phase") == "commentary"
+            and message.get("turnID") == "turn_stationai_fixture"
+            for message in result["messages"]
+        ))
 
         diagnostics = self.diagnostic_events()
         rpc_start = next(event for event in diagnostics if event.get("event") == "codex.rpc.request.started" and event.get("method") == "turn/start")
@@ -2823,6 +2836,19 @@ class StationAIBridgeTests(unittest.TestCase):
             {activity["id"]: activity for activity in activities},
         )
         self.assertTrue(any("subagent inspected" in message["text"].lower() for message in history["messages"]))
+        self.assertTrue(any(
+            message["role"] == "assistant"
+            and message["text"] == "The subagent inspected the project structure."
+            and message.get("phase") == "final_answer"
+            for message in history["messages"]
+        ))
+        self.assertTrue(any(
+            message["role"] == "assistant"
+            and message["text"] == "I inspected the project structure and am preparing the summary."
+            and message.get("phase") == "commentary"
+            and message.get("turnID") == "turn_stationai_fixture"
+            for message in history["messages"]
+        ))
 
     # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; a completed <proposed_plan> is automatically rendered as Markdown without exposing its wrapper tags, including after reopening, while bridge history preserves the exact source and the reopened conversation shows its latest message.
     def test_plan_mode_renders_markdown_in_conversation(self):

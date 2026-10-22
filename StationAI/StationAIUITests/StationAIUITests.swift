@@ -3373,7 +3373,7 @@ final class StationAIUITests: XCTestCase {
             XCTAssertTrue(app.staticTexts["Queued for after this turn"].waitForExistence(timeout: 10), "The queued follow-up should survive closing and reopening the conversation.")
             XCTAssertEqual(composer.value as? String, "", "A prompt already sent to Codex must not reappear as a composer draft.")
             let reopenedActivity = element("codex-activity-disclosure")
-            let visibleThinking = NSPredicate(format: "label CONTAINS %@ OR label CONTAINS %@", "Thinking", "Running")
+            let visibleThinking = NSPredicate(format: "label CONTAINS %@ OR label CONTAINS %@", "Codex activity", "Working for")
             let thinkingExpectation = XCTNSPredicateExpectation(predicate: visibleThinking, object: reopenedActivity)
             XCTAssertEqual(XCTWaiter.wait(for: [thinkingExpectation], timeout: 30), .completed, "An active turn should remain visibly active after leaving and reopening the task.")
 
@@ -3786,7 +3786,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
     }
 
-    // case-contract: test_conversation_shows_subagent_delegation | When Codex delegates a task to a subagent, the conversation activity shows the delegated task and its completion status during the turn and after history reload. Diagnostics record Codex RPC outcomes and command working directory and file-change paths while excluding conversation text, command output, and diffs.
+    // case-contract: test_conversation_shows_subagent_delegation | Raw Codex agentMessage items keep their commentary, final_answer, and turn IDs separate. During a delegated turn before assistant output, a “Working for …” disclosure appears without an assistant waiting spinner and updates by seconds until whole minutes; once commentary arrives, the disclosure remains above it. When the turn completes, a collapsed “Worked for …” row with a right-pointing chevron remains above the clean final_answer, with an accessible divider between them; its accessibility value exposes the collapsed/right-chevron and expanded/down-chevron states. Expanding it reveals preserved progress and completed subagent details. After leaving and reopening the completed conversation, the UI still shows the same “Worked for …” duration and no assistant waiting spinner; CLI/XPC history preserves phase-tagged messages, turn IDs, and activity details across reload. Diagnostics record Codex RPC outcomes and command working directory and file-change paths while excluding conversation text, command output, and diffs.
     func test_conversation_shows_subagent_delegation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -3795,8 +3795,25 @@ final class StationAIUITests: XCTestCase {
             "StationAI bridge tests own this deterministic fixture (v1).\n",
             "Refusing to place the Codex fixture in a directory StationAI does not own."
         )
-        let fixtureCopy = fixtureRoot.appendingPathComponent("codex-fixture-subagent")
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureCopy.path), "The UI runner must prepare the subagent fixture before launch.")
+        let preparedFixture = fixtureRoot.appendingPathComponent("codex-fixture-subagent")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: preparedFixture.path), "The UI runner must prepare the subagent fixture before launch.")
+        let fixtureCopy = fixtureRoot.appendingPathComponent("codex-fixture-subagent-wait")
+        if FileManager.default.fileExists(atPath: fixtureCopy.path) {
+            try FileManager.default.removeItem(at: fixtureCopy)
+        }
+        try FileManager.default.copyItem(at: preparedFixture, to: fixtureCopy)
+        let activeMarker = URL(fileURLWithPath: fixtureCopy.path + ".turn-active")
+        let releaseMarker = URL(fileURLWithPath: fixtureCopy.path + ".turn-release")
+        let commentaryActiveMarker = URL(fileURLWithPath: fixtureCopy.path + ".commentary-active")
+        let commentaryReleaseMarker = URL(fileURLWithPath: fixtureCopy.path + ".commentary-release")
+        for marker in [activeMarker, releaseMarker, commentaryActiveMarker, commentaryReleaseMarker]
+        where FileManager.default.fileExists(atPath: marker.path) {
+            try FileManager.default.removeItem(at: marker)
+        }
+        defer {
+            FileManager.default.createFile(atPath: releaseMarker.path, contents: Data())
+            FileManager.default.createFile(atPath: commentaryReleaseMarker.path, contents: Data())
+        }
         codexFixtureExecutable = fixtureCopy.path
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["task", "create", "--title", "Subagent delegation", "--root", fixture.primary.path])
@@ -3808,9 +3825,6 @@ final class StationAIUITests: XCTestCase {
         composer.click()
         composer.typeText(prompt)
         element("send-message-button").click()
-        XCTAssertTrue(waitUntil({
-            (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review"
-        }, timeout: 20), "The visible composer turn should finish and persist the task status.")
         XCTAssertTrue(waitUntil({
             (try? self.diagnosticEvents().contains {
                 $0["event"] as? String == "codex.rpc.response.succeeded" && $0["method"] as? String == "turn/start"
@@ -3850,17 +3864,89 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(app.state, .runningForeground, "StationAI must be foreground before inspecting the conversation.")
 
         let activityDisclosure = element("codex-activity-disclosure")
+        let workedDuration = element("codex-worked-duration")
+        let activityChevron = element("codex-activity-chevron")
+        let conversationScrollView = element("conversation-scroll-view")
+        let workDurationSeparator = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Separator between work duration and response"))
+            .firstMatch
         XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 20), "A delegated task should appear in conversation activity.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The fixture should hold the completed activity open so the disclosure can be expanded during the turn.")
+        let firstActivityLabel = activityDisclosure.label
+        XCTAssertTrue(firstActivityLabel.contains("Working for "), "An active turn should show its elapsed working time.")
+        XCTAssertTrue(waitUntil({ activityDisclosure.label != firstActivityLabel }, timeout: 3), "The working timer should update live without waiting for the turn to finish.")
+        let liveCommentary = element("assistant-message-item_item_stationai_commentary")
+        let finalAnswer = element("assistant-message-item_stationai_final")
+        XCTAssertFalse(liveCommentary.exists, "The fixture should hold before assistant progress arrives.")
+        XCTAssertFalse(finalAnswer.exists, "The fixture should hold before the final answer arrives.")
+        XCTAssertEqual(conversationScrollView.descendants(matching: .progressIndicator).count, 0,
+                       "The working-duration disclosure replaces the assistant waiting spinner before assistant output.")
+        XCTAssertTrue(waitUntil({
+            activityDisclosure.label.range(of: #"Working for \d+m"#, options: .regularExpression) != nil
+        }, timeout: 65), "After 60 seconds the live working duration should switch to whole minutes.")
+        FileManager.default.createFile(atPath: releaseMarker.path, contents: Data())
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: commentaryActiveMarker.path) }, timeout: 20),
+                      "The fixture should pause with live commentary before its final answer.")
+        XCTAssertTrue(liveCommentary.waitForExistence(timeout: 10), "Codex commentary should appear in the live conversation while work is in progress.")
+        XCTAssertTrue(liveCommentary.label.contains("I inspected the project structure"))
+        XCTAssertEqual(conversationScrollView.descendants(matching: .progressIndicator).count, 0,
+                       "The working-duration disclosure replaces the assistant waiting spinner during commentary.")
+        XCTAssertLessThan(activityDisclosure.frame.maxY, liveCommentary.frame.minY, "The live working row should be above the progress text.")
+        XCTAssertTrue(workDurationSeparator.exists, "The duration row should have its accessible separator.")
+        XCTAssertLessThan(activityDisclosure.frame.maxY, workDurationSeparator.frame.minY)
+        XCTAssertLessThan(workDurationSeparator.frame.minY, liveCommentary.frame.minY)
         activityDisclosure.click()
         let activityRow = element("codex-activity-row-item_stationai_subagent")
         XCTAssertTrue(activityRow.waitForExistence(timeout: 10))
         XCTAssertTrue(activityRow.label.contains("Task delegated to subagent"))
         XCTAssertTrue(activityRow.label.contains("Completed"))
+        FileManager.default.createFile(atPath: commentaryReleaseMarker.path, contents: Data())
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review"
+        }, timeout: 20), "The visible composer turn should finish and persist the task status.")
+        let workedFor = NSPredicate(format: "label CONTAINS %@", "Worked for")
+        let workedForExpectation = XCTNSPredicateExpectation(predicate: workedFor, object: activityDisclosure)
+        XCTAssertEqual(XCTWaiter.wait(for: [workedForExpectation], timeout: 10), .completed, "Successful completion should replace active progress status with its elapsed-time disclosure.")
+        XCTAssertTrue(activityDisclosure.label.contains("Worked for "), "Completion should leave a collapsed worked-for disclosure visible.")
+        let completedDurationLabel = activityDisclosure.label
+        XCTAssertFalse(activityRow.exists, "Completion should collapse the progress details automatically.")
+        XCTAssertEqual(activityDisclosure.value as? String, "Collapsed, right chevron", "The collapsed disclosure should expose its right-chevron state to assistive technology.")
+        XCTAssertTrue(workedDuration.exists && activityChevron.exists)
+        XCTAssertGreaterThanOrEqual(activityChevron.frame.minX, workedDuration.frame.maxX)
+        XCTAssertLessThan(activityChevron.frame.minX - workedDuration.frame.maxX, 16,
+                          "The collapsed chevron should sit beside the worked-for label.")
+        XCTAssertTrue(finalAnswer.waitForExistence(timeout: 10), "The final answer should remain visible while progress details are collapsed.")
+        XCTAssertTrue(finalAnswer.isHittable, "The clean final answer should be on screen while progress details are collapsed.")
+        XCTAssertLessThan(activityDisclosure.frame.maxY, finalAnswer.frame.minY, "The collapsed worked-for row should sit above the final answer.")
+        XCTAssertLessThan(workDurationSeparator.frame.minY, finalAnswer.frame.minY, "The visible divider should separate the worked-for row from the final answer.")
+        XCTAssertFalse(element("assistant-message-item_stationai_commentary").exists, "The commentary should no longer appear as a transcript answer after completion.")
+        activityDisclosure.click()
+        XCTAssertEqual(activityDisclosure.value as? String, "Expanded, down chevron", "The expanded disclosure should expose its down-chevron state to assistive technology.")
+        XCTAssertTrue(activityRow.waitForExistence(timeout: 10), "The completed progress details should remain available on demand.")
+        let collapsedProgress = element("codex-progress-message-item_stationai_commentary")
+        XCTAssertTrue(collapsedProgress.waitForExistence(timeout: 10), "Expanding the disclosure should reveal the preserved commentary separately from the final answer.")
+        XCTAssertTrue(collapsedProgress.label.contains("I inspected the project structure"))
         let activityDetail = element("codex-activity-detail-item_stationai_subagent")
         XCTAssertTrue(activityDetail.waitForExistence(timeout: 5))
         let detailDescription = "\(activityDetail.label) \(activityDetail.value as? String ?? "")"
         XCTAssertTrue(detailDescription.contains("Inspect the project structure and report relevant files."))
         attachScreenshot(named: "Conversation shows a completed subagent delegation")
+
+        element("back-to-board-button").click()
+        openTask(named: "Subagent delegation")
+        let reopenedDisclosure = element("codex-activity-disclosure")
+        let reopenedConversation = element("conversation-scroll-view")
+        XCTAssertTrue(reopenedConversation.waitForExistence(timeout: 10), "The reopened task should restore its conversation pane.")
+        XCTAssertEqual(reopenedConversation.descendants(matching: .progressIndicator).count, 0,
+                       "Reopening conversation history should not show a loading spinner.")
+        XCTAssertTrue(waitUntil({ reopenedDisclosure.exists && reopenedDisclosure.label.contains("Worked for ") }, timeout: 15),
+                      "Reopening a completed conversation should keep its worked-for duration disclosure.")
+        XCTAssertEqual(reopenedDisclosure.label, completedDurationLabel,
+                       "Reopening a completed conversation should preserve the displayed duration.")
+        let reopenedFinalAnswer = element("assistant-message-item_stationai_final")
+        XCTAssertTrue(reopenedFinalAnswer.waitForExistence(timeout: 10), "The completed response should reload with its duration disclosure.")
+        XCTAssertEqual(reopenedConversation.descendants(matching: .progressIndicator).count, 0,
+                       "The loaded conversation should remain free of a waiting spinner.")
     }
 
     // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; a completed <proposed_plan> is automatically rendered as Markdown without exposing its wrapper tags, including after reopening, while bridge history preserves the exact source and the reopened conversation shows its latest message.

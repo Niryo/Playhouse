@@ -2482,6 +2482,8 @@ final class WorkspaceManager {
 struct ConversationUpdate: Codable {
     let type: String
     var text: String?
+    var itemID: String?
+    var phase: String?
     var activity: CodexActivity?
     var diff: String?
     var history: CodexThreadHistory?
@@ -2865,6 +2867,14 @@ final class CodexConversationManager {
                 },
                 onSteerMessage: { message, images in
                     onUpdate(ConversationUpdate(type: "steered_message", message: message, imageDataURLs: images))
+                },
+                onProgressMessage: { message in
+                    onUpdate(ConversationUpdate(
+                        type: "assistant_progress",
+                        text: message.text,
+                        itemID: message.id,
+                        phase: message.phase
+                    ))
                 }
             )
             phase = "worktree-finalization"

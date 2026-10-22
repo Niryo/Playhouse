@@ -55,6 +55,9 @@ struct TaskConversationView: View {
     @State private var messages: [CodexChatMessage] = []
     @State private var activities: [CodexActivity] = []
     @State private var isActivityExpanded = false
+    @State private var responseStartedAt: Date?
+    @State private var completedResponseDuration: Int?
+    @State private var collapsedProgressTurnIDs = Set<String>()
     @State private var changeInventory = WorkspaceChangeInventory(staged: [], working: [])
     @State private var isLoadingChanges = false
     @State private var changesNeedRefresh = false
@@ -110,6 +113,55 @@ struct TaskConversationView: View {
         guard let diffChangeCount else { return "Calculating changes…" }
         guard diffChangeCount > 0 else { return "No text changes" }
         return "\(diffChangeCount) change\(diffChangeCount == 1 ? "" : "s") highlighted"
+    }
+
+    private var latestConversationTurnID: String? {
+        if let latestUserIndex = messages.lastIndex(where: { $0.role == .user }) {
+            return messages.dropFirst(latestUserIndex + 1).first(where: {
+                $0.role == .assistant && $0.turnID != nil
+            })?.turnID ?? messages[latestUserIndex].turnID
+        }
+        return messages.last(where: { $0.turnID != nil })?.turnID
+    }
+
+    private var progressMessageIDs: Set<String> {
+        guard let latestConversationTurnID,
+              collapsedProgressTurnIDs.contains(latestConversationTurnID) else { return [] }
+        return Set(messages.lazy.filter {
+            $0.role == .assistant && $0.phase == "commentary" && $0.turnID == latestConversationTurnID
+        }.map(\.id))
+    }
+
+    private var progressMessages: [CodexChatMessage] {
+        messages.filter { progressMessageIDs.contains($0.id) }
+    }
+
+    private var conversationMessages: [CodexChatMessage] {
+        let completedProgressIDs = progressMessageIDs
+        return messages.filter { !completedProgressIDs.contains($0.id) }
+    }
+
+    private var activityDisclosureAnchorID: String? {
+        if let latestUserIndex = conversationMessages.lastIndex(where: { $0.role == .user }) {
+            return conversationMessages.dropFirst(latestUserIndex + 1).first(where: { $0.role == .assistant })?.id
+        }
+        return conversationMessages.first(where: { $0.role == .assistant })?.id
+    }
+
+    private var shouldShowActivityDisclosure: Bool {
+        !activities.isEmpty || !progressMessages.isEmpty || isResponding || completedResponseDuration != nil || hasCompletedAssistantResponse
+    }
+
+    private var hasCompletedAssistantResponse: Bool {
+        messages.contains { $0.role == .assistant && $0.phase == "final_answer" }
+    }
+
+    private var responseStartedAtDefaultsKey: String {
+        "stationai.codex.response-started-at.\(task.id.uuidString)"
+    }
+
+    private var completedResponseDurationDefaultsKey: String {
+        "stationai.codex.completed-response-duration.\(task.id.uuidString)"
     }
 
     var body: some View {
@@ -1029,36 +1081,33 @@ struct TaskConversationView: View {
         ScrollViewReader { scrollProxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if messages.isEmpty {
+                    if messages.isEmpty && !isLoadingHistory {
                         VStack(spacing: 12) {
-                            if isLoadingHistory {
-                                ProgressView("Loading conversation…")
-                                    .controlSize(.small)
-                            } else {
-                                Image(systemName: "bubble.left.and.bubble.right")
-                                    .font(.system(size: 25, weight: .regular))
-                                    .foregroundStyle(Color.accentColor.opacity(0.8))
-                                Text("Start a conversation")
-                                    .font(.system(size: 17, weight: .semibold))
-                                Text("Send a message to Codex · Luna.")
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(.secondary)
-                            }
+                            Image(systemName: "bubble.left.and.bubble.right")
+                                .font(.system(size: 25, weight: .regular))
+                                .foregroundStyle(Color.accentColor.opacity(0.8))
+                            Text("Start a conversation")
+                                .font(.system(size: 17, weight: .semibold))
+                            Text("Send a message to Codex · Luna.")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
                         }
                         .frame(maxWidth: .infinity, minHeight: 210)
                         .padding(30)
                         .accessibilityIdentifier("empty-conversation")
-                    } else {
+                    } else if !messages.isEmpty {
                         LazyVStack(alignment: .leading, spacing: 16) {
-                            ForEach(messages) { message in
+                            ForEach(conversationMessages) { message in
+                                if shouldShowActivityDisclosure, message.id == activityDisclosureAnchorID {
+                                    activityList
+                                }
                                 messageBubble(message)
                                     .id(message.id)
                             }
+                            if shouldShowActivityDisclosure, activityDisclosureAnchorID == nil {
+                                activityList
+                            }
                         }
-                    }
-
-                    if !activities.isEmpty || isResponding {
-                        activityList
                     }
 
                     // Keep a stable scroll target outside the LazyVStack. A newly
@@ -1084,48 +1133,51 @@ struct TaskConversationView: View {
             .onChange(of: activities) { _, _ in
                 if isResponding { scrollToLatest(using: scrollProxy) }
             }
+            .onChange(of: isResponding) { _, _ in
+                scrollToLatest(using: scrollProxy)
+            }
         }
     }
 
     private var activityList: some View {
-        let runningCount = activities.filter { $0.status == "inProgress" || $0.status == "running" }.count
-        return VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 8) {
             Button {
                 withAnimation(.easeInOut(duration: 0.16)) {
                     isActivityExpanded.toggle()
                 }
             } label: {
-                HStack(spacing: 7) {
-                    Image(systemName: isActivityExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                    Image(systemName: runningCount > 0 || isResponding ? "gearshape.2.fill" : "checkmark.circle.fill")
-                        .foregroundStyle(runningCount > 0 || isResponding ? Color.accentColor : Color.green)
-                    if isResponding && runningCount == 0 {
-                        TimelineView(.periodic(from: .now, by: 0.45)) { timeline in
-                            let phase = Int(timeline.date.timeIntervalSinceReferenceDate / 0.45) % 4
-                            Text("Thinking" + String(repeating: ".", count: phase))
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(Color.accentColor)
-                                .accessibilityLabel("Thinking")
-                                .accessibilityIdentifier("codex-thinking-indicator")
-                        }
-                    } else {
-                        Text(runningCount > 0 ? "Running \(runningCount) task\(runningCount == 1 ? "" : "s")…" : "Codex activity · \(activities.count) task\(activities.count == 1 ? "" : "s")")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .contentShape(Rectangle())
-                .frame(maxWidth: .infinity, alignment: .leading)
+                activityDisclosureButtonLabel
             }
             .buttonHoverPointer()
             .help("Show or hide Codex activity details")
             .buttonStyle(.plain)
-            .accessibilityLabel(isResponding && runningCount == 0 ? "Thinking" : runningCount > 0 ? "Running \(runningCount) task\(runningCount == 1 ? "" : "s")" : "Codex activity, \(activities.count) task\(activities.count == 1 ? "" : "s")")
+            .accessibilityValue(isActivityExpanded ? "Expanded, down chevron" : "Collapsed, right chevron")
+            .accessibilityHint("Shows Codex progress messages and completed activity details.")
             .accessibilityIdentifier("codex-activity-disclosure")
+
+            Divider()
+                .opacity(0.32)
+                .accessibilityElement()
+                .accessibilityLabel("Separator between work duration and response")
 
             if isActivityExpanded {
                 VStack(alignment: .leading, spacing: 7) {
+                    if !progressMessages.isEmpty {
+                        Text("Progress")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 4)
+                        ForEach(progressMessages) { message in
+                            assistantMarkdownContent(Self.displayableAssistantText(message.text))
+                                .font(.system(size: 12))
+                                .foregroundStyle(WorkspaceTheme.conversationText)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(9)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 8))
+                                .accessibilityIdentifier("codex-progress-message-\(message.id)")
+                        }
+                    }
                     ForEach(activities) { activity in
                         VStack(alignment: .leading, spacing: 3) {
                             HStack(spacing: 7) {
@@ -1164,10 +1216,54 @@ struct TaskConversationView: View {
     }
 
     @ViewBuilder
+    private var activityDisclosureButtonLabel: some View {
+        if isResponding, let responseStartedAt {
+            TimelineView(.periodic(from: responseStartedAt, by: 1)) { timeline in
+                activityDisclosureContents(
+                    workingFor: Self.durationLabel(Self.elapsedSeconds(since: responseStartedAt, now: timeline.date))
+                )
+            }
+        } else {
+            activityDisclosureContents(
+                workedFor: completedResponseDuration.map(Self.durationLabel) ?? (hasCompletedAssistantResponse ? "" : nil)
+            )
+        }
+    }
+
+    private func activityDisclosureContents(workingFor: String? = nil, workedFor: String? = nil) -> some View {
+        return HStack(spacing: 7) {
+            if let workingFor {
+                Text("Working for \(workingFor)")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+                    .accessibilityIdentifier("codex-working-duration")
+            } else if let workedFor {
+                Text(workedFor.isEmpty ? "Worked for" : "Worked for \(workedFor)")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("codex-worked-duration")
+            } else {
+                Text("Codex activity")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            Image(systemName: isActivityExpanded ? "chevron.down" : "chevron.right")
+                .font(.system(size: 9, weight: .semibold))
+                .accessibilityIdentifier("codex-activity-chevron")
+        }
+        .contentShape(Rectangle())
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
     private func messageBubble(_ message: CodexChatMessage) -> some View {
         HStack(alignment: .top, spacing: 0) {
             if message.role == .assistant {
-                assistantBubble(message)
+                if Self.displayableAssistantText(message.text).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && isResponding {
+                    EmptyView()
+                } else {
+                    assistantBubble(message)
+                }
                 Spacer(minLength: 70)
             } else {
                 Spacer(minLength: 70)
@@ -1184,14 +1280,7 @@ struct TaskConversationView: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
 
-            Group {
-                if displayText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && isResponding {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    assistantMarkdownContent(displayText)
-                }
-            }
+            assistantMarkdownContent(displayText)
             .font(.system(size: 16, weight: .regular))
             .foregroundStyle(WorkspaceTheme.conversationText)
             .padding(.horizontal, 15)
@@ -1639,6 +1728,33 @@ struct TaskConversationView: View {
             if let threadID = task.codexThreadID {
                 isResponding = isResponding || codexClient.isTurnActive(threadID: threadID)
             }
+            let defaults = UserDefaults.standard
+            if isResponding {
+                responseStartedAt = defaults.object(forKey: responseStartedAtDefaultsKey) as? Date ?? Date()
+                defaults.set(responseStartedAt, forKey: responseStartedAtDefaultsKey)
+                completedResponseDuration = nil
+            } else if let duration = defaults.object(forKey: completedResponseDurationDefaultsKey) as? Int {
+                completedResponseDuration = duration
+                responseStartedAt = nil
+            } else if history.messages.contains(where: { $0.role == .assistant && $0.phase == "final_answer" }),
+                      let startedAt = defaults.object(forKey: responseStartedAtDefaultsKey) as? Date {
+                let duration = Self.elapsedSeconds(since: startedAt, now: Date())
+                completedResponseDuration = duration
+                defaults.set(duration, forKey: completedResponseDurationDefaultsKey)
+                defaults.removeObject(forKey: responseStartedAtDefaultsKey)
+                responseStartedAt = nil
+            } else {
+                responseStartedAt = nil
+                defaults.removeObject(forKey: responseStartedAtDefaultsKey)
+            }
+            let activeTurnID = history.messages.last(where: { $0.turnID != nil })?.turnID
+            collapsedProgressTurnIDs = Set(history.messages.lazy
+                .filter {
+                    $0.role == .assistant
+                        && $0.phase == "final_answer"
+                        && (!isResponding || $0.turnID != activeTurnID)
+                }
+                .compactMap(\.turnID))
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -1669,9 +1785,15 @@ struct TaskConversationView: View {
         }
         let userMessageID = UUID().uuidString
         let assistantMessageID = UUID().uuidString
+        let previousResponseDuration = completedResponseDuration
         messages.append(CodexChatMessage(id: userMessageID, role: .user, text: text, imageDataURLs: pendingImages.map(\.dataURL)))
         messages.append(CodexChatMessage(id: assistantMessageID, role: .assistant, text: ""))
         isResponding = true
+        let startedAt = Date()
+        responseStartedAt = startedAt
+        completedResponseDuration = nil
+        UserDefaults.standard.set(startedAt, forKey: responseStartedAtDefaultsKey)
+        UserDefaults.standard.removeObject(forKey: completedResponseDurationDefaultsKey)
         draft = ""
         let imageDataURLs = pendingImages.map(\.dataURL)
         pendingImages = []
@@ -1698,6 +1820,14 @@ struct TaskConversationView: View {
                     return PendingImage(dataURL: dataURL, image: image)
                 }
                 isResponding = false
+                responseStartedAt = nil
+                UserDefaults.standard.removeObject(forKey: responseStartedAtDefaultsKey)
+                completedResponseDuration = previousResponseDuration
+                if let previousResponseDuration {
+                    UserDefaults.standard.set(previousResponseDuration, forKey: completedResponseDurationDefaultsKey)
+                } else {
+                    UserDefaults.standard.removeObject(forKey: completedResponseDurationDefaultsKey)
+                }
                 return
             }
             do {
@@ -1713,6 +1843,30 @@ struct TaskConversationView: View {
                         guard let text = update.text else { return }
                         guard let messageIndex = messages.lastIndex(where: { $0.role == .assistant }) else { return }
                         messages[messageIndex].text = text
+                        messages[messageIndex].phase = "final_answer"
+                    case "assistant_progress":
+                        guard let itemID = update.itemID, let text = update.text else { return }
+                        if let index = messages.firstIndex(where: { $0.id == itemID }) {
+                            messages[index].text = text
+                            messages[index].phase = update.phase
+                        } else if let placeholderIndex = messages.firstIndex(where: { $0.id == assistantMessageID }) {
+                            messages.insert(CodexChatMessage(
+                                id: itemID,
+                                role: .assistant,
+                                text: text,
+                                phase: update.phase
+                            ), at: placeholderIndex)
+                        } else {
+                            messages.append(CodexChatMessage(
+                                id: itemID,
+                                role: .assistant,
+                                text: text,
+                                phase: update.phase
+                            ))
+                        }
+                        if let placeholderIndex = messages.firstIndex(where: { $0.id == assistantMessageID }) {
+                            messages[placeholderIndex].text = ""
+                        }
                     case "activity":
                         guard let activity = update.activity else { return }
                         if let index = activities.firstIndex(where: { $0.id == activity.id }) {
@@ -1727,6 +1881,18 @@ struct TaskConversationView: View {
                         messages = history.messages
                         activities = history.activities
                         if update.type == "completed" {
+                            if let responseStartedAt {
+                                let duration = Self.elapsedSeconds(since: responseStartedAt, now: Date())
+                                completedResponseDuration = duration
+                                UserDefaults.standard.set(duration, forKey: completedResponseDurationDefaultsKey)
+                                UserDefaults.standard.removeObject(forKey: responseStartedAtDefaultsKey)
+                            }
+                            if let completedTurnID = history.messages.reversed().first(where: {
+                                $0.role == .assistant && $0.phase == "final_answer"
+                            })?.turnID ?? history.messages.last?.turnID {
+                                collapsedProgressTurnIDs.insert(completedTurnID)
+                            }
+                            isActivityExpanded = false
                             Task { await refreshWorkspaceChanges() }
                         }
                     case "queue_changed":
@@ -1750,6 +1916,8 @@ struct TaskConversationView: View {
                 }
                 isComposerFocused = true
             } catch {
+                responseStartedAt = nil
+                UserDefaults.standard.removeObject(forKey: responseStartedAtDefaultsKey)
                 if codexClient.wasLastTurnInterrupted {
                     hasPausedResponse = true
                 } else {
@@ -1766,6 +1934,15 @@ struct TaskConversationView: View {
 
             isResponding = false
         }
+    }
+
+    private static func durationLabel(_ seconds: Int) -> String {
+        if seconds < 60 { return "\(seconds)s" }
+        return "\(seconds / 60)m"
+    }
+
+    private static func elapsedSeconds(since start: Date, now: Date) -> Int {
+        max(0, Int(now.timeIntervalSince(start).rounded(.down)))
     }
 
     private func refreshQueuedMessages() {
