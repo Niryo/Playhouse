@@ -11,11 +11,13 @@ import subprocess
 import stat
 import sys
 import tempfile
+import time
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--root", required=True, type=Path)
 parser.add_argument("--profile-bundle-id", required=True)
 parser.add_argument("--architecture", required=True)
+parser.add_argument("--fingerprint-only", action="store_true", help="Print the build key without building or locking.")
 arguments = parser.parse_args()
 root = arguments.root.resolve()
 
@@ -45,7 +47,12 @@ def source_fingerprint():
     digest.update(toolchain_fingerprint().encode())
     for raw_path in sorted(path for path in paths if path):
         relative_path = Path(os.fsdecode(raw_path))
+        # These directories are development instructions/docs, not Xcode inputs.
+        # Keep app resources, project settings, and build scripts conservative.
+        if relative_path.parts[0] in {"docs", ".agents", ".codex"}:
+            continue
         if relative_path.as_posix() in {
+            "README.md",
             "AGENTS.md",
             "StationAI/BridgeTests/BridgeTestContracts.json",
             "scripts/check-button-feedback.py",
@@ -72,6 +79,9 @@ def source_fingerprint():
 
 
 fingerprint = source_fingerprint()
+if arguments.fingerprint_only:
+    print(fingerprint)
+    raise SystemExit(0)
 cache_root = Path(tempfile.gettempdir()) / "StationAI-E2E-BuildCache"
 root_key = hashlib.sha256(os.fsencode(root)).hexdigest()[:16]
 cache_path = cache_root / f"{root_key}-{fingerprint}"
@@ -102,7 +112,10 @@ def cache_bundle_is_valid():
 
 
 with (cache_root / f"{root_key}.lock").open("a+") as lock_file:
+    wait_started = time.monotonic()
+    print(f"Waiting for E2E build cache lock: {lock_file.name}", file=sys.stderr, flush=True)
     fcntl.flock(lock_file, fcntl.LOCK_EX)
+    print(f"E2E build cache lock wait_seconds={time.monotonic() - wait_started:.3f}", file=sys.stderr, flush=True)
     reusable = (
         manifest.is_file()
         and manifest.read_text(encoding="utf-8").strip() == fingerprint
@@ -113,6 +126,7 @@ with (cache_root / f"{root_key}.lock").open("a+") as lock_file:
     if reusable:
         print(f"Reusing matching E2E build {fingerprint[:16]}.", file=os.sys.stderr)
     else:
+        print(f"Building E2E cache miss {fingerprint[:16]}.", file=sys.stderr, flush=True)
         cache_path.mkdir(parents=True, exist_ok=True)
         subprocess.run(
             [
