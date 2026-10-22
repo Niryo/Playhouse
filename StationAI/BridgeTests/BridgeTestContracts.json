@@ -73,7 +73,7 @@
   },
   {
     "id": "test_task_status_transitions_and_rejects_unknown_status",
-    "expectation": "With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards."
+    "expectation": "With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Task card titles use slightly expanded letter spacing and line spacing."
   },
   {
     "id": "test_task_progress_reports_publish_persist_and_clear",

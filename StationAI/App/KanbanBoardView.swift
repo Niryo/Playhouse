@@ -1115,8 +1115,10 @@ private struct TaskCardView: View {
             HStack(spacing: 6) {
                 if task.title == "Generating title…" { ProgressView().controlSize(.small) }
                 Text(task.title)
+                    .lineSpacing(2)
             }
                 .font(.system(size: 13, weight: .semibold))
+                .tracking(0.35)
                 .foregroundStyle(WorkspaceTheme.conversationText)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("task-title-\(task.id.uuidString)")
