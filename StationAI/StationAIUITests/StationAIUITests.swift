@@ -4042,6 +4042,81 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
     }
 
+    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; in-progress, completed, and failed statuses, server/tool identity, and optional duration render and survive history reload without duplicate rows. Missing optional duration remains absent. Arguments and raw result text are never exposed; only safe result summaries are shown.
+    func test_conversation_shows_mcp_and_dynamic_tool_activity() throws {
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-tool-activity").path
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
+        launchApp(defaultParent: fixture.primary.path)
+        _ = try runCLI(["task", "create", "--title", "Tool activity", "--root", fixture.primary.path])
+        let taskID = try taskID(named: "Tool activity")
+        openTask(named: "Tool activity")
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText("Show tool activity.")
+        element("send-message-button").click()
+
+        let fixture = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable))
+        let toolReady = URL(fileURLWithPath: fixture.path + ".tool-ready")
+        let toolRelease = URL(fileURLWithPath: fixture.path + ".tool-release")
+        defer { try? "Release tool completions after assertion failure.\n".write(to: toolRelease, atomically: true, encoding: .utf8) }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: toolReady.path) }, timeout: 20), "The fixture should pause after the tool start notifications.")
+        let mcpRow = element("codex-activity-row-item_fixture_mcp_call")
+        let dynamicRow = element("codex-activity-row-item_fixture_dynamic_call")
+        let legacyDynamicRow = element("codex-activity-row-item_fixture_dynamic_legacy")
+        XCTAssertTrue(mcpRow.waitForExistence(timeout: 10), "MCP calls should appear while they are in progress.")
+        XCTAssertTrue(dynamicRow.waitForExistence(timeout: 10), "Dynamic tool calls should appear while they are in progress.")
+        XCTAssertTrue(legacyDynamicRow.waitForExistence(timeout: 10), "Older dynamic tool calls may omit optional duration metadata.")
+        XCTAssertTrue(mcpRow.label.contains("In progress"))
+        XCTAssertTrue(dynamicRow.label.contains("In progress"))
+        XCTAssertTrue(legacyDynamicRow.label.contains("In progress"))
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").count, 1)
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").count, 1)
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").count, 1)
+        try "Release tool completions.\n".write(to: toolRelease, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ mcpRow.label.contains("Completed") && dynamicRow.label.contains("Failed") && legacyDynamicRow.label.contains("Completed") }, timeout: 30), "Lifecycle completions should update the existing rows.")
+        XCTAssertTrue(mcpRow.label.contains("MCP · lookup"))
+        XCTAssertTrue((mcpRow.value as? String ?? "").contains("fixture-server"))
+        XCTAssertTrue((mcpRow.value as? String ?? "").contains("Returned 1 result item"))
+        XCTAssertTrue((dynamicRow.value as? String ?? "").contains("Tool call failed"))
+        XCTAssertTrue((dynamicRow.value as? String ?? "").contains("Duration · 37 ms"))
+        XCTAssertTrue(dynamicRow.label.contains("Tool · summarize"))
+        XCTAssertTrue(legacyDynamicRow.label.contains("Tool · legacySummary"))
+        XCTAssertTrue((legacyDynamicRow.value as? String ?? "").contains("Returned 1 result item"))
+        XCTAssertFalse((legacyDynamicRow.value as? String ?? "").contains("Duration"))
+        let renderedToolRows = "\(mcpRow.label) \(mcpRow.value ?? "") \(dynamicRow.label) \(dynamicRow.value ?? "") \(legacyDynamicRow.label) \(legacyDynamicRow.value ?? "")"
+        XCTAssertFalse(renderedToolRows.contains("RAW_ARGUMENT_SECRET"))
+        XCTAssertFalse(renderedToolRows.contains("RAW_RESULT_SECRET"))
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").count, 1)
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").count, 1)
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").count, 1)
+
+        let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        let savedActivities = history?["activities"] as? [[String: Any]] ?? []
+        XCTAssertEqual(savedActivities.filter { $0["id"] as? String == "item_fixture_mcp_call" }.count, 1)
+        XCTAssertEqual(savedActivities.filter { $0["id"] as? String == "item_fixture_dynamic_call" }.count, 1)
+        element("back-to-board-button").click()
+        openTask(named: "Tool activity")
+        let reloadedMcpRow = element("codex-activity-row-item_fixture_mcp_call")
+        XCTAssertTrue(reloadedMcpRow.waitForExistence(timeout: 20), "Completed MCP activity should remain after history reload.")
+        let reloadedDynamicRow = element("codex-activity-row-item_fixture_dynamic_call")
+        let reloadedLegacyDynamicRow = element("codex-activity-row-item_fixture_dynamic_legacy")
+        XCTAssertTrue(reloadedDynamicRow.waitForExistence(timeout: 10), "Failed dynamic activity should remain after history reload.")
+        XCTAssertTrue(reloadedLegacyDynamicRow.waitForExistence(timeout: 10), "Legacy dynamic activity should remain after history reload.")
+        XCTAssertTrue(reloadedMcpRow.label.contains("MCP · lookup"))
+        XCTAssertTrue(reloadedMcpRow.label.contains("Completed"))
+        XCTAssertTrue((reloadedMcpRow.value as? String ?? "").contains("fixture-server"))
+        XCTAssertTrue((reloadedMcpRow.value as? String ?? "").contains("Returned 1 result item"))
+        XCTAssertTrue(reloadedDynamicRow.label.contains("Tool · summarize"))
+        XCTAssertTrue(reloadedDynamicRow.label.contains("Failed"))
+        XCTAssertTrue((reloadedDynamicRow.value as? String ?? "").contains("Tool call failed"))
+        XCTAssertTrue((reloadedDynamicRow.value as? String ?? "").contains("Duration · 37 ms"), "Optional duration should survive history reload and render.")
+        XCTAssertTrue(reloadedLegacyDynamicRow.label.contains("Tool · legacySummary"))
+        XCTAssertTrue(reloadedLegacyDynamicRow.label.contains("Completed"))
+        XCTAssertTrue((reloadedLegacyDynamicRow.value as? String ?? "").contains("Returned 1 result item"))
+        XCTAssertFalse((reloadedLegacyDynamicRow.value as? String ?? "").contains("Duration"), "Missing optional duration must remain absent.")
+    }
+
     // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, started and interacted updates coalesce by child thread ID into clear named timeline rows outside the collapsible Codex activity section, with sentence-style names, available path/model/reasoning metadata, and started-working wording; completed and interrupted states, optional metadata, and unknown kinds survive history reload and remain visible after reopening the task conversation. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs.
     func test_conversation_shows_subagent_delegation() throws {
         let fixtureRoot = WorkspaceFixture.root

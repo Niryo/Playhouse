@@ -2944,6 +2944,96 @@ class StationAIBridgeTests(unittest.TestCase):
         history, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(history)["messages"], [])
 
+    # case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; in-progress, completed, and failed statuses, server/tool identity, and optional duration render and survive history reload without duplicate rows. Missing optional duration remains absent. Arguments and raw result text are never exposed; only safe result summaries are shown.
+    def test_conversation_shows_mcp_and_dynamic_tool_activity(self):
+        task_id = self.create_task(title="Tool activity")['id']
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-tool-activity"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {
+            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
+            "STATIONAI_FIXTURE_WORKSPACE": str(self.primary),
+        }
+        send_command = ("conversation", "send", task_id, "--message", "Show tool activity.")
+        process = self.start_cli(*send_command, extra_environment=env, binary_output=True)
+        ready = Path(str(executable) + ".tool-ready")
+        release = Path(str(executable) + ".tool-release")
+        captured_lines = []
+        stream_buffer = bytearray()
+        active_rows = {}
+        expected_tool_ids = {"item_fixture_mcp_call", "item_fixture_dynamic_call", "item_fixture_dynamic_legacy"}
+        try:
+            deadline = time.monotonic() + 20
+            while (not ready.exists() or not expected_tool_ids.issubset(active_rows)) and time.monotonic() < deadline:
+                if process.stdout is not None:
+                    readable, _, _ = select.select([process.stdout], [], [], 0.02)
+                    if readable:
+                        chunk = os.read(process.stdout.fileno(), 65536)
+                        stream_buffer.extend(chunk)
+                        while b"\n" in stream_buffer:
+                            line, _, remainder = stream_buffer.partition(b"\n")
+                            stream_buffer = bytearray(remainder)
+                            if not line.strip():
+                                continue
+                            captured_lines.append(line.decode("utf-8"))
+                            event = json.loads(line)
+                            activity = event.get("payload", {}).get("activity", {})
+                            if event.get("type") == "activity" and activity.get("status") == "inProgress":
+                                active_rows[activity.get("id")] = activity
+            self.assertTrue(ready.exists(), "The fixture should hold both tool calls after their start notifications.")
+            self.assertTrue(expected_tool_ids.issubset(active_rows), "All expected tool calls should publish their started state.")
+            self.assertEqual(active_rows["item_fixture_mcp_call"]["toolKind"], "mcp")
+            self.assertEqual(active_rows["item_fixture_dynamic_call"]["toolKind"], "dynamic")
+            self.assertEqual(active_rows["item_fixture_dynamic_legacy"]["toolKind"], "dynamic")
+            release.write_text("Release tool completions.\n", encoding="utf-8")
+            remaining_stdout, remaining_stderr = process.communicate(timeout=60)
+            self.assertEqual(process.returncode, 0, f"CLI exit mismatch for {send_command}: {remaining_stderr!r}")
+            all_output = "\n".join(captured_lines).encode("utf-8") + b"\n" + remaining_stdout
+            response_lines = [line for line in all_output.splitlines() if line.strip()]
+            sent = json.loads(response_lines[-1])
+            self.assertEqual(sent.get("version"), 1)
+            self.assertTrue(sent.get("ok"), sent.get("error"))
+        finally:
+            if process.poll() is None:
+                release.write_text("Release tool completions after assertion failure.\n", encoding="utf-8")
+                process.communicate(timeout=30)
+        result = self.assert_success(sent)
+        activities = result["activities"]
+        mcp_rows = [row for row in activities if row["id"] == "item_fixture_mcp_call"]
+        dynamic_rows = [row for row in activities if row["id"] == "item_fixture_dynamic_call"]
+        self.assertEqual(len(mcp_rows), 1)
+        self.assertEqual(len(dynamic_rows), 1)
+        self.assertEqual(mcp_rows[0]["status"], "completed")
+        self.assertEqual(mcp_rows[0]["server"], "fixture-server")
+        self.assertEqual(mcp_rows[0]["tool"], "lookup")
+        self.assertIn("Returned 1 result item", mcp_rows[0]["detail"])
+        self.assertEqual(dynamic_rows[0]["status"], "failed")
+        self.assertEqual(dynamic_rows[0]["durationMs"], 37)
+        legacy_rows = [row for row in activities if row["id"] == "item_fixture_dynamic_legacy"]
+        self.assertEqual(len(legacy_rows), 1)
+        self.assertEqual(legacy_rows[0]["status"], "completed")
+        self.assertNotIn("durationMs", legacy_rows[0])
+        self.assertIn("Returned 1 result item", legacy_rows[0]["detail"])
+        serialized = json.dumps(activities)
+        self.assertNotIn("RAW_ARGUMENT_SECRET", serialized)
+        self.assertNotIn("RAW_RESULT_SECRET", serialized)
+        reloaded, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        reloaded_rows = self.assert_success(reloaded)["activities"]
+        reloaded_mcp = [row for row in reloaded_rows if row["id"] == "item_fixture_mcp_call"]
+        reloaded_dynamic = [row for row in reloaded_rows if row["id"] == "item_fixture_dynamic_call"]
+        reloaded_legacy = [row for row in reloaded_rows if row["id"] == "item_fixture_dynamic_legacy"]
+        self.assertEqual(len(reloaded_mcp), 1)
+        self.assertEqual(len(reloaded_dynamic), 1)
+        self.assertEqual(len(reloaded_legacy), 1)
+        self.assertEqual(reloaded_mcp[0]["tool"], "lookup")
+        self.assertEqual(reloaded_dynamic[0]["tool"], "summarize")
+        self.assertEqual(reloaded_dynamic[0]["durationMs"], 37)
+        self.assertNotIn("durationMs", reloaded_legacy[0])
+
     # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, started and interacted updates coalesce by child thread ID into clear named timeline rows outside the collapsible Codex activity section, with sentence-style names, available path/model/reasoning metadata, and started-working wording; completed and interrupted states, optional metadata, and unknown kinds survive history reload and remain visible after reopening the task conversation. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs.
     def test_conversation_shows_subagent_delegation(self):
         task_id = self.create_task(title="Subagent delegation")["id"]

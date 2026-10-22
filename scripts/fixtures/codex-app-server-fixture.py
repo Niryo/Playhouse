@@ -379,7 +379,7 @@ def main():
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
-            elif mode.endswith("-subagent") or mode.endswith("-subagent-wait"):
+            elif mode.endswith("-subagent") or mode.endswith("-subagent-wait") or mode.endswith("-tool-activity"):
                 if mode.endswith("-subagent-wait"):
                     active = Path(str(sys.argv[0]) + ".turn-active")
                     release = Path(str(sys.argv[0]) + ".turn-release")
@@ -414,18 +414,19 @@ def main():
                         model="gpt-6-sol", reasoning_effort="high",
                     ),
                 }})
-                ready = Path(str(sys.argv[0]) + ".subagent-ready")
-                release = Path(str(sys.argv[0]) + ".subagent-release")
-                ready.unlink(missing_ok=True)
-                release.unlink(missing_ok=True)
-                ready.write_text("Subagent activities are active.\n", encoding="utf-8")
-                deadline = time.monotonic() + 30
-                while not release.exists() and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                ready.unlink(missing_ok=True)
-                if not release.exists():
-                    return 3
-                release.unlink(missing_ok=True)
+                if not mode.endswith("-tool-activity"):
+                    ready = Path(str(sys.argv[0]) + ".subagent-ready")
+                    release = Path(str(sys.argv[0]) + ".subagent-release")
+                    ready.unlink(missing_ok=True)
+                    release.unlink(missing_ok=True)
+                    ready.write_text("Subagent activities are active.\n", encoding="utf-8")
+                    deadline = time.monotonic() + 30
+                    while not release.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    ready.unlink(missing_ok=True)
+                    if not release.exists():
+                        return 3
+                    release.unlink(missing_ok=True)
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID,
                     # A terminal event may omit metadata reported by the start.
@@ -442,6 +443,42 @@ def main():
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID, "item": subagent_item("completed"),
                 }})
+                if mode.endswith("-tool-activity"):
+                    mcp_item = {
+                        "id": "item_fixture_mcp_call", "type": "mcpToolCall", "server": "fixture-server",
+                        "tool": "lookup", "status": "inProgress", "arguments": {"token": "RAW_ARGUMENT_SECRET"},
+                    }
+                    dynamic_item = {
+                        "id": "item_fixture_dynamic_call", "type": "dynamicToolCall", "tool": "summarize",
+                        "status": "inProgress", "arguments": {"prompt": "RAW_ARGUMENT_SECRET"},
+                    }
+                    legacy_dynamic_item = {
+                        "id": "item_fixture_dynamic_legacy", "type": "dynamicToolCall", "tool": "legacySummary",
+                        "status": "inProgress", "arguments": {"input": "RAW_ARGUMENT_SECRET"},
+                    }
+                    for tool_item in [mcp_item, dynamic_item, legacy_dynamic_item]:
+                        write({"jsonrpc": "2.0", "method": "item/started", "params": {"threadId": THREAD_ID, "item": tool_item}})
+                    ready = Path(str(sys.argv[0]) + ".tool-ready")
+                    release = Path(str(sys.argv[0]) + ".tool-release")
+                    ready.unlink(missing_ok=True)
+                    release.unlink(missing_ok=True)
+                    ready.write_text("Tool lifecycle starts are visible.\n", encoding="utf-8")
+                    deadline = time.monotonic() + 30
+                    while not release.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    ready.unlink(missing_ok=True)
+                    if not release.exists():
+                        return 3
+                    release.unlink(missing_ok=True)
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
+                        **mcp_item, "status": "completed", "result": {"content": [{"type": "text", "text": "RAW_RESULT_SECRET"}]},
+                    }}})
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
+                        **dynamic_item, "status": "failed", "success": False, "durationMs": 37,
+                    }}})
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
+                        **legacy_dynamic_item, "status": "completed", "success": True, "contentItems": [{"type": "inputText", "text": "RAW_RESULT_SECRET"}],
+                    }}})
                 for action_item in diagnostic_action_items(os.environ.get("STATIONAI_FIXTURE_WORKSPACE", os.getcwd())):
                     write({"jsonrpc": "2.0", "method": "item/started", "params": {
                         "threadId": THREAD_ID, "item": {**action_item, "status": "inProgress"},
@@ -637,6 +674,12 @@ def main():
                     subagent_activity("futureKind", "00000000-0000-0000-0000-000000000004", "/agents/Future review"),
                     *diagnostic_action_items(os.environ.get("STATIONAI_FIXTURE_WORKSPACE", os.getcwd())),
                 ]
+            if mode.endswith("-tool-activity"):
+                contents.extend([
+                    {"id": "item_fixture_mcp_call", "type": "mcpToolCall", "server": "fixture-server", "tool": "lookup", "status": "completed", "arguments": {"token": "RAW_ARGUMENT_SECRET"}, "result": {"content": [{"type": "text", "text": "RAW_RESULT_SECRET"}]}},
+                    {"id": "item_fixture_dynamic_call", "type": "dynamicToolCall", "tool": "summarize", "status": "failed", "arguments": {"prompt": "RAW_ARGUMENT_SECRET"}, "success": False, "durationMs": 37},
+                    {"id": "item_fixture_dynamic_legacy", "type": "dynamicToolCall", "tool": "legacySummary", "status": "completed", "arguments": {"input": "RAW_ARGUMENT_SECRET"}, "success": True, "contentItems": [{"type": "inputText", "text": "RAW_RESULT_SECRET"}]},
+                ])
             if mode.endswith("-markdown"):
                 saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
                 contents = [
