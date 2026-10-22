@@ -140,6 +140,12 @@ struct CodexActivity: Codable, Identifiable, Equatable {
     let title: String
     let detail: String
     let status: String
+    var childThreadID: String? = nil
+    var agentPath: String? = nil
+    var model: String? = nil
+    var reasoningEffort: String? = nil
+
+    var isSubagent: Bool { childThreadID != nil }
 
     var statusLabel: String {
         switch status.lowercased() {
@@ -151,10 +157,46 @@ struct CodexActivity: Codable, Identifiable, Equatable {
         }
     }
 
+    var timelineStatus: String {
+        switch status.lowercased() {
+        case "inprogress", "running": "started working"
+        case "completed": "finished working"
+        case "interrupted": "was interrupted"
+        case "failed": "failed"
+        default: "working · \(statusLabel.lowercased())"
+        }
+    }
+
     static func from(item: [String: Any]) -> CodexActivity? {
         guard let id = item["id"] as? String, let type = item["type"] as? String else { return nil }
         let status = item["status"] as? String ?? "inProgress"
         switch type {
+        case "subAgentActivity":
+            guard let childThreadID = item["agentThreadId"] as? String else { return nil }
+            let kind = item["kind"] as? String ?? "unknown"
+            let status: String
+            switch kind.lowercased() {
+            case "started", "interacted": status = "inProgress"
+            case "completed": status = "completed"
+            case "interrupted": status = "interrupted"
+            default: status = kind
+            }
+            let path = item["agentPath"] as? String ?? "Subagent"
+            let pathName = path.split(separator: "/").last.map(String.init) ?? path
+            let spacedName = pathName.replacingOccurrences(of: "_", with: " ")
+            let name = spacedName.prefix(1).uppercased() + spacedName.dropFirst()
+            let metadata = [item["model"] as? String, item["reasoningEffort"] as? String]
+                .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+            return CodexActivity(
+                id: childThreadID,
+                title: name.isEmpty ? "Subagent" : name,
+                detail: [path, metadata].filter { !$0.isEmpty }.joined(separator: "\n"),
+                status: status,
+                childThreadID: childThreadID,
+                agentPath: path,
+                model: item["model"] as? String,
+                reasoningEffort: item["reasoningEffort"] as? String
+            )
         case "commandExecution":
             let command = item["command"] as? String ?? (item["command"] as? [String])?.joined(separator: " ") ?? ""
             let cwd = item["cwd"] as? String

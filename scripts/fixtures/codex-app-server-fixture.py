@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Deterministic app-server peer for StationAI's structured-question tests."""
+"""Deterministic app-server peer for StationAI's protocol integration tests."""
 
 import json
 import os
@@ -76,6 +76,29 @@ def subagent_item(status):
         },
         "status": status,
     }
+
+
+def subagent_activity(kind, child_thread_id, agent_path, *, model=None, reasoning_effort=None):
+    item = {
+        "id": f"item_activity_{child_thread_id}",
+        "type": "subAgentActivity",
+        "kind": kind,
+        "agentThreadId": child_thread_id,
+        "agentPath": agent_path,
+    }
+    if model is not None:
+        item["model"] = model
+    if reasoning_effort is not None:
+        item["reasoningEffort"] = reasoning_effort
+    return item
+
+
+CHILD_THREAD_ID = "00000000-0000-0000-0000-000000000002"
+CHILD_TURN_ID = "turn_stationai_child_fixture"
+CHILD_MESSAGES = [
+    {"id": "item_child_user", "type": "userMessage", "content": [{"type": "text", "text": "Inspect StationAI entitlements."}]},
+    {"id": "item_child_assistant", "type": "agentMessage", "text": "Sandbox review read StationAIEntitlements.entitlements and found the required profile."},
+]
 
 
 def diagnostic_action_items(cwd):
@@ -354,6 +377,52 @@ def main():
                 write({"jsonrpc": "2.0", "method": "item/started", "params": {
                     "threadId": THREAD_ID, "item": subagent_item("inProgress"),
                 }})
+                first_child_started = subagent_activity(
+                    "started", CHILD_THREAD_ID, "/agents/Sandbox review",
+                    model="gpt-6-sol", reasoning_effort="high",
+                )
+                second_child_id = "00000000-0000-0000-0000-000000000003"
+                second_child_started = subagent_activity(
+                    "started", second_child_id, "/agents/some_agent",
+                )
+                for child_item in [first_child_started, second_child_started]:
+                    write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                        "threadId": THREAD_ID, "item": child_item,
+                    }})
+                write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                    "threadId": THREAD_ID,
+                    "item": subagent_activity(
+                        "interacted", CHILD_THREAD_ID, "/agents/Sandbox review",
+                        model="gpt-6-sol", reasoning_effort="high",
+                    ),
+                }})
+                ready = Path(str(sys.argv[0]) + ".subagent-ready")
+                release = Path(str(sys.argv[0]) + ".subagent-release")
+                ready.unlink(missing_ok=True)
+                release.unlink(missing_ok=True)
+                ready.write_text("Subagent activities are active.\n", encoding="utf-8")
+                deadline = time.monotonic() + 30
+                while not release.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                ready.unlink(missing_ok=True)
+                if not release.exists():
+                    return 3
+                release.unlink(missing_ok=True)
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": THREAD_ID,
+                    "item": subagent_activity(
+                        "completed", CHILD_THREAD_ID, "/agents/Sandbox review",
+                        model="gpt-6-sol", reasoning_effort="high",
+                    ),
+                }})
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": THREAD_ID,
+                    "item": subagent_activity("interrupted", second_child_id, "/agents/some_agent"),
+                }})
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": THREAD_ID,
+                    "item": subagent_activity("futureKind", "00000000-0000-0000-0000-000000000004", "/agents/Future review"),
+                }})
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID, "item": subagent_item("completed"),
                 }})
@@ -442,7 +511,26 @@ def main():
             }})
         elif message.get("method") == "turn/interrupt":
             write({"jsonrpc": "2.0", "id": message["id"], "result": {}})
+        elif message.get("method") == "thread/read":
+            if message.get("params", {}).get("threadId") != CHILD_THREAD_ID:
+                write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32005, "message": "Unknown fixture child thread."}})
+                continue
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": CHILD_THREAD_ID, "turns": []}}})
+        elif message.get("method") == "thread/turns/list":
+            if message.get("params", {}).get("threadId") != CHILD_THREAD_ID:
+                write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32005, "message": "Unknown fixture child thread."}})
+                continue
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {
+                "data": [{"id": CHILD_TURN_ID, "status": "completed"}],
+                "nextCursor": None,
+            }})
         elif message.get("method") == "thread/items/list":
+            if message.get("params", {}).get("threadId") == CHILD_THREAD_ID:
+                write({"jsonrpc": "2.0", "id": message["id"], "result": {
+                    "data": [{"item": item, "turnId": CHILD_TURN_ID} for item in CHILD_MESSAGES],
+                    "nextCursor": None,
+                }})
+                continue
             saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
             if serial_mode and message.get("params", {}).get("threadId") != saved_history.get("threadID"):
                 write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32004, "message": "History can only be read from the persisted fixture thread."}})
@@ -488,6 +576,9 @@ def main():
                     {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": "Delegate this task."}]},
                     {"id": "item_assistant_fixture", "type": "agentMessage", "text": "The subagent inspected the project structure."},
                     subagent_item("completed"),
+                    subagent_activity("completed", CHILD_THREAD_ID, "/agents/Sandbox review", model="gpt-6-sol", reasoning_effort="high"),
+                    subagent_activity("interrupted", "00000000-0000-0000-0000-000000000003", "/agents/some_agent"),
+                    subagent_activity("futureKind", "00000000-0000-0000-0000-000000000004", "/agents/Future review"),
                     *diagnostic_action_items(os.environ.get("STATIONAI_FIXTURE_WORKSPACE", os.getcwd())),
                 ]
             if mode.endswith("-markdown"):

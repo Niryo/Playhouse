@@ -7,6 +7,7 @@ import fcntl
 import json
 import plistlib
 import os
+import select
 import shutil
 import sqlite3
 import stat
@@ -238,7 +239,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIn("id", response)
         return response, [json.loads(line) for line in lines[:-1]]
 
-    def start_cli(self, *command, extra_environment=None):
+    def start_cli(self, *command, extra_environment=None, binary_output=False):
         environment = os.environ.copy()
         environment["STATIONAI_DATA_DIRECTORY"] = str(self.data_directory)
         environment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = str(self.worktree_directory)
@@ -249,7 +250,8 @@ class StationAIBridgeTests(unittest.TestCase):
             [str(self.cli), *map(str, command)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            text=not binary_output,
+            bufsize=0 if binary_output else -1,
             env=environment,
         )
 
@@ -2896,7 +2898,7 @@ class StationAIBridgeTests(unittest.TestCase):
         history, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(history)["messages"], [])
 
-    # case-contract: test_conversation_shows_subagent_delegation | When Codex delegates a task to a subagent, the conversation activity shows the delegated task and its completion status during the turn and after history reload. Diagnostics record Codex RPC outcomes and command working directory and file-change paths while excluding conversation text, command output, and diffs.
+    # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, started and interacted updates coalesce by child thread ID into clear named timeline rows outside the collapsible Codex activity section, with sentence-style names, available path/model/reasoning metadata, and started-working wording; completed and interrupted states, optional metadata, and unknown kinds survive history reload and remain visible after reopening the task conversation. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs.
     def test_conversation_shows_subagent_delegation(self):
         task_id = self.create_task(title="Subagent delegation")["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -2910,16 +2912,88 @@ class StationAIBridgeTests(unittest.TestCase):
             "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
             "STATIONAI_FIXTURE_WORKSPACE": str(self.primary),
         }
-        sent, _ = self.call_cli(
-            "conversation", "send", task_id, "--message", "Delegate this task.",
-            extra_environment=env,
-        )
+        send_command = ("conversation", "send", task_id, "--message", "Delegate this task.")
+        process = self.start_cli(*send_command, extra_environment=env, binary_output=True)
+        ready = Path(str(executable) + ".subagent-ready")
+        release = Path(str(executable) + ".subagent-release")
+        captured_lines = []
+        stream_buffer = bytearray()
+        active_children = {}
+        active_updates = []
+        try:
+            deadline = time.monotonic() + 15
+            while (not ready.exists() or len(active_children) < 2) and time.monotonic() < deadline:
+                if process.stdout is not None:
+                    readable, _, _ = select.select([process.stdout], [], [], 0.02)
+                    if readable:
+                        chunk = os.read(process.stdout.fileno(), 65536)
+                        stream_buffer.extend(chunk)
+                        while b"\n" in stream_buffer:
+                            line, _, remainder = stream_buffer.partition(b"\n")
+                            stream_buffer = bytearray(remainder)
+                            if not line.strip():
+                                continue
+                            captured_lines.append(line.decode("utf-8"))
+                            event = json.loads(line)
+                            activity = event.get("payload", {}).get("activity", {})
+                            child_thread_id = activity.get("childThreadID")
+                            if event.get("type") == "activity" and child_thread_id and activity.get("status") == "inProgress":
+                                active_children[child_thread_id] = activity
+                                active_updates.append(activity)
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "The fixture should expose an active child interval before completion.")
+            self.assertEqual(set(active_children), {
+                "00000000-0000-0000-0000-000000000002",
+                "00000000-0000-0000-0000-000000000003",
+            }, "Both child rows should be projected as active XPC events before completion.")
+            self.assertIn("gpt-6-sol", active_children["00000000-0000-0000-0000-000000000002"]["detail"])
+            self.assertEqual(active_children["00000000-0000-0000-0000-000000000003"]["title"], "Some agent")
+            self.assertIn("/agents/some_agent", active_children["00000000-0000-0000-0000-000000000003"]["detail"])
+            same_child_updates = [
+                activity for activity in active_updates
+                if activity.get("childThreadID") == "00000000-0000-0000-0000-000000000002"
+            ]
+            self.assertEqual(len(same_child_updates), 2, "Started and interacted updates should both target the same active child row.")
+            self.assertEqual({activity["id"] for activity in same_child_updates}, {"00000000-0000-0000-0000-000000000002"})
+            task_while_active, _ = self.call_cli("task", "get", task_id)
+            self.assertEqual(self.assert_success(task_while_active)["status"], "In Progress")
+            release.write_text("Release child completion.\n", encoding="utf-8")
+            remaining_stdout, remaining_stderr = process.communicate(timeout=60)
+            self.assertEqual(process.returncode, 0, f"CLI exit mismatch for {send_command}: {remaining_stderr!r}")
+            all_output = "\n".join(captured_lines).encode("utf-8") + b"\n" + remaining_stdout
+            response_lines = [line for line in all_output.splitlines() if line.strip()]
+            self.assertTrue(response_lines, f"CLI returned no JSON output for {send_command}.")
+            sent = json.loads(response_lines[-1])
+            self.assertEqual(sent.get("version"), 1)
+            self.assertTrue(sent.get("ok"), sent.get("error"))
+        finally:
+            if process.poll() is None:
+                release.write_text("Release child completion after assertion failure.\n", encoding="utf-8")
+                process.communicate(timeout=30)
         result = self.assert_success(sent)
         activities = result["activities"]
         subagent = next(activity for activity in activities if activity["title"] == "Task delegated to subagent")
         self.assertEqual(subagent["status"], "completed")
         self.assertIn("Inspect the project structure", subagent["detail"])
         self.assertIn("Inspected the project structure", subagent["detail"])
+        children = {activity["childThreadID"]: activity for activity in activities if activity.get("childThreadID")}
+        self.assertEqual(set(children), {
+            "00000000-0000-0000-0000-000000000002",
+            "00000000-0000-0000-0000-000000000003",
+            "00000000-0000-0000-0000-000000000004",
+        })
+        sandbox_review = children["00000000-0000-0000-0000-000000000002"]
+        self.assertEqual(sandbox_review["title"], "Sandbox review")
+        self.assertEqual(sandbox_review["status"], "completed")
+        self.assertIn("/agents/Sandbox review", sandbox_review["detail"])
+        self.assertIn("gpt-6-sol", sandbox_review["detail"])
+        self.assertIn("high", sandbox_review["detail"])
+        docs_review = children["00000000-0000-0000-0000-000000000003"]
+        self.assertEqual(docs_review["title"], "Some agent")
+        self.assertEqual(docs_review["status"], "interrupted")
+        self.assertNotIn("model", docs_review)
+        self.assertNotIn("reasoningEffort", docs_review)
+        self.assertEqual(children["00000000-0000-0000-0000-000000000004"]["status"], "futureKind")
 
         diagnostics = self.diagnostic_events()
         rpc_start = next(event for event in diagnostics if event.get("event") == "codex.rpc.request.started" and event.get("method") == "turn/start")
@@ -2956,6 +3030,11 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(
             {activity["id"]: activity for activity in history["activities"]},
             {activity["id"]: activity for activity in activities},
+        )
+        history_children = {activity["childThreadID"]: activity for activity in history["activities"] if activity.get("childThreadID")}
+        self.assertEqual(
+            {thread_id: activity["status"] for thread_id, activity in history_children.items()},
+            {thread_id: activity["status"] for thread_id, activity in children.items()},
         )
         self.assertTrue(any("subagent inspected" in message["text"].lower() for message in history["messages"]))
 

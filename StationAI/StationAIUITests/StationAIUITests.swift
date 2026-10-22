@@ -3922,7 +3922,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
     }
 
-    // case-contract: test_conversation_shows_subagent_delegation | When Codex delegates a task to a subagent, the conversation activity shows the delegated task and its completion status during the turn and after history reload. Diagnostics record Codex RPC outcomes and command working directory and file-change paths while excluding conversation text, command output, and diffs.
+    // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, started and interacted updates coalesce by child thread ID into clear named timeline rows outside the collapsible Codex activity section, with sentence-style names, available path/model/reasoning metadata, and started-working wording; completed and interrupted states, optional metadata, and unknown kinds survive history reload and remain visible after reopening the task conversation. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs.
     func test_conversation_shows_subagent_delegation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -3944,6 +3944,46 @@ final class StationAIUITests: XCTestCase {
         composer.click()
         composer.typeText(prompt)
         element("send-message-button").click()
+
+        let subagentReady = URL(fileURLWithPath: fixtureCopy.path + ".subagent-ready")
+        let subagentRelease = URL(fileURLWithPath: fixtureCopy.path + ".subagent-release")
+        defer { try? "Release active child fixture.\n".write(to: subagentRelease, atomically: true, encoding: .utf8) }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: subagentReady.path) }, timeout: 20), "The fixture should expose the active child interval before completion.")
+        let activityDisclosure = element("codex-activity-disclosure")
+        XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 10), "Active child work should appear in conversation activity.")
+        let activeChildButton = element("codex-subagent-row-00000000-0000-0000-0000-000000000002")
+        XCTAssertTrue(activeChildButton.waitForExistence(timeout: 10), "The running child should appear as a clickable timeline row while Codex activity is collapsed.")
+        XCTAssertTrue(activeChildButton.label.contains("Sandbox review"))
+        XCTAssertTrue(activeChildButton.label.contains("started working"))
+        let agentIcon = activeChildButton.images.matching(NSPredicate(format: "label == %@", "Sandbox review agent icon")).firstMatch
+        XCTAssertTrue(agentIcon.waitForExistence(timeout: 5), "The requested robot icon should render in the child timeline row.")
+        assertSubagentIconArtwork(agentIcon)
+        activityDisclosure.click()
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-subagent-row-00000000-0000-0000-0000-000000000002").count, 1,
+                       "The interacted update should update the single timeline row instead of creating a duplicate.")
+        let childMetadata = activeChildButton.value as? String ?? ""
+        XCTAssertTrue(childMetadata.contains("/agents/Sandbox review"))
+        XCTAssertTrue(childMetadata.contains("gpt-6-sol"))
+        XCTAssertTrue(childMetadata.contains("high"))
+        let secondActiveChildButton = element("codex-subagent-row-00000000-0000-0000-0000-000000000003")
+        XCTAssertTrue(secondActiveChildButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(secondActiveChildButton.label.contains("Some agent"), "Underscored agent names should render with spaces and sentence capitalization.")
+        XCTAssertTrue(secondActiveChildButton.label.contains("started working"))
+        let secondChildMetadata = secondActiveChildButton.value as? String ?? ""
+        XCTAssertTrue(secondChildMetadata.contains("/agents/some_agent"))
+        XCTAssertFalse(secondChildMetadata.contains("gpt-"), "Optional child model metadata may be absent.")
+
+        activeChildButton.click()
+        XCTAssertTrue(element("subagent-conversation-panel").waitForExistence(timeout: 5))
+        try "Release child to finish and answer read-only inspection requests.\n".write(to: subagentRelease, atomically: true, encoding: .utf8)
+        XCTAssertTrue(element("subagent-back-button").exists)
+        XCTAssertTrue(app.staticTexts["Read only"].exists)
+        XCTAssertFalse(element("message-composer").exists, "The child conversation must not expose the parent composer.")
+        XCTAssertFalse(element("send-message-button").exists, "The child conversation must not expose a send action.")
+        let childResult = app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "found the required profile")).firstMatch
+        XCTAssertTrue(childResult.waitForExistence(timeout: 20), "The child view should render its stored conversation content.")
+        element("subagent-back-button").click()
+        XCTAssertTrue(waitUntil({ !self.element("subagent-conversation-panel").exists }, timeout: 5), "Back should return to the parent conversation.")
         XCTAssertTrue(waitUntil({
             (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response"
         }, timeout: 20), "The visible composer turn should finish and persist the task status.")
@@ -3985,18 +4025,41 @@ final class StationAIUITests: XCTestCase {
         app.activate()
         XCTAssertEqual(app.state, .runningForeground, "StationAI must be foreground before inspecting the conversation.")
 
-        let activityDisclosure = element("codex-activity-disclosure")
         XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 20), "A delegated task should appear in conversation activity.")
-        activityDisclosure.click()
         let activityRow = element("codex-activity-row-item_stationai_subagent")
         XCTAssertTrue(activityRow.waitForExistence(timeout: 10))
         XCTAssertTrue(activityRow.label.contains("Task delegated to subagent"))
         XCTAssertTrue(activityRow.label.contains("Completed"))
+        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000002").label.contains("finished working"))
+        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000003").label.contains("was interrupted"))
+        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000004").exists, "An unknown child kind should remain visible.")
         let activityDetail = element("codex-activity-detail-item_stationai_subagent")
         XCTAssertTrue(activityDetail.waitForExistence(timeout: 5))
         let detailDescription = "\(activityDetail.label) \(activityDetail.value as? String ?? "")"
         XCTAssertTrue(detailDescription.contains("Inspect the project structure and report relevant files."))
-        attachScreenshot(named: "Conversation shows a completed subagent delegation")
+        let childThreadID = "00000000-0000-0000-0000-000000000002"
+        for method in ["thread/read", "thread/turns/list", "thread/items/list"] {
+            XCTAssertTrue(codexDiagnostics.contains {
+                $0["event"] as? String == "codex.rpc.request.started"
+                    && $0["method"] as? String == method
+                    && $0["parameter.threadId"] as? String == childThreadID
+            }, "Child inspection should call \(method) for the child thread.")
+        }
+        XCTAssertFalse(codexDiagnostics.contains {
+            $0["event"] as? String == "codex.rpc.request.started"
+                && $0["method"] as? String == "thread/resume"
+                && $0["parameter.threadId"] as? String == childThreadID
+        }, "Inspecting a child thread must not resume it.")
+
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "The task should close before checking its saved conversation history.")
+        openTask(named: "Subagent delegation")
+        XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 10))
+        activityDisclosure.click()
+        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000002").label.contains("finished working"), "The completed child should remain visible after reopening the task.")
+        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000003").label.contains("was interrupted"), "The interrupted child should remain visible after reopening the task.")
+        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000004").exists, "The unknown child kind should remain visible after reopening the task.")
+        attachScreenshot(named: "Conversation shows and opens a subagent")
     }
 
     // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; a completed <proposed_plan> is automatically rendered as Markdown with visible spacing between distinct paragraphs and without exposing its wrapper tags, including after reopening, while bridge history preserves the exact source and the reopened conversation shows its latest message.
@@ -4899,6 +4962,33 @@ final class StationAIUITests: XCTestCase {
             }
         }
         XCTAssertGreaterThan(redPixels, 3, "The missing-folder warning should render red foreground pixels.", file: file, line: line)
+    }
+
+    private func assertSubagentIconArtwork(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        guard let cgImage = element.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            XCTFail("Could not read the subagent icon screenshot.", file: file, line: line)
+            return
+        }
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        func colorAt(_ normalizedX: CGFloat, _ normalizedY: CGFloat) -> NSColor? {
+            let x = min(cgImage.width - 1, max(0, Int(CGFloat(cgImage.width) * normalizedX)))
+            let y = min(cgImage.height - 1, max(0, Int(CGFloat(cgImage.height) * normalizedY)))
+            return bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB)
+        }
+        guard let topCyan = colorAt(0.5125, 0.2125),
+              let leftEye = colorAt(0.3625, 0.4875),
+              let face = colorAt(0.5125, 0.5125),
+              let lowerLeftAccent = colorAt(0.2125, 0.7875) else {
+            XCTFail("Could not sample the subagent icon artwork.", file: file, line: line)
+            return
+        }
+        XCTAssertGreaterThan(topCyan.greenComponent, 0.65, "The robot's top cyan detail should render at its expected position.", file: file, line: line)
+        XCTAssertGreaterThan(topCyan.blueComponent, 0.65, "The robot's top cyan detail should render at its expected position.", file: file, line: line)
+        XCTAssertLessThan(topCyan.redComponent, 0.5, "The top detail should retain the icon's cyan color.", file: file, line: line)
+        XCTAssertGreaterThan(leftEye.blueComponent, leftEye.redComponent * 1.4, "A blue eye should appear at the expected left-eye position.", file: file, line: line)
+        XCTAssertGreaterThan(face.blueComponent, face.redComponent * 1.4, "The robot face should appear at the center of the icon.", file: file, line: line)
+        XCTAssertGreaterThan(lowerLeftAccent.blueComponent, lowerLeftAccent.redComponent * 1.15, "The lower-left orbit should retain the icon's purple accent.", file: file, line: line)
+        XCTAssertGreaterThan(lowerLeftAccent.redComponent, lowerLeftAccent.greenComponent * 1.05, "The lower-left orbit should retain the icon's purple accent.", file: file, line: line)
     }
 
     private func assertContainsGreenForeground(in element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
