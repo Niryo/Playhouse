@@ -144,12 +144,17 @@ struct CodexActivity: Codable, Identifiable, Equatable {
     var agentPath: String? = nil
     var model: String? = nil
     var reasoningEffort: String? = nil
+    var toolKind: String? = nil
+    var server: String? = nil
+    var tool: String? = nil
+    var durationMs: Int? = nil
     var isContextCompaction: Bool = false
     var turnID: String? = nil
     var timelineOrder: Int? = nil
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, detail, status, childThreadID, agentPath, model, reasoningEffort, isContextCompaction, turnID, timelineOrder
+        case id, title, detail, status, childThreadID, agentPath, model, reasoningEffort
+        case toolKind, server, tool, durationMs, isContextCompaction, turnID, timelineOrder
     }
 
     init(
@@ -161,6 +166,10 @@ struct CodexActivity: Codable, Identifiable, Equatable {
         agentPath: String? = nil,
         model: String? = nil,
         reasoningEffort: String? = nil,
+        toolKind: String? = nil,
+        server: String? = nil,
+        tool: String? = nil,
+        durationMs: Int? = nil,
         isContextCompaction: Bool = false,
         turnID: String? = nil,
         timelineOrder: Int? = nil
@@ -173,6 +182,10 @@ struct CodexActivity: Codable, Identifiable, Equatable {
         self.agentPath = agentPath
         self.model = model
         self.reasoningEffort = reasoningEffort
+        self.toolKind = toolKind
+        self.server = server
+        self.tool = tool
+        self.durationMs = durationMs
         self.isContextCompaction = isContextCompaction
         self.turnID = turnID
         self.timelineOrder = timelineOrder
@@ -188,6 +201,10 @@ struct CodexActivity: Codable, Identifiable, Equatable {
         agentPath = try values.decodeIfPresent(String.self, forKey: .agentPath)
         model = try values.decodeIfPresent(String.self, forKey: .model)
         reasoningEffort = try values.decodeIfPresent(String.self, forKey: .reasoningEffort)
+        toolKind = try values.decodeIfPresent(String.self, forKey: .toolKind)
+        server = try values.decodeIfPresent(String.self, forKey: .server)
+        tool = try values.decodeIfPresent(String.self, forKey: .tool)
+        durationMs = try values.decodeIfPresent(Int.self, forKey: .durationMs)
         isContextCompaction = try values.decodeIfPresent(Bool.self, forKey: .isContextCompaction) ?? false
         turnID = try values.decodeIfPresent(String.self, forKey: .turnID)
         timelineOrder = try values.decodeIfPresent(Int.self, forKey: .timelineOrder)
@@ -284,6 +301,50 @@ struct CodexActivity: Codable, Identifiable, Equatable {
             return CodexActivity(id: id, title: "Searching the web", detail: item["query"] as? String ?? "", status: status)
         case "imageView":
             return CodexActivity(id: id, title: "Viewing image", detail: item["path"] as? String ?? "", status: status)
+        case "mcpToolCall":
+            let server = item["server"] as? String
+            let tool = item["tool"] as? String
+            let error = item["error"] as? [String: Any]
+            let summary: String
+            if status == "failed" || error != nil {
+                summary = "Tool call failed"
+            } else if status == "completed" {
+                let result = item["result"] as? [String: Any]
+                let count = (result?["content"] as? [Any])?.count ?? 0
+                summary = count > 0 ? "Returned \(count) result \(count == 1 ? "item" : "items")" : "Completed without result details"
+            } else {
+                summary = "Waiting for result"
+            }
+            return CodexActivity(
+                id: id,
+                title: "MCP · \(tool ?? "Tool")",
+                detail: [server.map { "Server · \($0)" }, summary].compactMap { $0 }.joined(separator: "\n"),
+                status: error == nil ? status : "failed",
+                toolKind: "mcp",
+                server: server,
+                tool: tool
+            )
+        case "dynamicToolCall":
+            let tool = item["tool"] as? String
+            let success = item["success"] as? Bool
+            let summary: String
+            if status == "failed" || success == false {
+                summary = "Tool call failed"
+            } else if status == "completed" {
+                let count = (item["contentItems"] as? [Any])?.count ?? 0
+                summary = count > 0 ? "Returned \(count) result \(count == 1 ? "item" : "items")" : "Tool call completed without result details"
+            } else {
+                summary = "Waiting for result"
+            }
+            return CodexActivity(
+                id: id,
+                title: "Tool · \(tool ?? "Dynamic tool")",
+                detail: summary,
+                status: success == false ? "failed" : status,
+                toolKind: "dynamic",
+                tool: tool,
+                durationMs: item["durationMs"] as? Int
+            )
         case "collabAgentToolCall":
             guard item["tool"] as? String == "spawnAgent" else { return nil }
             let prompt = item["prompt"] as? String ?? ""

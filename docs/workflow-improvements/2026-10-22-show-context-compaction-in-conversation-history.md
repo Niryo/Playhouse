@@ -1,6 +1,6 @@
 # Show Context Compaction in Conversation History — workflow review
 
-Task: `065372C9-A7DE-430E-A1CC-3E3497F31259`  
+Task: `065372C9-A7DE-430E-A1CC-3E3497F31259`
 Client date: 2026-10-22 (Asia/Jerusalem)
 
 ## Observed timeline

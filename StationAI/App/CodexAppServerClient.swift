@@ -786,6 +786,8 @@ final class CodexAppServerClient: ObservableObject {
         var messages: [CodexChatMessage] = []
         var latestTurnItems: [[String: Any]] = []
         var compactionHistory: [(item: [String: Any], turnID: String?, order: Int)] = []
+        var historicalToolItems: [[String: Any]] = []
+        var toolItemIndexes: [String: Int] = [:]
         var historicalSubagentItems: [[String: Any]] = []
         var subagentIndexes: [String: Int] = [:]
         var lastAssistantTurnID: String?
@@ -815,6 +817,15 @@ final class CodexAppServerClient: ObservableObject {
                     // items so timeline ordering is not collapsed into one bubble.
                     lastAssistantTurnID = nil
                     lastAssistantPhase = nil
+                }
+                if ["mcpToolCall", "dynamicToolCall"].contains(item["type"] as? String ?? ""),
+                   let itemID = item["id"] as? String {
+                    if let index = toolItemIndexes[itemID] {
+                        historicalToolItems[index] = item
+                    } else {
+                        toolItemIndexes[itemID] = historicalToolItems.count
+                        historicalToolItems.append(item)
+                    }
                 }
                 if item["type"] as? String == "subAgentActivity",
                    let activity = CodexActivity.from(item: item),
@@ -875,8 +886,14 @@ final class CodexAppServerClient: ObservableObject {
                 activities.append(activity)
             }
         }
+        for activity in historicalToolItems.compactMap({ CodexActivity.from(item: $0) }) {
+            let key = activity.childThreadID ?? activity.id
+            if let index = activityIndexes[key] { activities[index] = activity }
+            else { activityIndexes[key] = activities.count; activities.append(activity) }
+        }
         for activity in latestTurnItems
             .filter({ $0["type"] as? String != "contextCompaction" })
+            .filter({ !["mcpToolCall", "dynamicToolCall"].contains($0["type"] as? String ?? "") })
             .compactMap({ CodexActivity.from(item: $0) }) {
             let key = activity.childThreadID ?? activity.id
             if let index = activityIndexes[key] { activities[index] = activity }
@@ -1158,13 +1175,14 @@ final class CodexAppServerClient: ObservableObject {
     private func handleServerRequest(method: String, params: [String: Any], requestID: Any) async {
         let normalizedMethod = method.lowercased()
         if normalizedMethod.contains("approval") || normalizedMethod.contains("item/tool/") ||
-            normalizedMethod.contains("elicitation"), method != "item/tool/requestUserInput" {
+            normalizedMethod.contains("elicitation"),
+           method != "item/tool/requestUserInput", method != "tool/requestUserInput" {
             actionRequestHandler?()
         }
 
         let result: [String: Any]
         switch method {
-        case "item/tool/requestUserInput":
+        case "item/tool/requestUserInput", "tool/requestUserInput":
             guard let questionsRaw = params["questions"] as? [[String: Any]],
                   let threadID = params["threadId"] as? String,
                   let requestIDString = requestID as? String ?? (requestID as? NSNumber)?.stringValue else {

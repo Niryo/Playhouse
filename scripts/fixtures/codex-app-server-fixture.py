@@ -51,7 +51,7 @@ def question_request(request_id):
     write({
         "jsonrpc": "2.0",
         "id": request_id,
-        "method": "item/tool/requestUserInput",
+        "method": "tool/requestUserInput",
         "params": {
             "threadId": THREAD_ID,
             "turnId": TURN_ID,
@@ -381,7 +381,32 @@ def main():
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
-            elif mode.endswith("-subagent") or mode.endswith("-subagent-wait"):
+            elif mode.endswith("-context-compaction"):
+                compaction_item = {"id": "item_stationai_compaction", "type": "contextCompaction", "payload": {"opaque": "COMPACTION_OPAQUE_SENTINEL"}}
+                write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID, "item": compaction_item,
+                }})
+                ready = Path(str(sys.argv[0]) + ".compaction-ready")
+                release = Path(str(sys.argv[0]) + ".compaction-release")
+                ready.unlink(missing_ok=True)
+                release.unlink(missing_ok=True)
+                ready.write_text("Context compaction is active.\n", encoding="utf-8")
+                deadline = time.monotonic() + 30
+                while not release.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                ready.unlink(missing_ok=True)
+                if not release.exists():
+                    return 3
+                release.unlink(missing_ok=True)
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID, "item": compaction_item,
+                }})
+                item = {"id": "item_stationai_final", "type": "agentMessage", "phase": "final_answer", "text": "Context compaction completed."}
+                write({"jsonrpc": "2.0", "method": "item/started", "params": {"threadId": THREAD_ID, "turnId": TURN_ID, "item": item}})
+                write({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"threadId": THREAD_ID, "turnId": TURN_ID, "itemId": item["id"], "delta": item["text"]}})
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "turnId": TURN_ID, "item": item}})
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"}}})
+            elif mode.endswith("-subagent") or mode.endswith("-subagent-wait") or mode.endswith("-tool-activity"):
                 if mode.endswith("-subagent-wait"):
                     active = Path(str(sys.argv[0]) + ".turn-active")
                     release = Path(str(sys.argv[0]) + ".turn-release")
@@ -396,10 +421,6 @@ def main():
                         return 3
                 write({"jsonrpc": "2.0", "method": "item/started", "params": {
                     "threadId": THREAD_ID, "item": subagent_item("inProgress"),
-                }})
-                compaction_item = {"id": "item_stationai_compaction", "type": "contextCompaction", "payload": {"opaque": "COMPACTION_OPAQUE_SENTINEL"}}
-                write({"jsonrpc": "2.0", "method": "item/started", "params": {
-                    "threadId": THREAD_ID, "turnId": TURN_ID, "item": compaction_item,
                 }})
                 first_child_started = subagent_activity(
                     "started", CHILD_THREAD_ID, "/agents/Sandbox review",
@@ -420,21 +441,19 @@ def main():
                         model="gpt-6-sol", reasoning_effort="high",
                     ),
                 }})
-                ready = Path(str(sys.argv[0]) + ".subagent-ready")
-                release = Path(str(sys.argv[0]) + ".subagent-release")
-                ready.unlink(missing_ok=True)
-                release.unlink(missing_ok=True)
-                ready.write_text("Subagent activities are active.\n", encoding="utf-8")
-                deadline = time.monotonic() + 30
-                while not release.exists() and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                ready.unlink(missing_ok=True)
-                if not release.exists():
-                    return 3
-                release.unlink(missing_ok=True)
-                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
-                    "threadId": THREAD_ID, "turnId": TURN_ID, "item": compaction_item,
-                }})
+                if not mode.endswith("-tool-activity"):
+                    ready = Path(str(sys.argv[0]) + ".subagent-ready")
+                    release = Path(str(sys.argv[0]) + ".subagent-release")
+                    ready.unlink(missing_ok=True)
+                    release.unlink(missing_ok=True)
+                    ready.write_text("Subagent activities are active.\n", encoding="utf-8")
+                    deadline = time.monotonic() + 30
+                    while not release.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    ready.unlink(missing_ok=True)
+                    if not release.exists():
+                        return 3
+                    release.unlink(missing_ok=True)
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID,
                     # A terminal event may omit metadata reported by the start.
@@ -451,6 +470,42 @@ def main():
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID, "item": subagent_item("completed"),
                 }})
+                if mode.endswith("-tool-activity"):
+                    mcp_item = {
+                        "id": "item_fixture_mcp_call", "type": "mcpToolCall", "server": "fixture-server",
+                        "tool": "lookup", "status": "inProgress", "arguments": {"token": "RAW_ARGUMENT_SECRET"},
+                    }
+                    dynamic_item = {
+                        "id": "item_fixture_dynamic_call", "type": "dynamicToolCall", "tool": "summarize",
+                        "status": "inProgress", "arguments": {"prompt": "RAW_ARGUMENT_SECRET"},
+                    }
+                    legacy_dynamic_item = {
+                        "id": "item_fixture_dynamic_legacy", "type": "dynamicToolCall", "tool": "legacySummary",
+                        "status": "inProgress", "arguments": {"input": "RAW_ARGUMENT_SECRET"},
+                    }
+                    for tool_item in [mcp_item, dynamic_item, legacy_dynamic_item]:
+                        write({"jsonrpc": "2.0", "method": "item/started", "params": {"threadId": THREAD_ID, "item": tool_item}})
+                    ready = Path(str(sys.argv[0]) + ".tool-ready")
+                    release = Path(str(sys.argv[0]) + ".tool-release")
+                    ready.unlink(missing_ok=True)
+                    release.unlink(missing_ok=True)
+                    ready.write_text("Tool lifecycle starts are visible.\n", encoding="utf-8")
+                    deadline = time.monotonic() + 30
+                    while not release.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    ready.unlink(missing_ok=True)
+                    if not release.exists():
+                        return 3
+                    release.unlink(missing_ok=True)
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
+                        **mcp_item, "status": "completed", "result": {"content": [{"type": "text", "text": "RAW_RESULT_SECRET"}]},
+                    }}})
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
+                        **dynamic_item, "status": "failed", "success": False, "durationMs": 37,
+                    }}})
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
+                        **legacy_dynamic_item, "status": "completed", "success": True, "contentItems": [{"type": "inputText", "text": "RAW_RESULT_SECRET"}],
+                    }}})
                 for action_item in diagnostic_action_items(os.environ.get("STATIONAI_FIXTURE_WORKSPACE", os.getcwd())):
                     write({"jsonrpc": "2.0", "method": "item/started", "params": {
                         "threadId": THREAD_ID, "item": {**action_item, "status": "inProgress"},
@@ -663,7 +718,6 @@ def main():
             if mode.endswith("-subagent") or mode.endswith("-subagent-wait"):
                 contents = [
                     {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": "Delegate this task."}]},
-                    {"id": "item_stationai_compaction", "type": "contextCompaction", "payload": {"opaque": "COMPACTION_OPAQUE_SENTINEL"}},
                     {"id": "item_stationai_commentary", "type": "agentMessage", "phase": "commentary", "text": "I inspected the project structure and am preparing the summary."},
                     {"id": "item_stationai_final", "type": "agentMessage", "phase": "final_answer", "text": "The subagent inspected the project structure."},
                     subagent_item("completed"),
@@ -672,6 +726,20 @@ def main():
                     subagent_activity("futureKind", "00000000-0000-0000-0000-000000000004", "/agents/Future review"),
                     *diagnostic_action_items(os.environ.get("STATIONAI_FIXTURE_WORKSPACE", os.getcwd())),
                 ]
+            if mode.endswith("-context-compaction"):
+                contents = [
+                    {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": "Compact the context."}]},
+                    {"id": "item_stationai_compaction", "type": "contextCompaction", "payload": {"opaque": "COMPACTION_OPAQUE_SENTINEL"}},
+                    {"id": "item_stationai_final", "type": "agentMessage", "phase": "final_answer", "text": "Context compaction completed."},
+                ]
+            if mode.endswith("-tool-activity"):
+                contents.extend([
+                    {"id": "item_fixture_mcp_call", "type": "mcpToolCall", "server": "fixture-server", "tool": "lookup", "status": "completed", "arguments": {"token": "RAW_ARGUMENT_SECRET"}, "result": {"content": [{"type": "text", "text": "RAW_RESULT_SECRET"}]}},
+                    {"id": "item_fixture_dynamic_call", "type": "dynamicToolCall", "tool": "summarize", "status": "failed", "arguments": {"prompt": "RAW_ARGUMENT_SECRET"}, "success": False, "durationMs": 37},
+                    {"id": "item_fixture_dynamic_legacy", "type": "dynamicToolCall", "tool": "legacySummary", "status": "completed", "arguments": {"input": "RAW_ARGUMENT_SECRET"}, "success": True, "contentItems": [{"type": "inputText", "text": "RAW_RESULT_SECRET"}]},
+                    {"id": "item_user_fixture_later", "type": "userMessage", "content": [{"type": "text", "text": "A later turn starts."}]},
+                    {"id": "item_assistant_fixture_later", "type": "agentMessage", "text": "Later turn response."},
+                ])
             if mode.endswith("-markdown"):
                 saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
                 contents = [

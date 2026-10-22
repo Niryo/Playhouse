@@ -1139,6 +1139,9 @@ struct TaskConversationView: View {
                     ForEach(activities.filter(\.isSubagent)) { activity in
                         subagentTimelineRow(activity)
                     }
+                    ForEach(activities.filter { $0.toolKind != nil }) { activity in
+                        activityRow(activity)
+                    }
                     ForEach(activities.filter { $0.isContextCompaction && $0.timelineOrder == nil }) { activity in
                         contextCompactionTimelineRow(activity)
                     }
@@ -1210,7 +1213,7 @@ struct TaskConversationView: View {
                                 .accessibilityIdentifier("codex-progress-message-\(message.id)")
                         }
                     }
-                    ForEach(activities.filter { !$0.isSubagent }) { activity in
+                    ForEach(activities.filter { !$0.isSubagent && $0.toolKind == nil }) { activity in
                         activityRow(activity)
                     }
                 }
@@ -1262,7 +1265,11 @@ struct TaskConversationView: View {
     }
 
     private func activityRow(_ activity: CodexActivity) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
+        let displayDetail = [activity.detail, activity.durationMs.map { "Duration · \($0) ms" }]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 7) {
                 Image(systemName: activity.status == "completed" ? "checkmark.circle.fill" : activity.status == "interrupted" ? "pause.circle.fill" : "gearshape.2.fill")
                     .foregroundStyle(activity.status == "completed" ? .green : activity.status == "interrupted" ? .orange : .accentColor)
@@ -1274,14 +1281,14 @@ struct TaskConversationView: View {
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
             }
-            if !activity.detail.isEmpty {
-                Text(activity.detail)
+            if !displayDetail.isEmpty {
+                Text(displayDetail)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .lineLimit(4)
                     .accessibilityIdentifier("codex-activity-detail-\(activity.id)")
-                    .accessibilityLabel(activity.detail)
+                    .accessibilityLabel(displayDetail)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1289,7 +1296,7 @@ struct TaskConversationView: View {
         .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 8))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(activity.title), \(activity.statusLabel)")
-        .accessibilityValue(activity.detail)
+        .accessibilityValue(displayDetail)
         .accessibilityIdentifier(activity.isSubagent ? "codex-subagent-row-\(activity.childThreadID ?? activity.id)" : "codex-activity-row-\(activity.id)")
     }
 

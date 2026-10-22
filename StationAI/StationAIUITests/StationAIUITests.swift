@@ -4060,7 +4060,134 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
     }
 
-    // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, contextCompaction item/started and item/completed coalesce into one concise timeline event; missing summaries ignore malformed opaque payload fields and never render their data, and the event survives thread history reload and reopening. Started and interacted updates coalesce by child thread ID into clear named timeline rows outside the collapsible Codex activity section, with sentence-style names, available path/model/reasoning metadata, and started-working wording; completed and interrupted states, optional metadata, and unknown kinds survive history reload and remain visible after reopening the task conversation. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs.
+    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; in-progress, completed, and failed statuses, server/tool identity, and optional duration render and survive history reload without duplicate rows, even when later-turn items follow the calls in history. Missing optional duration remains absent. Arguments and raw result text are never exposed; only safe result summaries are shown.
+    func test_conversation_shows_mcp_and_dynamic_tool_activity() throws {
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-tool-activity").path
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
+        launchApp(defaultParent: fixture.primary.path)
+        _ = try runCLI(["task", "create", "--title", "Tool activity", "--root", fixture.primary.path])
+        let taskID = try taskID(named: "Tool activity")
+        openTask(named: "Tool activity")
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText("Show tool activity.")
+        element("send-message-button").click()
+
+        let fixture = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable))
+        let toolReady = URL(fileURLWithPath: fixture.path + ".tool-ready")
+        let toolRelease = URL(fileURLWithPath: fixture.path + ".tool-release")
+        defer { try? "Release tool completions after assertion failure.\n".write(to: toolRelease, atomically: true, encoding: .utf8) }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: toolReady.path) }, timeout: 20), "The fixture should pause after the tool start notifications.")
+        let mcpRow = element("codex-activity-row-item_fixture_mcp_call")
+        let dynamicRow = element("codex-activity-row-item_fixture_dynamic_call")
+        let legacyDynamicRow = element("codex-activity-row-item_fixture_dynamic_legacy")
+        XCTAssertTrue(mcpRow.waitForExistence(timeout: 10), "MCP calls should appear while they are in progress.")
+        XCTAssertTrue(dynamicRow.waitForExistence(timeout: 10), "Dynamic tool calls should appear while they are in progress.")
+        XCTAssertTrue(legacyDynamicRow.waitForExistence(timeout: 10), "Older dynamic tool calls may omit optional duration metadata.")
+        XCTAssertTrue(mcpRow.label.contains("In progress"))
+        XCTAssertTrue(dynamicRow.label.contains("In progress"))
+        XCTAssertTrue(legacyDynamicRow.label.contains("In progress"))
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").count, 1)
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").count, 1)
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").count, 1)
+        try "Release tool completions.\n".write(to: toolRelease, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ mcpRow.label.contains("Completed") && dynamicRow.label.contains("Failed") && legacyDynamicRow.label.contains("Completed") }, timeout: 30), "Lifecycle completions should update the existing rows.")
+        XCTAssertTrue(mcpRow.label.contains("MCP · lookup"))
+        XCTAssertTrue((mcpRow.value as? String ?? "").contains("fixture-server"))
+        XCTAssertTrue((mcpRow.value as? String ?? "").contains("Returned 1 result item"))
+        XCTAssertTrue((dynamicRow.value as? String ?? "").contains("Tool call failed"))
+        XCTAssertTrue((dynamicRow.value as? String ?? "").contains("Duration · 37 ms"))
+        XCTAssertTrue(dynamicRow.label.contains("Tool · summarize"))
+        XCTAssertTrue(legacyDynamicRow.label.contains("Tool · legacySummary"))
+        XCTAssertTrue((legacyDynamicRow.value as? String ?? "").contains("Returned 1 result item"))
+        XCTAssertFalse((legacyDynamicRow.value as? String ?? "").contains("Duration"))
+        let renderedToolRows = "\(mcpRow.label) \(mcpRow.value ?? "") \(dynamicRow.label) \(dynamicRow.value ?? "") \(legacyDynamicRow.label) \(legacyDynamicRow.value ?? "")"
+        XCTAssertFalse(renderedToolRows.contains("RAW_ARGUMENT_SECRET"))
+        XCTAssertFalse(renderedToolRows.contains("RAW_RESULT_SECRET"))
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").count, 1)
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").count, 1)
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").count, 1)
+
+        let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        let savedActivities = history?["activities"] as? [[String: Any]] ?? []
+        XCTAssertEqual(savedActivities.filter { $0["id"] as? String == "item_fixture_mcp_call" }.count, 1)
+        XCTAssertEqual(savedActivities.filter { $0["id"] as? String == "item_fixture_dynamic_call" }.count, 1)
+        element("back-to-board-button").click()
+        openTask(named: "Tool activity")
+        let reloadedMcpRow = element("codex-activity-row-item_fixture_mcp_call")
+        XCTAssertTrue(reloadedMcpRow.waitForExistence(timeout: 20), "Completed MCP activity should remain after history reload.")
+        let reloadedDynamicRow = element("codex-activity-row-item_fixture_dynamic_call")
+        let reloadedLegacyDynamicRow = element("codex-activity-row-item_fixture_dynamic_legacy")
+        XCTAssertTrue(reloadedDynamicRow.waitForExistence(timeout: 10), "Failed dynamic activity should remain after history reload.")
+        XCTAssertTrue(reloadedLegacyDynamicRow.waitForExistence(timeout: 10), "Legacy dynamic activity should remain after history reload.")
+        XCTAssertTrue(reloadedMcpRow.label.contains("MCP · lookup"))
+        XCTAssertTrue(reloadedMcpRow.label.contains("Completed"))
+        XCTAssertTrue((reloadedMcpRow.value as? String ?? "").contains("fixture-server"))
+        XCTAssertTrue((reloadedMcpRow.value as? String ?? "").contains("Returned 1 result item"))
+        XCTAssertTrue(reloadedDynamicRow.label.contains("Tool · summarize"))
+        XCTAssertTrue(reloadedDynamicRow.label.contains("Failed"))
+        XCTAssertTrue((reloadedDynamicRow.value as? String ?? "").contains("Tool call failed"))
+        XCTAssertTrue((reloadedDynamicRow.value as? String ?? "").contains("Duration · 37 ms"), "Optional duration should survive history reload and render.")
+        XCTAssertTrue(reloadedLegacyDynamicRow.label.contains("Tool · legacySummary"))
+        XCTAssertTrue(reloadedLegacyDynamicRow.label.contains("Completed"))
+        XCTAssertTrue((reloadedLegacyDynamicRow.value as? String ?? "").contains("Returned 1 result item"))
+        XCTAssertFalse((reloadedLegacyDynamicRow.value as? String ?? "").contains("Duration"), "Missing optional duration must remain absent.")
+        let reloadedToolRows = reloadedMcpRow.label + " " + (reloadedMcpRow.value as? String ?? "")
+            + " " + reloadedDynamicRow.label + " " + (reloadedDynamicRow.value as? String ?? "")
+            + " " + reloadedLegacyDynamicRow.label + " " + (reloadedLegacyDynamicRow.value as? String ?? "")
+        XCTAssertFalse(reloadedToolRows.contains("RAW_ARGUMENT_SECRET"))
+        XCTAssertFalse(reloadedToolRows.contains("RAW_RESULT_SECRET"))
+        XCTAssertTrue(app.staticTexts["A later turn starts."].exists, "The fixture history must include a subsequent turn after these tool calls.")
+    }
+
+    // case-contract: test_conversation_shows_context_compaction | contextCompaction item/started and item/completed coalesce into one concise timeline event; missing summaries ignore malformed opaque payload fields and never render their data, and the event survives thread history reload with correct prompt/response ordering.
+    func test_conversation_shows_context_compaction() throws {
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-context-compaction").path
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
+        launchApp(defaultParent: fixture.primary.path)
+        _ = try runCLI(["task", "create", "--title", "Context compaction", "--root", fixture.primary.path])
+        let taskID = try taskID(named: "Context compaction")
+        openTask(named: "Context compaction")
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText("Compact the context.")
+        element("send-message-button").click()
+
+        let executable = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable))
+        let ready = URL(fileURLWithPath: executable.path + ".compaction-ready")
+        let release = URL(fileURLWithPath: executable.path + ".compaction-release")
+        defer { try? "Release compaction after assertion failure.\n".write(to: release, atomically: true, encoding: .utf8) }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 20))
+        let row = element("context-compaction-row-item_stationai_compaction")
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        XCTAssertTrue(row.label.contains("In progress"))
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "context-compaction-row-item_stationai_compaction").count, 1)
+        XCTAssertFalse((row.label + " " + (row.value as? String ?? "")).contains("COMPACTION_OPAQUE_SENTINEL"))
+        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "COMPACTION_OPAQUE_SENTINEL")).count, 0)
+        try "Release context compaction.\n".write(to: release, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ row.label.contains("Completed") }, timeout: 20))
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "context-compaction-row-item_stationai_compaction").count, 1)
+        XCTAssertFalse((row.label + " " + (row.value as? String ?? "")).contains("COMPACTION_OPAQUE_SENTINEL"))
+        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "COMPACTION_OPAQUE_SENTINEL")).count, 0)
+        let finalMessage = app.staticTexts["Context compaction completed."]
+        XCTAssertTrue(finalMessage.waitForExistence(timeout: 10))
+        XCTAssertLessThan(row.frame.minY, finalMessage.frame.minY)
+        let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        XCTAssertEqual((history?["activities"] as? [[String: Any]] ?? []).filter { $0["isContextCompaction"] as? Bool == true }.count, 1)
+        element("back-to-board-button").click()
+        openTask(named: "Context compaction")
+        let reloaded = element("context-compaction-row-item_stationai_compaction")
+        XCTAssertTrue(reloaded.waitForExistence(timeout: 20))
+        XCTAssertTrue(reloaded.label.contains("Completed"))
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "context-compaction-row-item_stationai_compaction").count, 1)
+        XCTAssertFalse((reloaded.label + " " + (reloaded.value as? String ?? "")).contains("COMPACTION_OPAQUE_SENTINEL"))
+        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "COMPACTION_OPAQUE_SENTINEL")).count, 0)
+        XCTAssertLessThan(reloaded.frame.minY, app.staticTexts["Context compaction completed."].frame.minY)
+    }
+
+    // case-contract: test_conversation_shows_subagent_delegation | Started and interacted updates coalesce by child thread ID into clear named timeline rows outside the collapsible Codex activity section, with sentence-style names, available path/model/reasoning metadata, and started-working wording; completed and interrupted states, optional metadata, and unknown kinds survive history reload and remain visible after reopening the task conversation. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs.
     func test_conversation_shows_subagent_delegation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -4110,12 +4237,6 @@ final class StationAIUITests: XCTestCase {
         let secondChildMetadata = secondActiveChildButton.value as? String ?? ""
         XCTAssertTrue(secondChildMetadata.contains("/agents/some_agent"))
         XCTAssertFalse(secondChildMetadata.contains("gpt-"), "Optional child model metadata may be absent.")
-        let activeCompactionRow = element("context-compaction-row-item_stationai_compaction")
-        XCTAssertTrue(activeCompactionRow.waitForExistence(timeout: 5), "item/started should render while the fixture turn is still held.")
-        XCTAssertTrue(activeCompactionRow.label.contains("In progress"))
-        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "context-compaction-row-item_stationai_compaction").count, 1)
-        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "COMPACTION_OPAQUE_SENTINEL")).count, 0)
-
         activeChildButton.click()
         XCTAssertTrue(element("subagent-conversation-panel").waitForExistence(timeout: 5))
         try "Release child to finish and answer read-only inspection requests.\n".write(to: subagentRelease, atomically: true, encoding: .utf8)
@@ -4169,12 +4290,6 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(app.state, .runningForeground, "StationAI must be foreground before inspecting the conversation.")
 
         XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 20), "A delegated task should appear in conversation activity.")
-        let compactionRow = element("context-compaction-row-item_stationai_compaction")
-        XCTAssertTrue(compactionRow.waitForExistence(timeout: 10), "The compaction event should remain in the transcript after completion.")
-        XCTAssertTrue(compactionRow.label.contains("Completed"))
-        let activeUserMessage = app.staticTexts[prompt]
-        XCTAssertTrue(activeUserMessage.exists)
-        XCTAssertLessThan(activeUserMessage.frame.minY, compactionRow.frame.minY, "Compaction should follow its prompt in timeline order.")
         let activityRow = element("codex-activity-row-item_stationai_subagent")
         XCTAssertTrue(activityRow.waitForExistence(timeout: 10))
         XCTAssertTrue(activityRow.label.contains("Task delegated to subagent"))
@@ -4182,11 +4297,6 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000002").label.contains("finished working"))
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000003").label.contains("was interrupted"))
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000004").exists, "An unknown child kind should remain visible.")
-        XCTAssertTrue(compactionRow.label.contains("Completed"), "item/completed should update the existing event.")
-        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "context-compaction-row-item_stationai_compaction").count, 1)
-        let finalMessage = app.staticTexts["The subagent inspected the project structure."]
-        XCTAssertTrue(finalMessage.exists)
-        XCTAssertLessThan(compactionRow.frame.minY, finalMessage.frame.minY, "The event should remain between the prompt and response.")
         let activityDetail = element("codex-activity-detail-item_stationai_subagent")
         XCTAssertTrue(activityDetail.waitForExistence(timeout: 5))
         let detailDescription = "\(activityDetail.label) \(activityDetail.value as? String ?? "")"
@@ -4209,12 +4319,6 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "The task should close before checking its saved conversation history.")
         openTask(named: "Subagent delegation")
         XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 10))
-        let reloadedCompaction = element("context-compaction-row-item_stationai_compaction")
-        XCTAssertTrue(reloadedCompaction.exists, "Compaction should survive history reload after reopening.")
-        XCTAssertTrue(reloadedCompaction.label.contains("Completed"))
-        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "context-compaction-row-item_stationai_compaction").count, 1)
-        XCTAssertLessThan(app.staticTexts[prompt].frame.minY, reloadedCompaction.frame.minY)
-        XCTAssertLessThan(reloadedCompaction.frame.minY, app.staticTexts["The subagent inspected the project structure."].frame.minY)
         activityDisclosure.click()
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000002").label.contains("finished working"), "The completed child should remain visible after reopening the task.")
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000003").label.contains("was interrupted"), "The interrupted child should remain visible after reopening the task.")
@@ -4374,7 +4478,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Plan mode is visible in the conversation composer")
     }
 
-    // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | Structured questions raised in Plan mode move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome.
+    // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode use the existing question path, move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome.
     func test_codex_questions_can_be_answered_over_cli_xpc() throws {
         let created = try runCLI(["task", "create", "--title", "Codex questions", "--root", fixture.primary.path])
         XCTAssertEqual(created["ok"] as? Bool, true)
