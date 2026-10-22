@@ -2917,6 +2917,18 @@ class StationAIBridgeTests(unittest.TestCase):
 
 
 
+class TimedTestResult(unittest.TextTestResult):
+    def startTest(self, test):
+        self.case_started = time.monotonic()
+        super().startTest(test)
+
+    def stopTest(self, test):
+        self.stream.writeln(
+            f"E2E case={test._testMethodName} elapsed_seconds={time.monotonic() - self.case_started:.3f}"
+        )
+        super().stopTest(test)
+
+
 if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(StationAIBridgeTests)
     discovered_cases = [test._testMethodName for test in suite]
@@ -2948,7 +2960,7 @@ if __name__ == "__main__":
     test_count = len(selected_cases) if selected_cases else len(contract_cases)
     if test_count == 0:
         raise SystemExit("The bridge suite must execute at least one case.")
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    result = unittest.TextTestRunner(verbosity=2, resultclass=TimedTestResult).run(suite)
     if not result.wasSuccessful() or result.testsRun != test_count or result.skipped:
         raise SystemExit("Every discovered bridge test must pass without skips.")
     print(

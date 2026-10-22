@@ -11,6 +11,7 @@ import subprocess
 import stat
 import sys
 import tempfile
+import time
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--root", required=True, type=Path)
@@ -102,7 +103,10 @@ def cache_bundle_is_valid():
 
 
 with (cache_root / f"{root_key}.lock").open("a+") as lock_file:
+    wait_started = time.monotonic()
+    print(f"Waiting for E2E build cache lock: {lock_file.name}", file=sys.stderr, flush=True)
     fcntl.flock(lock_file, fcntl.LOCK_EX)
+    print(f"E2E build cache lock wait_seconds={time.monotonic() - wait_started:.3f}", file=sys.stderr, flush=True)
     reusable = (
         manifest.is_file()
         and manifest.read_text(encoding="utf-8").strip() == fingerprint
@@ -113,6 +117,7 @@ with (cache_root / f"{root_key}.lock").open("a+") as lock_file:
     if reusable:
         print(f"Reusing matching E2E build {fingerprint[:16]}.", file=os.sys.stderr)
     else:
+        print(f"Building E2E cache miss {fingerprint[:16]}.", file=sys.stderr, flush=True)
         cache_path.mkdir(parents=True, exist_ok=True)
         subprocess.run(
             [

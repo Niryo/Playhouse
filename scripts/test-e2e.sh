@@ -2,12 +2,16 @@
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-script_path="${repository_root}/scripts/test-e2e.sh"
-
-if [[ "${1:-}" != "--locked" ]]; then
-  exec "${repository_root}/scripts/with-e2e-lock.sh" -- bash "${script_path}" --locked "$@"
-fi
-shift
+# Headless runs use isolated fixtures and a cached build per worktree.
+# Never take the shared UI/app lock here.
+SECONDS=0
+phase_start=0
+phase="static"
+report_phase() {
+  printf 'E2E phase=%s elapsed_seconds=%s\n' "${phase}" "$((SECONDS - phase_start))" >&2
+  phase_start=${SECONDS}
+  phase="$1"
+}
 source "${repository_root}/scripts/app-profile.sh"
 stationai_load_app_profile "${repository_root}"
 
@@ -30,13 +34,21 @@ while (( $# > 0 )); do
 done
 
 test_output_dir="$(mktemp -d /tmp/stationai-bridge.XXXXXX)"
+cleanup() {
+  local status=$?
+  report_phase finished
+  printf 'E2E total_seconds=%s exit_status=%s\nBridge test artifacts: %s\n' "${SECONDS}" "${status}" "${test_output_dir}" >&2
+}
+trap cleanup EXIT
 architecture="$(uname -m)"
 python3 "${repository_root}/scripts/check-test-parity.py"
 python3 "${repository_root}/scripts/check-button-feedback.py"
+report_phase build
 build_info="$(python3 "${repository_root}/scripts/prepare-e2e-build.py" \
   --root "${repository_root}" \
   --profile-bundle-id "${STATIONAI_PROFILE_BUNDLE_ID}" \
   --architecture "${architecture}")"
+report_phase fixture
 derived_data_dir="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["derivedData"])' "${build_info}")"
 e2e_bundle_identifier="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["bundleID"])' "${build_info}")"
 app_bundle="${derived_data_dir}/Build/Products/Debug/StationAI.app"
@@ -44,10 +56,6 @@ cli_path="${app_bundle}/Contents/MacOS/stationai-cli"
 data_root="${test_output_dir}/data"
 fixture_root="${test_output_dir}/fixtures"
 bridge_log="${test_output_dir}/bridge-tests.log"
-cleanup() {
-  printf 'Bridge test artifacts: %s\n' "${test_output_dir}"
-}
-trap cleanup EXIT
 
 # The build helper compiles the paired UI test target and reuses this
 # content-matched DerivedData for focused retries and final full verification.
@@ -77,8 +85,12 @@ if (( ${#selected_cases[@]} > 0 )); then
   done
 fi
 
+report_phase cases
 set +e
-python3 "${bridge_arguments[@]}" 2>&1 | tee "${bridge_log}"
+# Reused builds share an XPC identity and process-global diagnostics routing.
+# Serialize only callers of that exact cached build, never unrelated worktrees/UI.
+python3 "${repository_root}/scripts/with-file-lock.py" "${derived_data_dir}/.bridge-run.lock" \
+  python3 "${bridge_arguments[@]}" 2>&1 | tee "${bridge_log}"
 bridge_status="${PIPESTATUS[0]}"
 set -e
 if (( bridge_status != 0 )); then
