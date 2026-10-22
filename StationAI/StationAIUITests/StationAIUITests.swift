@@ -1206,10 +1206,11 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
     }
 
-    // case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Moving a reviewed task to Done waits for active per-task operations and persists against refreshed state; it preserves that source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive.
+    // case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR; an unmerged PR keeps its link and suppresses the completion button. After all PRs merge, focus replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive.
     func test_task_done_preserves_worktree_and_branch() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
-        launchApp(defaultParent: fixture.parent.path)
+        let ghEnvironment = try makeGitHubStateFixture()
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
         openNewTaskConversation()
         chooseRepositorySuggestion("primary")
         XCTAssertTrue(element("message-composer").waitForExistence(timeout: 10), "New Task should open the composer in its conversation.")
@@ -1218,6 +1219,8 @@ final class StationAIUITests: XCTestCase {
         var path = try XCTUnwrap(record["worktreePath"] as? String)
         var branch = try XCTUnwrap(record["branch"] as? String)
         let taskID = try XCTUnwrap(task["id"] as? String)
+        _ = try runCLI(["task", "repository", "add-batch", taskID, "--repo", fixture.secondary.path])
+        XCTAssertEqual((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.count, 2)
         XCTAssertEqual(branch, "auto")
         XCTAssertEqual(record["isPending"] as? Bool, true)
         XCTAssertEqual(path, fixture.primary.path)
@@ -1264,16 +1267,81 @@ final class StationAIUITests: XCTestCase {
             if currentTitle == "Generating title…" { RunLoop.current.run(until: Date().addingTimeInterval(0.4)) }
         }
         XCTAssertNotEqual(currentTitle, "Generating title…", "The title placeholder should eventually resolve.")
+        XCTAssertTrue(terminateAppAndWait(app), "Close StationAI before seeding the real SwiftData fixture.")
+        try seedTaskPullRequest(
+            taskID: taskID,
+            number: 123,
+            url: "https://github.com/stationai-test/fixture/pull/123"
+        )
+        try seedTaskPullRequest(
+            taskID: taskID,
+            number: 456,
+            url: "https://github.com/stationai-test/fixture/pull/456",
+            repositoryIndex: 1
+        )
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        let prLink = element("task-pr-link-\(taskID)-123")
+        let secondPRLink = element("task-pr-link-\(taskID)-456")
+        XCTAssertTrue(prLink.waitForExistence(timeout: 10), "The linked unmerged PR should remain available on the Review card.")
+        XCTAssertTrue(secondPRLink.waitForExistence(timeout: 10), "The task's second linked PR should also be visible.")
+        let completionButton = element("task-complete-merged-pr-\(taskID)")
+        XCTAssertFalse(completionButton.exists)
+        let ghCallsURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["STATIONAI_E2E_GH_CALL_LOG"]))
+        XCTAssertTrue(waitUntil({
+            ((try? String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) ?? 0) >= 2
+        }, timeout: 10), "Opening the board should check the linked PR.")
+        XCTAssertEqual(Array(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), ["123", "456"])
+        XCTAssertTrue(prLink.exists, "An unmerged PR should stay as a link.")
+        XCTAssertTrue(secondPRLink.exists, "A second unmerged PR should stay as a link.")
+        let ghStateURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["STATIONAI_E2E_GH_STATE_PATH"]))
+        try "123=merged\n456=unmerged\n".write(to: ghStateURL, atomically: true, encoding: .utf8)
+        let previousCheckCount = (try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count
+        activateOtherAppThenReturn()
+        XCTAssertTrue(waitUntil({
+            ((try? String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) ?? 0) >= previousCheckCount + 2
+        }, timeout: 10), "Regaining focus should refresh the PR merge state.")
+        XCTAssertEqual(Array(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), ["123", "456"])
+        XCTAssertFalse(completionButton.exists, "The task should remain incomplete while any linked PR is unmerged.")
+        XCTAssertTrue(prLink.exists)
+        XCTAssertTrue(secondPRLink.exists)
+        try "123=unmerged\n456=merged\n".write(to: ghStateURL, atomically: true, encoding: .utf8)
+        let thirdCheckCount = (try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count
+        activateOtherAppThenReturn()
+        XCTAssertTrue(waitUntil({
+            ((try? String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) ?? 0) >= thirdCheckCount + 2
+        }, timeout: 10), "Focus should query both PRs when the second PR is already merged.")
+        XCTAssertEqual(Array(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), ["123", "456"])
+        XCTAssertFalse(completionButton.exists, "Either unmerged PR should suppress task completion.")
+        XCTAssertTrue(prLink.exists)
+        XCTAssertTrue(secondPRLink.exists)
+        try "123=merged\n456=merged\n".write(to: ghStateURL, atomically: true, encoding: .utf8)
+        let fourthCheckCount = (try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count
+        activateOtherAppThenReturn()
+        XCTAssertTrue(waitUntil({
+            ((try? String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) ?? 0) >= fourthCheckCount + 2
+        }, timeout: 10), "Regaining focus should refresh both PR merge states.")
+        XCTAssertEqual(Array(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), ["123", "456"])
+        XCTAssertTrue(completionButton.waitForExistence(timeout: 10), "A merged PR should replace its link with the completion button.")
+        XCTAssertEqual(completionButton.label, "Green checkmark. Complete task, all linked pull requests merged")
+        assertContainsGreenForeground(in: completionButton)
+        XCTAssertFalse(prLink.exists)
+        XCTAssertFalse(secondPRLink.exists)
         let moveLock = try TaskOperationLockBarrier(dataDirectory: dataDirectory, taskID: taskID)
         var moveLockReleased = false
         defer { if !moveLockReleased { try? moveLock.release() } }
         let taskCard = element("task-card-\(taskID)")
         XCTAssertTrue(taskCard.waitForExistence(timeout: 5))
-        dragTaskToDone(taskCard)
+        completionButton.click()
         Thread.sleep(forTimeInterval: 0.25)
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review", "The UI move should wait while another process owns the task operation lock.")
+        try "123=merged\n456=unmerged\n".write(to: ghStateURL, atomically: true, encoding: .utf8)
         try moveLock.release()
         moveLockReleased = true
+        XCTAssertTrue(app.buttons["Mark Done Anyway"].waitForExistence(timeout: 10), "Completion should recheck merge state after waiting for the task lock.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
+        app.buttons["Cancel"].click()
+        try "123=merged\n456=merged\n".write(to: ghStateURL, atomically: true, encoding: .utf8)
+        completionButton.click()
         XCTAssertTrue(waitUntil({ !element("task-card-\(taskID)").exists }, timeout: 15), "The completed task should disappear from the active board.")
         XCTAssertEqual(element("task-count").value as? String, "0", "The active task count should decrease when a task is archived.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
@@ -4368,7 +4436,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "External Git commit clears the open changes sidebar")
     }
 
-    private func launchApp(defaultParent: String?) {
+    private func launchApp(defaultParent: String?, environmentOverrides: [String: String] = [:]) {
         clearSavedWindowFrames()
         launchDefaultParent = defaultParent
         let bundleIdentifier = Bundle(url: appBundle)?.bundleIdentifier ?? "com.stationai.app.e2e"
@@ -4381,7 +4449,10 @@ final class StationAIUITests: XCTestCase {
         if let codexFixtureExecutable {
             app.launchEnvironment["STATIONAI_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
         }
-        launchAppWithOpen(bundleIdentifier: bundleIdentifier)
+        for (key, value) in environmentOverrides {
+            app.launchEnvironment[key] = value
+        }
+        launchAppWithOpen(bundleIdentifier: bundleIdentifier, environmentOverrides: environmentOverrides)
         waitForBoardOrAbortSuite()
         let newTaskButton = element("new-task-button")
         if newTaskButton.exists && !newTaskButton.isHittable {
@@ -4398,7 +4469,7 @@ final class StationAIUITests: XCTestCase {
     }
 
 
-    private func launchAppWithOpen(bundleIdentifier: String? = nil) {
+    private func launchAppWithOpen(bundleIdentifier: String? = nil, environmentOverrides: [String: String] = [:]) {
         let targetBundleIdentifier = bundleIdentifier ?? Bundle(url: appBundle)?.bundleIdentifier ?? "com.stationai.app.e2e"
         var environment = ProcessInfo.processInfo.environment
         environment["STATIONAI_DATA_DIRECTORY"] = dataDirectory.path
@@ -4408,6 +4479,7 @@ final class StationAIUITests: XCTestCase {
         if let codexFixtureExecutable {
             environment["STATIONAI_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
         }
+        environment.merge(environmentOverrides, uniquingKeysWith: { _, new in new })
         app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
         app.launchEnvironment = environment
         let opener = Process()
@@ -4422,6 +4494,9 @@ final class StationAIUITests: XCTestCase {
         ]
         if let codexFixtureExecutable {
             opener.arguments?.append(contentsOf: ["--env", "STATIONAI_E2E_CODEX_EXECUTABLE=\(codexFixtureExecutable)"])
+        }
+        for (key, value) in environmentOverrides {
+            opener.arguments?.append(contentsOf: ["--env", "\(key)=\(value)"])
         }
         opener.arguments?.append(appBundle.path)
         let output = Pipe()
@@ -4496,6 +4571,42 @@ final class StationAIUITests: XCTestCase {
             .appendingPathComponent(emptyQuestions ? "codex-fixture-empty" : (nonblocking ? "codex-fixture-nonblocking" : "codex-fixture-ui"))
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path), "The prepared Codex fixture is missing or not executable.")
         return executable
+    }
+
+    private func makeGitHubStateFixture() throws -> [String: String] {
+        let directory = dataDirectory.appendingPathComponent("gh-fixture", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let stateURL = directory.appendingPathComponent("state")
+        let callLogURL = directory.appendingPathComponent("calls")
+        try "123=unmerged\n456=unmerged\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        let executable = directory.appendingPathComponent("gh")
+        let script = """
+        #!/bin/sh
+        if [ "$1" != pr ] || [ "$2" != view ] || { [ "$3" != 123 ] && [ "$3" != 456 ]; } || [ "$4" != --json ] || [ "$5" != mergedAt ]; then
+          echo 'Unexpected gh fixture command' >&2
+          exit 2
+        fi
+        printf '%s\\n' "$3" >> "$STATIONAI_E2E_GH_CALL_LOG"
+        state=$(awk -F= -v number="$3" '$1 == number { print $2 }' "$STATIONAI_E2E_GH_STATE_PATH")
+        if [ "$state" = merged ]; then
+          printf '{"mergedAt":"2026-10-22T00:00:00Z"}\\n'
+        else
+          printf '{"mergedAt":null}\\n'
+        fi
+        """
+        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let inheritedPath = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
+        return [
+            "PATH": "\(directory.path):\(inheritedPath)",
+            "STATIONAI_E2E_GH_STATE_PATH": stateURL.path,
+            "STATIONAI_E2E_GH_CALL_LOG": callLogURL.path,
+        ]
+    }
+
+    private func activateOtherAppThenReturn() {
+        XCUIApplication(bundleIdentifier: "com.apple.finder").activate()
+        app.activate()
     }
 
     private func relaunchApp() {
@@ -4705,6 +4816,28 @@ final class StationAIUITests: XCTestCase {
         XCTAssertGreaterThan(redPixels, 3, "The missing-folder warning should render red foreground pixels.", file: file, line: line)
     }
 
+    private func assertContainsGreenForeground(in element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        guard let cgImage = element.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            XCTFail("Could not read the merged-PR completion button screenshot.", file: file, line: line)
+            return
+        }
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        var greenPixels = 0
+        for x in stride(from: 0, to: cgImage.width, by: 1) {
+            for y in stride(from: 0, to: cgImage.height, by: 1) {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                if color.greenComponent > 0.35,
+                   color.redComponent < 0.65,
+                   color.blueComponent < 0.65,
+                   color.greenComponent > color.redComponent * 1.15,
+                   color.greenComponent > color.blueComponent * 1.05 {
+                    greenPixels += 1
+                }
+            }
+        }
+        XCTAssertGreaterThan(greenPixels, 3, "The merged-PR completion checkmark should render green foreground pixels.", file: file, line: line)
+    }
+
     private func deleteTaskFromContextMenu(_ title: String) {
         let card = app.buttons[title].firstMatch
         XCTAssertTrue(card.waitForExistence(timeout: 5))
@@ -4861,13 +4994,14 @@ final class StationAIUITests: XCTestCase {
         return try XCTUnwrap(record["id"] as? String)
     }
 
-    private func seedTaskPullRequest(taskID: String, number: Int, url: String) throws {
+    private func seedTaskPullRequest(taskID: String, number: Int, url: String, repositoryIndex: Int = 0) throws {
         let seeder = WorkspaceFixture.root.appendingPathComponent("seed-task-pr-link")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: seeder.path), "The precompiled SwiftData fixture seeder should be executable.")
 
         let seed = Process()
         seed.executableURL = seeder
         seed.arguments = [dataDirectory.path, taskID, String(number), url]
+        if repositoryIndex > 0 { seed.arguments?.append(String(repositoryIndex)) }
         let seedOutput = Pipe()
         seed.standardOutput = seedOutput
         seed.standardError = seedOutput
