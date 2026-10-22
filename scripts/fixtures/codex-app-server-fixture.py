@@ -397,6 +397,10 @@ def main():
                 write({"jsonrpc": "2.0", "method": "item/started", "params": {
                     "threadId": THREAD_ID, "item": subagent_item("inProgress"),
                 }})
+                compaction_item = {"id": "item_stationai_compaction", "type": "contextCompaction", "payload": {"opaque": "COMPACTION_OPAQUE_SENTINEL"}}
+                write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID, "item": compaction_item,
+                }})
                 first_child_started = subagent_activity(
                     "started", CHILD_THREAD_ID, "/agents/Sandbox review",
                     model="gpt-6-sol", reasoning_effort="high",
@@ -428,6 +432,9 @@ def main():
                 if not release.exists():
                     return 3
                 release.unlink(missing_ok=True)
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID, "item": compaction_item,
+                }})
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID,
                     # A terminal event may omit metadata reported by the start.
@@ -656,6 +663,7 @@ def main():
             if mode.endswith("-subagent") or mode.endswith("-subagent-wait"):
                 contents = [
                     {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": "Delegate this task."}]},
+                    {"id": "item_stationai_compaction", "type": "contextCompaction", "payload": {"opaque": "COMPACTION_OPAQUE_SENTINEL"}},
                     {"id": "item_stationai_commentary", "type": "agentMessage", "phase": "commentary", "text": "I inspected the project structure and am preparing the summary."},
                     {"id": "item_stationai_final", "type": "agentMessage", "phase": "final_answer", "text": "The subagent inspected the project structure."},
                     subagent_item("completed"),
