@@ -2793,7 +2793,11 @@ final class CodexConversationManager {
         if type == "response_item", let itemType = payload["type"] as? String, itemType == "message",
            let role = payload["role"] as? String, role == "user" || role == "assistant",
            let content = payload["content"] as? [[String: Any]] {
-            return content.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
+            let searchableTextTypes: Set<String> = ["text", "input_text", "output_text"]
+            return content.compactMap {
+                guard let contentType = $0["type"] as? String, searchableTextTypes.contains(contentType) else { return nil }
+                return $0["text"] as? String
+            }
         }
         if type == "event_msg", let eventType = payload["type"] as? String,
            eventType == "UserMessage" || eventType == "AgentMessage",
