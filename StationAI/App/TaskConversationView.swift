@@ -1386,6 +1386,7 @@ struct TaskConversationView: View {
                 case .paragraph:
                     Text(Self.markdownAttributedText(block.text))
                         .accessibilityIdentifier("assistant-markdown-paragraph-\(block.id)")
+                        .padding(.bottom, 5)
                 }
             }
         }
@@ -1395,19 +1396,46 @@ struct TaskConversationView: View {
     }
 
     private static func markdownBlocks(_ markdown: String) -> [AssistantMarkdownBlock] {
-        markdown.components(separatedBy: .newlines).enumerated().compactMap { index, rawLine in
+        var blocks: [AssistantMarkdownBlock] = []
+        var paragraphLines: [String] = []
+        var paragraphStart: Int?
+
+        func flushParagraph() {
+            guard let start = paragraphStart, !paragraphLines.isEmpty else { return }
+            blocks.append(AssistantMarkdownBlock(
+                id: start,
+                kind: .paragraph,
+                text: paragraphLines.joined(separator: " ")
+            ))
+            paragraphLines.removeAll()
+            paragraphStart = nil
+        }
+
+        for (index, rawLine) in markdown.components(separatedBy: .newlines).enumerated() {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard !line.isEmpty else { return nil }
+            guard !line.isEmpty else {
+                flushParagraph()
+                continue
+            }
             let headingPrefix = line.prefix(while: { $0 == "#" })
             if !headingPrefix.isEmpty, headingPrefix.count <= 6,
                line.dropFirst(headingPrefix.count).first == " " {
-                return AssistantMarkdownBlock(id: index, kind: .heading(headingPrefix.count), text: String(line.dropFirst(headingPrefix.count + 1)))
+                flushParagraph()
+                blocks.append(AssistantMarkdownBlock(
+                    id: index,
+                    kind: .heading(headingPrefix.count),
+                    text: String(line.dropFirst(headingPrefix.count + 1))
+                ))
+            } else if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
+                flushParagraph()
+                blocks.append(AssistantMarkdownBlock(id: index, kind: .listItem, text: String(line.dropFirst(2))))
+            } else {
+                paragraphStart = paragraphStart ?? index
+                paragraphLines.append(line)
             }
-            if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
-                return AssistantMarkdownBlock(id: index, kind: .listItem, text: String(line.dropFirst(2)))
-            }
-            return AssistantMarkdownBlock(id: index, kind: .paragraph, text: line)
         }
+        flushParagraph()
+        return blocks
     }
 
     private var composer: some View {
