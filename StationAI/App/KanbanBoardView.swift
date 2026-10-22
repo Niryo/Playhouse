@@ -26,6 +26,9 @@ struct KanbanBoardView: View {
     @State private var rememberPRConflictAction = false
     @State private var pullRequestError: String?
     @State private var doneMoveError: String?
+    @State private var isShowingBoardSearch = false
+    @State private var boardSearchText = ""
+    @FocusState private var isBoardSearchFocused: Bool
 
     var body: some View {
         Group {
@@ -282,6 +285,26 @@ struct KanbanBoardView: View {
             }
         }
         .background(DragEndEventMonitor(draggedTaskID: $draggedTaskID))
+        .background {
+            Button("Search tasks") {
+                withAnimation(.easeInOut(duration: 0.18)) { isShowingBoardSearch = true }
+                isBoardSearchFocused = true
+            }
+            .keyboardShortcut("f", modifiers: .command)
+            .buttonHoverPointer()
+            .help("Search tasks (⌘F)")
+            .hidden()
+        }
+        .overlay(alignment: .topTrailing) {
+            if isShowingBoardSearch {
+                boardSearchBar
+                    .frame(width: 360)
+                    .padding(.top, 16)
+                    .padding(.trailing, 20)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    .zIndex(2)
+            }
+        }
         .overlay(alignment: .trailing) {
             if isShowingDoneArchive {
                 doneArchivePanel
@@ -302,7 +325,9 @@ struct KanbanBoardView: View {
     private func kanbanColumn(_ status: TaskStatus, minHeight: CGFloat = 480) -> some View {
         KanbanColumnView(
             status: status,
-            tasks: tasks.filter { $0.status == status },
+            tasks: tasks.filter { task in
+                task.status == status && (boardSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || task.title.localizedCaseInsensitiveContains(boardSearchText.trimmingCharacters(in: .whitespacesAndNewlines)))
+            },
             onMoveTask: { id, status in moveTask(id: id, to: status) },
             onCreatePullRequests: { createPullRequests(for: $0) },
             creatingPullRequestTaskIDs: taskCreatingPullRequests,
@@ -318,6 +343,61 @@ struct KanbanBoardView: View {
         )
         .frame(width: 264)
         .frame(minHeight: minHeight)
+    }
+
+    private var boardSearchBar: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(WorkspaceTheme.accent)
+            TextField("Search tasks", text: $boardSearchText)
+                .font(.system(size: 14))
+                .textFieldStyle(.plain)
+                .focused($isBoardSearchFocused)
+                .accessibilityIdentifier("board-search-field")
+                .onKeyPress(.escape) {
+                    boardSearchText = ""
+                    withAnimation(.easeInOut(duration: 0.18)) { isShowingBoardSearch = false }
+                    isBoardSearchFocused = false
+                    return .handled
+                }
+            if !boardSearchText.isEmpty {
+                Text("\(tasks.filter { $0.status != .done && $0.title.localizedCaseInsensitiveContains(boardSearchText.trimmingCharacters(in: .whitespacesAndNewlines)) }.count) matches")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("board-search-match-count")
+                Button { boardSearchText = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                    .buttonStyle(.plain)
+                    .buttonHoverPointer()
+                    .help("Clear search")
+                    .accessibilityIdentifier("clear-board-search-button")
+            }
+            Button {
+                boardSearchText = ""
+                withAnimation(.easeInOut(duration: 0.18)) { isShowingBoardSearch = false }
+                isBoardSearchFocused = false
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(.plain)
+            .buttonHoverPointer()
+            .help("Close search")
+            .accessibilityLabel("Close search")
+            .accessibilityIdentifier("close-board-search-button")
+        }
+        .padding(.horizontal, 13)
+        .padding(.vertical, 9)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.primary.opacity(0.12), lineWidth: 1))
+        .shadow(color: .black.opacity(0.10), radius: 10, y: 3)
+        .accessibilityIdentifier("board-search-bar")
     }
 
     private var boardHeader: some View {

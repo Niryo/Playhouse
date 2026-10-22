@@ -1,0 +1,4 @@
+# Workflow improvements
+
+- **Create a Search Feature (E8FD88C7-A82D-4BA2-9667-21B3D306DDCB, 2026-10-22):** Two unsupported XCTest focus assertions (`.isFocused`, then `.hasFocus`) caused compile failures after 67 and 68 seconds, consuming 135 seconds before any bridge case ran. Check unfamiliar UI assertion APIs with a small compile probe against the installed XCTest SDK before invoking the full E2E build; compare pre-case failures and elapsed build time on the next UI assertion change.
+- **Create a Search Feature (E8FD88C7-A82D-4BA2-9667-21B3D306DDCB, 2026-10-22):** The two failed E2E attempts reported total times, but their phase and compiler output was not retained in the task artifacts; the corresponding temporary artifact directories were empty. Have `scripts/test-e2e.sh` save its own phase and build diagnostics in each run's artifact directory, then verify that a failed build leaves a readable log with phase times and the compiler error.

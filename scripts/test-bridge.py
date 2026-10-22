@@ -1253,7 +1253,7 @@ class StationAIBridgeTests(unittest.TestCase):
         notice = json.loads((self.data_directory / "task-lifecycle-v2-notice.json").read_text(encoding="utf-8"))
         self.assertEqual(notice, [str(dirty_path)])
 
-    # case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status.
+    # case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards.
     def test_task_status_transitions_and_rejects_unknown_status(self):
         task_id = self.create_task()["id"]
         response, _ = self.call_cli("task", "move", task_id, "Unknown", expected_status=2)
