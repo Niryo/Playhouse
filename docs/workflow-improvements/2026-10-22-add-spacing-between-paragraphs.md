@@ -1,6 +1,6 @@
 # Add Spacing Between Paragraphs — workflow review
 
-Task: `7FE58BBE-4F3F-4EAA-B9D4-44B2A893C488`  
+Task: `7FE58BBE-4F3F-4EAA-B9D4-44B2A893C488`
 Client date: 2026-10-22 (Asia/Jerusalem)
 
 ## Timeline and observed duration

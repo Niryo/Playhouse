@@ -1080,7 +1080,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(all(record["repositoryWorktrees"][0]["worktreePath"] == str(self.primary) for record in records))
         self.assertTrue(all(record["status"] == "Backlog" for record in records))
 
-    # case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR; an unmerged PR keeps its link and suppresses the completion button. After all PRs merge, focus replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive.
+    # case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR; an unmerged PR keeps its link and suppresses the completion button. After all PRs merge, focus replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files without loading conversation histories, while the visible archive loads the newest 40 first and reveals older tasks as the user scrolls.
     def test_task_done_preserves_worktree_and_branch(self):
         task = self.create_repo_task("Untitled task", [self.primary, self.secondary])
         draft = "Please update the README and add concise setup steps for first time contributors tomorrow."
@@ -1164,6 +1164,29 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         messages = self.assert_success(history)["messages"]
         self.assertTrue(any(message["role"] == "assistant" and "Answers received: Blue / fixture-secret." in message["text"] for message in messages))
+        thread_id = started["codexThreadID"]
+        sessions = self.data_directory / "codex-home" / "sessions" / "2026" / "10" / "22"
+        sessions.mkdir(parents=True)
+        session_file = sessions / f"rollout-2026-10-22T00-00-00-{thread_id}.jsonl"
+        session_file.write_text(json.dumps({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "text", "text": "LOCAL-SESSION-ONLY-token"}]}}) + "\n", encoding="utf-8")
+        search_env = {"CODEX_HOME": str(self.data_directory / "codex-home")}
+        search, _ = self.call_cli("archive", "search", "local-session-only-TOKEN", extra_environment=search_env)
+        search_results = self.assert_success(search)
+        self.assertEqual([result["id"] for result in search_results], [task["id"]], "Archive search should find conversation text from the task's local session file.")
+        invalid_search, _ = self.call_cli("archive", "search", "   ", expected_status=2, extra_environment=search_env)
+        self.assert_failure(invalid_search, "invalid_argument")
+        filler_ids = []
+        for index in range(1, 41):
+            filler = self.assert_success(self.call_cli("task", "create", "--title", f"Archive page filler {index}", "--root", str(self.custom))[0])
+            filler_ids.append(filler["id"])
+            self.complete_fixture_turn(filler["id"])
+            moved = self.assert_success(self.call_cli("task", "move", filler["id"], "Done")[0])
+            self.assertEqual(moved["status"], "Done")
+        board, _ = self.call_cli("board", "list")
+        archived_tasks = [item for item in self.assert_success(board)["tasks"] if item["status"] == "Done"]
+        archived_ids = {item["id"] for item in archived_tasks}
+        self.assertGreaterEqual(len(archived_tasks), 41, "The CLI board read should retain completed tasks beyond the first visible archive page.")
+        self.assertTrue(set(filler_ids).issubset(archived_ids), "All persisted archive records should remain available across pages.")
 
     # case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done changes only task status and preserves dirty worktree files, branch, and target commit without committing or merging.
     def test_task_done_preserves_dirty_worktree(self):

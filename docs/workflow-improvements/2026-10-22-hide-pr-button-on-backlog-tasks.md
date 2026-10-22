@@ -1,6 +1,6 @@
 # Hide the PR button on Backlog tasks
 
-Task: `8B68E628-8040-4636-817C-AB10930AC3F1`  
+Task: `8B68E628-8040-4636-817C-AB10930AC3F1`
 Date: 2026-10-22 (Asia/Jerusalem)
 
 ## Observed timeline

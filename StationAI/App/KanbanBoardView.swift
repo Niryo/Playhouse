@@ -5,7 +5,7 @@ import SwiftUI
 struct KanbanBoardView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var codexClient: CodexAppServerClient
-    @Query(sort: \BoardTask.createdAt, order: .reverse) private var tasks: [BoardTask]
+    @Query(filter: #Predicate<BoardTask> { $0.statusRawValue != "Done" }, sort: \BoardTask.createdAt, order: .reverse) private var tasks: [BoardTask]
     @State private var isCreatingNewTask = false
     @State private var saveError: String?
     @State private var lifecycleResetNotice: String?
@@ -18,8 +18,12 @@ struct KanbanBoardView: View {
     @State private var isDoneTargetActive = false
     @State private var isShowingDoneArchive = false
     @State private var archiveSearchText = ""
-    @State private var archivedConversationText: [UUID: String] = [:]
     @State private var isIndexingArchive = false
+    @State private var archiveSearchResults: [BoardTask]?
+    @State private var archiveTasks: [BoardTask] = []
+    @State private var archiveOffset = 0
+    @State private var archiveHasMore = true
+    @State private var isLoadingArchivePage = false
     @State private var taskCreatingPullRequests = Set<UUID>()
     @State private var mergedReviewTaskIDs = Set<UUID>()
     @State private var checkingMergedPullRequests = false
@@ -325,7 +329,28 @@ struct KanbanBoardView: View {
             }
         }
         .animation(.easeInOut(duration: 0.24), value: isShowingDoneArchive)
-        .task(id: "\(isShowingDoneArchive)-\(tasks.filter { $0.status == .done }.count)") { await indexDoneConversationsIfNeeded() }
+        .task(id: "\(isShowingDoneArchive)-\(archiveSearchText)") {
+            guard isShowingDoneArchive else { return }
+            if archiveTasks.isEmpty && archiveHasMore { loadNextArchivePage() }
+            let query = archiveSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !query.isEmpty else { archiveSearchResults = nil; return }
+            archiveSearchResults = nil
+            isIndexingArchive = true
+            defer { isIndexingArchive = false }
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled else { return }
+                let manager = CodexConversationManager(tasks: BoardTaskManager(modelContext: modelContext), client: codexClient)
+                let records = try await manager.searchArchive(query: query)
+                guard !Task.isCancelled else { return }
+                archiveSearchResults = records.compactMap { try? BoardTaskManager(modelContext: modelContext).taskModel($0.id) }
+            } catch is CancellationError {
+                return
+            } catch {
+                saveError = error.localizedDescription
+                archiveSearchResults = []
+            }
+        }
     }
 
     @ViewBuilder
@@ -483,23 +508,13 @@ struct KanbanBoardView: View {
 
     private var doneArchivePanel: some View {
         let query = archiveSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let completed = tasks.filter { $0.status == .done }
-        let titleMatches = completed.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) }
-        let conversationMatches = completed.filter { task in
-            !query.isEmpty && !titleMatches.contains(where: { $0.id == task.id }) &&
-                (archivedConversationText[task.id]?.localizedCaseInsensitiveContains(query) ?? false)
-        }
-        let results = (titleMatches + conversationMatches).sorted { lhs, rhs in
-            let lhsTitle = query.isEmpty || lhs.title.localizedCaseInsensitiveContains(query)
-            let rhsTitle = query.isEmpty || rhs.title.localizedCaseInsensitiveContains(query)
-            if lhsTitle != rhsTitle { return lhsTitle }
-            return lhs.createdAt > rhs.createdAt
-        }
+        let completed = query.isEmpty ? archiveTasks : (archiveSearchResults ?? [])
+        let results = completed
         return VStack(spacing: 0) {
             HStack {
                 Text("Done tasks").font(.system(size: 14, weight: .semibold))
                 Spacer()
-                Button { withAnimation { isShowingDoneArchive = false } } label: { Image(systemName: "xmark") }
+                Button { closeDoneArchive() } label: { Image(systemName: "xmark") }
                 .buttonHoverPointer()
                 .help("Close done tasks")
                     .buttonStyle(.plain).accessibilityLabel("Close done tasks")
@@ -520,10 +535,7 @@ struct KanbanBoardView: View {
                 }
             }
             .padding(10).background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 9)).padding(12)
-            if isIndexingArchive {
-                ProgressView("Searching conversations…").controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .accessibilityIdentifier("done-archive-indexing")
-            } else if results.isEmpty {
+            if results.isEmpty && (query.isEmpty ? !archiveHasMore && !isLoadingArchivePage : archiveSearchResults != nil) && !isIndexingArchive {
                 Text(query.isEmpty ? "No completed tasks" : "No matching tasks")
                     .font(.system(size: 12)).foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
                     .accessibilityIdentifier("done-archive-empty-state")
@@ -532,7 +544,7 @@ struct KanbanBoardView: View {
                     LazyVStack(spacing: 5) {
                         ForEach(results) { task in
                             Button {
-                                isShowingDoneArchive = false
+                                closeDoneArchive()
                                 selectedTask = task
                                 isSelectedTaskNew = false
                             } label: {
@@ -550,6 +562,9 @@ struct KanbanBoardView: View {
                             .help("Open task: \(task.title)")
                             .buttonStyle(.plain)
                             .accessibilityIdentifier("done-archive-task-\(task.id.uuidString)")
+                            .onAppear {
+                                if query.isEmpty && task.id == archiveTasks.last?.id { loadNextArchivePage() }
+                            }
                             .overlay(alignment: .trailing) {
                                 if !task.repositoryWorktrees.isEmpty {
                                     archivedTaskPullRequestControl(task)
@@ -560,9 +575,13 @@ struct KanbanBoardView: View {
                         }
                     }
                     .padding(.horizontal, 10)
+                    if isLoadingArchivePage || isIndexingArchive {
+                        ProgressView().controlSize(.small).padding(12)
+                    }
                 }
                 .scrollIndicators(.visible)
                 .accessibilityIdentifier("done-archive-list")
+                .accessibilityValue("\(archiveTasks.count) tasks loaded")
             }
         }
     }
@@ -602,21 +621,34 @@ struct KanbanBoardView: View {
     }
 
     @MainActor
-    private func indexDoneConversationsIfNeeded() async {
-        guard isShowingDoneArchive,
-              tasks.contains(where: { $0.status == .done && archivedConversationText[$0.id] == nil }) else { return }
-        isIndexingArchive = true
-        defer { isIndexingArchive = false }
-        let manager = CodexConversationManager(tasks: BoardTaskManager(modelContext: modelContext), client: codexClient)
-        for task in tasks where task.status == .done && archivedConversationText[task.id] == nil {
-            guard !Task.isCancelled else { return }
-            do {
-                let history = try await manager.history(taskID: task.id)
-                archivedConversationText[task.id] = history.messages.map(\.text).joined(separator: "\n")
-            } catch {
-                archivedConversationText[task.id] = ""
-            }
+    private func loadNextArchivePage() {
+        guard isShowingDoneArchive, archiveHasMore, !isLoadingArchivePage else { return }
+        isLoadingArchivePage = true
+        var descriptor = FetchDescriptor<BoardTask>(
+            predicate: #Predicate { $0.statusRawValue == "Done" },
+            sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
+        )
+        descriptor.fetchOffset = archiveOffset
+        descriptor.fetchLimit = 40
+        do {
+            let page = try modelContext.fetch(descriptor)
+            archiveTasks.append(contentsOf: page)
+            archiveOffset += page.count
+            archiveHasMore = page.count == 40
+        } catch {
+            saveError = error.localizedDescription
+            archiveHasMore = false
         }
+        isLoadingArchivePage = false
+    }
+
+    @MainActor
+    private func closeDoneArchive() {
+        isShowingDoneArchive = false
+        archiveTasks = []
+        archiveSearchResults = nil
+        archiveOffset = 0
+        archiveHasMore = true
     }
 
     private var isShowingSaveError: Binding<Bool> {
