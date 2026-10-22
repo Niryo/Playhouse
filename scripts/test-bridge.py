@@ -327,7 +327,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(current)["status"], "Review")
         return result
 
-    def seed_done_task_pull_request(self, task_id, number=123):
+    def seed_done_task_pull_request(self, task_id, number=123, repository_index=0):
         repository_root = Path(__file__).resolve().parent.parent
         executable = self.data_directory / "seed-task-pr-link"
         subprocess.run(
@@ -342,8 +342,11 @@ class StationAIBridgeTests(unittest.TestCase):
             text=True,
         )
         seeded_url = f"https://github.com/stationai-test/fixture/pull/{number}"
+        command = [str(executable), str(self.data_directory), task_id, str(number), seeded_url]
+        if repository_index:
+            command.append(str(repository_index))
         result = subprocess.run(
-            [str(executable), str(self.data_directory), task_id, str(number), seeded_url],
+            command,
             check=True,
             capture_output=True,
             text=True,
@@ -1045,9 +1048,9 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(all(record["repositoryWorktrees"][0]["worktreePath"] == str(self.primary) for record in records))
         self.assertTrue(all(record["status"] == "Backlog" for record in records))
 
-    # case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Moving a reviewed task to Done waits for active per-task operations and persists against refreshed state; it preserves that source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files without loading conversation histories, while the visible archive loads the newest 40 first and reveals older tasks as the user scrolls.
+    # case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR; an unmerged PR keeps its link and suppresses the completion button. After all PRs merge, focus replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files without loading conversation histories, while the visible archive loads the newest 40 first and reveals older tasks as the user scrolls.
     def test_task_done_preserves_worktree_and_branch(self):
-        task = self.create_repo_task("Untitled task", [self.primary])
+        task = self.create_repo_task("Untitled task", [self.primary, self.secondary])
         draft = "Please update the README and add concise setup steps for first time contributors tomorrow."
         self.assertEqual(self.assert_success(self.call_cli("task", "prompt", task["id"], "--text", draft)[0])["savedPrompt"], draft)
         self.assertTrue(task["repositoryWorktrees"][0]["isPending"])
@@ -1064,13 +1067,40 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), target_head)
         current, _ = self.call_cli("task", "get", task["id"])
         self.assertEqual(self.assert_success(current)["status"], "Review")
+        pr_url = self.seed_done_task_pull_request(task["id"])
+        second_pr_url = self.seed_done_task_pull_request(task["id"], number=456, repository_index=1)
+        gh_directory = self.data_directory / "gh-fixture"
+        gh_directory.mkdir()
+        gh_state = gh_directory / "state"
+        gh_calls = gh_directory / "calls"
+        gh_state.write_text("123=merged\n456=unmerged\n", encoding="utf-8")
+        gh = gh_directory / "gh"
+        gh.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" != pr ] || [ \"$2\" != view ] || { [ \"$3\" != 123 ] && [ \"$3\" != 456 ]; } || [ \"$4\" != --json ] || [ \"$5\" != mergedAt ]; then\n"
+            "  echo 'Unexpected gh fixture command' >&2\n"
+            "  exit 2\n"
+            "fi\n"
+            f"printf '%s\\n' \"$3\" >> '{gh_calls}'\n"
+            f"if [ \"$(awk -F= -v number=\"$3\" '$1 == number {{ print $2 }}' '{gh_state}')\" = merged ]; then\n"
+            "  printf '{\"mergedAt\":\"2026-10-22T00:00:00Z\"}\\n'\n"
+            "else\n"
+            "  printf '{\"mergedAt\":null}\\n'\n"
+            "fi\n",
+            encoding="utf-8",
+        )
+        gh.chmod(0o755)
+        gh_environment = {"PATH": f"{gh_directory}:{os.environ.get('PATH', '')}"}
+        linked = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(linked["repositoryWorktrees"][0]["pullRequestURL"], pr_url)
+        self.assertEqual(linked["repositoryWorktrees"][1]["pullRequestURL"], second_pr_url)
         (self.primary / "target-only.txt").write_text("Master advanced after this task branch was created.\n", encoding="utf-8")
         self.run_git(self.primary, "add", "target-only.txt")
         self.run_git(self.primary, "commit", "-m", "Advance merge target while task is under review")
         target_head = self.run_git(self.primary, "rev-parse", "main")
         move_lock = TaskOperationLockBarrier(self.data_directory, task["id"])
         move_command = ["task", "move", task["id"], "Done"]
-        move_process = self.start_cli(*move_command)
+        move_process = self.start_cli(*move_command, extra_environment=gh_environment)
         try:
             time.sleep(0.25)
             self.assertIsNone(move_process.poll(), "Moving a task to Done must wait for an active per-task operation.")
@@ -1078,8 +1108,13 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assertEqual(self.assert_success(current)["status"], "Review")
         finally:
             move_lock.release()
-        response, _ = self.finish_cli(move_process, move_command)
+        response, _ = self.finish_cli(move_process, move_command, expected_status=1)
+        self.assert_failure(response, "invalid_transition")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review")
+        gh_state.write_text("123=merged\n456=merged\n", encoding="utf-8")
+        response, _ = self.call_cli(*move_command, extra_environment=gh_environment)
         self.assertEqual(self.assert_success(response)["status"], "Done")
+        self.assertEqual(gh_calls.read_text(encoding="utf-8").splitlines(), ["123", "456", "123", "456"])
         self.assertTrue(worktree.exists(), "Moving a task to Done must preserve its worktree.")
         self.assertTrue(self.branch_exists(self.primary, "generated-fixture-title"))
         self.assertEqual(self.run_git(self.primary, "rev-parse", "main"), target_head, "Moving a task to Done must not merge into the local target.")
@@ -1142,11 +1177,16 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), branch_head)
         self.assertTrue(self.branch_exists(self.primary, branch))
 
-    # case-contract: test_task_pr_create_reports_real_gh_failure | A repository-backed task checks its configured merge target for conflicts before PR creation; the clean path returns no conflicts, and the active-card and Done-archive PR controls retain their help and wait for the task lock before publication failure without saving a PR link or changing Done status.
+    # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes. The Done archive control retains its help and waits for the task lock before publication failure without saving a PR link or changing Done status.
     def test_task_pr_create_reports_real_gh_failure(self):
         task = self.create_repo_task(
-            "PR failure", [self.primary], merge_targets={self.primary: "main"}, materialize=True
+            "PR failure", [self.primary], merge_targets={self.primary: "main"}
         )
+        self.assertEqual(task["status"], "Backlog")
+        persisted_backlog = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(persisted_backlog["status"], "Backlog")
+        self.complete_fixture_turn(task["id"])
+        task = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(task["repositoryWorktrees"][0]["mergeTarget"], "main")
         conflicts, _ = self.call_cli("task", "pr", "conflicts", task["id"])
         self.assertEqual(self.assert_success(conflicts)["repositories"], [])
@@ -2847,7 +2887,7 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assertTrue(any("subagent inspected" in message["text"].lower() for message in history["messages"]))
 
-    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; a completed <proposed_plan> is automatically rendered as Markdown without exposing its wrapper tags, including after reopening, while bridge history preserves the exact source and the reopened conversation shows its latest message.
+    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; a completed <proposed_plan> is automatically rendered as Markdown with visible spacing between distinct paragraphs and without exposing its wrapper tags, including after reopening, while bridge history preserves the exact source and the reopened conversation shows its latest message.
     def test_plan_mode_renders_markdown_in_conversation(self):
         task_id = self.create_task(title="Plan mode Markdown", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -2858,7 +2898,7 @@ class StationAIBridgeTests(unittest.TestCase):
             "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
-        markdown_reply = "<proposed_plan>\n## Implementation plan\n\nStart with the **workspace model**.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening\n</proposed_plan>"
+        markdown_reply = "<proposed_plan>\n## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening\n</proposed_plan>"
         sent, _ = self.call_cli(
             "conversation", "send", task_id, "--message", "Plan the task.", "--mode", "plan",
             extra_environment=env,
