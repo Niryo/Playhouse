@@ -2944,7 +2944,7 @@ class StationAIBridgeTests(unittest.TestCase):
         history, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(history)["messages"], [])
 
-    # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, started and interacted updates coalesce by child thread ID into clear named timeline rows outside the collapsible Codex activity section, with sentence-style names, available path/model/reasoning metadata, and started-working wording; completed and interrupted states, optional metadata, and unknown kinds survive history reload and remain visible after reopening the task conversation. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs.
+    # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, contextCompaction item/started and item/completed coalesce into one concise timeline event; missing summaries ignore malformed opaque payload fields and never render their data, and the event survives thread history reload and reopening. Started and interacted updates coalesce by child thread ID into clear named timeline rows outside the collapsible Codex activity section, with sentence-style names, available path/model/reasoning metadata, and started-working wording; completed and interrupted states, optional metadata, and unknown kinds survive history reload and remain visible after reopening the task conversation. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs.
     def test_conversation_shows_subagent_delegation(self):
         task_id = self.create_task(title="Subagent delegation")["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -2982,12 +2982,15 @@ class StationAIBridgeTests(unittest.TestCase):
                             captured_lines.append(line.decode("utf-8"))
                             event = json.loads(line)
                             activity = event.get("payload", {}).get("activity", {})
+                            if event.get("type") == "activity" and activity.get("isContextCompaction"):
+                                active_updates.append(activity)
                             child_thread_id = activity.get("childThreadID")
                             if event.get("type") == "activity" and child_thread_id and activity.get("status") == "inProgress":
                                 active_children[child_thread_id] = activity
                                 active_updates.append(activity)
                 time.sleep(0.02)
             self.assertTrue(ready.exists(), "The fixture should expose an active child interval before completion.")
+            self.assertTrue(any(item.get("isContextCompaction") and item.get("status") == "inProgress" for item in active_updates))
             self.assertEqual(set(active_children), {
                 "00000000-0000-0000-0000-000000000002",
                 "00000000-0000-0000-0000-000000000003",
@@ -3018,6 +3021,27 @@ class StationAIBridgeTests(unittest.TestCase):
                 process.communicate(timeout=30)
         result = self.assert_success(sent)
         activities = result["activities"]
+        compactions = [activity for activity in activities if activity.get("isContextCompaction")]
+        self.assertEqual(len(compactions), 1)
+        self.assertEqual(compactions[0]["id"], "item_stationai_compaction")
+        self.assertEqual(compactions[0]["title"], "Context compacted")
+        self.assertEqual(compactions[0]["status"], "completed")
+        self.assertEqual(compactions[0]["detail"], "")
+        reloaded_history, _ = self.call_cli(
+            "conversation", "history", task_id,
+            extra_environment={
+                "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
+                "STATIONAI_FIXTURE_WORKSPACE": str(self.primary),
+            },
+        )
+        reloaded = self.assert_success(reloaded_history)
+        reloaded_compactions = [activity for activity in reloaded["activities"] if activity.get("isContextCompaction")]
+        self.assertEqual(len(reloaded_compactions), 1)
+        self.assertEqual(reloaded_compactions[0]["status"], "completed")
+        user_message = next(message for message in reloaded["messages"] if message.get("role") == "user")
+        assistant_message = next(message for message in reloaded["messages"] if message.get("role") == "assistant" and "subagent inspected" in message.get("text", ""))
+        self.assertLess(user_message["timelineOrder"], reloaded_compactions[0]["timelineOrder"])
+        self.assertLess(reloaded_compactions[0]["timelineOrder"], assistant_message["timelineOrder"])
         subagent = next(activity for activity in activities if activity["title"] == "Task delegated to subagent")
         self.assertEqual(subagent["status"], "completed")
         self.assertIn("Inspect the project structure", subagent["detail"])
