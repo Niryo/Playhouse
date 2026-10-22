@@ -4042,7 +4042,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
     }
 
-    // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, started and interacted updates coalesce by child thread ID into clear named timeline rows outside the collapsible Codex activity section, with sentence-style names, available path/model/reasoning metadata, and started-working wording; completed and interrupted states, optional metadata, and unknown kinds survive history reload and remain visible after reopening the task conversation. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs.
+    // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, contextCompaction item/started and item/completed coalesce into one concise timeline event; missing summaries ignore malformed opaque payload fields and never render their data, and the event survives thread history reload and reopening. Started and interacted updates coalesce by child thread ID into clear named timeline rows outside the collapsible Codex activity section, with sentence-style names, available path/model/reasoning metadata, and started-working wording; completed and interrupted states, optional metadata, and unknown kinds survive history reload and remain visible after reopening the task conversation. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs.
     func test_conversation_shows_subagent_delegation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -4092,6 +4092,11 @@ final class StationAIUITests: XCTestCase {
         let secondChildMetadata = secondActiveChildButton.value as? String ?? ""
         XCTAssertTrue(secondChildMetadata.contains("/agents/some_agent"))
         XCTAssertFalse(secondChildMetadata.contains("gpt-"), "Optional child model metadata may be absent.")
+        let activeCompactionRow = element("context-compaction-row-item_stationai_compaction")
+        XCTAssertTrue(activeCompactionRow.waitForExistence(timeout: 5), "item/started should render while the fixture turn is still held.")
+        XCTAssertTrue(activeCompactionRow.label.contains("In progress"))
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "context-compaction-row-item_stationai_compaction").count, 1)
+        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "COMPACTION_OPAQUE_SENTINEL")).count, 0)
 
         activeChildButton.click()
         XCTAssertTrue(element("subagent-conversation-panel").waitForExistence(timeout: 5))
@@ -4146,6 +4151,12 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(app.state, .runningForeground, "StationAI must be foreground before inspecting the conversation.")
 
         XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 20), "A delegated task should appear in conversation activity.")
+        let compactionRow = element("context-compaction-row-item_stationai_compaction")
+        XCTAssertTrue(compactionRow.waitForExistence(timeout: 10), "The compaction event should remain in the transcript after completion.")
+        XCTAssertTrue(compactionRow.label.contains("Completed"))
+        let activeUserMessage = app.staticTexts[prompt]
+        XCTAssertTrue(activeUserMessage.exists)
+        XCTAssertLessThan(activeUserMessage.frame.minY, compactionRow.frame.minY, "Compaction should follow its prompt in timeline order.")
         let activityRow = element("codex-activity-row-item_stationai_subagent")
         XCTAssertTrue(activityRow.waitForExistence(timeout: 10))
         XCTAssertTrue(activityRow.label.contains("Task delegated to subagent"))
@@ -4153,6 +4164,11 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000002").label.contains("finished working"))
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000003").label.contains("was interrupted"))
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000004").exists, "An unknown child kind should remain visible.")
+        XCTAssertTrue(compactionRow.label.contains("Completed"), "item/completed should update the existing event.")
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "context-compaction-row-item_stationai_compaction").count, 1)
+        let finalMessage = app.staticTexts["The subagent inspected the project structure."]
+        XCTAssertTrue(finalMessage.exists)
+        XCTAssertLessThan(compactionRow.frame.minY, finalMessage.frame.minY, "The event should remain between the prompt and response.")
         let activityDetail = element("codex-activity-detail-item_stationai_subagent")
         XCTAssertTrue(activityDetail.waitForExistence(timeout: 5))
         let detailDescription = "\(activityDetail.label) \(activityDetail.value as? String ?? "")"
@@ -4175,6 +4191,12 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "The task should close before checking its saved conversation history.")
         openTask(named: "Subagent delegation")
         XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 10))
+        let reloadedCompaction = element("context-compaction-row-item_stationai_compaction")
+        XCTAssertTrue(reloadedCompaction.exists, "Compaction should survive history reload after reopening.")
+        XCTAssertTrue(reloadedCompaction.label.contains("Completed"))
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "context-compaction-row-item_stationai_compaction").count, 1)
+        XCTAssertLessThan(app.staticTexts[prompt].frame.minY, reloadedCompaction.frame.minY)
+        XCTAssertLessThan(reloadedCompaction.frame.minY, app.staticTexts["The subagent inspected the project structure."].frame.minY)
         activityDisclosure.click()
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000002").label.contains("finished working"), "The completed child should remain visible after reopening the task.")
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000003").label.contains("was interrupted"), "The interrupted child should remain visible after reopening the task.")
