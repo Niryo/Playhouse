@@ -2861,7 +2861,7 @@ class StationAIBridgeTests(unittest.TestCase):
         queue_after_completion, _ = self.call_cli("conversation", "queue-list", task_id)
         self.assertEqual(self.assert_success(queue_after_completion), [], "Successful dispatch must be durable and nonduplicating across reload.")
 
-    # case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. Diagnostics record image MIME and encoded size without storing image payloads.
+    # case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. Diagnostics record image MIME and encoded size without storing image payloads.
     def test_conversation_sends_image_attachments(self):
         task_id = self.create_task(title="Image conversation") ["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -2873,6 +2873,21 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         image = self.data_directory / "tiny.png"
         image.write_bytes(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"))
+        backlog_task = self.create_task(title="Backlog image draft")
+        draft_result, _ = self.call_cli("task", "prompt", backlog_task["id"], "--text", "", "--image", str(image))
+        saved_draft = self.assert_success(draft_result)
+        self.assertEqual(len(saved_draft["draftImageDataURLs"]), 1)
+        self.assertTrue(saved_draft["draftImageDataURLs"][0].startswith("data:image/png;base64,"))
+        fresh_draft, _ = self.call_cli("task", "get", backlog_task["id"])
+        self.assertEqual(self.assert_success(fresh_draft)["draftImageDataURLs"], saved_draft["draftImageDataURLs"])
+        excess_draft, _ = self.call_cli(
+            "task", "prompt", backlog_task["id"], "--text", "",
+            *[argument for _ in range(9) for argument in ("--image", str(image))],
+            expected_status=2,
+        )
+        self.assertEqual(excess_draft.get("error", {}).get("code"), "invalid_argument")
+        unchanged_draft, _ = self.call_cli("task", "get", backlog_task["id"])
+        self.assertEqual(self.assert_success(unchanged_draft)["draftImageDataURLs"], saved_draft["draftImageDataURLs"])
         result, _ = self.call_cli(
             "conversation", "send", task_id, "--image", str(image),
             extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},

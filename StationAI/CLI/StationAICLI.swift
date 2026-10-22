@@ -190,7 +190,7 @@ enum StationAICLI {
                 }
             case "prompt":
                 guard let id = tail.first else { throw CLIError.usage("Use: stationai task prompt <task-id> --text <prompt> [--status <status>] [--submitted true]") }
-                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--text", "--status", "--submitted"])
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--text", "--status", "--submitted", "--image"])
                 let prompt = try requiredFlag("--text", flags: flags).first!
                 let status = flags["--status"]?.first
                 let submittedValue = flags["--submitted"]?.first
@@ -205,6 +205,16 @@ enum StationAICLI {
                     throw CLIError.usage("A submitted prompt requires nonblank text and --status \"In Progress\".")
                 }
                 var arguments: [String: BridgeValue] = ["taskID": .string(id), "prompt": .string(prompt)]
+                if let imagePaths = flags["--image"] {
+                    arguments["images"] = .array(try imagePaths.map { path in
+                        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+                        let mime: String
+                        if data.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]) { mime = "image/png" }
+                        else if data.starts(with: [255, 216, 255]) { mime = "image/jpeg" }
+                        else { throw CLIError.usage("Images must be PNG or JPEG files.") }
+                        return .string("data:\(mime);base64,\(data.base64EncodedString())")
+                    })
+                }
                 if let status { arguments["status"] = .string(status) }
                 if submitted { arguments["submitted"] = .boolean(true) }
                 return BridgeRequest(command: "task.prompt.save", arguments: arguments)
