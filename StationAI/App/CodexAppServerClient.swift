@@ -187,6 +187,14 @@ final class CodexAppServerClient: ObservableObject {
         return try await readMessages(threadID: threadID)
     }
 
+    /// Reads a child thread without resuming it or changing its turn state.
+    func inspectThreadReadOnly(id threadID: String, workspace: CodexWorkspaceContext) async throws -> CodexThreadHistory {
+        try await ensureInitialized(workspace: workspace)
+        _ = try await request(method: "thread/read", params: ["threadId": threadID])
+        _ = try await request(method: "thread/turns/list", params: ["threadId": threadID, "limit": 100])
+        return try await readMessages(threadID: threadID)
+    }
+
     func startThread(
         workspace: CodexWorkspaceContext,
         modelID: String = CodexAppServerClient.modelID,
@@ -753,6 +761,8 @@ final class CodexAppServerClient: ObservableObject {
     private func readMessages(threadID: String) async throws -> CodexThreadHistory {
         var messages: [CodexChatMessage] = []
         var latestTurnItems: [[String: Any]] = []
+        var historicalSubagentItems: [[String: Any]] = []
+        var subagentIndexes: [String: Int] = [:]
         var lastAssistantTurnID: String?
         var cursor: String?
         var visitedCursors = Set<String>()
@@ -772,6 +782,16 @@ final class CodexAppServerClient: ObservableObject {
             let data = response["data"] as? [[String: Any]] ?? []
             for entry in data {
                 guard let item = entry["item"] as? [String: Any] else { continue }
+                if item["type"] as? String == "subAgentActivity",
+                   let activity = CodexActivity.from(item: item),
+                   let childThreadID = activity.childThreadID {
+                    if let index = subagentIndexes[childThreadID] {
+                        historicalSubagentItems[index] = item
+                    } else {
+                        subagentIndexes[childThreadID] = historicalSubagentItems.count
+                        historicalSubagentItems.append(item)
+                    }
+                }
                 if item["type"] as? String == "userMessage" {
                     latestTurnItems.removeAll()
                 }
@@ -796,7 +816,17 @@ final class CodexAppServerClient: ObservableObject {
             }
         } while cursor != nil
 
-        let activities = latestTurnItems.compactMap(CodexActivity.from)
+        var activityIndexes: [String: Int] = [:]
+        var activities: [CodexActivity] = []
+        for activity in (latestTurnItems + historicalSubagentItems).compactMap(CodexActivity.from) {
+            let key = activity.childThreadID ?? activity.id
+            if let index = activityIndexes[key] {
+                activities[index] = activity
+            } else {
+                activityIndexes[key] = activities.count
+                activities.append(activity)
+            }
+        }
         return CodexThreadHistory(
             messages: messages,
             activities: activities,
