@@ -17,6 +17,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--root", required=True, type=Path)
 parser.add_argument("--profile-bundle-id", required=True)
 parser.add_argument("--architecture", required=True)
+parser.add_argument("--fingerprint-only", action="store_true", help="Print the build key without building or locking.")
 arguments = parser.parse_args()
 root = arguments.root.resolve()
 
@@ -46,7 +47,12 @@ def source_fingerprint():
     digest.update(toolchain_fingerprint().encode())
     for raw_path in sorted(path for path in paths if path):
         relative_path = Path(os.fsdecode(raw_path))
+        # These directories are development instructions/docs, not Xcode inputs.
+        # Keep app resources, project settings, and build scripts conservative.
+        if relative_path.parts[0] in {"docs", ".agents", ".codex"}:
+            continue
         if relative_path.as_posix() in {
+            "README.md",
             "AGENTS.md",
             "StationAI/BridgeTests/BridgeTestContracts.json",
             "scripts/check-button-feedback.py",
@@ -73,6 +79,9 @@ def source_fingerprint():
 
 
 fingerprint = source_fingerprint()
+if arguments.fingerprint_only:
+    print(fingerprint)
+    raise SystemExit(0)
 cache_root = Path(tempfile.gettempdir()) / "StationAI-E2E-BuildCache"
 root_key = hashlib.sha256(os.fsencode(root)).hexdigest()[:16]
 cache_path = cache_root / f"{root_key}-{fingerprint}"

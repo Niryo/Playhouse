@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 
 root = Path(__file__).resolve().parent.parent
 helper = root / "scripts/with-file-lock.py"
@@ -48,8 +49,12 @@ with tempfile.TemporaryDirectory(prefix="stationai-lock-check-") as directory:
         try:
             waiting = waiter.stderr.readline()
             assert "Lock waiting" in waiting and str(child.pid) in waiting
+            released_at = time.monotonic()
             child.communicate("", timeout=5)
-            _, acquired = waiter.communicate(timeout=25)
+            _, acquired = waiter.communicate(timeout=3)
+            handoff_seconds = time.monotonic() - released_at
+            assert handoff_seconds < 3, f"Lock handoff took {handoff_seconds:.3f}s"
+            print(f"Lock release-to-completion: {handoff_seconds:.3f}s")
             assert waiter.returncode == 0 and "Lock acquired" in acquired
         finally:
             if waiter.poll() is None:
