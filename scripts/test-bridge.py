@@ -1157,7 +1157,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIsNone(record.get("pullRequestURL"))
         self.assertEqual(current["status"], "Done")
 
-    # case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects conflicts without mutation, requires confirmation by default, honors saved keep without publishing, commits staged resolution locally without pushing via resolve-only, and commits and pushes via resolve-and-push without changing the target; unknown actions are rejected. The paired UI verifies unresolved conflicts stay uncommitted and do not advance task or target commits, confirms staged resolve-only commits locally while the remote task branch remains absent, presents all choices and the remember checkbox, and verifies remembered keep skips the next confirmation.
+    # case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects conflicts without mutation, requires confirmation by default, honors saved keep without publishing, resolves staged conflicts locally without pushing, and commits and pushes a staged resolution without changing the target; unknown actions are rejected. The paired UI verifies unresolved conflicts stay uncommitted and unpublished, presents keep, resolve-only, and resolve-and-push with the remember checkbox, verifies remembered choices skip confirmation and persist in Settings, and confirms resolve-only commits staged resolution locally while the remote task branch remains absent.
     def test_task_pr_conflicts_detect_without_mutation(self):
         task = self.create_repo_task("PR conflict detection", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
         record = task["repositoryWorktrees"][0]
@@ -2146,10 +2146,13 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "roots", "get", task_id)
         self.assertEqual(self.assert_success(response)["roots"], [str(self.primary)])
 
-    # case-contract: test_new_task_has_empty_conversation_history | The CLI creates an Untitled task with no roots, verifies empty history, and deletes it cleanly. New Task opens one empty conversation with its repository picker focused and no create sheet. Adding folder-only context leaves history empty, and backing out deletes the pending task without confirmation.
+    # case-contract: test_new_task_has_empty_conversation_history | The CLI creates an Untitled task with no roots, logs task.create.succeeded for its ID, verifies empty history, and deletes it cleanly. New Task logs start and completion events with the same attempt ID and created task ID, then opens one empty conversation with its repository picker focused and no create sheet. Adding folder-only context leaves history empty, and backing out deletes the pending task without confirmation.
     def test_new_task_has_empty_conversation_history(self):
         response, _ = self.call_cli("task", "create", "--title", "Untitled task")
         task_id = self.assert_success(response)["id"]
+        task_create = next((event for event in self.diagnostic_events()
+                            if event.get("event") == "task.create.succeeded" and event.get("taskID") == task_id), None)
+        self.assertIsNotNone(task_create, "Creating a task through CLI/XPC should persist its success diagnostic.")
         response, _ = self.call_cli("task", "get", task_id)
         task = self.assert_success(response)
         self.assertEqual(task["title"], "Untitled task")
@@ -2165,6 +2168,24 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(self.assert_success(response)["deleted"])
         response, _ = self.call_cli("task", "get", task_id, expected_status=3)
         self.assert_failure(response, "not_found")
+
+    # case-contract: test_new_task_failure_diagnostics | A real directory at the task-store write-lock path makes CLI task creation fail with operation_failed and leaves no task persisted; the paired New Task button shows the save error and writes correlated start and failure diagnostics with the same attempt ID, error domain, and code.
+    def test_new_task_failure_diagnostics(self):
+        write_lock = self.data_directory / "store-write.lock"
+        write_lock.mkdir()
+        try:
+            response, _ = self.call_cli("task", "create", "--title", "Must not persist", expected_status=1)
+            self.assert_failure(response, "operation_failed")
+            tasks, _ = self.call_cli("board", "list")
+            self.assertEqual(self.assert_success(tasks)["tasks"], [])
+            events = self.diagnostic_events()
+            self.assertTrue(any(
+                event.get("event") == "bridge.request.failed"
+                and "Couldn't open the task-store-write lock" in event.get("errorDescription", "")
+                for event in events
+            ), "The real lock-path failure should be recorded by the bridge.")
+        finally:
+            write_lock.rmdir()
 
     # case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while the composer automatically saves an unsent prompt as it is typed; clearing the composer clears the stored draft, backing out needs no Save button, and reopening restores the draft without creating a branch or worktree. Blank drafts cannot be stored, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
     def test_task_prompt_draft_persists_after_back(self):
@@ -2251,7 +2272,7 @@ class StationAIBridgeTests(unittest.TestCase):
         serialized_title_events = json.dumps(title_events)
         self.assertNotIn("Explain the delayed title result.", serialized_title_events)
         self.assertNotIn("Generated fixture title", serialized_title_events)
-    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, and the CLI/XPC preserves a 15-line draft, and the UI composer expands beyond five lines, stops growing at its 12-line limit, and retains the complete draft while scrolling. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. During title preparation, CLI/XPC confirms the submitted prompt and conversation thread remain attached to the task, while the UI keeps Pause disabled until the task's conversation client has an interruptible turn. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, the UI exposes separate steer and queue actions, sends steering with the active turn ID, and retains the queued follow-up across reopening.
+    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline prompts persist as typed text, the composer expands beyond five lines, stops at its 12-line limit, and retains all lines while scrolling. Long saved drafts reopen intact and immediately expand before typing, including after restart, remain editable, grow for wrapped text, shrink when shortened, and show their own overflow scrollbar for earlier and later content. The CLI/XPC preserves a 15-line draft. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. During title preparation, CLI/XPC confirms the submitted prompt and conversation thread remain attached to the task, while the UI keeps Pause disabled until the task's conversation client has an interruptible turn. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, the UI exposes separate steer and queue actions, sends steering with the active turn ID, and retains the queued follow-up across reopening.
     def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         task_id = self.create_task(title="Blank conversation send", roots=[self.primary])["id"]
@@ -2269,12 +2290,33 @@ class StationAIBridgeTests(unittest.TestCase):
         history = self.assert_success(response)
         self.assertEqual(history["activities"], [])
         self.assertEqual(history["messages"], [])
+        # Exercise a saved, unsent draft larger than the prompt that exposed the UI stall.
+        long_draft = "# Inspect subagents\n" + "Review child activity and preserve the complete result.\n" * 160
+        saved, _ = self.call_cli("task", "prompt", task_id, "--text", long_draft)
+        self.assertEqual(self.assert_success(saved)["savedPrompt"], long_draft)
+        reopened, _ = self.call_cli("task", "get", task_id)
+        self.assertEqual(self.assert_success(reopened)["savedPrompt"], long_draft)
+        edited_draft = long_draft + "Edited after reopening."
+        edited, _ = self.call_cli("task", "prompt", task_id, "--text", edited_draft)
+        self.assertEqual(self.assert_success(edited)["savedPrompt"], edited_draft)
+        reopened, _ = self.call_cli("task", "get", task_id)
+        self.assertEqual(self.assert_success(reopened)["savedPrompt"], edited_draft)
+        reopened_again, _ = self.call_cli("task", "get", task_id)
+        self.assertEqual(self.assert_success(reopened_again)["savedPrompt"], edited_draft)
+        self.assertEqual(self.assert_success(reopened_again)["status"], "Backlog")
+        history, _ = self.call_cli("conversation", "history", task_id)
+        self.assertEqual(self.assert_success(history)["messages"], [])
         prompt = "Work on the persisted prompt while I reopen this task."
         saved, _ = self.call_cli("task", "prompt", task_id, "--text", prompt)
         self.assertEqual(self.assert_success(saved)["savedPrompt"], prompt)
         multiline_prompt = "\n".join(f"Draft line {index}" for index in range(1, 16))
         saved, _ = self.call_cli("task", "prompt", task_id, "--text", multiline_prompt)
         self.assertEqual(self.assert_success(saved)["savedPrompt"], multiline_prompt)
+        trailing_newline_prompt = "First line\n"
+        saved, _ = self.call_cli("task", "prompt", task_id, "--text", trailing_newline_prompt)
+        self.assertEqual(self.assert_success(saved)["savedPrompt"], trailing_newline_prompt)
+        reopened, _ = self.call_cli("task", "get", task_id)
+        self.assertEqual(self.assert_success(reopened)["savedPrompt"], trailing_newline_prompt)
         saved, _ = self.call_cli("task", "prompt", task_id, "--text", prompt)
         self.assertEqual(self.assert_success(saved)["savedPrompt"], prompt)
         persisted = self.complete_fixture_turn(task_id, executable_name="codex-fixture-success", message=prompt)

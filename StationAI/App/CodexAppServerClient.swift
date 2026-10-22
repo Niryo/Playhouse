@@ -159,6 +159,7 @@ final class CodexAppServerClient: ObservableObject {
     var executableOverrideForTitleGeneration: String? { codexExecutableOverride }
     private var turnWaiters: [String: CheckedContinuation<Void, Error>] = [:]
     private var completedTurns: [String: Result<Void, Error>] = [:]
+    private var rejectedTurnKeys = Set<String>()
 
     init(codexExecutableOverride: String? = nil) {
         self.codexExecutableOverride = Self.ownedTestFixtureExecutable(codexExecutableOverride)
@@ -543,6 +544,28 @@ final class CodexAppServerClient: ObservableObject {
             actionRequestHandler?()
             return false
         }
+    }
+
+    func rejectUserInput(requestID: String, threadID: String, message: String) {
+        guard let requestIDValue = pendingUserInputRequestID,
+              String(describing: requestIDValue) == requestID,
+              pendingUserInputThreadID == threadID else { return }
+        pendingUserInputRequestID = nil
+        pendingUserInputThreadID = nil
+        pendingUserInputQuestions.removeAll()
+        pendingUserInputRequest = nil
+        sendServerError(requestID: requestIDValue, code: -32000, message: message)
+
+        guard activeThreadID == threadID, let turnID = activeTurnID else { return }
+        let turnKey = Self.turnKey(threadID: threadID, turnID: turnID)
+        rejectedTurnKeys.insert(turnKey)
+        let error = ClientError.turnFailed(message)
+        if let waiter = turnWaiters.removeValue(forKey: turnKey) {
+            waiter.resume(throwing: error)
+        } else {
+            completedTurns[turnKey] = .failure(error)
+        }
+        Task { try? await request(method: "turn/interrupt", params: ["threadId": threadID, "turnId": turnID]) }
     }
 
     func isTurnActive(threadID: String) -> Bool {
@@ -1002,6 +1025,7 @@ final class CodexAppServerClient: ObservableObject {
             ]))
 
             let key = Self.turnKey(threadID: threadID, turnID: turnID)
+            if rejectedTurnKeys.remove(key) != nil { return }
             let result: Result<Void, Error>
             if turn["status"] as? String == "completed" {
                 result = .success(())
@@ -1147,6 +1171,7 @@ final class CodexAppServerClient: ObservableObject {
         }
         turnWaiters.removeAll()
         completedTurns.removeAll()
+        rejectedTurnKeys.removeAll()
     }
 
     private func confirmModel(_ model: String?, expected: String) throws {

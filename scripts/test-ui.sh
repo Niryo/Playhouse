@@ -141,7 +141,7 @@ python3 "${dashboard_script}" "${dashboard_arguments[@]}" >/dev/null
 architecture="$(uname -m)"
 xcode_version="$(xcodebuild -version | awk '/^Xcode / {print $2}')"
 if [[ "${STATIONAI_UI_TART_GUEST:-0}" == "1" ]]; then
-  repository_cache_key="tart-vm-v3"
+  repository_cache_key="tart-vm-v5"
   derived_data_root="${HOME}/StationAIUITestRuns/DerivedData"
 else
   repository_cache_key="$(printf '%s' "${repository_root}" | shasum -a 256 | cut -c 1-12)"
@@ -224,13 +224,6 @@ for (( batch_index=0; batch_index<batch_count; batch_index++ )); do
   summary_path="${test_output_dir}/test-summary-batch-${batch_tag}.json"
   dashboard_log="${test_output_dir}/xcodebuild-batch-${batch_tag}.log"
   app_bundle_identifier="${source_bundle_identifier}.e2e.${test_run_identifier}.b${batch_tag}"
-  for ui_case in "${batch_cases[@]}"; do
-    if [[ "${ui_case}" == "test_worktree_app_profiles_isolate_identity_and_store" ]]; then
-      linked_profile_key="$("${repository_root}/scripts/app-profile.sh" "${fixture_root}/existing-worktree" | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])')"
-      app_bundle_identifier="com.stationai.app.worktree.${linked_profile_key}.e2e.${test_run_identifier}.b${batch_tag}"
-      break
-    fi
-  done
   test_arguments=("${base_test_arguments[@]}" -resultBundlePath "${result_bundle}")
   for ui_case in "${batch_cases[@]}"; do
     test_arguments+=("-only-testing:StationAIUITests/StationAIUITests/${ui_case}")

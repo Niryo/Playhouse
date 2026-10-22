@@ -43,6 +43,7 @@ struct TaskConversationView: View {
     let onBack: () -> Void
 
     @State private var draft = ""
+    @State private var composerHeight: CGFloat = 28
     @State private var draftAutosaveTask: Task<Void, Never>?
     @State private var draftNeedsAutosave = false
     @State private var pendingImages: [PendingImage] = []
@@ -1350,34 +1351,31 @@ struct TaskConversationView: View {
             }
 
             VStack(alignment: .leading, spacing: 10) {
-                TextField("Message…", text: $draft, axis: .vertical)
-                    .font(.system(size: 14))
-                    .lineLimit(1...12)
-                    .textFieldStyle(.plain)
-                    .focused($isComposerFocused)
-                    .onKeyPress(.return, phases: .down) { press in
-                        guard press.modifiers.contains(.shift) else { return .ignored }
-                        draft += "\n"
-                        return .handled
-                    }
-                    .onKeyPress(KeyEquivalent("v"), phases: .down) { press in
-                        guard press.modifiers.contains(.command),
-                              let image = NSPasteboard.general.readObjects(forClasses: [NSImage.self])?.first as? NSImage,
-                              let data = image.tiffRepresentation else { return .ignored }
-                        do { try addImageData(data) }
+                NativeChatEditor(
+                    text: $draft,
+                    height: $composerHeight,
+                    isFocused: Binding(get: { isComposerFocused }, set: { isComposerFocused = $0 }),
+                    isEnabled: !isReadOnly && !isLoadingHistory,
+                    accessibilityHelp: isReadOnly
+                        ? "Archived conversation, read-only."
+                         : (isResponding ? "Enter a follow-up to steer the active turn or queue it for later."
+                            : (isLoadingHistory ? "Composer unavailable while conversation history loads." : "")),
+                    onSubmit: { sendMessage() },
+                    onPasteImage: { image in
+                        do { try addImage(image) }
                         catch { errorMessage = error.localizedDescription }
-                        return .handled
                     }
-                    .onSubmit { sendMessage() }
-                    .onPasteCommand(of: [.image]) { providers in
-                        for provider in providers {
-                            _ = provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
-                                guard let data else { return }
-                                Task { @MainActor in
-                                    do { try addImageData(data) }
-                                    catch { errorMessage = error.localizedDescription }
-                                }
-                            }
+                )
+                    .frame(height: composerHeight)
+                    .overlay(alignment: .topLeading) {
+                        if draft.isEmpty {
+                            Text("Message…")
+                                .font(.system(size: 14))
+                                .foregroundStyle(.tertiary)
+                                .padding(.horizontal, 5)
+                                .padding(.top, 4)
+                                .allowsHitTesting(false)
+                                .accessibilityHidden(true)
                         }
                     }
                     .onChange(of: draft) { _, newValue in
@@ -1824,14 +1822,29 @@ struct TaskConversationView: View {
     }
 
     private func addImageData(_ data: Data) throws {
-        guard pendingImages.count < 8,
-              let image = NSImage(data: data),
-              let tiff = image.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiff),
-              let encoded = Self.encodedImage(bitmap), encoded.data.count <= 10_000_000 else {
+        guard let image = NSImage(data: data) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images that fit within 10 MB after encoding.")
         }
-        pendingImages.append(PendingImage(dataURL: "data:\(encoded.mimeType);base64,\(encoded.data.base64EncodedString())", image: image))
+        try addImage(image)
+    }
+
+    private func addImage(_ image: NSImage) throws {
+        guard pendingImages.count < 8 else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images that fit within 10 MB after encoding.")
+        }
+        let bitmap = image.representations.compactMap { $0 as? NSBitmapImageRep }.first
+            ?? image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:))
+            ?? image.cgImage(forProposedRect: nil, context: nil, hints: nil).map(NSBitmapImageRep.init(cgImage:))
+        guard let bitmap else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images that fit within 10 MB after encoding.")
+        }
+        guard let encoded = Self.encodedImage(bitmap), encoded.data.count <= 10_000_000 else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images that fit within 10 MB after encoding.")
+        }
+        guard let previewImage = NSImage(data: encoded.data) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images that fit within 10 MB after encoding.")
+        }
+        pendingImages.append(PendingImage(dataURL: "data:\(encoded.mimeType);base64,\(encoded.data.base64EncodedString())", image: previewImage))
     }
 
     private static func encodedImage(_ bitmap: NSBitmapImageRep) -> (data: Data, mimeType: String)? {
@@ -2160,6 +2173,184 @@ struct TaskConversationView: View {
             withAnimation(.easeOut(duration: 0.2)) {
                 proxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
             }
+        }
+    }
+}
+
+// The native text view owns wrapping and document sizing. SwiftUI only receives
+// a bounded viewport height; it never asks a multiline TextField for its ideal size.
+private struct NativeChatEditor: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var height: CGFloat
+    @Binding var isFocused: Bool
+    let isEnabled: Bool
+    let accessibilityHelp: String
+    let onSubmit: () -> Void
+    let onPasteImage: (NSImage) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> ChatEditorScrollView {
+        let scroll = ChatEditorScrollView()
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.setAccessibilityIdentifier("message-composer-scroll-view")
+        let editor = ChatEditorTextView(frame: NSRect(x: 0, y: 0, width: 100, height: 28))
+        editor.isRichText = false
+        editor.allowsUndo = true
+        editor.drawsBackground = false
+        editor.font = .systemFont(ofSize: 14)
+        editor.textColor = .textColor
+        editor.textContainerInset = NSSize(width: 0, height: 4)
+        editor.isVerticallyResizable = true
+        editor.isHorizontallyResizable = false
+        editor.minSize = NSSize(width: 0, height: 28)
+        editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        editor.autoresizingMask = [.width]
+        editor.textContainer?.widthTracksTextView = true
+        editor.textContainer?.heightTracksTextView = false
+        editor.textContainer?.containerSize = NSSize(width: 100, height: CGFloat.greatestFiniteMagnitude)
+        editor.setAccessibilityIdentifier("message-composer")
+        editor.setAccessibilityLabel("Message")
+        editor.delegate = context.coordinator
+        editor.onDocumentHeightChange = { [weak scroll] height in
+            scroll?.documentHeightDidChange(height)
+        }
+        scroll.documentView = editor
+        scroll.onHeightChange = { [weak coordinator = context.coordinator] height in
+            // AppKit layout must finish before updating SwiftUI state.
+            DispatchQueue.main.async { [weak scroll] in
+                guard let scroll, scroll.viewportHeight == height else { return }
+                if coordinator?.parent.height != height { coordinator?.parent.height = height }
+            }
+        }
+        return scroll
+    }
+
+    func updateNSView(_ scroll: ChatEditorScrollView, context: Context) {
+        context.coordinator.parent = self
+        guard let editor = scroll.documentView as? ChatEditorTextView else { return }
+        editor.onSubmit = onSubmit
+        editor.onPasteImage = onPasteImage
+        editor.isEditable = isEnabled
+        editor.isSelectable = isEnabled
+        editor.setAccessibilityHelp(accessibilityHelp)
+        if editor.string != text {
+            editor.string = text
+            editor.undoManager?.removeAllActions()
+            scroll.requestTextLayout()
+        }
+        if isFocused, isEnabled, editor.window?.firstResponder !== editor {
+            editor.window?.makeFirstResponder(editor)
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: NativeChatEditor
+        init(_ parent: NativeChatEditor) { self.parent = parent }
+
+        func textDidChange(_ notification: Notification) {
+            guard let editor = notification.object as? ChatEditorTextView else { return }
+            parent.text = editor.string
+            (editor.enclosingScrollView as? ChatEditorScrollView)?.requestTextLayout()
+        }
+
+        func textDidBeginEditing(_ notification: Notification) { parent.isFocused = true }
+        func textDidEndEditing(_ notification: Notification) { parent.isFocused = false }
+    }
+}
+
+private final class ChatEditorScrollView: NSScrollView {
+    var onHeightChange: ((CGFloat) -> Void)?
+    private(set) var viewportHeight: CGFloat = 28
+    private var previousWidth: CGFloat = 0
+    private var textLayoutNeeded = true
+
+    func requestTextLayout() {
+        textLayoutNeeded = true
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        guard let editor = documentView as? NSTextView else { return }
+        let width = contentSize.width
+        guard width > 0, textLayoutNeeded || width != previousWidth else { return }
+        textLayoutNeeded = false
+        previousWidth = width
+        editor.setFrameSize(NSSize(width: width, height: editor.frame.height))
+        guard let textContainer = editor.textContainer,
+              let layoutManager = editor.layoutManager else { return }
+        // NSTextView can keep its previous long-document frame after deletion
+        // until the layout manager recomputes glyph usage for the edited text.
+        layoutManager.ensureLayout(for: textContainer)
+        let usedRect = layoutManager.usedRect(for: textContainer)
+        let trailingLineBottom = layoutManager.extraLineFragmentTextContainer === textContainer
+            ? layoutManager.extraLineFragmentRect.maxY
+            : usedRect.maxY
+        let contentHeight = ceil(max(usedRect.maxY, trailingLineBottom) + editor.textContainerInset.height * 2)
+        let documentHeight = max(28, contentHeight)
+        editor.setFrameSize(NSSize(width: width, height: documentHeight))
+        documentHeightDidChange(documentHeight)
+    }
+
+    func documentHeightDidChange(_ documentHeight: CGFloat) {
+        let newHeight = min(240, max(28, ceil(documentHeight)))
+        if viewportHeight != newHeight {
+            viewportHeight = newHeight
+            onHeightChange?(newHeight)
+        }
+    }
+}
+
+private final class ChatEditorTextView: NSTextView {
+    var onDocumentHeightChange: ((CGFloat) -> Void)?
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        // NSTextView can finish laying out text after the scroll view's layout
+        // pass. Follow its actual document height whenever native layout changes
+        // it, including restored drafts, wrapping and deletion.
+        onDocumentHeightChange?(frame.height)
+    }
+
+    var onSubmit: (() -> Void)?
+    var onPasteImage: ((NSImage) -> Void)?
+
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(paste(_:)),
+           NSPasteboard.general.canReadObject(forClasses: [NSImage.self], options: nil) {
+            return isEditable
+        }
+        return super.validateUserInterfaceItem(item)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if (event.keyCode == 36 || event.keyCode == 76), !hasMarkedText(), isEditable {
+            if event.modifierFlags.contains(.shift) {
+                insertNewlineIgnoringFieldEditor(nil)
+            } else {
+                onSubmit?()
+            }
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    override func paste(_ sender: Any?) {
+        guard isEditable else { return }
+        let pasteboard = NSPasteboard.general
+        let image = pasteboard.readObjects(forClasses: [NSImage.self])?.first as? NSImage
+        if let image {
+            onPasteImage?(image)
+        } else if let data = pasteboard.data(forType: .png)
+                    ?? pasteboard.data(forType: .tiff),
+                  let image = NSImage(data: data) {
+            onPasteImage?(image)
+        } else {
+            super.paste(sender)
         }
     }
 }

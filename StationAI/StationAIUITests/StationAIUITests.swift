@@ -418,7 +418,8 @@ final class StationAIUITests: XCTestCase {
                 .appendingPathComponent("Library/Application Support/StationAI/Worktrees/\($0)").path
         })
         let launchedIdentifier = try XCTUnwrap(Bundle(url: appBundle)?.bundleIdentifier)
-        XCTAssertTrue(launchedIdentifier.hasPrefix(try XCTUnwrap(linked["bundleID"]) + ".e2e."))
+        let sourceProfile = try profile(for: repositoryRoot)
+        XCTAssertTrue(launchedIdentifier.hasPrefix(try XCTUnwrap(sourceProfile["bundleID"]) + ".e2e."), "The test app must use the actual source checkout's identity, not a repository fixture's identity.")
         XCTAssertEqual(serviceName, launchedIdentifier + ".bridge")
         XCTAssertNotEqual(dataDirectory.path, primary["dataDirectory"])
         XCTAssertNotEqual(dataDirectory.path, linked["dataDirectory"])
@@ -438,9 +439,9 @@ final class StationAIUITests: XCTestCase {
             try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
         }
         let loggedStorePaths = diagnostics.compactMap { $0["storePath"] as? String }
-        XCTAssertTrue(loggedStorePaths.contains(store.path), "The linked-profile XPC log must name its isolated store.")
+        XCTAssertTrue(loggedStorePaths.contains(store.path), "The test app's XPC log must name its isolated store.")
         let primaryDataDirectory = try XCTUnwrap(primary["dataDirectory"])
-        XCTAssertFalse(loggedStorePaths.contains(where: { $0.hasPrefix(primaryDataDirectory) }), "The linked-profile log must not route to the primary store.")
+        XCTAssertFalse(loggedStorePaths.contains(where: { $0.hasPrefix(primaryDataDirectory) }), "The test app's log must not route to the primary store.")
     }
 
     // case-contract: test_task_creation_rejects_invalid_title_roots_and_missing_folder | New Task immediately opens an empty conversation with the repository picker focused and a visible red missing-working-folder warning; sending stays disabled until a working folder is added. A persisted empty-root task shows the same red warning when its conversation is reopened. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets.
@@ -1220,7 +1221,11 @@ final class StationAIUITests: XCTestCase {
         let generatedBranch = "generated-fixture-title"
         XCTAssertEqual(record["mergeTarget"] as? String, "main")
         let composer = element("message-composer")
-        XCTAssertTrue(waitUntil({ composer.isEnabled && composer.isHittable }, timeout: 15), "The composer should become available after conversation history loads.")
+        let composerIsAvailable = waitUntil({ composer.isEnabled && composer.isHittable }, timeout: 15)
+        if !composerIsAvailable {
+            attachScreenshot(named: "Unavailable composer after repository selection")
+        }
+        XCTAssertTrue(composerIsAvailable, "The composer should become available after conversation history loads. enabled=\(composer.isEnabled), value=\(composer.value as? String ?? "<none>"), hittable=\(composer.isHittable), frame=\(composer.frame); \(app.debugDescription)")
         composer.click()
         composer.typeText(taskPrompt)
         element("send-message-button").click()
@@ -1394,7 +1399,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(current["status"] as? String, "Done")
     }
 
-    // case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects conflicts without mutation, requires confirmation by default, honors saved keep without publishing, commits staged resolution locally without pushing via resolve-only, and commits and pushes via resolve-and-push without changing the target; unknown actions are rejected. The paired UI verifies unresolved conflicts stay uncommitted and do not advance task or target commits, confirms staged resolve-only commits locally while the remote task branch remains absent, presents all choices and the remember checkbox, and verifies remembered keep skips the next confirmation.
+    // case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects conflicts without mutation, requires confirmation by default, honors saved keep without publishing, resolves staged conflicts locally without pushing, and commits and pushes a staged resolution without changing the target; unknown actions are rejected. The paired UI verifies unresolved conflicts stay uncommitted and unpublished, presents keep, resolve-only, and resolve-and-push with the remember checkbox, verifies remembered choices skip confirmation and persist in Settings, and confirms resolve-only commits staged resolution locally while the remote task branch remains absent.
     func test_task_pr_conflicts_detect_without_mutation() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -1436,12 +1441,12 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(prButton.waitForExistence(timeout: 5))
         prButton.click()
         XCTAssertTrue(element("pr-conflict-confirmation").waitForExistence(timeout: 10), "The PR action should ask how to handle actual merge conflicts.")
-        XCTAssertTrue(element("pr-conflict-resolve-push-button").exists)
-        XCTAssertTrue(element("pr-conflict-keep-button").exists)
-        element("pr-conflict-resolve-only-button").click()
+        XCTAssertTrue(app.buttons["Resolve and push"].waitForExistence(timeout: 5), "The conflict sheet should expose its resolve-and-push option. \(app.debugDescription)")
+        XCTAssertTrue(app.buttons["Keep PR as is"].waitForExistence(timeout: 5), "The conflict sheet should expose its keep option.")
+        app.buttons["Resolve without pushing"].click()
         XCTAssertTrue(waitUntil({ !element("pr-conflict-confirmation").exists }, timeout: 10))
         let unresolvedAlert = app.alerts["Couldn't create pull request"]
-        XCTAssertTrue(unresolvedAlert.waitForExistence(timeout: 20), "Resolve without pushing should run conflict resolution and report that unresolved files remain.")
+        XCTAssertTrue(unresolvedAlert.waitForExistence(timeout: 20), "Resolve without pushing should run conflict resolution and report that unresolved files remain. \(app.debugDescription)")
         XCTAssertTrue((unresolvedAlert.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "couldn't resolve every merge conflict")).firstMatch).exists)
         unresolvedAlert.buttons["OK"].click()
         XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), branchHead, "Resolve without pushing must not advance the task branch when conflicts remain unresolved.")
@@ -1449,11 +1454,11 @@ final class StationAIUITests: XCTestCase {
 
         prButton.click()
         XCTAssertTrue(element("pr-conflict-confirmation").waitForExistence(timeout: 10))
-        XCTAssertTrue(element("pr-conflict-resolve-push-button").exists)
-        XCTAssertTrue(element("pr-conflict-resolve-only-button").exists)
-        let remember = element("pr-conflict-remember-choice")
+        XCTAssertTrue(app.buttons["Resolve and push"].exists)
+        XCTAssertTrue(app.buttons["Resolve without pushing"].exists)
+        let remember = app.checkBoxes["Remember this choice"]
         remember.click()
-        element("pr-conflict-resolve-push-button").click()
+        app.buttons["Resolve and push"].click()
         XCTAssertTrue(waitUntil({ !element("pr-conflict-confirmation").exists }, timeout: 10))
         XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["pullRequestConflictAction"] as? String, "resolve-and-push", "The push choice should persist its own policy before starting resolution.")
         XCTAssertTrue(unresolvedAlert.waitForExistence(timeout: 20))
@@ -1465,11 +1470,11 @@ final class StationAIUITests: XCTestCase {
 
         prButton.click()
         XCTAssertTrue(element("pr-conflict-confirmation").waitForExistence(timeout: 10))
-        XCTAssertTrue(element("pr-conflict-resolve-push-button").exists)
-        XCTAssertTrue(element("pr-conflict-resolve-only-button").exists)
+        XCTAssertTrue(app.buttons["Resolve and push"].exists)
+        XCTAssertTrue(app.buttons["Resolve without pushing"].exists)
         XCTAssertTrue(remember.exists)
         remember.click()
-        element("pr-conflict-keep-button").click()
+        app.buttons["Keep PR as is"].click()
         XCTAssertTrue(waitUntil({ !element("pr-conflict-confirmation").exists }, timeout: 10))
         XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["pullRequestConflictAction"] as? String, "keep")
         XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), branchHead)
@@ -2650,8 +2655,12 @@ final class StationAIUITests: XCTestCase {
             preferencesWindow.buttons["Resolve without pushing"].click()
         }
         XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["pullRequestConflictAction"] as? String, "resolve-only")
-        _ = try runCLI(["settings", "set-pr-conflict-action", "resolve-only"])
-        XCTAssertTrue(waitUntil({ conflictPicker.value as? String == "resolve-only" }, timeout: 5), "An external CLI write should update the saved conflict behavior picker.")
+        _ = try runCLI(["settings", "set-pr-conflict-action", "keep"])
+        let conflictPickerUpdated = waitUntil({ conflictPicker.value as? String == "Keep the PR as is" }, timeout: 5)
+        if !conflictPickerUpdated {
+            attachScreenshot(named: "Conflict preference picker after external write")
+        }
+        XCTAssertTrue(conflictPickerUpdated, "An external CLI write should update the saved conflict behavior picker. \(conflictPicker.debugDescription); \(preferencesWindow.debugDescription)")
         _ = try runCLI(["settings", "set-pr-conflict-action", "ask"])
         XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["appearance"] as? String, "dark")
         appearancePicker.click()
@@ -2843,10 +2852,13 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Existing task roots survive clearing the default parent")
     }
 
-    // case-contract: test_new_task_has_empty_conversation_history | The CLI creates an Untitled task with no roots, verifies empty history, and deletes it cleanly. New Task opens one empty conversation with its repository picker focused and no create sheet. Adding folder-only context leaves history empty, and backing out deletes the pending task without confirmation.
+    // case-contract: test_new_task_has_empty_conversation_history | The CLI creates an Untitled task with no roots, logs task.create.succeeded for its ID, verifies empty history, and deletes it cleanly. New Task logs start and completion events with the same attempt ID and created task ID, then opens one empty conversation with its repository picker focused and no create sheet. Adding folder-only context leaves history empty, and backing out deletes the pending task without confirmation.
     func test_new_task_has_empty_conversation_history() throws {
         launchApp(defaultParent: fixture.parent.path)
         openNewTaskConversation()
+        XCTAssertTrue(waitUntil({
+            (try? self.diagnosticEvents().contains { $0["event"] as? String == "ui.new_task.started" }) ?? false
+        }, timeout: 2), "The New Task start event should reach the diagnostics file promptly after the click.")
         XCTAssertEqual(app.windows.count, 1, "New Task should open one conversation window.")
         XCTAssertTrue(element("empty-conversation").waitForExistence(timeout: 10))
         let repositorySearch = element("conversation-repository-search")
@@ -2872,6 +2884,16 @@ final class StationAIUITests: XCTestCase {
 
         let createdTask = try XCTUnwrap(tasksFromBoardList().first)
         let createdTaskID = try XCTUnwrap(createdTask["id"] as? String)
+        let newTaskEvents = try diagnosticEvents().filter {
+            ["ui.new_task.started", "ui.new_task.succeeded"].contains($0["event"] as? String ?? "")
+        }
+        let newTaskStarted = try XCTUnwrap(newTaskEvents.first { $0["event"] as? String == "ui.new_task.started" })
+        let newTaskSucceeded = try XCTUnwrap(newTaskEvents.first { $0["event"] as? String == "ui.new_task.succeeded" })
+        let successAttemptID = try XCTUnwrap(newTaskStarted["attemptID"] as? String)
+        XCTAssertFalse(successAttemptID.isEmpty)
+        XCTAssertEqual(newTaskSucceeded["attemptID"] as? String, successAttemptID)
+        XCTAssertEqual(newTaskSucceeded["taskID"] as? String, createdTaskID)
+        XCTAssertNotNil(newTaskSucceeded["durationMilliseconds"] as? String)
         XCTAssertEqual(createdTask["contextFolders"] as? [String], [fixture.custom.path])
         XCTAssertEqual(createdTask["workspaceRoots"] as? [String], [fixture.custom.path])
         let history = try runCLI(["conversation", "history", createdTaskID])["result"] as? [String: Any]
@@ -2885,6 +2907,35 @@ final class StationAIUITests: XCTestCase {
         let deleted = try runCLI(["task", "get", createdTaskID], expectedStatus: 3)
         XCTAssertEqual((deleted["error"] as? [String: Any])?["code"] as? String, "not_found")
         attachScreenshot(named: "New conversation shows its empty state")
+    }
+
+    // case-contract: test_new_task_failure_diagnostics | A real directory at the task-store write-lock path makes CLI task creation fail with operation_failed and leaves no task persisted; the paired New Task button shows the save error and writes correlated start and failure diagnostics with the same attempt ID, error domain, and code.
+    func test_new_task_failure_diagnostics() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        let writeLock = dataDirectory.appendingPathComponent("store-write.lock", isDirectory: true)
+        let missingLockTarget = dataDirectory.appendingPathComponent("missing-lock-parent/store-write.lock")
+        try FileManager.default.createSymbolicLink(at: writeLock, withDestinationURL: missingLockTarget)
+
+        element("new-task-button").click()
+        let saveAlert = app.alerts["Couldn't save changes"]
+        XCTAssertTrue(saveAlert.waitForExistence(timeout: 10), "A real store-lock open failure should be shown to the user.")
+        XCTAssertTrue(waitUntil({
+            (try? self.diagnosticEvents().contains { $0["event"] as? String == "ui.new_task.failed" }) ?? false
+        }, timeout: 2), "The New Task failure should reach the diagnostics file promptly.")
+        let events = try diagnosticEvents()
+        let failure = try XCTUnwrap(events.last { $0["event"] as? String == "ui.new_task.failed" })
+        let starts = events.filter { $0["event"] as? String == "ui.new_task.started" }
+        let start = try XCTUnwrap(starts.last)
+        let failureAttemptID = try XCTUnwrap(start["attemptID"] as? String)
+        XCTAssertFalse(failureAttemptID.isEmpty)
+        XCTAssertEqual(failure["attemptID"] as? String, failureAttemptID)
+        XCTAssertFalse((failure["errorDomain"] as? String ?? "").isEmpty)
+        XCTAssertFalse((failure["errorCode"] as? String ?? "").isEmpty)
+        XCTAssertNotNil(failure["durationMilliseconds"] as? String)
+
+        saveAlert.buttons["OK"].click()
+        try FileManager.default.removeItem(at: writeLock)
+        XCTAssertTrue(try tasksFromBoardList().isEmpty, "A failed create must not leave a persisted task.")
     }
 
     // case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while the composer automatically saves an unsent prompt as it is typed; clearing the composer clears the stored draft, backing out needs no Save button, and reopening restores the draft without creating a branch or worktree. Blank drafts cannot be stored, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
@@ -2963,56 +3014,118 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Unsent task prompt is saved after returning to backlog")
     }
 
-    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline in the composer without sending; multiline prompts persist as typed text, and the CLI/XPC preserves a 15-line draft, and the UI composer expands beyond five lines, stops growing at its 12-line limit, and retains the complete draft while scrolling. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. During title preparation, CLI/XPC confirms the submitted prompt and conversation thread remain attached to the task, while the UI keeps Pause disabled until the task's conversation client has an interruptible turn. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, the UI exposes separate steer and queue actions, sends steering with the active turn ID, and retains the queued follow-up across reopening.
+    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline prompts persist as typed text, the composer expands beyond five lines, stops at its 12-line limit, and retains all lines while scrolling. Long saved drafts reopen intact and immediately expand before typing, including after restart, remain editable, grow for wrapped text, shrink when shortened, and show their own overflow scrollbar for earlier and later content. The CLI/XPC preserves a 15-line draft. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. During title preparation, CLI/XPC confirms the submitted prompt and conversation thread remain attached to the task, while the UI keeps Pause disabled until the task's conversation client has an interruptible turn. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, the UI exposes separate steer and queue actions, sends steering with the active turn ID, and retains the queued follow-up across reopening.
     func test_conversation_composer_rejects_blank_and_supports_live_turn_controls() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Blank message", roots: [fixture.primary.path])
+        let longDraftTaskID = try taskID(named: "Blank message")
+        let longDraft = "# Inspect subagents\n" + String(repeating: "Review child activity and preserve the complete result.\n", count: 160)
+        _ = try runCLI(["task", "prompt", longDraftTaskID, "--text", longDraft])
+        app.terminate()
+        launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Blank message")
+        let draftEditor = element("message-composer")
+        let editorViewport = element("message-composer-scroll-view")
+        XCTAssertTrue(draftEditor.waitForExistence(timeout: 5))
+        XCTAssertEqual(draftEditor.elementType, .textView, "The composer should use a native multiline text area.")
+        XCTAssertEqual(draftEditor.value as? String, longDraft)
+        XCTAssertTrue(waitUntil({ editorViewport.frame.height >= 239 }, timeout: 5), "Opening a saved long draft must expand the visible editor immediately, before typing.")
+        XCTAssertLessThanOrEqual(editorViewport.frame.height, 241, "A long draft must not expand the editor beyond its viewport cap.")
+        attachScreenshot(named: "Long saved draft expands the native composer")
+        let draftTopPosition = draftEditor.frame.minY
+        editorViewport.swipeUp()
+        XCTAssertTrue(editorViewport.scrollBars.firstMatch.waitForExistence(timeout: 5), "Scrolling overflow must expose the composer's own native scrollbar.")
+        XCTAssertTrue(waitUntil({ draftEditor.frame.minY < draftTopPosition - 20 }, timeout: 5), "Scrolling down must reveal later draft content.")
+        let draftLowerPosition = draftEditor.frame.minY
+        editorViewport.swipeDown()
+        XCTAssertTrue(waitUntil({ draftEditor.frame.minY > draftLowerPosition + 20 }, timeout: 5), "Scrolling up must reveal earlier draft content.")
+        draftEditor.click()
+        draftEditor.typeKey(.downArrow, modifierFlags: .command)
+        draftEditor.typeText("Edited after reopening.")
+        let editedDraft = longDraft + "Edited after reopening."
+        XCTAssertTrue(waitUntil({ draftEditor.value as? String == editedDraft }, timeout: 5), "The reopened long draft must respond to editing.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: longDraftTaskID)?["savedPrompt"] as? String) == editedDraft }, timeout: 10))
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5), "Back must remain responsive after editing a long draft.")
+        app.terminate()
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Blank message")
+        XCTAssertEqual(draftEditor.value as? String, editedDraft)
+        XCTAssertTrue(waitUntil({ editorViewport.frame.height >= 239 }, timeout: 5), "The editor must also expand after restarting with a saved draft.")
+        draftEditor.click()
+        draftEditor.typeKey("a", modifierFlags: .command)
+        draftEditor.typeText("Short")
+        let shortenedEditor = waitUntil({ editorViewport.frame.height < 60 }, timeout: 5)
+        if !shortenedEditor {
+            attachScreenshot(named: "Composer after shortening a saved long draft")
+        }
+        XCTAssertTrue(shortenedEditor, "Shortening the draft should shrink the editor; viewport=\(editorViewport.frame), document=\(draftEditor.frame), text=\(draftEditor.value ?? "")")
+        let shortHeight = editorViewport.frame.height
+        draftEditor.typeKey("a", modifierFlags: .command)
+        draftEditor.typeText(String(repeating: "Wrapped text without a newline. ", count: 30))
+        XCTAssertTrue(waitUntil({ editorViewport.frame.height > shortHeight + 20 }, timeout: 5), "Wrapping must grow the editor without explicit newlines.")
+        draftEditor.typeKey("a", modifierFlags: .command)
+        draftEditor.typeKey(.delete, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: longDraftTaskID)?["savedPrompt"] as? String) == nil }, timeout: 10))
         let composer = element("message-composer")
         let sendButton = element("send-message-button")
-        let modelPicker = element("model-picker-menu")
+        let modelPicker = app.popUpButtons.firstMatch
         XCTAssertTrue(composer.waitForExistence(timeout: 10))
         XCTAssertTrue(modelPicker.waitForExistence(timeout: 10), "The composer should show the selected model next to its send controls.")
         let modelTaskID = try taskID(named: "Blank message")
         let modelResult = try runCLI(["conversation", "models", modelTaskID])["result"] as? [String: Any]
         let availableModels = try XCTUnwrap(modelResult?["models"] as? [[String: Any]])
-        let selectedModelName = String(modelPicker.label.split(separator: ":").last ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let selectedModel = try XCTUnwrap(availableModels.first(where: { ($0["name"] as? String) == selectedModelName || ($0["id"] as? String) == selectedModelName }))
-        XCTAssertTrue(modelPicker.label.localizedCaseInsensitiveContains(selectedModel["name"] as? String ?? selectedModelName))
+        let selectedModelValue = (modelPicker.value as? String ?? modelPicker.label)
+            .split(separator: ":").last.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        XCTAssertTrue(availableModels.contains(where: {
+            selectedModelValue.caseInsensitiveCompare($0["name"] as? String ?? "") == .orderedSame
+                || selectedModelValue.caseInsensitiveCompare($0["id"] as? String ?? "") == .orderedSame
+        }), "The selected composer model '\(selectedModelValue)' should match an available Codex model: \(availableModels).")
         XCTAssertFalse(sendButton.isEnabled)
         composer.click()
         composer.typeText("First line")
         composer.typeKey(.return, modifierFlags: .shift)
+        XCTAssertTrue(waitUntil({ editorViewport.frame.height > shortHeight }, timeout: 5), "The composer should reserve the empty caret line immediately after a trailing newline.")
+        XCTAssertEqual(composer.value as? String, "First line\n", "The trailing newline should remain in the editor before text is entered on the next line.")
         composer.typeText("Second line")
         XCTAssertEqual(composer.value as? String, "First line\nSecond line", "Shift+Enter should add a line without submitting the composer.")
-        let twoLineHeight = composer.frame.height
+        XCTAssertTrue(waitUntil({ editorViewport.frame.height > shortHeight }, timeout: 5))
+        let twoLineHeight = editorViewport.frame.height
         for index in 3...5 {
             composer.typeKey(.return, modifierFlags: .shift)
             composer.typeText("Line \(index)")
         }
-        let fiveLineHeight = composer.frame.height
+        XCTAssertTrue(waitUntil({ editorViewport.frame.height > twoLineHeight }, timeout: 5))
+        let fiveLineHeight = editorViewport.frame.height
         for index in 6...9 {
             composer.typeKey(.return, modifierFlags: .shift)
             composer.typeText("Line \(index)")
         }
-        XCTAssertGreaterThan(composer.frame.height, twoLineHeight, "The composer should grow as a draft gains lines, up to its expanded limit.")
-        XCTAssertGreaterThan(composer.frame.height, fiveLineHeight, "The composer should expand beyond the previous five-line limit.")
+        XCTAssertTrue(waitUntil({ editorViewport.frame.height > twoLineHeight }, timeout: 5), "The visible composer should grow as a draft gains lines.")
+        XCTAssertTrue(waitUntil({ editorViewport.frame.height > fiveLineHeight }, timeout: 5), "The visible composer should expand beyond the previous five-line limit.")
         for index in 10...12 {
             composer.typeKey(.return, modifierFlags: .shift)
             composer.typeText("Line \(index)")
         }
-        let twelveLineHeight = composer.frame.height
+        let twelveLineHeight = editorViewport.frame.height
         for index in 13...15 {
             composer.typeKey(.return, modifierFlags: .shift)
             composer.typeText("Line \(index)")
         }
         let expectedLongDraft = (["First line", "Second line"] + (3...15).map { "Line \($0)" }).joined(separator: "\n")
-        XCTAssertLessThanOrEqual(composer.frame.height, twelveLineHeight + 2, "The composer should stop growing at its 12-line limit and scroll the remaining draft.")
+        XCTAssertLessThanOrEqual(editorViewport.frame.height, twelveLineHeight + 2, "The composer should stop growing at its 12-line limit and scroll the remaining draft.")
         XCTAssertEqual(composer.value as? String, expectedLongDraft, "The composer should retain all lines after reaching its scroll limit.")
         XCTAssertTrue(element("conversation-scroll-view").exists, "The transcript should expose its scroll view for reading the full conversation.")
         XCTAssertTrue(sendButton.isEnabled)
         XCTAssertEqual(((try runCLI(["conversation", "history", taskID(named: "Blank message")])["result"] as? [String: Any])?["messages"] as? [Any])?.count, 0, "Adding a line must not send a conversation message.")
+        composer.typeKey("a", modifierFlags: .command)
+        composer.typeText("BeforeAfter")
+        composer.typeKey(.leftArrow, modifierFlags: .command)
+        for _ in 0..<6 { composer.typeKey(.rightArrow, modifierFlags: []) }
+        composer.typeKey(.return, modifierFlags: .shift)
+        XCTAssertEqual(composer.value as? String, "Before\nAfter", "Shift+Return must insert at the caret, not append to the draft.")
+        XCTAssertEqual(((try runCLI(["conversation", "history", modelTaskID])["result"] as? [String: Any])?["messages"] as? [Any])?.count, 0)
         composer.typeKey("a", modifierFlags: .command)
         composer.typeText("   ")
         XCTAssertFalse(sendButton.isEnabled, "Whitespace-only messages must not be sent.")
@@ -3052,7 +3165,7 @@ final class StationAIUITests: XCTestCase {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             titleComposer.click()
             titleComposer.typeText(titlePrompt)
-            element("send-message-button").click()
+            titleComposer.typeKey(.return, modifierFlags: [])
             let titleFixtureReady = URL(fileURLWithPath: titleFixtureExecutable + ".resolve-ready")
             XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: titleFixtureReady.path) }, timeout: 15), "The title fixture should hold the task in its title-pending state.")
             XCTAssertEqual(try taskRecord(id: titleTaskID)?["title"] as? String, "Generating title…")
@@ -3098,7 +3211,7 @@ final class StationAIUITests: XCTestCase {
             let transcriptScrollView = element("conversation-scroll-view")
             let longPromptMessage = app.staticTexts[titlePrompt]
             XCTAssertTrue(longPromptMessage.waitForExistence(timeout: 5), "The full long prompt should remain present in conversation history.")
-            XCTAssertTrue(app.scrollBars.firstMatch.waitForExistence(timeout: 5), "An overflowing transcript should expose a visible scrollbar.")
+            XCTAssertTrue(transcriptScrollView.scrollBars.firstMatch.waitForExistence(timeout: 5), "An overflowing transcript should expose a visible scrollbar.")
             let latestPosition = longPromptMessage.frame.minY
             transcriptScrollView.swipeDown()
             XCTAssertTrue(waitUntil({ longPromptMessage.frame.minY > latestPosition + 20 }, timeout: 5), "Scrolling up should reveal earlier content in the long message.")
@@ -3526,13 +3639,15 @@ final class StationAIUITests: XCTestCase {
         let rawClipboardPNG = try XCTUnwrap(largeBitmap.representation(using: .png, properties: [:]))
         XCTAssertGreaterThan(rawClipboardPNG.count, 10_000_000, "The clipboard source PNG should exceed the encoded payload limit.")
         XCTAssertGreaterThan(try XCTUnwrap(largeBitmap.tiffRepresentation).count, 10_000_000, "The clipboard TIFF representation should exceed the raw limit that previously caused rejection.")
-        let largeImage = NSImage(size: NSSize(width: 3000, height: 1500))
-        largeImage.addRepresentation(largeBitmap)
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects([largeImage])
+        NSPasteboard.general.setData(rawClipboardPNG, forType: .png)
         let pastedComposer = element("message-composer")
         pastedComposer.click()
-        pastedComposer.typeKey("v", modifierFlags: .command)
+        app.menuBars.menuBarItems["Edit"].click()
+        let pasteMenuItem = app.menuItems["Paste"].firstMatch
+        XCTAssertTrue(pasteMenuItem.waitForExistence(timeout: 5))
+        XCTAssertTrue(pasteMenuItem.isEnabled, "The native text editor must enable Paste for an image-only clipboard.")
+        pasteMenuItem.click()
         XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "Pasting an image should create a composer preview.")
         element("send-message-button").click()
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
@@ -3634,7 +3749,9 @@ final class StationAIUITests: XCTestCase {
                 && $0["itemType"] as? String == "commandExecution"
         })
         XCTAssertEqual(commandDiagnostic["command"] as? String, "git status --short")
-        XCTAssertEqual(commandDiagnostic["workingDirectory"] as? String, fixture.primary.resolvingSymlinksInPath().path)
+        let loggedWorkingDirectory = try XCTUnwrap(commandDiagnostic["workingDirectory"] as? String)
+        XCTAssertEqual(URL(fileURLWithPath: loggedWorkingDirectory).resolvingSymlinksInPath().standardizedFileURL.path,
+                       fixture.primary.resolvingSymlinksInPath().standardizedFileURL.path)
         XCTAssertGreaterThan(Int(commandDiagnostic["outputBytes"] as? String ?? "0") ?? 0, 0)
         let fileDiagnostic = try XCTUnwrap(codexDiagnostics.first {
             $0["event"] as? String == "codex.notification"
@@ -3752,13 +3869,22 @@ final class StationAIUITests: XCTestCase {
         let modelResult = try runCLI(["conversation", "models", taskID])["result"] as? [String: Any]
         let availableModels = try XCTUnwrap(modelResult?["models"] as? [[String: Any]])
         XCTAssertFalse(availableModels.isEmpty)
-        let modelMenu = element("model-picker-menu")
-        XCTAssertTrue(modelMenu.waitForExistence(timeout: 10))
-        let selectedModelName = String(modelMenu.label.split(separator: ":").last ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let selectedModel = try XCTUnwrap(availableModels.first(where: { ($0["name"] as? String) == selectedModelName || ($0["id"] as? String) == selectedModelName }))
+        let modelPicker = app.popUpButtons.firstMatch
+        XCTAssertTrue(modelPicker.waitForExistence(timeout: 5), "The composer should expose a model returned by Codex.")
+        func displayedModelValue() -> String {
+            let rawValue = modelPicker.value as? String ?? modelPicker.label
+            return String(rawValue.split(separator: ":").last ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let selectedModel = try XCTUnwrap(availableModels.first { model in
+            let displayedModel = displayedModelValue()
+            return displayedModel.caseInsensitiveCompare(model["name"] as? String ?? "") == .orderedSame
+                || displayedModel.caseInsensitiveCompare(model["id"] as? String ?? "") == .orderedSame
+        }, "The composer should expose a model returned by Codex.")
+        let selectedModelName = try XCTUnwrap(selectedModel["name"] as? String)
         let selectedModelID = try XCTUnwrap(selectedModel["id"] as? String)
-        XCTAssertTrue(modelMenu.label.localizedCaseInsensitiveContains(selectedModelName))
+        let modelMenu = modelPicker
+        XCTAssertTrue(displayedModelValue().caseInsensitiveCompare(selectedModelName) == .orderedSame
+            || displayedModelValue().caseInsensitiveCompare(selectedModelID) == .orderedSame)
         if let alternateModel = availableModels.first(where: { $0["id"] as? String != selectedModelID }) {
             let alternateID = try XCTUnwrap(alternateModel["id"] as? String)
             modelMenu.click()
@@ -3766,9 +3892,12 @@ final class StationAIUITests: XCTestCase {
             let modelOption = app.menuItems.matching(identifier: optionID).firstMatch
             XCTAssertTrue(modelOption.waitForExistence(timeout: 5), "The model picker should list each model returned by Codex.")
             modelOption.click()
-            let updatedModelPicker = element("model-picker-menu")
-            XCTAssertTrue(updatedModelPicker.waitForExistence(timeout: 5))
-            XCTAssertTrue(updatedModelPicker.label.localizedCaseInsensitiveContains(alternateModel["name"] as? String ?? alternateID), "Choosing a model should update the composer selection.")
+            let alternateName = alternateModel["name"] as? String ?? alternateID
+            XCTAssertTrue(waitUntil({
+                let displayedModel = displayedModelValue()
+                return displayedModel.caseInsensitiveCompare(alternateName) == .orderedSame
+                    || displayedModel.caseInsensitiveCompare(alternateID) == .orderedSame
+            }, timeout: 5), "Choosing a model should update the composer selection.")
         }
 
         let modeMenu = element("conversation-mode-menu")

@@ -621,6 +621,11 @@ struct KanbanBoardView: View {
     private func openNewTask() {
         guard !isCreatingNewTask else { return }
         isCreatingNewTask = true
+        let attemptID = UUID().uuidString
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        StationAIDiagnostics.record("ui.new_task.started", fields: [
+            "attemptID": attemptID
+        ])
         Task { @MainActor in
             defer { isCreatingNewTask = false }
             do {
@@ -630,9 +635,23 @@ struct KanbanBoardView: View {
                     repositories: [],
                     contextFolders: []
                 )
-                selectedTask = try manager.taskModel(created.id)
+                let newTask = try manager.taskModel(created.id)
+                selectedTask = newTask
                 isSelectedTaskNew = true
+                StationAIDiagnostics.record("ui.new_task.succeeded", fields: [
+                    "attemptID": attemptID,
+                    "taskID": created.id.uuidString,
+                    "durationMilliseconds": String((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
+                ])
             } catch {
+                let nsError = error as NSError
+                StationAIDiagnostics.record("ui.new_task.failed", fields: [
+                    "attemptID": attemptID,
+                    "durationMilliseconds": String((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000),
+                    "errorDomain": nsError.domain,
+                    "errorCode": String(nsError.code),
+                    "errorDescription": error.localizedDescription
+                ])
                 saveError = error.localizedDescription
             }
         }

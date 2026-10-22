@@ -128,6 +128,11 @@ def main():
             continue
         if message.get("method") == "initialize":
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"serverInfo": {"name": "stationai-fixture", "version": "1"}}})
+        elif message.get("method") == "model/list":
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {"data": [
+                {"id": "gpt-6-luna", "displayName": "GPT-6 Luna", "isDefault": True},
+                {"id": "gpt-6-sol", "displayName": "GPT-6 Sol", "isDefault": False},
+            ]}})
         elif message.get("method") == "thread/start":
             thread_start_instructions = message.get("params", {}).get("developerInstructions")
             if serial_mode:
@@ -400,6 +405,8 @@ def main():
                 "turn": {"id": TURN_ID, "status": "interrupted" if mode.endswith("-interrupted") else ("failed" if failed else "completed"),
                          **({"error": {"message": "Codex interrupted this turn."}} if mode.endswith("-interrupted") else ({"error": {"message": "Question response was missing or incorrect."}} if failed else {}))},
             }})
+        elif message.get("method") == "turn/interrupt":
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {}})
         elif message.get("method") == "thread/items/list":
             saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
             if serial_mode and message.get("params", {}).get("threadId") != saved_history.get("threadID"):

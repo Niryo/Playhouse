@@ -1129,6 +1129,12 @@ final class BoardTaskManager {
             throw BridgeCommandError(code: "invalid_argument", message: "Add at least one repository.")
         }
 
+        StationAIDiagnostics.record("workspace.repository.add.started", fields: [
+            "taskID": id.uuidString,
+            "repositoryCount": String(repositoryPaths.count),
+            "repositoryPaths": repositoryPaths.joined(separator: "\n")
+        ])
+
         let initialTask = try requireTask(id)
         guard initialTask.status != .done else {
             throw BridgeCommandError(code: "invalid_transition", message: "Repositories can't be changed on a completed task.")
@@ -1189,6 +1195,11 @@ final class BoardTaskManager {
                     task.contextFolderPaths = contextFolders
                     task.workspaceRootPaths = roots
                     try await saveTaskContext(taskID: id)
+                    StationAIDiagnostics.record("workspace.repository.add.succeeded", fields: [
+                        "taskID": id.uuidString,
+                        "repositoryCount": String(records.count),
+                        "repositoryPaths": records.map(\.repositoryPath).joined(separator: "\n")
+                    ])
                     return BoardTaskRecord(task: task)
                 }
             }
@@ -1540,17 +1551,33 @@ final class BoardTaskManager {
             }
             if needsCodexResolution {
                 let thread = try await client.startThread(workspace: roots, modelID: CodexAppServerClient.modelID)
-                try await client.sendMessage(
-                    "Resolve every Git merge conflict in the current workspace. Preserve the intended changes from both sides, inspect the resulting files, and stage the resolved files. Do not commit or push. Report which conflicts you resolved.",
-                    mode: .code,
-                    modelID: CodexAppServerClient.modelID,
-                    threadID: thread,
-                    workspace: roots,
-                    onDelta: { _ in },
-                    onFinalMessage: { finalMessage = $0 },
-                    onActivity: { _ in }, onDiff: { _ in }, onHistory: { _ in },
-                    onActionRequest: {}, onUserInput: { _ in }
-                )
+                do {
+                    try await client.sendMessage(
+                        "Resolve every Git merge conflict in the current workspace. Preserve the intended changes from both sides, inspect the resulting files, and stage the resolved files. Do not commit or push. Report which conflicts you resolved.",
+                        mode: .code,
+                        modelID: CodexAppServerClient.modelID,
+                        threadID: thread,
+                        workspace: roots,
+                        onDelta: { _ in },
+                        onFinalMessage: { finalMessage = $0 },
+                        onActivity: { _ in }, onDiff: { _ in }, onHistory: { _ in },
+                        onActionRequest: {},
+                        onUserInput: { request in
+                            client.rejectUserInput(
+                                requestID: request.id,
+                                threadID: request.threadID,
+                                message: "Conflict resolution cannot continue while Codex is waiting for user input."
+                            )
+                        }
+                    )
+                } catch {
+                    for record in affected {
+                        if try await worktreeService.hasUnmergedFiles(record) {
+                            throw BridgeCommandError(code: "operation_failed", message: "Codex couldn't resolve every merge conflict. The task branch was left available for manual resolution.")
+                        }
+                    }
+                    throw error
+                }
             }
             for record in affected {
                 guard try await worktreeService.hasUnmergedFiles(record) == false else {
@@ -1613,7 +1640,7 @@ final class BoardTaskManager {
 
     @discardableResult
     func clearProgressReport(_ id: UUID) async throws -> BoardTaskRecord {
-        try await withTaskOperationLock(id) {
+        return try await withTaskOperationLock(id) {
             let task = try requireTask(id)
             clearProgressReport(task)
             try await saveTaskContext(taskID: id)
@@ -1628,7 +1655,11 @@ final class BoardTaskManager {
     }
 
     func reconcileLifecycleStatusOnOpen(_ id: UUID, client: CodexAppServerClient) async throws -> BoardTaskRecord {
-        try await withTaskOperationLock(id) {
+        let currentTask = try requireTask(id)
+        guard currentTask.codexThreadID != nil || currentTask.pendingSubmittedPrompt != nil else {
+            return BoardTaskRecord(task: currentTask)
+        }
+        return try await withTaskOperationLock(id) {
             let task = try requireTask(id)
             guard let threadID = task.codexThreadID else {
                 if task.pendingSubmittedPrompt != nil, !(try hasConversationTurnReservation(id)) {
@@ -3182,7 +3213,8 @@ final class StationAIBridgeRuntime {
                 )
                 result = try Self.value(await conversations.history(taskID: taskID))
             case "conversation.models":
-                let conversations = CodexConversationManager(tasks: taskManager, client: CodexAppServerClient())
+                let codexClient = CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
+                let conversations = CodexConversationManager(tasks: taskManager, client: codexClient)
                 result = .object(["models": .array(try await conversations.models(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })])
             case "conversation.queue", "conversation.queue.list", "conversation.queue.retry", "conversation.steer":
                 let taskID = try request.requiredUUID("taskID")
