@@ -1041,7 +1041,7 @@ final class CodexAppServerClient: ObservableObject {
             activeTurnID = turnID
             isTurnActive = true
             Self.processActiveThreadIDs.insert(threadID)
-        case "item/agentMessage/delta":
+        case "item/agentMessage/delta", "item/plan/delta":
             guard params["threadId"] as? String == activeThreadID,
                   let delta = params["delta"] as? String else { return }
             activeDeltaHandler?(delta)
@@ -1049,10 +1049,11 @@ final class CodexAppServerClient: ObservableObject {
             guard params["threadId"] as? String == activeThreadID,
                   let item = params["item"] as? [String: Any] else { return }
             if method == "item/completed",
-               item["type"] as? String == "agentMessage",
+               let itemType = item["type"] as? String,
+               itemType == "agentMessage" || itemType == "plan",
                let text = item["text"] as? String,
                !text.isEmpty {
-                if item["phase"] as? String == "commentary" {
+                if itemType == "agentMessage", item["phase"] as? String == "commentary" {
                     activeProgressMessageHandler?(CodexChatMessage(
                         id: item["id"] as? String ?? UUID().uuidString,
                         role: .assistant,
@@ -1276,9 +1277,11 @@ final class CodexAppServerClient: ObservableObject {
             }
             guard !text.isEmpty || !images.isEmpty else { return nil }
             return CodexChatMessage(id: itemID, role: .user, text: text, imageDataURLs: images, turnID: entry["turnId"] as? String)
-        case "agentMessage":
+        case "agentMessage", "plan":
             guard let text = item["text"] as? String, !text.isEmpty else { return nil }
-            return CodexChatMessage(id: itemID, role: .assistant, text: text, phase: item["phase"] as? String, turnID: entry["turnId"] as? String)
+            return CodexChatMessage(id: itemID, role: .assistant, text: text,
+                                    phase: type == "plan" ? "final_answer" : item["phase"] as? String,
+                                    turnID: entry["turnId"] as? String)
         default:
             return nil
         }
