@@ -1459,31 +1459,27 @@ struct TaskConversationView: View {
 
     private func assistantMarkdownContent(_ markdown: String) -> some View {
         let blocks = Self.markdownBlocks(markdown)
-        return VStack(alignment: .leading, spacing: 7) {
-            ForEach(blocks) { block in
-                switch block.kind {
-                case .heading(let level):
-                    Text(Self.markdownAttributedText(block.text))
-                        .font(.system(size: level == 1 ? 19 : level == 2 ? 17 : 15, weight: .semibold))
-                        .accessibilityIdentifier("assistant-markdown-heading-\(block.id)")
-                case .listItem:
-                    HStack(alignment: .firstTextBaseline, spacing: 7) {
-                        Text("•").foregroundStyle(.secondary)
-                        Text(Self.markdownAttributedText(block.text))
-                            .accessibilityIdentifier("assistant-markdown-list-content-\(block.id)")
-                    }
-                    .accessibilityElement(children: .combine)
-                    .accessibilityIdentifier("assistant-markdown-list-item-\(block.id)")
-                case .paragraph:
-                    Text(Self.markdownAttributedText(block.text))
-                        .accessibilityIdentifier("assistant-markdown-paragraph-\(block.id)")
-                        .padding(.bottom, 5)
-                }
+        var content = AttributedString()
+        for (index, block) in blocks.enumerated() {
+            if index > 0 {
+                content.append(AttributedString("\n\n"))
             }
+            if case .listItem = block.kind {
+                content.append(AttributedString("•  "))
+            }
+            var text = Self.markdownAttributedText(block.text)
+            switch block.kind {
+            case .heading(let level):
+                text.font = .system(size: level == 1 ? 19 : level == 2 ? 17 : 15, weight: .semibold)
+            case .listItem, .paragraph:
+                break
+            }
+            content.append(text)
         }
-        .lineSpacing(4)
-        .textSelection(.enabled)
-        .fixedSize(horizontal: false, vertical: true)
+        return Text(content)
+            .lineSpacing(4)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private static func markdownBlocks(_ markdown: String) -> [AssistantMarkdownBlock] {
