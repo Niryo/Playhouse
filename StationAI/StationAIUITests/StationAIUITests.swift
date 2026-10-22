@@ -3492,7 +3492,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts[secondPrompt].waitForExistence(timeout: 10), "Reopening the task should load the completed second send from the real app-server thread.")
     }
 
-    // case-contract: test_conversation_steers_and_queues_active_turn | While a Codex turn is active, a stale steer response is shown as an error and preserves the draft for retry; CLI/XPC steering routes to a UI-owned active turn and appears in the visible conversation; a subsequent accepted UI Steer action uses the matching active turn ID, appears in the transcript, and clears its draft. The user can also persist a distinct follow-up for after completion; it dispatches once after a matching completed notification, survives fresh CLI/XPC reads, and is removed only after successful delivery.
+    // case-contract: test_conversation_steers_and_queues_active_turn | While a Codex turn is active, a stale steer response is shown as an error and preserves the draft for retry; malformed steer images fail validation; CLI/XPC steering routes image data through the mailbox to a UI-owned active turn and appears in the visible conversation; an accepted UI Steer action sends attached image data with text using the matching active turn ID, displays it in the transcript, and clears its draft and image preview. The user can also persist a distinct follow-up for after completion; it dispatches once after a matching completed notification, survives fresh CLI/XPC reads, and is removed only after successful delivery.
     func test_conversation_steers_and_queues_active_turn() throws {
         let fixtureTemplate = try makeCodexFixture(emptyQuestions: false)
         let sharedFixture = dataDirectory.appendingPathComponent("codex-fixture-steer-queue-serial-success-wait")
@@ -3523,21 +3523,44 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("steer-current-turn-button").waitForExistence(timeout: 10))
         XCTAssertTrue(element("queue-message-after-turn-button").exists)
 
+        let invalidSteerImage = dataDirectory.appendingPathComponent("invalid-steer.png")
+        try Data("not an image".utf8).write(to: invalidSteerImage)
+        let invalidSteer = try runCLI(
+            ["conversation", "steer", taskID, "--message", "Invalid image", "--image", invalidSteerImage.path],
+            expectedStatus: 2,
+            extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": sharedFixture.path]
+        )
+        assertCLIError(invalidSteer, code: "invalid_argument")
+
         composer.click()
         composer.typeText(steeringText)
         element("steer-current-turn-button").click()
         XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10), "A stale server response should be shown as a steering error.")
         XCTAssertEqual(composer.value as? String, steeringText, "A rejected steering message should remain available for retry.")
         XCTAssertFalse(app.staticTexts[steeringText].exists, "A rejected steering message must not appear as sent.")
-        let remoteSteer = try runCLI(["conversation", "steer", taskID, "--message", steeringText])["result"] as? [String: Any]
+        let cliSteerImage = dataDirectory.appendingPathComponent("cli-steer.png")
+        let cliSteerBitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        try XCTUnwrap(cliSteerBitmap.representation(using: .png, properties: [:])).write(to: cliSteerImage)
+        let remoteSteer = try runCLI(["conversation", "steer", taskID, "--message", steeringText, "--image", cliSteerImage.path])["result"] as? [String: Any]
         XCTAssertEqual(remoteSteer?["accepted"] as? Bool, true, "CLI/XPC steering should route to the UI-owned active turn.")
         XCTAssertTrue(app.staticTexts[steeringText].waitForExistence(timeout: 10))
+        let transcriptImages = app.images.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-image-"))
+        XCTAssertTrue(transcriptImages.firstMatch.waitForExistence(timeout: 5), "An image-bearing CLI/XPC steer should render in the visible transcript.")
+        XCTAssertEqual(transcriptImages.count, 1, "The CLI/XPC steer should add one transcript image.")
         XCTAssertEqual(composer.value as? String, "", "A successful XPC steer should clear the matching draft in the visible composer.")
         let uiSteeringText = "Make the final change concise and focused."
+        let steerBitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        let steerPNG = try XCTUnwrap(steerBitmap.representation(using: .png, properties: [:]))
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setData(steerPNG, forType: .png)
         composer.click()
         composer.typeText(uiSteeringText)
+        composer.typeKey("v", modifierFlags: .command)
+        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "An image attached to a steer should remain previewed until accepted.")
         element("steer-current-turn-button").click()
         XCTAssertTrue(app.staticTexts[uiSteeringText].waitForExistence(timeout: 10), "An accepted UI steer should appear in the visible transcript.")
+        XCTAssertEqual(transcriptImages.count, 2, "The UI Steer action should add its own image to the transcript.")
+        XCTAssertFalse(element("pending-chat-images").exists, "An accepted steer should clear its image preview.")
         XCTAssertEqual(composer.value as? String, "", "An accepted UI steer should clear the submitted draft.")
         composer.click()
         composer.typeText(queuedText)
@@ -3564,13 +3587,19 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(steerRequests.count, 2)
         let activeTurnID = (fixtureHistory["messages"] as? [[String: Any]])?.first?["turnID"] as? String
         XCTAssertEqual(steerRequests[0]["expectedTurnId"] as? String, activeTurnID)
-        XCTAssertEqual(steerRequests[0]["input"] as? [[String: String]], [["type": "text", "text": steeringText]])
+        let remoteSteerInput = try XCTUnwrap(steerRequests[0]["input"] as? [[String: String]])
+        XCTAssertEqual(remoteSteerInput[0], ["type": "text", "text": steeringText])
+        XCTAssertEqual(remoteSteerInput[1]["type"], "image")
+        XCTAssertTrue(remoteSteerInput[1]["url"]?.hasPrefix("data:image/png;base64,") == true)
         XCTAssertEqual(steerRequests[1]["expectedTurnId"] as? String, activeTurnID, "The UI Steer action must include the current turn ID.")
-        XCTAssertEqual(steerRequests[1]["input"] as? [[String: String]], [["type": "text", "text": uiSteeringText]])
+        let uiSteerInput = try XCTUnwrap(steerRequests[1]["input"] as? [[String: String]])
+        XCTAssertEqual(uiSteerInput[0], ["type": "text", "text": uiSteeringText])
+        XCTAssertEqual(uiSteerInput[1]["type"], "image")
+        XCTAssertTrue(uiSteerInput[1]["url"]?.hasPrefix("data:image/png;base64,") == true)
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 10))
     }
 
-    // case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, and displays attached images from reloaded conversation history. Diagnostics record image MIME and encoded size without storing image payloads.
+    // case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. Diagnostics record image MIME and encoded size without storing image payloads.
 
     func test_conversation_sends_image_attachments() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
@@ -3613,11 +3642,32 @@ final class StationAIUITests: XCTestCase {
         element("ai-question-answer-token").typeText("fixture-secret")
         element("submit-ai-answers-button").click()
         XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
-        XCTAssertTrue(element("user-message-item_user_fixture").waitForExistence(timeout: 10), "Reloaded history should retain the picker attachment.")
-        XCTAssertTrue(app.images["user-message-item_user_fixture"].waitForExistence(timeout: 10), "Conversation history should render the picker image.")
+        XCTAssertTrue(element("user-message-item_user_fixture_1").waitForExistence(timeout: 10), "Reloaded history should retain the picker attachment.")
+        XCTAssertTrue(app.images["user-message-item_user_fixture_1"].waitForExistence(timeout: 10), "Conversation history should render the picker image.")
+
+        let followupPrompt = "Continue using the earlier image as context."
+        composer.click()
+        composer.typeText(followupPrompt)
+        element("send-message-button").click()
+        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10), "The follow-up turn should refresh the existing conversation history.")
+        app.buttons["Blue"].click()
+        element("ai-question-answer-token").click()
+        element("ai-question-answer-token").typeText("fixture-secret")
+        element("submit-ai-answers-button").click()
+        XCTAssertTrue(app.staticTexts[followupPrompt].waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({
+            self.app.staticTexts.matching(NSPredicate(format: "label == %@", "Answers received: Blue / fixture-secret.")).count == 2
+        }, timeout: 10), "The follow-up turn should complete and replace the transcript from Codex history.")
+        XCTAssertTrue(waitUntil({
+            self.app.images.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-image-")).count == 1
+        }, timeout: 10), "Refreshing history after another turn should keep the earlier image visible.")
+        let refreshedHistory = try runCLI(["conversation", "history", try taskID(named: "Image conversation")])["result"] as? [String: Any]
+        let refreshedUserMessages = (refreshedHistory?["messages"] as? [[String: Any]] ?? []).filter { $0["role"] as? String == "user" }
+        XCTAssertEqual(refreshedUserMessages.first?["imageDataURLs"] as? [String], [pickedImage], "A fresh XPC history read should retain the earlier image after a later turn.")
 
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        try FileManager.default.removeItem(at: URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history"))
         try createTaskFixture(title: "Pasted image conversation", roots: [fixture.primary.path])
         openTask(named: "Pasted image conversation")
 
@@ -3656,8 +3706,8 @@ final class StationAIUITests: XCTestCase {
         element("ai-question-answer-token").typeText("fixture-secret")
         element("submit-ai-answers-button").click()
         XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
-        XCTAssertTrue(element("user-message-item_user_fixture").waitForExistence(timeout: 10), "History reload should leave the pasted attachment in the conversation.")
-        XCTAssertTrue(app.images["user-message-item_user_fixture"].waitForExistence(timeout: 10), "Conversation history should render the pasted image itself.")
+        XCTAssertTrue(element("user-message-item_user_fixture_1").waitForExistence(timeout: 10), "History reload should leave the pasted attachment in the conversation.")
+        XCTAssertTrue(app.images["user-message-item_user_fixture_1"].waitForExistence(timeout: 10), "Conversation history should render the pasted image itself.")
         let pastedTurnData = try Data(contentsOf: URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history"))
         let pastedTurn = try XCTUnwrap(JSONSerialization.jsonObject(with: pastedTurnData) as? [String: Any])
         XCTAssertTrue(pastedTurn["userMessage"] is NSNull, "The fixture should receive no text for the pasted image-only turn.")
