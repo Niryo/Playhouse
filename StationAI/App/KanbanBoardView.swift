@@ -986,7 +986,7 @@ private struct TaskCardView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(progressLabel)
                             .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.primary)
+                            .foregroundStyle(WorkspaceTheme.conversationText)
                             .accessibilityIdentifier("task-progress-label-\(task.id.uuidString)")
                         if let progressDetail = task.progressDetail, !progressDetail.isEmpty {
                             Text(progressDetail)
@@ -1018,7 +1018,7 @@ private struct TaskCardView: View {
                 Text(task.title)
             }
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.primary)
+                .foregroundStyle(WorkspaceTheme.conversationText)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("task-title-\(task.id.uuidString)")
 
