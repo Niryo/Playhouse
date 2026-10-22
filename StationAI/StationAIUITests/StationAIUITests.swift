@@ -1206,7 +1206,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
     }
 
-    // case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Moving a reviewed task to Done waits for active per-task operations and persists against refreshed state; it preserves that source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive.
+    // case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Moving a reviewed task to Done waits for active per-task operations and persists against refreshed state; it preserves that source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files without loading conversation histories, while the visible archive loads the newest 40 first and reveals older tasks as the user scrolls.
     func test_task_done_preserves_worktree_and_branch() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -1286,6 +1286,15 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.primary.appendingPathComponent("task-result.txt").path))
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
 
+        for index in 1...39 {
+            let filler = try XCTUnwrap(try runCLI(["task", "create", "--title", "Archive page filler \(index)", "--root", fixture.custom.path])["result"] as? [String: Any])
+            let fillerID = try XCTUnwrap(filler["id"] as? String)
+            _ = try runCLI(
+                ["conversation", "send", fillerID, "--message", "Complete this archive fixture.", "--answer", "color=Blue", "--answer", "token=fixture-secret"],
+                extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": try XCTUnwrap(codexFixtureExecutable)]
+            )
+            XCTAssertEqual(try XCTUnwrap((try runCLI(["task", "move", fillerID, "Done"])["result"] as? [String: Any])?["status"] as? String), "Done")
+        }
         let titleMatch = try XCTUnwrap(try runCLI(["task", "create", "--title", "fixture-secret title match", "--root", fixture.custom.path])["result"] as? [String: Any])
         let titleMatchID = try XCTUnwrap(titleMatch["id"] as? String)
         let fixtureExecutable = try XCTUnwrap(codexFixtureExecutable)
@@ -1295,10 +1304,23 @@ final class StationAIUITests: XCTestCase {
         )
         XCTAssertEqual(try XCTUnwrap((try runCLI(["task", "move", titleMatchID, "Done"])["result"] as? [String: Any])?["status"] as? String), "Done")
 
+        let threadID = try XCTUnwrap(taskRecord(id: taskID)?["codexThreadID"] as? String)
+        let sessions = dataDirectory.appendingPathComponent("codex-home/sessions/2026/10/22", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let sessionFile = sessions.appendingPathComponent("rollout-2026-10-22T00-00-00-\(threadID).jsonl")
+        let sessionLine: [String: Any] = ["type": "response_item", "payload": ["type": "message", "role": "assistant", "content": [["type": "text", "text": "LOCAL-SESSION-ONLY-token"]]]]
+        let sessionData = try JSONSerialization.data(withJSONObject: sessionLine)
+        try (sessionData + Data([0x0A])).write(to: sessionFile, options: .atomic)
+
         let archiveButton = element("done-archive-button")
         archiveButton.click()
         let archiveResult = element("done-archive-task-\(taskID)")
-        XCTAssertTrue(archiveResult.waitForExistence(timeout: 10), "The completed task should appear in the archive.")
+        XCTAssertTrue(element("done-archive-task-\(titleMatchID)").waitForExistence(timeout: 10), "The newest completed task should appear in the first archive page.")
+        let archiveList = app.scrollViews["done-archive-list"]
+        XCTAssertEqual(archiveList.value as? String, "40 tasks loaded", "The archive should fetch one 40-task page initially.")
+        XCTAssertFalse(archiveResult.exists, "Older tasks should not be loaded into the first archive page.")
+        for _ in 0..<8 where !archiveResult.isHittable { archiveList.swipeUp() }
+        XCTAssertTrue(waitUntil({ archiveResult.isHittable && archiveList.frame.intersects(archiveResult.frame) }, timeout: 10), "Scrolling should load older completed tasks into the archive viewport.")
         let archiveSearch = element("done-archive-search")
         archiveSearch.click()
         archiveSearch.typeText("no-such-archive-task")
@@ -1309,6 +1331,14 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(titleMatchResult.waitForExistence(timeout: 10), "A title match should appear in the archive search results.")
         XCTAssertTrue(archiveResult.waitForExistence(timeout: 10), "Searching saved conversation text should find the completed task.")
         XCTAssertLessThan(titleMatchResult.frame.minY, archiveResult.frame.minY, "Title matches should precede conversation-only matches.")
+        element("clear-archive-search-button").click()
+        archiveSearch.typeText("local-session-only-TOKEN")
+        XCTAssertTrue(archiveResult.waitForExistence(timeout: 10), "Searching text found only in the local JSONL file should find its completed task.")
+        XCTAssertFalse(titleMatchResult.exists, "A conversation-only query should not return a task whose title does not match.")
+        element("clear-archive-search-button").click()
+        archiveSearch.typeText("FiXtUrE-SeCrEt")
+        XCTAssertTrue(titleMatchResult.waitForExistence(timeout: 10))
+        XCTAssertTrue(archiveResult.waitForExistence(timeout: 10))
         archiveResult.click()
         XCTAssertTrue(element("archived-conversation-read-only").waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
@@ -4358,6 +4388,7 @@ final class StationAIUITests: XCTestCase {
         let bundleIdentifier = Bundle(url: appBundle)?.bundleIdentifier ?? "com.stationai.app.e2e"
         app = XCUIApplication(bundleIdentifier: bundleIdentifier)
         app.launchEnvironment["STATIONAI_DATA_DIRECTORY"] = dataDirectory.path
+        app.launchEnvironment["CODEX_HOME"] = dataDirectory.appendingPathComponent("codex-home").path
         app.launchEnvironment["STATIONAI_WORKTREE_LABEL"] = "StationAI UI Test Worktree"
         app.launchEnvironment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         app.launchEnvironment["STATIONAI_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
@@ -4386,6 +4417,7 @@ final class StationAIUITests: XCTestCase {
         let targetBundleIdentifier = bundleIdentifier ?? Bundle(url: appBundle)?.bundleIdentifier ?? "com.stationai.app.e2e"
         var environment = ProcessInfo.processInfo.environment
         environment["STATIONAI_DATA_DIRECTORY"] = dataDirectory.path
+        environment["CODEX_HOME"] = dataDirectory.appendingPathComponent("codex-home").path
         environment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         environment["STATIONAI_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         environment["STATIONAI_E2E_DEFAULT_PARENT_FOLDER"] = launchDefaultParent ?? "__unset__"

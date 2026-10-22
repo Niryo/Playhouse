@@ -1040,8 +1040,17 @@ final class BoardTaskManager {
         return try await operation()
     }
 
-    func list() throws -> [BoardTaskRecord] {
-        let descriptor = FetchDescriptor<BoardTask>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+    func list(status: TaskStatus? = nil) throws -> [BoardTaskRecord] {
+        let descriptor: FetchDescriptor<BoardTask>
+        if let status {
+            let statusRawValue = status.rawValue
+            descriptor = FetchDescriptor(
+                predicate: #Predicate { $0.statusRawValue == statusRawValue },
+                sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
+            )
+        } else {
+            descriptor = FetchDescriptor(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+        }
         let readFields = persistenceReadFields(operation: "BoardTaskManager.list")
         let readStartedAt = DispatchTime.now().uptimeNanoseconds
         StationAIDiagnostics.record("persistence.read.started", fields: readFields)
@@ -2541,6 +2550,98 @@ final class CodexConversationManager {
         }
     }
 
+    func searchArchive(query: String, codexHomePath: String? = nil) async throws -> [BoardTaskRecord] {
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedQuery.isEmpty else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Archive search query can't be blank.")
+        }
+        let completed = try tasks.list(status: .done)
+        let titleMatches = completed.filter { $0.title.localizedCaseInsensitiveContains(normalizedQuery) }
+        let titleIDs = Set(titleMatches.map(\.id))
+        let root: URL
+        if let codexHomePath, !codexHomePath.isEmpty {
+            root = URL(fileURLWithPath: codexHomePath, isDirectory: true)
+        } else if let environmentRoot = ProcessInfo.processInfo.environment["CODEX_HOME"], !environmentRoot.isEmpty {
+            root = URL(fileURLWithPath: environmentRoot, isDirectory: true)
+        } else {
+            root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
+        }
+        let roots = [root.appendingPathComponent("sessions", isDirectory: true), root.appendingPathComponent("archived_sessions", isDirectory: true)]
+        let taskByThread = Dictionary(completed.compactMap { task -> (String, UUID)? in
+            guard !titleIDs.contains(task.id), let threadID = task.codexThreadID else { return nil }
+            return (threadID, task.id)
+        }, uniquingKeysWith: { first, _ in first })
+        let scanTask = Task.detached(priority: .userInitiated) {
+            try Self.searchSessionFiles(query: normalizedQuery, taskByThread: taskByThread, roots: roots)
+        }
+        let conversationIDs = try await withTaskCancellationHandler {
+            try await scanTask.value
+        } onCancel: {
+            scanTask.cancel()
+        }
+        let byID = Dictionary(uniqueKeysWithValues: completed.map { ($0.id, $0) })
+        let titles = titleMatches.sorted { $0.createdAt > $1.createdAt }
+        let conversations = conversationIDs.compactMap { byID[$0] }.sorted { $0.createdAt > $1.createdAt }
+        return titles + conversations
+    }
+
+    nonisolated private static func searchSessionFiles(query: String, taskByThread: [String: UUID], roots: [URL]) throws -> Set<UUID> {
+        var filesByThread: [String: [URL]] = [:]
+        for sessionsRoot in roots {
+            guard let enumerator = FileManager.default.enumerator(at: sessionsRoot, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else { continue }
+            for case let fileURL as URL in enumerator where fileURL.pathExtension == "jsonl" {
+                try Task.checkCancellation()
+                let basename = fileURL.deletingPathExtension().lastPathComponent
+                guard let threadID = taskByThread.keys.first(where: { basename.hasSuffix("-\($0)") }) else { continue }
+                filesByThread[threadID, default: []].append(fileURL)
+            }
+        }
+        var conversationIDs = Set<UUID>()
+        for (threadID, taskID) in taskByThread {
+            for fileURL in filesByThread[threadID] ?? [] {
+                try Task.checkCancellation()
+                if try sessionFile(fileURL, contains: query) {
+                    conversationIDs.insert(taskID)
+                    break
+                }
+            }
+        }
+        return conversationIDs
+    }
+
+    nonisolated private static func sessionFile(_ url: URL, contains query: String) throws -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        var pending = Data()
+        let needle = query.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        while let chunk = try? handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
+            try Task.checkCancellation()
+            pending.append(chunk)
+            while let newline = pending.firstRange(of: Data([0x0A])) {
+                let line = pending.subdata(in: pending.startIndex..<newline.lowerBound)
+                pending.removeSubrange(pending.startIndex..<newline.upperBound)
+                if Self.messageText(in: line).contains(where: { $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).contains(needle) }) { return true }
+            }
+        }
+        if !pending.isEmpty, Self.messageText(in: pending).contains(where: { $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).contains(needle) }) { return true }
+        return false
+    }
+
+    nonisolated private static func messageText(in line: Data) -> [String] {
+        guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+              let type = object["type"] as? String,
+              let payload = object["payload"] as? [String: Any] else { return [] }
+        if type == "response_item", let itemType = payload["type"] as? String, itemType == "message",
+           let role = payload["role"] as? String, role == "user" || role == "assistant",
+           let content = payload["content"] as? [[String: Any]] {
+            return content.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
+        }
+        if type == "event_msg", let eventType = payload["type"] as? String,
+           eventType == "UserMessage" || eventType == "AgentMessage",
+           let message = payload["message"] as? String { return [message] }
+        return []
+    }
+
     func models(taskID: UUID) async throws -> [CodexModelOption] {
         StationAIDiagnostics.record("codex.models.read.started", fields: ["taskID": taskID.uuidString])
         let task = try tasks.taskModel(taskID)
@@ -3073,6 +3174,12 @@ final class StationAIBridgeRuntime {
                 result = .object(["service": .string("StationAI"), "bridgeVersion": .integer(BridgeContract.currentVersion)])
             case "board.list", "task.list":
                 result = try Self.value(["tasks": taskManager.list()])
+            case "archive.search":
+                let conversations = CodexConversationManager(tasks: taskManager, client: CodexAppServerClient())
+                result = try Self.value(await conversations.searchArchive(
+                    query: request.requiredString("query"),
+                    codexHomePath: request.arguments["codexHome"]?.string
+                ))
             case "task.create":
                 let title = try request.requiredString("title")
                 let roots = try request.requiredStrings("roots")

@@ -55,6 +55,11 @@ enum StationAICLI {
         case "board":
             guard rest == ["list"] else { throw CLIError.usage("Use: stationai board list") }
             return BridgeRequest(command: "board.list")
+        case "archive":
+            guard rest.count == 2, rest[0] == "search" else { throw CLIError.usage("Use: stationai archive search <query>") }
+            var arguments: [String: BridgeValue] = ["query": .string(rest[1])]
+            if let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"] { arguments["codexHome"] = .string(codexHome) }
+            return BridgeRequest(command: "archive.search", arguments: arguments)
         case "task":
             guard let operation = rest.first else { throw CLIError.usage("Missing task operation.") }
             let tail = Array(rest.dropFirst())
@@ -392,6 +397,7 @@ enum StationAICLI {
     Usage:
       stationai status
       stationai board list
+      stationai archive search <query>
       stationai task list|get <task-id>
       stationai task create --title <title> --root <path> [--root <path>...]
       stationai task create --title <title> --repo <path> [--repo <path>...] [--branch <repo-path>=<name>] [--branch-from <repo-path>=<ref>] [--merge-target <repo-path>=<local-branch>]
