@@ -1115,12 +1115,14 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), branch_head)
         self.assertTrue(self.branch_exists(self.primary, branch))
 
-    # case-contract: test_task_pr_create_reports_real_gh_failure | A repository-backed task exposes an active-card PR action and a Done-task archive PR action with distinct hover emphasis and useful help; it preserves the configured merge target, waits for the task operation lock, commits and publishes the branch before GitHub lookup, and reports publication failure without saving a PR link or changing Done status when no usable remote exists.
+    # case-contract: test_task_pr_create_reports_real_gh_failure | A repository-backed task checks its configured merge target for conflicts before PR creation; the clean path returns no conflicts, and the active-card and Done-archive PR controls retain their help and wait for the task lock before publication failure without saving a PR link or changing Done status.
     def test_task_pr_create_reports_real_gh_failure(self):
         task = self.create_repo_task(
             "PR failure", [self.primary], merge_targets={self.primary: "main"}, materialize=True
         )
         self.assertEqual(task["repositoryWorktrees"][0]["mergeTarget"], "main")
+        conflicts, _ = self.call_cli("task", "pr", "conflicts", task["id"])
+        self.assertEqual(self.assert_success(conflicts)["repositories"], [])
         completed, _ = self.call_cli("task", "move", task["id"], "Done")
         self.assertEqual(self.assert_success(completed)["status"], "Done")
 
@@ -1150,6 +1152,68 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIsNone(record.get("pullRequestNumber"))
         self.assertIsNone(record.get("pullRequestURL"))
         self.assertEqual(current["status"], "Done")
+
+    # case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects a merge conflict without mutation, requires confirmation by default, honors saved keep without publishing, and successfully commits and locally pushes a staged conflict resolution through XPC without changing the target; unknown actions are rejected. The paired UI dispatches resolve-only and resolve-and-push on an actual conflict, verifies unresolved conflicts remain uncommitted and unpublished, presents all three choices and the remember checkbox, verifies remembered keep skips the next confirmation, and changes the saved action in Settings.
+    def test_task_pr_conflicts_detect_without_mutation(self):
+        task = self.create_repo_task("PR conflict detection", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
+        record = task["repositoryWorktrees"][0]
+        worktree = Path(record["worktreePath"])
+        conflict_path = "stationai-pr-conflict-fixture.txt"
+        remote = self.data_directory / "pr-conflict-origin.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+        self.run_git(self.primary, "remote", "add", "origin", str(remote))
+        self.run_git(self.primary, "push", "--set-upstream", "origin", "main")
+        target_file = self.primary / conflict_path
+        target_file.write_text("target branch version\n", encoding="utf-8")
+        self.run_git(self.primary, "add", conflict_path)
+        self.run_git(self.primary, "commit", "-m", "Update PR target fixture")
+        self.run_git(self.primary, "push", "origin", "main")
+        branch_file = worktree / conflict_path
+        branch_file.write_text("task branch version\n", encoding="utf-8")
+        self.run_git(worktree, "add", conflict_path)
+        self.run_git(worktree, "commit", "-m", "Update task branch fixture")
+        branch_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        target_head = self.run_git(self.primary, "rev-parse", "main").strip()
+
+        checked, _ = self.call_cli("task", "pr", "conflicts", task["id"])
+        self.assertEqual(self.assert_success(checked)["repositories"], [str(self.primary)])
+        self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), branch_head)
+        self.assertEqual(self.run_git(self.primary, "rev-parse", "main").strip(), target_head)
+        self.assertEqual((worktree / conflict_path).read_text(encoding="utf-8"), "task branch version\n")
+        self.assertEqual(target_file.read_text(encoding="utf-8"), "target branch version\n")
+        requires_ui, _ = self.call_cli("task", "pr", "create", task["id"], expected_status=1)
+        self.assert_failure(requires_ui, "conflicts_require_confirmation")
+        self.call_cli("settings", "set-pr-conflict-action", "keep")
+        kept_creation, _ = self.call_cli("task", "pr", "create", task["id"])
+        self.assertEqual(self.assert_success(kept_creation)["id"], task["id"])
+        self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), branch_head)
+        self.call_cli("settings", "set-pr-conflict-action", "ask")
+        self.run_git(worktree, "fetch", "origin", "main")
+        merge = subprocess.run(
+            ["git", "-C", str(worktree), "merge", "--no-commit", "--no-ff", "FETCH_HEAD"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(merge.returncode, 1, f"Expected the real Git fixture merge to conflict: {merge.stderr}")
+        resolved_content = "resolved task and target versions\n"
+        branch_file.write_text(resolved_content, encoding="utf-8")
+        self.run_git(worktree, "add", conflict_path)
+        resolved, _ = self.call_cli("task", "pr", "resolve", task["id"], "resolve-and-push")
+        self.assertEqual(self.assert_success(resolved)["id"], task["id"])
+        resolved_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        self.assertNotEqual(resolved_head, branch_head, "A fully staged resolution should be committed when resuming the merge.")
+        self.assertEqual(self.run_git(self.primary, "rev-parse", "main").strip(), target_head, "Conflict resolution must leave the target branch unchanged.")
+        self.assertEqual(branch_file.read_text(encoding="utf-8"), resolved_content)
+        remote_branch_head = self.run_git(remote, "rev-parse", f"refs/heads/{record['branch']}").strip()
+        self.assertEqual(remote_branch_head, resolved_head, "Resolve-and-push must publish the resolved task branch.")
+        remote_content = subprocess.run(
+            ["git", "--git-dir", str(remote), "show", f"refs/heads/{record['branch']}:{conflict_path}"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        self.assertEqual(remote_content, resolved_content)
+        self.assertIsNone(self.assert_success(self.call_cli("task", "get", task["id"])[0])["repositoryWorktrees"][0].get("pullRequestNumber"))
+        invalid, _ = self.call_cli("task", "pr", "resolve", task["id"], "unknown", expected_status=2)
+        self.assert_failure(invalid, "invalid_argument")
+        self.run_git(self.primary, "remote", "remove", "origin")
 
     # case-contract: test_done_archive_displays_existing_pull_request_link | A Done task's real SwiftData record retains a linked PR number and URL across fresh CLI/XPC reads so the archive renders the PR link with distinct hover emphasis and useful help; an active repository-backed task card renders a saved PR link with the same hover indication.
     def test_done_archive_displays_existing_pull_request_link(self):
@@ -1880,11 +1944,20 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(self.assert_success(response)["deleted"])
         self.assertFalse(broken_worktree.exists())
 
-    # case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. In the UI, the conversation picker keeps a Change parent affordance visible after a valid parent is selected, and choosing another folder refreshes suggestions and persists the new parent. Dark and Light appearance choices persist and log successful writes, an external CLI appearance write updates the open Settings picker, and Dark renders the workspace canvas as #1E1E1E in the VS Code Dark+ palette.
+    # case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, and the ask-each-time, resolve-and-push, resolve-only, and keep-PR conflict preferences validate and persist across fresh CLI/XPC reads and are editable in Settings; appearance changes update the open Settings picker.
     def test_default_parent_settings_read_write_clear_and_validation(self):
         response, _ = self.call_cli("settings", "get")
         self.assertIsNone(self.assert_success(response)["defaultParentFolder"])
         self.assertEqual(self.assert_success(response)["appearance"], "dark")
+        response, _ = self.call_cli("settings", "get")
+        self.assertEqual(self.assert_success(response)["pullRequestConflictAction"], "ask")
+        for action in ("resolve-and-push", "resolve-only", "keep", "ask"):
+            response, _ = self.call_cli("settings", "set-pr-conflict-action", action)
+            self.assertEqual(self.assert_success(response)["pullRequestConflictAction"], action)
+            persisted, _ = self.call_cli("settings", "get")
+            self.assertEqual(self.assert_success(persisted)["pullRequestConflictAction"], action)
+        invalid, _ = self.call_cli("settings", "set-pr-conflict-action", "bad-choice", expected_status=2)
+        self.assert_failure(invalid, "invalid_argument")
 
         response, _ = self.call_cli("settings", "set-appearance", "light")
         self.assertEqual(self.assert_success(response)["appearance"], "light")

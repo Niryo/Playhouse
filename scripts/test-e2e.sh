@@ -49,7 +49,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# The build helper also compiles the paired UI test target and reuses this
+# The build helper compiles the paired UI test target and reuses this
 # content-matched DerivedData for focused retries and final full verification.
 python3 "${repository_root}/scripts/prepare-e2e-fixture.py" --fixture-root "${fixture_root}"
 legacy_store_seeder="${fixture_root}/seed-legacy-task-store"

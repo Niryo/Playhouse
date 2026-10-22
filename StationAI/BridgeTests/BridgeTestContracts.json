@@ -117,7 +117,7 @@
   },
   {
     "id": "test_default_parent_settings_read_write_clear_and_validation",
-    "expectation": "The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. In the UI, the conversation picker keeps a Change parent affordance visible after a valid parent is selected, and choosing another folder refreshes suggestions and persists the new parent. Dark and Light appearance choices persist and log successful writes, an external CLI appearance write updates the open Settings picker, and Dark renders the workspace canvas as #1E1E1E in the VS Code Dark+ palette."
+    "expectation": "The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, and the ask-each-time, resolve-and-push, resolve-only, and keep-PR conflict preferences validate and persist across fresh CLI/XPC reads and are editable in Settings; appearance changes update the open Settings picker."
   },
   {
     "id": "test_repository_suggestions_skip_nested_repositories_and_symlinks",
@@ -197,7 +197,11 @@
   },
   {
     "id": "test_task_pr_create_reports_real_gh_failure",
-    "expectation": "A repository-backed task exposes an active-card PR action and a Done-task archive PR action with distinct hover emphasis and useful help; it preserves the configured merge target, waits for the task operation lock, commits and publishes the branch before GitHub lookup, and reports publication failure without saving a PR link or changing Done status when no usable remote exists."
+    "expectation": "A repository-backed task checks its configured merge target for conflicts before PR creation; the clean path returns no conflicts, and the active-card and Done-archive PR controls retain their help and wait for the task lock before publication failure without saving a PR link or changing Done status."
+  },
+  {
+    "id": "test_task_pr_conflicts_detect_without_mutation",
+    "expectation": "The real Git CLI detects a merge conflict without mutation, requires confirmation by default, honors saved keep without publishing, and successfully commits and locally pushes a staged conflict resolution through XPC without changing the target; unknown actions are rejected. The paired UI dispatches resolve-only and resolve-and-push on an actual conflict, verifies unresolved conflicts remain uncommitted and unpublished, presents all three choices and the remember checkbox, verifies remembered keep skips the next confirmation, and changes the saved action in Settings."
   },
   {
     "id": "test_done_archive_displays_existing_pull_request_link",
