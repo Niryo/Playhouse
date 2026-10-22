@@ -1,4 +1,5 @@
 import Combine
+import Darwin
 import Foundation
 
 enum CodexChatRole: String, Codable, Equatable {
@@ -50,6 +51,24 @@ struct CodexUserInputRequest: Identifiable, Codable, Equatable {
     let isBlocking: Bool
 }
 
+private struct ConversationSteerMailboxRequest: Codable {
+    let id: String
+    let threadID: String
+    let expectedTurnID: String
+    let text: String
+}
+
+private struct ConversationSteerMailboxActiveTurn: Codable {
+    let threadID: String
+    let turnID: String
+    let processID: Int32
+}
+
+private struct ConversationSteerMailboxResponse: Codable {
+    let accepted: Bool
+    let error: String?
+}
+
 enum CodexConversationMode: String, CaseIterable, Hashable {
     case code = "default"
     case plan
@@ -72,6 +91,8 @@ struct CodexModelOption: Codable, Identifiable, Hashable {
 final class CodexAppServerClient: ObservableObject {
     nonisolated static let modelID = "gpt-6-luna"
     private static var processActiveThreadIDs = Set<String>()
+    private static var activeClientsByThreadID: [String: CodexAppServerClient] = [:]
+    private static var steerMailboxDirectory: URL?
     private var startingThreadIDs = Set<String>()
     @Published private(set) var isTurnActive = false
     @Published private(set) var activeThreadID: String?
@@ -125,6 +146,7 @@ final class CodexAppServerClient: ObservableObject {
     private(set) var wasLastTurnInterrupted = false
     private var activeDeltaHandler: ((String) -> Void)?
     private var activeFinalMessageHandler: ((String) -> Void)?
+    private var activeSteerMessageHandler: ((String) -> Void)?
     private var activeActivityHandler: ((CodexActivity) -> Void)?
     private var activeDiffHandler: ((CodexTurnDiff) -> Void)?
     private var activeActivities: [String: CodexActivity] = [:]
@@ -224,6 +246,127 @@ final class CodexAppServerClient: ObservableObject {
         }
     }
 
+    func steerActiveTurn(threadID expectedThreadID: String, text: String) async throws -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { throw StationAIManagerError.invalidMessage }
+        guard let target = Self.activeClientsByThreadID[expectedThreadID] else {
+            return try await requestSteerFromTurnOwner(threadID: expectedThreadID, text: normalized)
+        }
+        guard let threadID = target.activeThreadID, threadID == expectedThreadID,
+              let turnID = target.activeTurnID, target.isTurnActive else { return false }
+        return try await target.sendSteerRequest(threadID: threadID, turnID: turnID, text: normalized)
+    }
+
+    static func configureSteerMailbox(directory: URL) {
+        steerMailboxDirectory = directory
+    }
+
+    private func sendSteerRequest(threadID: String, turnID: String, text: String) async throws -> Bool {
+        // Verified against `codex-cli 0.162.1` app-server schemas: params require
+        // threadId/input/expectedTurnId and the response requires turnId.
+        let response = try await request(method: "turn/steer", params: [
+            "threadId": threadID,
+            "input": [["type": "text", "text": text]],
+            "expectedTurnId": turnID
+        ])
+        guard response["turnId"] as? String == turnID else {
+            throw ClientError.protocolFailure("Codex acknowledged steering for an unexpected turn.")
+        }
+        return true
+    }
+
+    private func requestSteerFromTurnOwner(threadID: String, text: String) async throws -> Bool {
+        guard let directory = Self.steerMailboxDirectory else { return false }
+        let activeURL = Self.activeTurnMailboxURL(threadID: threadID, directory: directory)
+        guard FileManager.default.fileExists(atPath: activeURL.path) else { return false }
+        let activeTurn = try JSONDecoder().decode(ConversationSteerMailboxActiveTurn.self, from: Data(contentsOf: activeURL))
+        guard activeTurn.threadID == threadID else { return false }
+        guard Darwin.kill(activeTurn.processID, 0) == 0 || errno == EPERM else {
+            try? FileManager.default.removeItem(at: activeURL)
+            return false
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        _ = Darwin.chmod(directory.path, mode_t(0o700))
+        let requestID = UUID().uuidString
+        let requestURL = directory.appendingPathComponent("\(requestID).request.json")
+        let responseURL = directory.appendingPathComponent("\(requestID).response.json")
+        let request = ConversationSteerMailboxRequest(id: requestID, threadID: threadID, expectedTurnID: activeTurn.turnID, text: text)
+        try JSONEncoder().encode(request).write(to: requestURL, options: .atomic)
+        _ = Darwin.chmod(requestURL.path, mode_t(0o600))
+        defer {
+            try? FileManager.default.removeItem(at: requestURL)
+            try? FileManager.default.removeItem(at: responseURL)
+        }
+        let deadline = Date().addingTimeInterval(30)
+        while Date() < deadline {
+            if FileManager.default.fileExists(atPath: responseURL.path) {
+                let response = try JSONDecoder().decode(ConversationSteerMailboxResponse.self, from: Data(contentsOf: responseURL))
+                if let error = response.error { throw ClientError.server(error) }
+                return response.accepted
+            }
+            if !FileManager.default.fileExists(atPath: activeURL.path) { return false }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        return false
+    }
+
+    private func serviceSteerMailbox(threadID: String, turnID: String) async {
+        guard let directory = Self.steerMailboxDirectory,
+              let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
+        for requestURL in files where requestURL.lastPathComponent.hasSuffix(".request.json") {
+            guard let request = try? JSONDecoder().decode(ConversationSteerMailboxRequest.self, from: Data(contentsOf: requestURL)),
+                  request.threadID == threadID else { continue }
+            let claimedURL = directory.appendingPathComponent("\(request.id).claimed.json")
+            do { try FileManager.default.moveItem(at: requestURL, to: claimedURL) }
+            catch { continue }
+            let responseURL = directory.appendingPathComponent("\(request.id).response.json")
+            let response: ConversationSteerMailboxResponse
+            if request.expectedTurnID != turnID {
+                response = ConversationSteerMailboxResponse(accepted: false, error: "The active turn changed before the steering message could be sent.")
+            } else {
+                do {
+                    _ = try await sendSteerRequest(threadID: threadID, turnID: turnID, text: request.text)
+                    activeSteerMessageHandler?(request.text)
+                    response = ConversationSteerMailboxResponse(accepted: true, error: nil)
+                } catch {
+                    response = ConversationSteerMailboxResponse(accepted: false, error: error.localizedDescription)
+                }
+            }
+            if let data = try? JSONEncoder().encode(response) {
+                try? data.write(to: responseURL, options: .atomic)
+            }
+            try? FileManager.default.removeItem(at: claimedURL)
+        }
+    }
+
+    private static func activeTurnMailboxURL(threadID: String, directory: URL) -> URL {
+        let key = threadID.utf8.map { String(format: "%02x", $0) }.joined()
+        return directory.appendingPathComponent("active-\(key).json")
+    }
+
+    private func publishActiveTurnForMailbox(threadID: String, turnID: String) {
+        guard let directory = Self.steerMailboxDirectory else { return }
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            _ = Darwin.chmod(directory.path, mode_t(0o700))
+            let data = try JSONEncoder().encode(ConversationSteerMailboxActiveTurn(
+                threadID: threadID,
+                turnID: turnID,
+                processID: Int32(ProcessInfo.processInfo.processIdentifier)
+            ))
+            let url = Self.activeTurnMailboxURL(threadID: threadID, directory: directory)
+            try data.write(to: url, options: .atomic)
+            _ = Darwin.chmod(url.path, mode_t(0o600))
+        } catch {
+            StationAIDiagnostics.record("conversation.steer_mailbox.publish_failed", fields: ["threadID": threadID])
+        }
+    }
+
+    private func clearActiveTurnForMailbox(threadID: String) {
+        guard let directory = Self.steerMailboxDirectory else { return }
+        try? FileManager.default.removeItem(at: Self.activeTurnMailboxURL(threadID: threadID, directory: directory))
+    }
+
     func sendMessage(
         _ text: String,
         imageDataURLs: [String] = [],
@@ -237,30 +380,38 @@ final class CodexAppServerClient: ObservableObject {
         onDiff: @escaping (CodexTurnDiff) -> Void,
         onHistory: @escaping (CodexThreadHistory) -> Void,
         onActionRequest: @escaping () -> Void,
-        onUserInput: @escaping (CodexUserInputRequest) async -> Void
+        onUserInput: @escaping (CodexUserInputRequest) async -> Void,
+        onSteerMessage: @escaping (String) -> Void = { _ in }
     ) async throws {
         actionRequestHandler = onActionRequest
         userInputHandler = onUserInput
         try await resumeThreadIfNeeded(id: threadID, workspace: workspace, modelID: modelID)
 
         activeThreadID = threadID
+        Self.activeClientsByThreadID[threadID] = self
         activeTurnID = nil
         activeConversationMode = mode
         isTurnActive = false
         wasLastTurnInterrupted = false
         activeDeltaHandler = onDelta
         activeFinalMessageHandler = onFinalMessage
+        activeSteerMessageHandler = onSteerMessage
         activeActivityHandler = onActivity
         activeDiffHandler = onDiff
         activeActivities.removeAll()
         defer {
             Self.processActiveThreadIDs.remove(threadID)
+            clearActiveTurnForMailbox(threadID: threadID)
+            if Self.activeClientsByThreadID[threadID] === self {
+                Self.activeClientsByThreadID.removeValue(forKey: threadID)
+            }
             activeThreadID = nil
             activeTurnID = nil
             activeConversationMode = .code
             isTurnActive = false
             activeDeltaHandler = nil
             activeFinalMessageHandler = nil
+            activeSteerMessageHandler = nil
             activeActivityHandler = nil
             activeDiffHandler = nil
             activeActivities.removeAll()
@@ -294,6 +445,7 @@ final class CodexAppServerClient: ObservableObject {
         }
         activeTurnID = turnID
         isTurnActive = true
+        publishActiveTurnForMailbox(threadID: threadID, turnID: turnID)
         Self.processActiveThreadIDs.insert(threadID)
         StationAIDiagnostics.record("codex.turn.started", fields: diagnosticFields([
             "threadID": threadID,
@@ -314,6 +466,13 @@ final class CodexAppServerClient: ObservableObject {
             ]))
             throw ClientError.turnFailed(Self.turnFailureDescription(turn))
         default:
+            let mailboxTask = Task { @MainActor [weak self] in
+                while let self, !Task.isCancelled, self.activeThreadID == threadID, self.activeTurnID == turnID {
+                    await self.serviceSteerMailbox(threadID: threadID, turnID: turnID)
+                    try? await Task.sleep(for: .milliseconds(75))
+                }
+            }
+            defer { mailboxTask.cancel() }
             do {
                 try await waitForTurn(turnKey)
             } catch {
@@ -390,6 +549,22 @@ final class CodexAppServerClient: ObservableObject {
         startingThreadIDs.contains(threadID)
             || (activeThreadID == threadID && activeTurnID != nil)
             || pendingUserInputThreadID == threadID
+    }
+
+    func activeTurnOwnerProcessID(threadID: String) -> Int32? {
+        if let target = Self.activeClientsByThreadID[threadID],
+           target.isTurnActive(threadID: threadID) {
+            return Int32(ProcessInfo.processInfo.processIdentifier)
+        }
+        guard let directory = Self.steerMailboxDirectory else { return nil }
+        let activeURL = Self.activeTurnMailboxURL(threadID: threadID, directory: directory)
+        guard let active = try? JSONDecoder().decode(ConversationSteerMailboxActiveTurn.self, from: Data(contentsOf: activeURL)),
+              active.threadID == threadID else { return nil }
+        guard Darwin.kill(active.processID, 0) == 0 || errno == EPERM else {
+            try? FileManager.default.removeItem(at: activeURL)
+            return nil
+        }
+        return active.processID
     }
 
     func canInterruptActiveTurn(threadID: String) -> Bool {
@@ -568,6 +743,7 @@ final class CodexAppServerClient: ObservableObject {
             }
 
             let response = try await request(method: "thread/items/list", params: params)
+            // The installed codex-cli 0.162.1 schema returns {data:[{threadId,turnId,item}],nextCursor}.
             let data = response["data"] as? [[String: Any]] ?? []
             for entry in data {
                 guard let item = entry["item"] as? [String: Any] else { continue }
@@ -771,6 +947,7 @@ final class CodexAppServerClient: ObservableObject {
     private func handleNotification(method: String, params: [String: Any]) {
         switch method {
         case "turn/started":
+            // Server notifications use params {threadId, turn:{id,status,...}}.
             guard let threadID = params["threadId"] as? String,
                   threadID == activeThreadID,
                   let turn = params["turn"] as? [String: Any],
@@ -813,6 +990,7 @@ final class CodexAppServerClient: ObservableObject {
                   let diff = params["diff"] as? String, !diff.isEmpty else { return }
             activeDiffHandler?(CodexTurnDiff(unifiedDiff: diff))
         case "turn/completed":
+            // A terminal notification has the same threadId/turn envelope; only a matching waiter completes.
             guard let threadID = params["threadId"] as? String,
                   let turn = params["turn"] as? [String: Any],
                   let turnID = turn["id"] as? String else { return }

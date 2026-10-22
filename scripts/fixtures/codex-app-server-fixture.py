@@ -4,6 +4,7 @@
 
 import json
 import os
+import select
 import sys
 import time
 import uuid
@@ -171,6 +172,7 @@ def main():
             saw_question = True
             serial_first_turn = False
             if serial_mode:
+                TURN_ID = f"turn-{uuid.uuid4()}"
                 first_turn_marker = Path(str(sys.argv[0]) + ".serial-first-turn")
                 try:
                     descriptor = os.open(first_turn_marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -263,12 +265,39 @@ def main():
                 resume = Path(str(sys.argv[0]) + ".resolve-continue")
                 ready.write_text("The first serialized fixture turn is active.\n", encoding="utf-8")
                 deadline = time.monotonic() + 30
+                steer_requests = []
+                rejected_steer_requests = []
                 while not resume.exists() and time.monotonic() < deadline:
-                    time.sleep(0.02)
+                    readable, _, _ = select.select([sys.stdin], [], [], 0.02)
+                    if readable:
+                        try:
+                            steer_request = json.loads(sys.stdin.readline())
+                        except json.JSONDecodeError:
+                            continue
+                        if steer_request.get("method") == "turn/steer":
+                            params = steer_request.get("params", {})
+                            reject_marker = Path(str(sys.argv[0]) + ".reject-next-steer")
+                            if reject_marker.exists():
+                                reject_marker.unlink()
+                                rejected_steer_requests.append(params)
+                                write({"jsonrpc": "2.0", "id": steer_request["id"], "error": {"code": -32010, "message": "The expected turn ID is stale."}})
+                            elif params.get("threadId") != THREAD_ID or params.get("expectedTurnId") != TURN_ID:
+                                rejected_steer_requests.append(params)
+                                write({"jsonrpc": "2.0", "id": steer_request["id"], "error": {"code": -32010, "message": "The expected turn ID is stale."}})
+                            else:
+                                steer_requests.append(params)
+                                write({"jsonrpc": "2.0", "id": steer_request["id"], "result": {"turnId": TURN_ID}})
+                        else:
+                            write({"jsonrpc": "2.0", "id": steer_request.get("id"), "error": {"code": -32601, "message": "Unsupported fixture request."}})
                 if not resume.exists():
                     return 3
                 ready.unlink(missing_ok=True)
                 resume.unlink(missing_ok=True)
+                if steer_requests or rejected_steer_requests:
+                    saved_history = serial_history()
+                    saved_history["steerRequests"] = saved_history.get("steerRequests", []) + steer_requests
+                    saved_history["rejectedSteerRequests"] = saved_history.get("rejectedSteerRequests", []) + rejected_steer_requests
+                    history_path.write_text(json.dumps(saved_history), encoding="utf-8")
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},

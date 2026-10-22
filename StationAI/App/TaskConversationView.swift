@@ -72,6 +72,8 @@ struct TaskConversationView: View {
     @State private var isPreparingSubmittedMessage = false
     @State private var hasPausedResponse = false
     @State private var isPausingResponse = false
+    @State private var queuedMessages: [QueuedConversationMessage] = []
+    @State private var isSubmittingLiveMessage = false
     @State private var userInputRequest: CodexUserInputRequest?
     @State private var userInputAnswers: [String: [String]] = [:]
     @State private var userInputOther: [String: String] = [:]
@@ -149,6 +151,7 @@ struct TaskConversationView: View {
                 userInputRequest = request
             }
             await loadConversation()
+            if !isReadOnly { refreshQueuedMessages() }
             if !isReadOnly { await loadModels() }
         }
         .onChange(of: codexClient.isTurnActive) { _, isTurnActive in
@@ -1327,6 +1330,25 @@ struct TaskConversationView: View {
                     .accessibilityIdentifier("codex-chat-error")
             }
 
+            if !queuedMessages.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(queuedMessages) { queued in
+                        HStack {
+                            Text(queued.state == .needsAction ? "Follow-up needs your action" : "Queued for after this turn")
+                            Spacer()
+                            if queued.state == .needsAction {
+                                Button("Retry") { retryQueuedMessage(queued) }
+                                    .buttonHoverPointer()
+                                    .help("Retry this follow-up")
+                                    .accessibilityIdentifier("retry-queued-message-\(queued.id.uuidString)")
+                            }
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .accessibilityIdentifier("queued-message-\(queued.id.uuidString)")
+                    }
+                }
+            }
+
             VStack(alignment: .leading, spacing: 10) {
                 TextField("Message…", text: $draft, axis: .vertical)
                     .font(.system(size: 14))
@@ -1367,7 +1389,7 @@ struct TaskConversationView: View {
                         }
                         scheduleDraftAutosave(newValue)
                     }
-                    .disabled(isReadOnly || isResponding || isLoadingHistory)
+                    .disabled(isReadOnly || isLoadingHistory || isPreparingSubmittedMessage)
                     .accessibilityIdentifier("message-composer")
 
                 HStack(spacing: 12) {
@@ -1427,6 +1449,18 @@ struct TaskConversationView: View {
                     .accessibilityIdentifier("model-picker-menu")
 
                     if isResponding {
+                        if codexClient.isTurnActive(threadID: task.codexThreadID ?? "") {
+                            Button("Queue") { queueDraftForAfterTurn() }
+                                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSubmittingLiveMessage)
+                                .buttonHoverPointer()
+                                .help("Send this message after the current turn finishes")
+                                .accessibilityIdentifier("queue-message-after-turn-button")
+                            Button("Steer") { steerCurrentTurn() }
+                                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSubmittingLiveMessage)
+                                .buttonHoverPointer()
+                                .help("Send this message to the active turn now")
+                                .accessibilityIdentifier("steer-current-turn-button")
+                        }
                         Button(action: pauseResponse) {
                             Image(systemName: "pause.fill")
                                 .font(.system(size: 11, weight: .bold))
@@ -1697,6 +1731,12 @@ struct TaskConversationView: View {
                         if update.type == "completed" {
                             Task { await refreshWorkspaceChanges() }
                         }
+                    case "queue_changed":
+                        refreshQueuedMessages()
+                    case "steered_message":
+                        guard let message = update.message else { return }
+                        messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: message))
+                        if draft == message { draft = "" }
                     case "action_notice":
                         actionNotice = update.message
                     default:
@@ -1728,6 +1768,58 @@ struct TaskConversationView: View {
             }
 
             isResponding = false
+        }
+    }
+
+    private func refreshQueuedMessages() {
+        queuedMessages = (try? conversationManager.queuedMessages(taskID: task.id)) ?? []
+    }
+
+    private func queueDraftForAfterTurn() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        do {
+            _ = try conversationManager.queueMessage(taskID: task.id, text: text)
+            draft = ""
+            refreshQueuedMessages()
+            errorMessage = nil
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    private func steerCurrentTurn() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        isSubmittingLiveMessage = true
+        Task { @MainActor in
+            defer { isSubmittingLiveMessage = false }
+            do {
+                guard try await conversationManager.steer(taskID: task.id, text: text) else {
+                    throw BridgeCommandError(code: "invalid_transition", message: "The active turn changed before the steering message could be sent. Try again after the current turn is active.")
+                }
+                messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: text))
+                draft = ""
+                errorMessage = nil
+            } catch { errorMessage = error.localizedDescription }
+        }
+    }
+
+    private func retryQueuedMessage(_ message: QueuedConversationMessage) {
+        Task { @MainActor in
+            do {
+                let retried = try await conversationManager.retryQueuedMessage(taskID: task.id, messageID: message.id, onUserInput: { request in
+                    userInputRequest = request
+                    userInputAnswers = [:]
+                    userInputOther = [:]
+                })
+                guard retried else {
+                    throw BridgeCommandError(code: "operation_failed", message: "The queued follow-up still needs your attention.")
+                }
+                let history = try await conversationManager.history(taskID: task.id)
+                messages = history.messages
+                activities = history.activities
+                refreshQueuedMessages()
+                errorMessage = nil
+            } catch { errorMessage = error.localizedDescription }
         }
     }
 
