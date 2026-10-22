@@ -369,6 +369,8 @@ def main():
             elif mode.endswith("-success-wait") and not mode.endswith("-title-success-wait"):
                 ready = Path(str(sys.argv[0]) + ".resolve-ready")
                 resume = Path(str(sys.argv[0]) + ".resolve-continue")
+                with Path(str(sys.argv[0]) + ".resolve-start-count").open("a", encoding="utf-8") as stream:
+                    stream.write("start\n")
                 ready.write_text("Codex conflict-resolution turn is active.\n", encoding="utf-8")
                 deadline = time.monotonic() + 30
                 while not resume.exists() and time.monotonic() < deadline:

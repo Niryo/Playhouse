@@ -40,6 +40,8 @@ struct TaskConversationView: View {
     let task: BoardTask
     var isNewTask = false
     var isReadOnly = false
+    var conflictResolutionRequested = false
+    var onConflictResolutionChecked: (Bool) -> Void = { _ in }
     let onBack: () -> Void
 
     @State private var draft = ""
@@ -78,6 +80,7 @@ struct TaskConversationView: View {
     @State private var isLoadingHistory = false
     @State private var isResponding = false
     @State private var isPreparingSubmittedMessage = false
+    @State private var conflictResolutionAttempt = 0
     @State private var hasPausedResponse = false
     @State private var isPausingResponse = false
     @State private var queuedMessages: [QueuedConversationMessage] = []
@@ -210,6 +213,10 @@ struct TaskConversationView: View {
             await loadConversation()
             if !isReadOnly { refreshQueuedMessages() }
             if !isReadOnly { await loadModels() }
+            if conflictResolutionRequested && !isReadOnly && !isResponding {
+                conflictResolutionAttempt = 1
+                sendMessage(overrideText: "The PR has conflicts. Fix them, commit, and push.")
+            }
         }
         .onChange(of: codexClient.isTurnActive) { _, isTurnActive in
             let submittedTurnIsPending = task.pendingSubmittedPrompt != nil
@@ -2033,6 +2040,7 @@ struct TaskConversationView: View {
     private func sendMessage(overrideText: String? = nil) {
         let text = (overrideText ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
         guard (!text.isEmpty || !pendingImages.isEmpty), !isResponding, !isLoadingHistory else { return }
+        let resolutionAttempt = conflictResolutionAttempt
         if text == "/plan" {
             activatePlanMode()
             return
@@ -2067,6 +2075,10 @@ struct TaskConversationView: View {
             )
             isPreparingSubmittedMessage = false
             guard saved else {
+                if resolutionAttempt > 0 {
+                    conflictResolutionAttempt = 0
+                    onConflictResolutionChecked(false)
+                }
                 messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
                 draft = text
                 pendingImages = imageDataURLs.compactMap { dataURL in
@@ -2169,7 +2181,37 @@ struct TaskConversationView: View {
                     messages.removeAll { $0.id == assistantMessageID }
                 }
                 isComposerFocused = true
+                if resolutionAttempt > 0 {
+                    do {
+                        switch try await BoardTaskManager(modelContext: modelContext).verifyPullRequestResolution(task.id) {
+                        case .resolved:
+                            conflictResolutionAttempt = 0
+                            onConflictResolutionChecked(true)
+                        case .stillConflicted where resolutionAttempt == 1:
+                            conflictResolutionAttempt = 2
+                            isResponding = false
+                            sendMessage(overrideText: "The PR still has conflicts or your latest commit has not reached GitHub. Resolve the remaining conflicts, commit, and push. Verify the PR's merge status before finishing.")
+                            return
+                        case .stillConflicted:
+                            conflictResolutionAttempt = 0
+                            onConflictResolutionChecked(false)
+                            errorMessage = "The PR still has conflicts after two turns. Review the PR and try again."
+                        case .inconclusive:
+                            conflictResolutionAttempt = 0
+                            onConflictResolutionChecked(false)
+                            errorMessage = "GitHub hasn't confirmed that the PR is conflict-free at the pushed head. Try again after its merge check finishes."
+                        }
+                    } catch {
+                        conflictResolutionAttempt = 0
+                        onConflictResolutionChecked(false)
+                        errorMessage = error.localizedDescription
+                    }
+                }
             } catch {
+                if resolutionAttempt > 0 {
+                    conflictResolutionAttempt = 0
+                    onConflictResolutionChecked(false)
+                }
                 responseStartedAt = nil
                 UserDefaults.standard.removeObject(forKey: responseStartedAtDefaultsKey)
                 if codexClient.wasLastTurnInterrupted {
