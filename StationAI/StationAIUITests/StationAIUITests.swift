@@ -1588,7 +1588,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Lifecycle rollout clears tasks and reports a retained dirty worktree")
     }
 
-    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards.
+    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Task card titles use slightly expanded letter spacing and line spacing.
     func test_task_status_transitions_and_rejects_unknown_status() throws {
         let waitingFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-status-transition-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: waitingFixture.path))
@@ -1596,6 +1596,31 @@ final class StationAIUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Status transitions", roots: [fixture.primary.path])
         try createTaskFixture(title: "Searchable board card", roots: [fixture.alternate.path])
+        let titleElement = app.staticTexts["Searchable board card"]
+        XCTAssertTrue(titleElement.waitForExistence(timeout: 5), "The task card should expose its rendered title text.")
+        let titleFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        let untrackedWidth = ("Searchable board card" as NSString).size(withAttributes: [.font: titleFont]).width
+        XCTAssertGreaterThan(
+            titleElement.frame.width,
+            untrackedWidth + 2,
+            "The title's rendered width should reflect the added letter spacing."
+        )
+        let wrappedTitle = "Task card title spacing increases between wrapped lines"
+        try createTaskFixture(title: wrappedTitle, roots: [fixture.alternate.path])
+        let wrappedTitleElement = app.staticTexts[wrappedTitle]
+        XCTAssertTrue(wrappedTitleElement.waitForExistence(timeout: 5))
+        let wrappedTitleBaseline = NSAttributedString(
+            string: wrappedTitle,
+            attributes: [.font: titleFont, .kern: 0.35]
+        ).boundingRect(
+            with: CGSize(width: wrappedTitleElement.frame.width, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        ).height
+        XCTAssertGreaterThan(
+            wrappedTitleElement.frame.height,
+            wrappedTitleBaseline + 1,
+            "Wrapped task titles should have visible spacing between lines."
+        )
         XCTAssertFalse(element("board-search-field").exists, "Board search should stay hidden until requested.")
         app.typeKey("f", modifierFlags: .command)
         let boardSearch = element("board-search-field")
