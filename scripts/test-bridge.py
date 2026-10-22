@@ -1157,7 +1157,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIsNone(record.get("pullRequestURL"))
         self.assertEqual(current["status"], "Done")
 
-    # case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects a merge conflict without mutation, requires confirmation by default, honors saved keep without publishing, and successfully commits and locally pushes a staged conflict resolution through XPC without changing the target; unknown actions are rejected. The paired UI dispatches resolve-only and resolve-and-push on an actual conflict, verifies unresolved conflicts do not advance the task or target commits, presents all three choices and the remember checkbox, and verifies remembered keep skips the next confirmation.
+    # case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects conflicts without mutation, requires confirmation by default, honors saved keep without publishing, commits staged resolution locally without pushing via resolve-only, and commits and pushes via resolve-and-push without changing the target; unknown actions are rejected. The paired UI verifies unresolved conflicts stay uncommitted and do not advance task or target commits, confirms staged resolve-only commits locally while the remote task branch remains absent, presents all choices and the remember checkbox, and verifies remembered keep skips the next confirmation.
     def test_task_pr_conflicts_detect_without_mutation(self):
         task = self.create_repo_task("PR conflict detection", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
         record = task["repositoryWorktrees"][0]
@@ -1191,6 +1191,12 @@ class StationAIBridgeTests(unittest.TestCase):
         kept_creation, _ = self.call_cli("task", "pr", "create", task["id"])
         self.assertEqual(self.assert_success(kept_creation)["id"], task["id"])
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), branch_head)
+        task_branch_ref = f"refs/heads/{record['branch']}"
+        kept_remote_branch = subprocess.run(
+            ["git", "--git-dir", str(remote), "show-ref", "--verify", "--quiet", task_branch_ref],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(kept_remote_branch.returncode, 1, "Keep must not publish the task branch to the bare remote.")
         self.call_cli("settings", "set-pr-conflict-action", "ask")
         self.run_git(worktree, "fetch", "origin", "main")
         merge = subprocess.run(
@@ -1201,19 +1207,49 @@ class StationAIBridgeTests(unittest.TestCase):
         resolved_content = "resolved task and target versions\n"
         branch_file.write_text(resolved_content, encoding="utf-8")
         self.run_git(worktree, "add", conflict_path)
+        resolved_only, _ = self.call_cli("task", "pr", "resolve", task["id"], "resolve-only")
+        self.assertEqual(self.assert_success(resolved_only)["id"], task["id"])
+        resolved_only_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        self.assertNotEqual(resolved_only_head, branch_head, "Resolve-only should commit a fully staged conflict resolution locally.")
+        self.assertEqual(self.run_git(self.primary, "rev-parse", "main").strip(), target_head, "Conflict resolution must leave the target branch unchanged.")
+        self.assertEqual(branch_file.read_text(encoding="utf-8"), resolved_content)
+        unresolved_remote_branch = subprocess.run(
+            ["git", "--git-dir", str(remote), "show-ref", "--verify", "--quiet", task_branch_ref],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(unresolved_remote_branch.returncode, 1, "Resolve-only must commit locally without publishing the task branch.")
+
+        target_file.write_text("target branch version two\n", encoding="utf-8")
+        self.run_git(self.primary, "add", conflict_path)
+        self.run_git(self.primary, "commit", "-m", "Advance PR target fixture again")
+        self.run_git(self.primary, "push", "origin", "main")
+        target_head_second = self.run_git(self.primary, "rev-parse", "main").strip()
+        branch_file.write_text("task branch version two\n", encoding="utf-8")
+        self.run_git(worktree, "add", conflict_path)
+        self.run_git(worktree, "commit", "-m", "Advance task branch fixture again")
+        branch_head_second = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        self.run_git(worktree, "fetch", "origin", "main")
+        second_merge = subprocess.run(
+            ["git", "-C", str(worktree), "merge", "--no-commit", "--no-ff", "FETCH_HEAD"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(second_merge.returncode, 1, f"Expected the second real Git fixture merge to conflict: {second_merge.stderr}")
+        pushed_content = "resolved task and target versions two\n"
+        branch_file.write_text(pushed_content, encoding="utf-8")
+        self.run_git(worktree, "add", conflict_path)
         resolved, _ = self.call_cli("task", "pr", "resolve", task["id"], "resolve-and-push")
         self.assertEqual(self.assert_success(resolved)["id"], task["id"])
         resolved_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
-        self.assertNotEqual(resolved_head, branch_head, "A fully staged resolution should be committed when resuming the merge.")
-        self.assertEqual(self.run_git(self.primary, "rev-parse", "main").strip(), target_head, "Conflict resolution must leave the target branch unchanged.")
-        self.assertEqual(branch_file.read_text(encoding="utf-8"), resolved_content)
-        remote_branch_head = self.run_git(remote, "rev-parse", f"refs/heads/{record['branch']}").strip()
+        self.assertNotEqual(resolved_head, branch_head_second, "A fully staged resolution should be committed when resuming the second merge.")
+        self.assertEqual(self.run_git(self.primary, "rev-parse", "main").strip(), target_head_second, "Conflict resolution must leave the target branch unchanged.")
+        self.assertEqual(branch_file.read_text(encoding="utf-8"), pushed_content)
+        remote_branch_head = self.run_git(remote, "rev-parse", task_branch_ref).strip()
         self.assertEqual(remote_branch_head, resolved_head, "Resolve-and-push must publish the resolved task branch.")
         remote_content = subprocess.run(
-            ["git", "--git-dir", str(remote), "show", f"refs/heads/{record['branch']}:{conflict_path}"],
+            ["git", "--git-dir", str(remote), "show", f"{task_branch_ref}:{conflict_path}"],
             check=True, capture_output=True, text=True,
         ).stdout
-        self.assertEqual(remote_content, resolved_content)
+        self.assertEqual(remote_content, pushed_content)
         self.assertIsNone(self.assert_success(self.call_cli("task", "get", task["id"])[0])["repositoryWorktrees"][0].get("pullRequestNumber"))
         invalid, _ = self.call_cli("task", "pr", "resolve", task["id"], "unknown", expected_status=2)
         self.assert_failure(invalid, "invalid_argument")
@@ -1407,6 +1443,10 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assertIn(str(self.cli), instructions)
             self.assertIn("task progress publish", instructions)
             self.assertIn("hidden from the conversation", instructions)
+            self.assertIn("periodically during substantial work", instructions)
+            self.assertIn("active test and position", instructions)
+            self.assertIn("Test 3/8", instructions)
+            self.assertIn("under 80 characters", instructions)
             self.assertIsNone(turn_data["developerInstructions"])
         finally:
             if turn.poll() is None:

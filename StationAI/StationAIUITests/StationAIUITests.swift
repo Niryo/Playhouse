@@ -1394,7 +1394,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(current["status"] as? String, "Done")
     }
 
-    // case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects a merge conflict without mutation, requires confirmation by default, honors saved keep without publishing, and successfully commits and locally pushes a staged conflict resolution through XPC without changing the target; unknown actions are rejected. The paired UI dispatches resolve-only and resolve-and-push on an actual conflict, verifies unresolved conflicts do not advance the task or target commits, presents all three choices and the remember checkbox, and verifies remembered keep skips the next confirmation.
+    // case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects conflicts without mutation, requires confirmation by default, honors saved keep without publishing, commits staged resolution locally without pushing via resolve-only, and commits and pushes via resolve-and-push without changing the target; unknown actions are rejected. The paired UI verifies unresolved conflicts stay uncommitted and do not advance task or target commits, confirms staged resolve-only commits locally while the remote task branch remains absent, presents all choices and the remember checkbox, and verifies remembered keep skips the next confirmation.
     func test_task_pr_conflicts_detect_without_mutation() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -1418,6 +1418,12 @@ final class StationAIUITests: XCTestCase {
         try runGit(worktree, "commit", "-m", "Update task branch fixture")
         let branchHead = try runGitOutput(worktree, "rev-parse", "HEAD")
         let targetHead = try runGitOutput(fixture.primary, "rev-parse", "main")
+        let remote = WorkspaceFixture.root.appendingPathComponent("pr-conflict-origin.git", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: remote.path), "Each UI case should start with an isolated bare remote fixture.")
+        try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+        _ = try runGitOutput(remote, "init", "--bare")
+        try runGit(fixture.primary, "remote", "add", "origin", remote.path)
+        try runGit(fixture.primary, "push", "--set-upstream", "origin", "main")
         let conflictResult = try runCLI(["task", "pr", "conflicts", taskID])["result"] as? [String: Any]
         XCTAssertEqual(conflictResult?["repositories"] as? [String], [fixture.primary.path])
         XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), branchHead, "Conflict detection must leave the task branch unchanged.")
@@ -1470,6 +1476,26 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ prButton.isEnabled }, timeout: 10))
         prButton.click()
         XCTAssertFalse(element("pr-conflict-confirmation").waitForExistence(timeout: 1), "A remembered action should skip the confirmation next time.")
+
+        try "resolved task and target versions\n".write(to: worktree.appendingPathComponent(conflictPath), atomically: true, encoding: .utf8)
+        try runGit(worktree, "add", conflictPath)
+        try runCLI(["settings", "set-pr-conflict-action", "ask"])
+        prButton.click()
+        XCTAssertTrue(element("pr-conflict-confirmation").waitForExistence(timeout: 10))
+        element("pr-conflict-resolve-only-button").click()
+        XCTAssertTrue(waitUntil({ !element("pr-conflict-confirmation").exists }, timeout: 10))
+        XCTAssertTrue(waitUntil({
+            (try? runGitOutput(worktree, "rev-parse", "HEAD")) != branchHead
+        }, timeout: 10), "Resolve-only should commit the staged resolution locally.")
+        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetHead, "Resolve-only must leave the target branch unchanged.")
+        XCTAssertEqual(
+            try runGitOutput(fixture.primary, "ls-remote", "--heads", "origin", try XCTUnwrap(completedRecord["branch"] as? String))
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            "",
+            "Resolve-only must keep the task branch unpublished."
+        )
+        XCTAssertNil((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"])
+        XCTAssertFalse(app.alerts["Couldn't create pull request"].exists, "Resolve-only should finish without starting PR publication.")
         let finalRecord = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
         XCTAssertNil(finalRecord["pullRequestNumber"])
     }
@@ -1795,6 +1821,10 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(instructions.contains(cliURL.path))
         XCTAssertTrue(instructions.contains("task progress publish"))
         XCTAssertTrue(instructions.contains("hidden from the conversation"))
+        XCTAssertTrue(instructions.contains("periodically during substantial work"))
+        XCTAssertTrue(instructions.contains("active test and position"))
+        XCTAssertTrue(instructions.contains("Test 3/8"))
+        XCTAssertTrue(instructions.contains("under 80 characters"))
         XCTAssertEqual(turn["threadStartCount"] as? Int, 1, "The follow-up should reuse the thread created with progress instructions.")
         XCTAssertGreaterThanOrEqual(turn["threadResumeCount"] as? Int ?? 0, 1)
         let turns = try XCTUnwrap(turn["turns"] as? [[String: Any]])

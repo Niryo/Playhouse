@@ -43,6 +43,7 @@ trap cleanup EXIT
 architecture="$(uname -m)"
 python3 "${repository_root}/scripts/check-test-parity.py"
 python3 "${repository_root}/scripts/check-button-feedback.py"
+python3 "${repository_root}/scripts/check-e2e-locking.py"
 report_phase build
 build_info="$(python3 "${repository_root}/scripts/prepare-e2e-build.py" \
   --root "${repository_root}" \
