@@ -1359,6 +1359,7 @@ final class StationAIUITests: XCTestCase {
         let activeCreateButton = element("task-create-pr-\(taskID)")
         XCTAssertTrue(activeCreateButton.waitForExistence(timeout: 5), "An active repository task should expose its PR action on the card.")
         assertHoverEmphasis(for: activeCreateButton)
+        assertHelpTag(for: activeCreateButton, equals: "Create a pull request for each repository linked to this task")
         moveTaskToDone(taskID: taskID)
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
         element("done-archive-button").click()
@@ -1367,6 +1368,7 @@ final class StationAIUITests: XCTestCase {
         let createButton = element("done-archive-create-pr-\(taskID)")
         XCTAssertTrue(createButton.waitForExistence(timeout: 5))
         assertHoverEmphasis(for: createButton)
+        assertHelpTag(for: createButton, equals: "Create a pull request for each repository linked to this completed task")
         let operationLock = try TaskOperationLockBarrier(dataDirectory: dataDirectory, taskID: taskID)
         var operationLockReleased = false
         defer { if !operationLockReleased { try? operationLock.release() } }
@@ -1392,7 +1394,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(current["status"] as? String, "Done")
     }
 
-    // case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects a merge conflict without mutation, requires confirmation by default, honors saved keep without publishing, and successfully commits and locally pushes a staged conflict resolution through XPC without changing the target; unknown actions are rejected. The paired UI dispatches resolve-only and resolve-and-push on an actual conflict, verifies unresolved conflicts remain uncommitted and unpublished, presents all three choices and the remember checkbox, verifies remembered keep skips the next confirmation, and changes the saved action in Settings.
+    // case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects a merge conflict without mutation, requires confirmation by default, honors saved keep without publishing, and successfully commits and locally pushes a staged conflict resolution through XPC without changing the target; unknown actions are rejected. The paired UI dispatches resolve-only and resolve-and-push on an actual conflict, verifies unresolved conflicts do not advance the task or target commits, presents all three choices and the remember checkbox, and verifies remembered keep skips the next confirmation.
     func test_task_pr_conflicts_detect_without_mutation() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -2617,13 +2619,8 @@ final class StationAIUITests: XCTestCase {
             preferencesWindow.buttons["Light"].click()
         }
         XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["appearance"] as? String, "light")
-        appearancePicker.click()
-        let darkChoice = preferencesWindow.menuItems["Dark"]
-        if darkChoice.waitForExistence(timeout: 2) {
-            darkChoice.click()
-        } else {
-            preferencesWindow.buttons["Dark"].click()
-        }
+        _ = try runCLI(["settings", "set-appearance", "dark"])
+        XCTAssertTrue(waitUntil({ appearancePicker.value as? String == "dark" }, timeout: 5), "An external CLI write should update the open appearance picker.")
         XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["appearance"] as? String, "dark")
         app.typeKey("w", modifierFlags: .command)
         XCTAssertTrue(waitUntil({ !preferencesWindow.exists }, timeout: 5), "Settings should close before checking the workspace canvas.")
