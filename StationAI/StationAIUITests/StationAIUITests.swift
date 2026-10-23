@@ -1309,9 +1309,10 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({
             ((try? String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) ?? 0) >= 2
         }, timeout: 10), "Opening the board should check the linked PR.")
-        XCTAssertEqual(Array(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), ["123", "456"])
+        XCTAssertEqual(Set(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), Set(["123", "456"]))
         XCTAssertTrue(prLink.exists, "An unmerged PR should stay as a link.")
         XCTAssertTrue(secondPRLink.exists, "A second unmerged PR should stay as a link.")
+        Thread.sleep(forTimeInterval: 10.1)
         let ghStateURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["STATIONAI_E2E_GH_STATE_PATH"]))
         try "123=merged\n456=unmerged\n".write(to: ghStateURL, atomically: true, encoding: .utf8)
         let previousCheckCount = (try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count
@@ -1319,7 +1320,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({
             ((try? String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) ?? 0) >= previousCheckCount + 2
         }, timeout: 10), "Regaining focus should refresh the PR merge state.")
-        XCTAssertEqual(Array(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), ["123", "456"])
+        XCTAssertEqual(Set(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), Set(["123", "456"]))
         XCTAssertFalse(completionButton.exists, "The task should remain incomplete while any linked PR is unmerged.")
         XCTAssertTrue(prLink.exists)
         XCTAssertTrue(secondPRLink.exists)
@@ -1334,7 +1335,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({
             ((try? String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) ?? 0) >= thirdCheckCount + 2
         }, timeout: 10), "Focus should query both PRs when the second PR is already merged.")
-        XCTAssertEqual(Array(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), ["123", "456"])
+        XCTAssertEqual(Set(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), Set(["123", "456"]))
         XCTAssertFalse(completionButton.exists, "Either unmerged PR should suppress task completion.")
         XCTAssertTrue(prLink.exists)
         XCTAssertTrue(secondPRLink.exists)
@@ -1345,7 +1346,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({
             ((try? String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) ?? 0) >= fourthCheckCount + 2
         }, timeout: 10), "Regaining focus should refresh both PR merge states.")
-        XCTAssertEqual(Array(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), ["123", "456"])
+        XCTAssertEqual(Set(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), Set(["123", "456"]))
         XCTAssertTrue(completionButton.waitForExistence(timeout: 10), "A merged PR should replace its link with the completion button.")
         XCTAssertEqual(completionButton.label, "Green checkmark. Complete task, all linked pull requests merged")
         assertContainsGreenForeground(in: completionButton)
@@ -1445,6 +1446,112 @@ final class StationAIUITests: XCTestCase {
         element("back-to-board-button").click()
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done", "Leaving the read-only conversation must not alter the archived task.")
         attachScreenshot(named: "Completed task opens from the searchable read-only archive")
+    }
+
+    // case-contract: test_review_pr_conflicts_probe_and_verify | Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 10 seconds. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action beside its PR link; clicking it sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head.
+    func test_review_pr_conflicts_probe_and_verify() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        var ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [123, 456])
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Review PR conflict UI", "--repo", fixture.primary.path,
+            "--merge-target", "\(fixture.primary.path)=main",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Review PR conflict UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Review PR conflict UI")
+        element("back-to-board-button").click()
+        XCTAssertTrue(waitUntil({ element("task-card-\(taskID)").exists }, timeout: 10))
+        let secondCreated = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Second Review PR conflict UI", "--repo", fixture.secondary.path,
+            "--merge-target", "\(fixture.secondary.path)=main",
+        ])["result"] as? [String: Any])
+        let secondTaskID = try XCTUnwrap(secondCreated["id"] as? String)
+        openTask(named: "Second Review PR conflict UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Second Review PR conflict UI")
+        element("back-to-board-button").click()
+        XCTAssertTrue(waitUntil({ element("task-card-\(secondTaskID)").exists }, timeout: 10))
+        XCTAssertTrue(terminateAppAndWait(app))
+        try seedTaskPullRequest(taskID: taskID, number: 123, url: "https://github.com/stationai-test/fixture/pull/123")
+        try seedTaskPullRequest(taskID: secondTaskID, number: 456, url: "https://github.com/stationai-test/fixture/pull/456")
+        let remote = runDirectory.appendingPathComponent("conflict-solver-origin.git", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: remote.path), "Each UI case should use a fresh owned bare remote.")
+        _ = try runGitOutput(remote, "init", "--bare")
+        for (id, number) in [(taskID, 123), (secondTaskID, 456)] {
+            let record = try XCTUnwrap((try taskRecord(id: id)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+            let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String), isDirectory: true)
+            try runGit(worktree, "push", remote.path, "HEAD:refs/heads/pr-\(number)")
+        }
+        ghEnvironment["STATIONAI_E2E_GH_REMOTE_REPOSITORY"] = remote.path
+
+        let resolutionFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success-wait")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: resolutionFixture.path))
+        codexFixtureExecutable = resolutionFixture.path
+        let readyURL = URL(fileURLWithPath: resolutionFixture.path + ".resolve-ready")
+        let continueURL = URL(fileURLWithPath: resolutionFixture.path + ".resolve-continue")
+        let startCountURL = URL(fileURLWithPath: resolutionFixture.path + ".resolve-start-count")
+        try? FileManager.default.removeItem(at: readyURL)
+        try? FileManager.default.removeItem(at: continueURL)
+        try? FileManager.default.removeItem(at: startCountURL)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+
+        let link = element("task-pr-link-\(taskID)-123")
+        let resolveButton = element("task-resolve-pr-conflicts-\(taskID)")
+        XCTAssertTrue(link.waitForExistence(timeout: 10))
+        XCTAssertTrue(element("task-pr-link-\(secondTaskID)-456").waitForExistence(timeout: 10))
+        let startedDirectory = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["STATIONAI_E2E_GH_STARTED_DIRECTORY"]))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("123").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("456").path), "Both Review task probes should overlap on focus.")
+        XCTAssertFalse(resolveButton.exists, "A mergeable PR should not show the conflict action.")
+        Thread.sleep(forTimeInterval: 10.1)
+        let stateURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["STATIONAI_E2E_GH_STATE_PATH"]))
+        try "123=conflicting\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        for number in [123, 456] { try? FileManager.default.removeItem(at: startedDirectory.appendingPathComponent("\(number)")) }
+        activateOtherAppThenReturn()
+        XCTAssertTrue(resolveButton.waitForExistence(timeout: 10), "Focus should discover the conflicting PR.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("123").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("456").path), "Focus refresh should probe separate Review cards concurrently.")
+
+        resolveButton.click()
+        let initialPrompt = "The PR has conflicts. Fix them, commit, and push."
+        let initialPromptElement = app.staticTexts.matching(NSPredicate(format: "label == %@", initialPrompt)).firstMatch
+        XCTAssertTrue(initialPromptElement.waitForExistence(timeout: 10), "The conflict action should send the corrected instruction into the task conversation.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: readyURL.path) }, timeout: 10), "Codex should start the conflict resolution turn.")
+        try "Continue after first conflict attempt.\n".write(to: continueURL, atomically: true, encoding: .utf8)
+
+        let retryPrompt = "The PR still has conflicts or your latest commit has not reached GitHub. Resolve the remaining conflicts, commit, and push. Verify the PR's merge status before finishing."
+        let retryPromptElement = app.staticTexts.matching(NSPredicate(format: "label == %@", retryPrompt)).firstMatch
+        XCTAssertTrue(retryPromptElement.waitForExistence(timeout: 15), "A still-conflicting PR should receive one follow-up turn.")
+        XCTAssertTrue(waitUntil({
+            (try? String(contentsOf: startCountURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) == 2
+        }, timeout: 10), "Codex should start exactly two resolution turns.")
+        let primaryRecord = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let primaryWorktree = URL(fileURLWithPath: try XCTUnwrap(primaryRecord["worktreePath"] as? String), isDirectory: true)
+        try "Resolution from the conflict solver.\n".write(
+            to: primaryWorktree.appendingPathComponent("conflict-solver-resolution.txt"), atomically: true, encoding: .utf8
+        )
+        try runGit(primaryWorktree, "add", "conflict-solver-resolution.txt")
+        try runGit(primaryWorktree, "commit", "-m", "Resolve pull request conflicts")
+        let resolvedLocalHead = try runGitOutput(primaryWorktree, "rev-parse", "HEAD")
+        let staleRemoteHead = try runGitOutput(remote, "rev-parse", "refs/heads/pr-123")
+        XCTAssertNotEqual(resolvedLocalHead, staleRemoteHead, "A local resolution commit must remain unconfirmed until it is pushed.")
+        try "123=remote\n456=unmerged\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        _ = try runCLI(
+            ["task", "outcome", taskID, "completed"],
+            extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": resolutionFixture.path]
+        )
+        try "Continue after verified conflict resolution.\n".write(to: continueURL, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ element("send-message-button").exists }, timeout: 15), "The second Codex turn should finish after the verified push.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
+        element("back-to-board-button").click()
+        XCTAssertTrue(resolveButton.exists, "A mergeable PR with a mismatched remote head must retain the conflict action.")
+        try runGit(primaryWorktree, "push", remote.path, "HEAD:refs/heads/pr-123")
+        XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/pr-123"), resolvedLocalHead)
+        try "123=remote\n456=unmerged\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        for number in [123, 456] { try? FileManager.default.removeItem(at: startedDirectory.appendingPathComponent("\(number)")) }
+        Thread.sleep(forTimeInterval: 10.1)
+        activateOtherAppThenReturn()
+        XCTAssertTrue(waitUntil({ !resolveButton.exists }, timeout: 10), "The action should disappear after GitHub confirms the pushed head.")
     }
 
     // case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done changes only task status and preserves dirty worktree files, branch, and target commit without committing or merging.
@@ -1893,7 +2000,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ lowestTask.exists && lowestTask.isHittable }, timeout: 10), "Vertical board scrolling should make lower backlog tasks reachable.")
     }
 
-    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Only an explicit completed outcome reaches Review.
+    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review.
     func test_task_progress_reports_publish_persist_and_clear() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Progress reports", roots: [fixture.primary.path])
@@ -2029,9 +2136,10 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(instructions.contains(cliURL.path))
         XCTAssertTrue(instructions.contains("task progress publish"))
         XCTAssertTrue(instructions.contains("hidden from the conversation"))
-        XCTAssertTrue(instructions.contains("periodically during substantial work"))
-        XCTAssertTrue(instructions.contains("active test and position"))
-        XCTAssertTrue(instructions.contains("Test 3/8"))
+        XCTAssertTrue(instructions.contains("at least every 30 seconds"))
+        XCTAssertTrue(instructions.contains("starting or finishing a substantial tool call"))
+        XCTAssertTrue(instructions.contains("active suite/case and position"))
+        XCTAssertTrue(instructions.contains("CLI/XPC 3/8"))
         XCTAssertTrue(instructions.contains("under 80 characters"))
         XCTAssertTrue(instructions.contains("task outcome"))
         XCTAssertTrue(instructions.contains("waiting-response"))
@@ -4071,7 +4179,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
     }
 
-    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; in-progress, completed, and failed statuses, server/tool identity, and optional duration render and survive history reload without duplicate rows, even when later-turn items follow the calls in history. Missing optional duration remains absent. Arguments and raw result text are never exposed; only safe result summaries are shown.
+    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. The conversation header shows only the newest active call; when it completes, the indicator falls back to the next still-active call. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
     func test_conversation_shows_mcp_and_dynamic_tool_activity() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-tool-activity").path
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
@@ -4087,18 +4195,42 @@ final class StationAIUITests: XCTestCase {
 
         let fixture = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable))
         let toolReady = URL(fileURLWithPath: fixture.path + ".tool-ready")
+        let toolReleaseLatest = URL(fileURLWithPath: fixture.path + ".tool-release-latest")
         let toolRelease = URL(fileURLWithPath: fixture.path + ".tool-release")
-        defer { try? "Release tool completions after assertion failure.\n".write(to: toolRelease, atomically: true, encoding: .utf8) }
+        defer {
+            try? "Release newest tool after assertion failure.\n".write(to: toolReleaseLatest, atomically: true, encoding: .utf8)
+            try? "Release tool completions after assertion failure.\n".write(to: toolRelease, atomically: true, encoding: .utf8)
+        }
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: toolReady.path) }, timeout: 20), "The fixture should pause after the tool start notifications.")
-        let mcpRow = element("codex-activity-row-item_fixture_mcp_call")
-        let dynamicRow = element("codex-activity-row-item_fixture_dynamic_call")
-        let legacyDynamicRow = element("codex-activity-row-item_fixture_dynamic_legacy")
-        XCTAssertTrue(mcpRow.waitForExistence(timeout: 10), "MCP calls should appear while they are in progress.")
-        XCTAssertTrue(dynamicRow.waitForExistence(timeout: 10), "Dynamic tool calls should appear while they are in progress.")
-        XCTAssertTrue(legacyDynamicRow.waitForExistence(timeout: 10), "Older dynamic tool calls may omit optional duration metadata.")
+        let currentActivity = element("current-activity-title")
+        XCTAssertTrue(waitUntil({ currentActivity.label == "Tool · legacySummary" }, timeout: 10), "The header should show the most recently started active call.")
+        XCTAssertTrue(element("current-activity-duration").exists, "The current activity should show its elapsed time outside the disclosure.")
+        element("codex-activity-disclosure").click()
+        let activityDetails = element("codex-activity-details")
+        XCTAssertTrue(activityDetails.waitForExistence(timeout: 5), "Expanded Working for should contain tool activity rows.")
+        func containsPositiveDuration(_ value: String) -> Bool {
+            value.range(of: #"Duration · [1-9][0-9]* ms"#, options: .regularExpression) != nil
+        }
+        func containsPositiveRunningDuration(_ value: String) -> Bool {
+            value.range(of: #"Running · [1-9][0-9]* ms"#, options: .regularExpression) != nil
+        }
+        let mcpRow = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").firstMatch
+        let dynamicRow = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").firstMatch
+        let legacyDynamicRow = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").firstMatch
+        XCTAssertTrue(mcpRow.waitForExistence(timeout: 10), "MCP calls should appear inside expanded Working for while in progress.")
+        XCTAssertTrue(dynamicRow.waitForExistence(timeout: 10), "Dynamic tool calls should appear inside expanded Working for while in progress.")
+        XCTAssertTrue(legacyDynamicRow.waitForExistence(timeout: 10), "Every active call should appear inside expanded Working for.")
+        for identifier in ["item_fixture_mcp_call", "item_fixture_dynamic_call", "item_fixture_dynamic_legacy"] {
+            let liveDuration = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-duration-\(identifier)").firstMatch
+            XCTAssertTrue(liveDuration.exists, "Expanded Working for should show a live duration for \(identifier).")
+            XCTAssertTrue(containsPositiveRunningDuration(liveDuration.value as? String ?? ""), "The live duration for \(identifier) should contain positive elapsed time in milliseconds.")
+        }
         XCTAssertTrue(mcpRow.label.contains("In progress"))
         XCTAssertTrue(dynamicRow.label.contains("In progress"))
         XCTAssertTrue(legacyDynamicRow.label.contains("In progress"))
+        try "Finish the newest call first.\n".write(to: toolReleaseLatest, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ currentActivity.label == "Tool · summarize" }, timeout: 15), "When the newest call finishes, the header should fall back to the next active call.")
+        XCTAssertTrue(waitUntil({ legacyDynamicRow.label.contains("Completed") }, timeout: 10))
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").count, 1)
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").count, 1)
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").count, 1)
@@ -4107,12 +4239,13 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(mcpRow.label.contains("MCP · lookup"))
         XCTAssertTrue((mcpRow.value as? String ?? "").contains("fixture-server"))
         XCTAssertTrue((mcpRow.value as? String ?? "").contains("Returned 1 result item"))
+        XCTAssertTrue(containsPositiveDuration(mcpRow.value as? String ?? ""), "The completed MCP call should display its positive measured duration in milliseconds.")
         XCTAssertTrue((dynamicRow.value as? String ?? "").contains("Tool call failed"))
         XCTAssertTrue((dynamicRow.value as? String ?? "").contains("Duration · 37 ms"))
         XCTAssertTrue(dynamicRow.label.contains("Tool · summarize"))
         XCTAssertTrue(legacyDynamicRow.label.contains("Tool · legacySummary"))
         XCTAssertTrue((legacyDynamicRow.value as? String ?? "").contains("Returned 1 result item"))
-        XCTAssertFalse((legacyDynamicRow.value as? String ?? "").contains("Duration"))
+        XCTAssertTrue(containsPositiveDuration(legacyDynamicRow.value as? String ?? ""), "The completed legacy call should display its positive measured duration in milliseconds.")
         let renderedToolRows = "\(mcpRow.label) \(mcpRow.value ?? "") \(dynamicRow.label) \(dynamicRow.value ?? "") \(legacyDynamicRow.label) \(legacyDynamicRow.value ?? "")"
         XCTAssertFalse(renderedToolRows.contains("RAW_ARGUMENT_SECRET"))
         XCTAssertFalse(renderedToolRows.contains("RAW_RESULT_SECRET"))
@@ -4126,16 +4259,20 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(savedActivities.filter { $0["id"] as? String == "item_fixture_dynamic_call" }.count, 1)
         element("back-to-board-button").click()
         openTask(named: "Tool activity")
-        let reloadedMcpRow = element("codex-activity-row-item_fixture_mcp_call")
-        XCTAssertTrue(reloadedMcpRow.waitForExistence(timeout: 20), "Completed MCP activity should remain after history reload.")
-        let reloadedDynamicRow = element("codex-activity-row-item_fixture_dynamic_call")
-        let reloadedLegacyDynamicRow = element("codex-activity-row-item_fixture_dynamic_legacy")
+        element("codex-activity-disclosure").click()
+        let reloadedActivityDetails = element("codex-activity-details")
+        XCTAssertTrue(reloadedActivityDetails.waitForExistence(timeout: 5))
+        let reloadedMcpRow = reloadedActivityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").firstMatch
+        XCTAssertTrue(reloadedMcpRow.waitForExistence(timeout: 20), "Completed MCP activity should remain in Working for after history reload.")
+        let reloadedDynamicRow = reloadedActivityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").firstMatch
+        let reloadedLegacyDynamicRow = reloadedActivityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").firstMatch
         XCTAssertTrue(reloadedDynamicRow.waitForExistence(timeout: 10), "Failed dynamic activity should remain after history reload.")
         XCTAssertTrue(reloadedLegacyDynamicRow.waitForExistence(timeout: 10), "Legacy dynamic activity should remain after history reload.")
         XCTAssertTrue(reloadedMcpRow.label.contains("MCP · lookup"))
         XCTAssertTrue(reloadedMcpRow.label.contains("Completed"))
         XCTAssertTrue((reloadedMcpRow.value as? String ?? "").contains("fixture-server"))
         XCTAssertTrue((reloadedMcpRow.value as? String ?? "").contains("Returned 1 result item"))
+        XCTAssertTrue(containsPositiveDuration(reloadedMcpRow.value as? String ?? ""), "The positive MCP duration must survive history reload in milliseconds.")
         XCTAssertTrue(reloadedDynamicRow.label.contains("Tool · summarize"))
         XCTAssertTrue(reloadedDynamicRow.label.contains("Failed"))
         XCTAssertTrue((reloadedDynamicRow.value as? String ?? "").contains("Tool call failed"))
@@ -4143,7 +4280,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(reloadedLegacyDynamicRow.label.contains("Tool · legacySummary"))
         XCTAssertTrue(reloadedLegacyDynamicRow.label.contains("Completed"))
         XCTAssertTrue((reloadedLegacyDynamicRow.value as? String ?? "").contains("Returned 1 result item"))
-        XCTAssertFalse((reloadedLegacyDynamicRow.value as? String ?? "").contains("Duration"), "Missing optional duration must remain absent.")
+        XCTAssertTrue(containsPositiveDuration(reloadedLegacyDynamicRow.value as? String ?? ""), "The positive legacy tool duration must survive history reload in milliseconds.")
         let reloadedToolRows = reloadedMcpRow.label + " " + (reloadedMcpRow.value as? String ?? "")
             + " " + reloadedDynamicRow.label + " " + (reloadedDynamicRow.value as? String ?? "")
             + " " + reloadedLegacyDynamicRow.label + " " + (reloadedLegacyDynamicRow.value as? String ?? "")
@@ -4982,24 +5119,63 @@ final class StationAIUITests: XCTestCase {
     }
 
     private func makeGitHubStateFixture() throws -> [String: String] {
+        try makeGitHubStateFixture(expectedNumbers: [123, 456])
+    }
+
+    private func makeGitHubStateFixture(expectedNumbers: [Int]) throws -> [String: String] {
         let directory = dataDirectory.appendingPathComponent("gh-fixture", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let stateURL = directory.appendingPathComponent("state")
         let callLogURL = directory.appendingPathComponent("calls")
-        try "123=unmerged\n456=unmerged\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        try expectedNumbers.map { "\($0)=unmerged" }.joined(separator: "\n").appending("\n")
+            .write(to: stateURL, atomically: true, encoding: .utf8)
+        let startedDirectory = directory.appendingPathComponent("started", isDirectory: true)
+        try FileManager.default.createDirectory(at: startedDirectory, withIntermediateDirectories: true)
+        let expectedIDs = expectedNumbers.map(String.init).joined(separator: " ")
         let executable = directory.appendingPathComponent("gh")
         let script = """
         #!/bin/sh
-        if [ "$1" != pr ] || [ "$2" != view ] || { [ "$3" != 123 ] && [ "$3" != 456 ]; } || [ "$4" != --json ] || [ "$5" != mergedAt ]; then
+        if [ "$1" != pr ] || [ "$2" != view ] || { [ "$3" != 123 ] && [ "$3" != 456 ]; } || [ "$4" != --json ]; then
           echo 'Unexpected gh fixture command' >&2
           exit 2
         fi
         printf '%s\\n' "$3" >> "$STATIONAI_E2E_GH_CALL_LOG"
         state=$(awk -F= -v number="$3" '$1 == number { print $2 }' "$STATIONAI_E2E_GH_STATE_PATH")
-        if [ "$state" = merged ]; then
-          printf '{"mergedAt":"2026-10-22T00:00:00Z"}\\n'
+        if [ "$5" = mergedAt ]; then
+          if [ "$state" = merged ]; then
+            printf '{"mergedAt":"2026-10-22T00:00:00Z"}\\n'
+          else
+            printf '{"mergedAt":null}\\n'
+          fi
+        elif [ "$5" = mergedAt,mergeable,headRefOid ]; then
+          touch "$STATIONAI_E2E_GH_STARTED_DIRECTORY/$3"
+          parallel=0
+          for attempt in $(seq 1 100); do
+            parallel=1
+            for expected in $STATIONAI_E2E_GH_EXPECTED_IDS; do
+              if [ ! -f "$STATIONAI_E2E_GH_STARTED_DIRECTORY/$expected" ]; then parallel=0; fi
+            done
+            [ "$parallel" = 1 ] && break
+            sleep 0.02
+          done
+          if [ "$parallel" != 1 ]; then echo 'Review pull request probes did not run in parallel' >&2; exit 3; fi
+          if [ -n "$STATIONAI_E2E_GH_REMOTE_REPOSITORY" ]; then
+            head=$(git --git-dir "$STATIONAI_E2E_GH_REMOTE_REPOSITORY" rev-parse "refs/heads/pr-$3")
+          else
+            head=$(git rev-parse HEAD)
+          fi
+          if [ "$state" = head-mismatch ]; then
+            printf '{"mergedAt":null,"mergeable":"MERGEABLE","headRefOid":"remote-head-not-pushed"}\\n'
+          elif [ "$state" = merged ]; then
+            printf '{"mergedAt":"2026-10-22T00:00:00Z","mergeable":"MERGEABLE","headRefOid":"%s"}\\n' "$head"
+          elif [ "$state" = conflicting ]; then
+            printf '{"mergedAt":null,"mergeable":"CONFLICTING","headRefOid":"%s"}\\n' "$head"
+          else
+            printf '{"mergedAt":null,"mergeable":"MERGEABLE","headRefOid":"%s"}\\n' "$head"
+          fi
         else
-          printf '{"mergedAt":null}\\n'
+          echo 'Unexpected gh fixture field list' >&2
+          exit 2
         fi
         """
         try script.write(to: executable, atomically: true, encoding: .utf8)
@@ -5009,6 +5185,8 @@ final class StationAIUITests: XCTestCase {
             "PATH": "\(directory.path):\(inheritedPath)",
             "STATIONAI_E2E_GH_STATE_PATH": stateURL.path,
             "STATIONAI_E2E_GH_CALL_LOG": callLogURL.path,
+            "STATIONAI_E2E_GH_STARTED_DIRECTORY": startedDirectory.path,
+            "STATIONAI_E2E_GH_EXPECTED_IDS": expectedIDs,
         ]
     }
 

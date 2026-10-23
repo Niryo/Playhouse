@@ -26,7 +26,10 @@ struct KanbanBoardView: View {
     @State private var isLoadingArchivePage = false
     @State private var taskCreatingPullRequests = Set<UUID>()
     @State private var mergedReviewTaskIDs = Set<UUID>()
+    @State private var conflictedReviewTaskIDs = Set<UUID>()
+    @State private var conflictResolutionTaskID: UUID?
     @State private var checkingMergedPullRequests = false
+    @State private var mergedPullRequestCheckPending = false
     @State private var lastMergedPullRequestCheckAt: Date?
     @State private var taskAwaitingUnmergedConfirmation: UUID?
     @State private var taskAwaitingPRConflictChoice: BoardTask?
@@ -40,9 +43,17 @@ struct KanbanBoardView: View {
     var body: some View {
         Group {
             if let selectedTask {
-                TaskConversationView(task: selectedTask, isNewTask: isSelectedTaskNew, isReadOnly: selectedTask.status == .done) {
+                TaskConversationView(
+                    task: selectedTask, isNewTask: isSelectedTaskNew, isReadOnly: selectedTask.status == .done,
+                    conflictResolutionRequested: conflictResolutionTaskID == selectedTask.id,
+                    onConflictResolutionChecked: { resolved in
+                        if resolved { conflictedReviewTaskIDs.remove(selectedTask.id) }
+                        else { conflictedReviewTaskIDs.insert(selectedTask.id) }
+                    }
+                ) {
                     self.selectedTask = nil
                     self.isSelectedTaskNew = false
+                    self.conflictResolutionTaskID = nil
                 }
                 .id(selectedTask.id)
             } else {
@@ -52,7 +63,7 @@ struct KanbanBoardView: View {
         .background(WorkspaceTheme.windowBackground)
         .frame(minWidth: 980, minHeight: 640)
         .onAppear {
-            checkMergedReviewPullRequests()
+            checkReviewPullRequests()
             let retained = StationAIStore.takeLifecycleResetNotice(
                 dataDirectory: ProcessInfo.processInfo.environment["STATIONAI_DATA_DIRECTORY"]
             )
@@ -61,7 +72,7 @@ struct KanbanBoardView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            checkMergedReviewPullRequests()
+            checkReviewPullRequests()
         }
         .sheet(isPresented: Binding(
             get: { taskBeingRenamed != nil },
@@ -362,8 +373,13 @@ struct KanbanBoardView: View {
             },
             onMoveTask: { id, status in moveTask(id: id, to: status) },
             onCreatePullRequests: { createPullRequests(for: $0) },
+            onResolveConflicts: {
+                conflictResolutionTaskID = $0.id
+                selectedTask = $0
+            },
             creatingPullRequestTaskIDs: taskCreatingPullRequests,
             mergedReviewTaskIDs: mergedReviewTaskIDs,
+            conflictedReviewTaskIDs: conflictedReviewTaskIDs,
             onAddTask: openNewTask,
             onOpenTask: { selectedTask = $0 },
             onRenameTask: { taskBeingRenamed = $0 },
@@ -715,43 +731,56 @@ struct KanbanBoardView: View {
         }
     }
 
-    private func checkMergedReviewPullRequests() {
+    private func checkReviewPullRequests() {
         let now = Date()
-        guard !checkingMergedPullRequests,
-              lastMergedPullRequestCheckAt.map({ now.timeIntervalSince($0) >= 10 }) ?? true else { return }
+        if checkingMergedPullRequests {
+            if lastMergedPullRequestCheckAt.map({ now.timeIntervalSince($0) >= 10 }) ?? false {
+                mergedPullRequestCheckPending = true
+            }
+            return
+        }
+        guard lastMergedPullRequestCheckAt.map({ now.timeIntervalSince($0) >= 10 }) ?? true else { return }
         lastMergedPullRequestCheckAt = now
         checkingMergedPullRequests = true
         Task { @MainActor in
             defer {
                 checkingMergedPullRequests = false
+                if mergedPullRequestCheckPending {
+                    mergedPullRequestCheckPending = false
+                    checkReviewPullRequests()
+                }
             }
-            var merged = Set<UUID>()
-            let reviewTasks = tasks.filter { task in
+            let reviewIDs = tasks.filter { task in
                 task.status == .review && task.repositoryWorktrees.contains { !$0.isPending && $0.pullRequestNumber != nil }
-            }
-            guard !reviewTasks.isEmpty else {
+            }.map(\.id)
+            guard !reviewIDs.isEmpty else {
                 mergedReviewTaskIDs = []
+                conflictedReviewTaskIDs = []
                 return
             }
-            do {
-                let service = StationAIPullRequestService()
-                let executable = try service.resolveExecutable()
-                for task in reviewTasks {
-                    let linked = task.repositoryWorktrees.filter { !$0.isPending && $0.pullRequestNumber != nil }
-                    guard !linked.isEmpty else { continue }
-                    var allMerged = true
-                    for repository in linked {
-                        if try await !service.isMerged(repository, executable: executable) {
-                            allMerged = false
-                        }
+            let manager = BoardTaskManager(modelContext: modelContext)
+            await withTaskGroup(of: (UUID, [PullRequestReviewState]?, String?).self) { group in
+                for id in reviewIDs {
+                    group.addTask {
+                        do { return (id, try await manager.reviewPullRequests(id), nil) }
+                        catch { return (id, nil, error.localizedDescription) }
                     }
-                    if allMerged { merged.insert(task.id) }
                 }
-                mergedReviewTaskIDs = merged
-            } catch {
-                mergedReviewTaskIDs = merged
-                pullRequestError = error.localizedDescription
+                for await (id, states, error) in group {
+                    if let states {
+                        if !states.isEmpty && states.allSatisfy(\.merged) { mergedReviewTaskIDs.insert(id) }
+                        else { mergedReviewTaskIDs.remove(id) }
+                        if states.contains(where: \.requiresConflictResolution) { conflictedReviewTaskIDs.insert(id) }
+                        else { conflictedReviewTaskIDs.remove(id) }
+                    } else if let error {
+                        mergedReviewTaskIDs.remove(id)
+                        conflictedReviewTaskIDs.remove(id)
+                        pullRequestError = error
+                    }
+                }
             }
+            mergedReviewTaskIDs.formIntersection(reviewIDs)
+            conflictedReviewTaskIDs.formIntersection(reviewIDs)
         }
     }
 
@@ -873,8 +902,10 @@ private struct KanbanColumnView: View {
     let tasks: [BoardTask]
     let onMoveTask: (UUID, TaskStatus) -> Void
     let onCreatePullRequests: (BoardTask) -> Void
+    let onResolveConflicts: (BoardTask) -> Void
     let creatingPullRequestTaskIDs: Set<UUID>
     let mergedReviewTaskIDs: Set<UUID>
+    let conflictedReviewTaskIDs: Set<UUID>
     let onAddTask: () -> Void
     let onOpenTask: (BoardTask) -> Void
     let onRenameTask: (BoardTask) -> Void
@@ -978,8 +1009,10 @@ private struct KanbanColumnView: View {
             onRename: { onRenameTask(task) },
             onDelete: { onDeleteTask(task) },
             onCreatePullRequests: { onCreatePullRequests(task) },
+            onResolveConflicts: { onResolveConflicts(task) },
             isCreatingPullRequests: creatingPullRequestTaskIDs.contains(task.id),
             isPullRequestMerged: mergedReviewTaskIDs.contains(task.id),
+            hasPullRequestConflicts: conflictedReviewTaskIDs.contains(task.id),
             onMoveToDone: task.status == .review ? { onMoveTask(task.id, .done) } : nil
         )
 
@@ -1140,8 +1173,10 @@ private struct TaskCardView: View {
     let onRename: () -> Void
     let onDelete: () -> Void
     let onCreatePullRequests: () -> Void
+    let onResolveConflicts: () -> Void
     let isCreatingPullRequests: Bool
     let isPullRequestMerged: Bool
+    let hasPullRequestConflicts: Bool
     let onMoveToDone: (() -> Void)?
 
     var body: some View {
@@ -1277,6 +1312,19 @@ private struct TaskCardView: View {
                             .accessibilityLabel("Green checkmark. Complete task, all linked pull requests merged")
                             .accessibilityIdentifier("task-complete-merged-pr-\(task.id.uuidString)")
                         } else {
+                            if hasPullRequestConflicts {
+                                Button(action: onResolveConflicts) {
+                                    Image("ConflictIndicator")
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(width: 30, height: 12)
+                                }
+                                .buttonHoverPointer()
+                                .actionButtonHoverEmphasis()
+                                .help("Resolve pull request conflicts with Codex")
+                                .accessibilityLabel("Resolve pull request conflicts")
+                                .accessibilityIdentifier("task-resolve-pr-conflicts-\(task.id.uuidString)")
+                            }
                             ForEach(linked, id: \.repositoryPath) { record in
                                 if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
                                     Link("#\(number)", destination: url)

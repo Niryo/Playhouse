@@ -77,6 +77,7 @@ final class BoardTask {
     var repositoryWorktreesData: Data?
     var contextFolderPathsData: Data?
     var draftImageDataURLsData: Data?
+    var conversationActivityDurationsData: Data?
 
     var workspaceRootPaths: [String] {
         get {
@@ -139,6 +140,7 @@ final class BoardTask {
         repositoryWorktreesData = nil
         contextFolderPathsData = nil
         draftImageDataURLsData = nil
+        conversationActivityDurationsData = nil
     }
 }
 

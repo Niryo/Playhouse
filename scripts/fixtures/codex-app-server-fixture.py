@@ -369,6 +369,8 @@ def main():
             elif mode.endswith("-success-wait") and not mode.endswith("-title-success-wait"):
                 ready = Path(str(sys.argv[0]) + ".resolve-ready")
                 resume = Path(str(sys.argv[0]) + ".resolve-continue")
+                with Path(str(sys.argv[0]) + ".resolve-start-count").open("a", encoding="utf-8") as stream:
+                    stream.write("start\n")
                 ready.write_text("Codex conflict-resolution turn is active.\n", encoding="utf-8")
                 deadline = time.monotonic() + 30
                 while not resume.exists() and time.monotonic() < deadline:
@@ -490,7 +492,17 @@ def main():
                     ready.unlink(missing_ok=True)
                     release.unlink(missing_ok=True)
                     ready.write_text("Tool lifecycle starts are visible.\n", encoding="utf-8")
+                    release_latest = Path(str(sys.argv[0]) + ".tool-release-latest")
+                    release_latest.unlink(missing_ok=True)
                     deadline = time.monotonic() + 30
+                    while not release_latest.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    if not release_latest.exists():
+                        return 3
+                    release_latest.unlink(missing_ok=True)
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
+                        **legacy_dynamic_item, "status": "completed", "success": True, "contentItems": [{"type": "inputText", "text": "RAW_RESULT_SECRET"}],
+                    }}})
                     while not release.exists() and time.monotonic() < deadline:
                         time.sleep(0.02)
                     ready.unlink(missing_ok=True)
@@ -502,9 +514,6 @@ def main():
                     }}})
                     write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
                         **dynamic_item, "status": "failed", "success": False, "durationMs": 37,
-                    }}})
-                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
-                        **legacy_dynamic_item, "status": "completed", "success": True, "contentItems": [{"type": "inputText", "text": "RAW_RESULT_SECRET"}],
                     }}})
                 for action_item in diagnostic_action_items(os.environ.get("STATIONAI_FIXTURE_WORKSPACE", os.getcwd())):
                     write({"jsonrpc": "2.0", "method": "item/started", "params": {

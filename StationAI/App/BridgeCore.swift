@@ -647,6 +647,35 @@ enum GitHubPullRequestManager {
         let mergedAt: String?
     }
 
+    private struct PullRequestReviewResponse: Decodable {
+        let mergedAt: String?
+        let mergeable: String?
+        let headRefOid: String?
+    }
+
+    static func reviewState(_ record: RepositoryWorktreeRecord, executable: String) throws -> PullRequestReviewState {
+        guard let number = record.pullRequestNumber else {
+            throw BridgeCommandError(code: "invalid_transition", message: "This repository has no linked pull request.")
+        }
+        let result = try run(executable, ["pr", "view", String(number), "--json", "mergedAt,mergeable,headRefOid"], directory: record.worktreePath)
+        let response = try JSONDecoder().decode(PullRequestReviewResponse.self, from: Data(result.utf8))
+        let localHead: String?
+        if response.headRefOid != nil {
+            let git = try StationAIProcessRunner.run(executable: "/usr/bin/git", arguments: ["rev-parse", "HEAD"], directory: record.worktreePath)
+            guard git.status == 0 else {
+                throw BridgeCommandError(code: "operation_failed", message: "Couldn't inspect the local head for pull request #\(number).")
+            }
+            localHead = String(data: git.stdout, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            localHead = nil
+        }
+        return PullRequestReviewState(
+            repositoryPath: record.repositoryPath, number: number,
+            merged: response.mergedAt != nil, mergeable: response.mergeable ?? "UNKNOWN",
+            headRefOid: response.headRefOid, localHeadOid: localHead
+        )
+    }
+
     static func resolveExecutable() throws -> String {
         let paths = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map {
             URL(fileURLWithPath: String($0)).appendingPathComponent("gh").path
@@ -730,6 +759,38 @@ enum GitHubPullRequestManager {
     }
 }
 
+struct PullRequestReviewState: Codable, Sendable {
+    let repositoryPath: String
+    let number: Int
+    let merged: Bool
+    let mergeable: String
+    let headRefOid: String?
+    let localHeadOid: String?
+    let hasConflicts: Bool
+    let isConfirmedResolved: Bool
+
+    var requiresConflictResolution: Bool {
+        hasConflicts || (!merged && mergeable == "MERGEABLE" && headRefOid != nil && headRefOid != localHeadOid)
+    }
+
+    init(repositoryPath: String, number: Int, merged: Bool, mergeable: String, headRefOid: String?, localHeadOid: String?) {
+        self.repositoryPath = repositoryPath
+        self.number = number
+        self.merged = merged
+        self.mergeable = mergeable
+        self.headRefOid = headRefOid
+        self.localHeadOid = localHeadOid
+        hasConflicts = !merged && mergeable == "CONFLICTING"
+        isConfirmedResolved = merged || (mergeable == "MERGEABLE" && headRefOid != nil && headRefOid == localHeadOid)
+    }
+}
+
+enum PullRequestResolutionCheck: String, Codable, Sendable {
+    case resolved
+    case stillConflicted
+    case inconclusive
+}
+
 struct StationAIPullRequestService {
 
     func resolveExecutable() throws -> String {
@@ -756,6 +817,12 @@ struct StationAIPullRequestService {
     func isMerged(_ record: RepositoryWorktreeRecord, executable: String) async throws -> Bool {
         try await StationAIBackgroundOperation.run {
             try GitHubPullRequestManager.isMerged(record, executable: executable)
+        }
+    }
+
+    func reviewState(_ record: RepositoryWorktreeRecord, executable: String) async throws -> PullRequestReviewState {
+        try await StationAIBackgroundOperation.run {
+            try GitHubPullRequestManager.reviewState(record, executable: executable)
         }
     }
 }
@@ -1647,6 +1714,36 @@ final class BoardTaskManager {
         }
     }
 
+    func reviewPullRequests(_ id: UUID) async throws -> [PullRequestReviewState] {
+        let task = try requireTask(id)
+        let records = task.repositoryWorktrees.filter { !$0.isPending && $0.pullRequestNumber != nil }
+        guard !records.isEmpty else { return [] }
+        let executable = try pullRequestService.resolveExecutable()
+        return try await withThrowingTaskGroup(of: PullRequestReviewState.self) { group in
+            for record in records {
+                group.addTask {
+                    try await StationAIPullRequestService().reviewState(record, executable: executable)
+                }
+            }
+            var states: [PullRequestReviewState] = []
+            for try await state in group { states.append(state) }
+            return states.sorted { $0.repositoryPath < $1.repositoryPath }
+        }
+    }
+
+    func verifyPullRequestResolution(_ id: UUID) async throws -> PullRequestResolutionCheck {
+        var latest: [PullRequestReviewState] = []
+        for attempt in 0..<5 {
+            latest = try await reviewPullRequests(id)
+            if !latest.isEmpty && latest.allSatisfy(\.isConfirmedResolved) { return .resolved }
+            if attempt < 4 { try await Task.sleep(for: .seconds(1)) }
+        }
+        guard !latest.isEmpty else { return .inconclusive }
+        return latest.contains(where: {
+            $0.hasConflicts || ($0.headRefOid != nil && $0.headRefOid != $0.localHeadOid)
+        }) ? .stillConflicted : .inconclusive
+    }
+
     private func pullRequestConflictRepositoriesUnlocked(_ id: UUID) async throws -> [String] {
         let task = try requireTask(id)
         guard !task.repositoryWorktrees.isEmpty else { return [] }
@@ -1802,6 +1899,24 @@ final class BoardTaskManager {
             try await saveTaskContext(taskID: id)
             return BoardTaskRecord(task: task)
         }
+    }
+
+    func recordConversationActivityDuration(taskID: UUID, activityID: String, durationMs: Int) async throws {
+        guard !activityID.isEmpty, durationMs >= 0 else { return }
+        try await withTaskOperationLock(taskID) {
+            let task = try self.requireTask(taskID)
+            var durations = (try? task.conversationActivityDurationsData.map {
+                try JSONDecoder().decode([String: Int].self, from: $0)
+            }) ?? [:]
+            durations[activityID] = durationMs
+            task.conversationActivityDurationsData = try? JSONEncoder().encode(durations)
+            try await self.saveTaskContext(taskID: taskID)
+        }
+    }
+
+    func conversationActivityDurations(taskID: UUID) -> [String: Int] {
+        guard let task = try? requireTask(taskID), let data = task.conversationActivityDurationsData else { return [:] }
+        return (try? JSONDecoder().decode([String: Int].self, from: data)) ?? [:]
     }
 
     @discardableResult
@@ -2700,13 +2815,19 @@ final class CodexConversationManager {
                 developerInstructions: TaskProgressReportInstructions.make(taskID: taskID),
                 onActionRequest: onActionRequest
             )
+            let savedDurations = tasks.conversationActivityDurations(taskID: taskID)
+            let activities = history.activities.map { activity -> CodexActivity in
+                var activity = activity
+                if activity.durationMs == nil { activity.durationMs = savedDurations[activity.id] }
+                return activity
+            }
             StationAIDiagnostics.record("conversation.history.succeeded", fields: client.diagnosticFields([
                 "taskID": taskID.uuidString,
                 "threadID": threadID,
                 "messageCount": String(history.messages.count),
                 "activityCount": String(history.activities.count)
             ]))
-            return history
+            return CodexThreadHistory(messages: history.messages, activities: activities, diff: history.diff)
         } catch {
             var fields = StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
             fields["taskID"] = taskID.uuidString
@@ -3126,7 +3247,18 @@ final class CodexConversationManager {
                 developerInstructions: TaskProgressReportInstructions.make(taskID: taskID),
                 onDelta: { delta in onUpdate(ConversationUpdate(type: "text_delta", text: delta)) },
                 onFinalMessage: { message in onUpdate(ConversationUpdate(type: "assistant_final", text: message)) },
-                onActivity: { activity in onUpdate(ConversationUpdate(type: "activity", activity: activity)) },
+                onActivity: { activity in
+                    if let durationMs = activity.durationMs {
+                        Task { @MainActor in
+                            try? await self.tasks.recordConversationActivityDuration(
+                                taskID: taskID,
+                                activityID: activity.id,
+                                durationMs: durationMs
+                            )
+                        }
+                    }
+                    onUpdate(ConversationUpdate(type: "activity", activity: activity))
+                },
                 onDiff: { diff in onUpdate(ConversationUpdate(type: "diff", diff: diff.unifiedDiff)) },
                 onHistory: { history in onUpdate(ConversationUpdate(type: "history", history: history)) },
                 onActionRequest: {
@@ -3172,6 +3304,13 @@ final class CodexConversationManager {
                     ))
                 }
             )
+            for (activityID, durationMs) in client.lastTurnActivityDurations {
+                try await tasks.recordConversationActivityDuration(
+                    taskID: taskID,
+                    activityID: activityID,
+                    durationMs: durationMs
+                )
+            }
             phase = "worktree-finalization"
             phase = "review-status-persistence"
             let reportedOutcome = try await tasks.finishConversationTurnOutcome(taskID)
@@ -3179,6 +3318,13 @@ final class CodexConversationManager {
             _ = try await tasks.setLifecycleStatus(taskID, to: finalStatus)
         } catch {
             await titleGeneration?.value
+            for (activityID, durationMs) in client.lastTurnActivityDurations {
+                try? await tasks.recordConversationActivityDuration(
+                    taskID: taskID,
+                    activityID: activityID,
+                    durationMs: durationMs
+                )
+            }
             var fields = StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
             fields["taskID"] = taskID.uuidString
             fields["threadID"] = persistedThreadID ?? ""
@@ -3410,6 +3556,10 @@ final class StationAIBridgeRuntime {
                 ))
             case "task.pr.conflicts":
                 result = .object(["repositories": .array(try await taskManager.pullRequestConflictRepositories(request.requiredUUID("taskID")).map(BridgeValue.string))])
+            case "task.pr.status":
+                result = try Self.value(await taskManager.reviewPullRequests(request.requiredUUID("taskID")))
+            case "task.pr.verify":
+                result = .object(["status": .string(try await taskManager.verifyPullRequestResolution(request.requiredUUID("taskID")).rawValue)])
             case "task.pr.resolve":
                 result = try Self.value(await taskManager.resolvePullRequestConflicts(
                     request.requiredUUID("taskID"), action: request.requiredString("action"),

@@ -161,6 +161,9 @@ final class CodexAppServerClient: ObservableObject {
     private var activeActivityHandler: ((CodexActivity) -> Void)?
     private var activeDiffHandler: ((CodexTurnDiff) -> Void)?
     private var activeActivities: [String: CodexActivity] = [:]
+    private var activityStartedAtUptime: [String: UInt64] = [:]
+    private var activityStartedAtDate: [String: Date] = [:]
+    private(set) var lastTurnActivityDurations: [String: Int] = [:]
     private var actionRequestHandler: (() -> Void)?
     private var userInputHandler: ((CodexUserInputRequest) async -> Void)?
     private var pendingUserInputRequestID: Any?
@@ -428,6 +431,9 @@ final class CodexAppServerClient: ObservableObject {
         activeActivityHandler = onActivity
         activeDiffHandler = onDiff
         activeActivities.removeAll()
+        activityStartedAtUptime.removeAll()
+        activityStartedAtDate.removeAll()
+        lastTurnActivityDurations.removeAll()
         defer {
             Self.processActiveThreadIDs.remove(threadID)
             clearActiveTurnForMailbox(threadID: threadID)
@@ -1111,11 +1117,32 @@ final class CodexAppServerClient: ObservableObject {
                     activeFinalMessageHandler?(text)
                 }
             }
+            let activityID = item["type"] as? String == "subAgentActivity"
+                ? (item["agentThreadId"] as? String ?? item["id"] as? String)
+                : item["id"] as? String
+            guard let activityID else { return }
+            if method == "item/started" {
+                activityStartedAtUptime[activityID] = activityStartedAtUptime[activityID] ?? DispatchTime.now().uptimeNanoseconds
+                activityStartedAtDate[activityID] = activityStartedAtDate[activityID] ?? .now
+            }
+            let measuredDuration: Int?
+            if method == "item/completed", let started = activityStartedAtUptime[activityID] {
+                measuredDuration = max(1, Int((DispatchTime.now().uptimeNanoseconds - started) / 1_000_000))
+            } else {
+                measuredDuration = nil
+            }
             guard let activity = CodexActivity.from(
                 item: item,
                 lifecycle: method == "item/completed" ? "completed" : "inProgress",
-                turnID: params["turnId"] as? String
+                turnID: params["turnId"] as? String,
+                startedAt: activityStartedAtDate[activityID],
+                measuredDurationMs: measuredDuration
             ) else { return }
+            if method == "item/completed" {
+                if let durationMs = activity.durationMs { lastTurnActivityDurations[activity.id] = durationMs }
+                activityStartedAtUptime.removeValue(forKey: activityID)
+                activityStartedAtDate.removeValue(forKey: activityID)
+            }
             activeActivities[activity.id] = activity
             activeActivityHandler?(activity)
         case "item/commandExecution/outputDelta":
@@ -1124,12 +1151,7 @@ final class CodexAppServerClient: ObservableObject {
                   let delta = params["delta"] as? String,
                   var activity = activeActivities[itemID] else { return }
             let output = String((activity.detail + delta).suffix(2_000))
-            activity = CodexActivity(
-                id: activity.id,
-                title: activity.title,
-                detail: output,
-                status: activity.status
-            )
+            activity.detail = output
             activeActivities[itemID] = activity
             activeActivityHandler?(activity)
         case "turn/diff/updated":
@@ -1431,7 +1453,7 @@ enum TaskProgressReportInstructions {
         let quotedExecutable = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
         let id = taskID.uuidString
         return """
-        Report your current work on the StationAI task board using the StationAI CLI. Publish at phase changes and periodically during substantial work so the card stays current, without reporting every small step. During tests, identify the active test and position when known (for example, "Test 3/8: task progress persistence"); during other work, name the current concrete activity. Keep each detail to a short subtitle, ideally under 80 characters, and update it as the work moves on. Use these commands for this task:
+        Report your current work on the StationAI task board using the StationAI CLI. Publish at every phase change, when starting or finishing a substantial tool call, and at least every 30 seconds during long commands, builds, tests, waits, or investigation. Keep the report current while a tool runs; after it finishes, replace it with the next active action. During tests, identify the active suite/case and position when known (for example, "CLI/XPC 3/8: task progress persistence"); during other work, name the concrete action and useful target. Keep each detail to a short subtitle, ideally under 80 characters. Do not report every tiny edit. Use these commands for this task:
         \(quotedExecutable) task progress publish \(id) --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail \"short detail\"]
         \(quotedExecutable) task progress custom \(id) --label \"short label\" [--detail \"short detail\"]
         \(quotedExecutable) task progress clear \(id)

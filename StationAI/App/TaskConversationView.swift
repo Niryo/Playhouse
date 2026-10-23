@@ -40,6 +40,8 @@ struct TaskConversationView: View {
     let task: BoardTask
     var isNewTask = false
     var isReadOnly = false
+    var conflictResolutionRequested = false
+    var onConflictResolutionChecked: (Bool) -> Void = { _ in }
     let onBack: () -> Void
 
     @State private var draft = ""
@@ -78,6 +80,7 @@ struct TaskConversationView: View {
     @State private var isLoadingHistory = false
     @State private var isResponding = false
     @State private var isPreparingSubmittedMessage = false
+    @State private var conflictResolutionAttempt = 0
     @State private var hasPausedResponse = false
     @State private var isPausingResponse = false
     @State private var queuedMessages: [QueuedConversationMessage] = []
@@ -156,6 +159,16 @@ struct TaskConversationView: View {
         !activities.isEmpty || !progressMessages.isEmpty || isResponding || completedResponseDuration != nil || hasCompletedAssistantResponse
     }
 
+    private var currentActivity: CodexActivity? {
+        activities.enumerated()
+            .filter { $0.element.isActive }
+            .max { lhs, rhs in
+                let lhsStart = lhs.element.startedAt ?? .distantPast
+                let rhsStart = rhs.element.startedAt ?? .distantPast
+                return lhsStart == rhsStart ? lhs.offset < rhs.offset : lhsStart < rhsStart
+            }?.element
+    }
+
     private var hasCompletedAssistantResponse: Bool {
         messages.contains { $0.role == .assistant && $0.phase == "final_answer" }
     }
@@ -210,6 +223,10 @@ struct TaskConversationView: View {
             await loadConversation()
             if !isReadOnly { refreshQueuedMessages() }
             if !isReadOnly { await loadModels() }
+            if conflictResolutionRequested && !isReadOnly && !isResponding {
+                conflictResolutionAttempt = 1
+                sendMessage(overrideText: "The PR has conflicts. Fix them, commit, and push.")
+            }
         }
         .onChange(of: codexClient.isTurnActive) { _, isTurnActive in
             let submittedTurnIsPending = task.pendingSubmittedPrompt != nil
@@ -773,6 +790,9 @@ struct TaskConversationView: View {
                         .lineLimit(3)
                         .accessibilityIdentifier("task-status-message")
                 }
+                if isResponding {
+                    currentActivityIndicator
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -794,6 +814,39 @@ struct TaskConversationView: View {
         .padding(.vertical, 15)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(WorkspaceTheme.windowBackground.opacity(0.96))
+    }
+
+    private var currentActivityIndicator: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { timeline in
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: 6, height: 6)
+                if let currentActivity {
+                    Text(currentActivity.title)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                        .accessibilityIdentifier("current-activity-title")
+                    Spacer(minLength: 4)
+                    if currentActivity.startedAt != nil {
+                        Text(currentActivity.durationLabel(at: timeline.date) ?? "Running · 0 ms")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .accessibilityValue(currentActivity.durationLabel(at: timeline.date) ?? "Running · 0 ms")
+                            .accessibilityIdentifier("current-activity-duration")
+                    }
+                } else {
+                    Text("Thinking")
+                        .font(.system(size: 11, weight: .medium))
+                        .accessibilityIdentifier("current-activity-title")
+                    Spacer(minLength: 4)
+                }
+            }
+            .foregroundStyle(Color.accentColor)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("current-activity-indicator")
+        }
     }
 
     private var repositoryBadges: some View {
@@ -1139,9 +1192,6 @@ struct TaskConversationView: View {
                     ForEach(activities.filter(\.isSubagent)) { activity in
                         subagentTimelineRow(activity)
                     }
-                    ForEach(activities.filter { $0.toolKind != nil }) { activity in
-                        activityRow(activity)
-                    }
                     ForEach(activities.filter { $0.isContextCompaction && $0.timelineOrder == nil }) { activity in
                         contextCompactionTimelineRow(activity)
                     }
@@ -1213,11 +1263,13 @@ struct TaskConversationView: View {
                                 .accessibilityIdentifier("codex-progress-message-\(message.id)")
                         }
                     }
-                    ForEach(activities.filter { !$0.isSubagent && $0.toolKind == nil }) { activity in
+                    ForEach(activities.filter { !$0.isSubagent && !$0.isContextCompaction }) { activity in
                         activityRow(activity)
                     }
                 }
                 .padding(.top, 6)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("codex-activity-details")
             }
         }
     }
@@ -1241,6 +1293,11 @@ struct TaskConversationView: View {
                     let metadata = [activity.agentPath, activity.model, activity.reasoningEffort]
                         .compactMap { $0 }
                         .filter { !$0.isEmpty }
+                    if let duration = activity.durationLabel() {
+                        Text(duration)
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
                     if !metadata.isEmpty {
                         Text(metadata.joined(separator: " · "))
                             .font(.system(size: 10))
@@ -1260,12 +1317,12 @@ struct TaskConversationView: View {
         .help("Open the read-only conversation for this agent")
         .buttonStyle(.plain)
         .accessibilityLabel("\(activity.title) \(activity.timelineStatus)")
-        .accessibilityValue(activity.detail)
+        .accessibilityValue([activity.detail, activity.durationLabel()].compactMap { $0 }.joined(separator: "\n"))
         .accessibilityIdentifier("codex-subagent-row-\(activity.childThreadID ?? activity.id)")
     }
 
     private func activityRow(_ activity: CodexActivity) -> some View {
-        let displayDetail = [activity.detail, activity.durationMs.map { "Duration · \($0) ms" }]
+        let displayDetail = [activity.detail]
             .compactMap { $0 }
             .filter { !$0.isEmpty }
             .joined(separator: "\n")
@@ -1290,13 +1347,35 @@ struct TaskConversationView: View {
                     .accessibilityIdentifier("codex-activity-detail-\(activity.id)")
                     .accessibilityLabel(displayDetail)
             }
+            if activity.isActive, activity.startedAt != nil {
+                TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                    let duration = activity.durationLabel(at: timeline.date) ?? ""
+                    Text(duration)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .accessibilityValue(duration)
+                        .accessibilityIdentifier("codex-activity-duration-\(activity.id)")
+                }
+            } else if let duration = activity.durationLabel() {
+                Text(duration)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .accessibilityValue(duration)
+                    .accessibilityIdentifier("codex-activity-duration-\(activity.id)")
+            } else {
+                Text("Duration unavailable")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityValue("Duration unavailable")
+                    .accessibilityIdentifier("codex-activity-duration-\(activity.id)")
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(9)
         .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 8))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(activity.title), \(activity.statusLabel)")
-        .accessibilityValue(displayDetail)
+        .accessibilityValue([displayDetail, activity.durationLabel()].compactMap { $0 }.joined(separator: "\n"))
         .accessibilityIdentifier(activity.isSubagent ? "codex-subagent-row-\(activity.childThreadID ?? activity.id)" : "codex-activity-row-\(activity.id)")
     }
 
@@ -2047,6 +2126,7 @@ struct TaskConversationView: View {
     private func sendMessage(overrideText: String? = nil) {
         let text = (overrideText ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
         guard (!text.isEmpty || !pendingImages.isEmpty), !isResponding, !isLoadingHistory else { return }
+        let resolutionAttempt = conflictResolutionAttempt
         if text == "/plan" {
             activatePlanMode()
             return
@@ -2081,6 +2161,10 @@ struct TaskConversationView: View {
             )
             isPreparingSubmittedMessage = false
             guard saved else {
+                if resolutionAttempt > 0 {
+                    conflictResolutionAttempt = 0
+                    onConflictResolutionChecked(false)
+                }
                 messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
                 draft = text
                 pendingImages = imageDataURLs.compactMap { dataURL in
@@ -2183,7 +2267,37 @@ struct TaskConversationView: View {
                     messages.removeAll { $0.id == assistantMessageID }
                 }
                 isComposerFocused = true
+                if resolutionAttempt > 0 {
+                    do {
+                        switch try await BoardTaskManager(modelContext: modelContext).verifyPullRequestResolution(task.id) {
+                        case .resolved:
+                            conflictResolutionAttempt = 0
+                            onConflictResolutionChecked(true)
+                        case .stillConflicted where resolutionAttempt == 1:
+                            conflictResolutionAttempt = 2
+                            isResponding = false
+                            sendMessage(overrideText: "The PR still has conflicts or your latest commit has not reached GitHub. Resolve the remaining conflicts, commit, and push. Verify the PR's merge status before finishing.")
+                            return
+                        case .stillConflicted:
+                            conflictResolutionAttempt = 0
+                            onConflictResolutionChecked(false)
+                            errorMessage = "The PR still has conflicts after two turns. Review the PR and try again."
+                        case .inconclusive:
+                            conflictResolutionAttempt = 0
+                            onConflictResolutionChecked(false)
+                            errorMessage = "GitHub hasn't confirmed that the PR is conflict-free at the pushed head. Try again after its merge check finishes."
+                        }
+                    } catch {
+                        conflictResolutionAttempt = 0
+                        onConflictResolutionChecked(false)
+                        errorMessage = error.localizedDescription
+                    }
+                }
             } catch {
+                if resolutionAttempt > 0 {
+                    conflictResolutionAttempt = 0
+                    onConflictResolutionChecked(false)
+                }
                 responseStartedAt = nil
                 UserDefaults.standard.removeObject(forKey: responseStartedAtDefaultsKey)
                 if codexClient.wasLastTurnInterrupted {
