@@ -172,6 +172,12 @@ final class CodexAppServerClient: ObservableObject {
     private var stderrPipe: Pipe?
     private var pendingRequests: [Int: CheckedContinuation<[String: Any], Error>] = [:]
     private var pendingRequestDiagnostics: [Int: (method: String, startedAt: UInt64)] = [:]
+    private struct DeltaLogSummary {
+        var notificationCount = 0
+        var payloadBytes = 0
+    }
+    private var deltaLogSummaries: [String: (threadID: String, turnID: String, itemID: String, method: String, summary: DeltaLogSummary)] = [:]
+    private let deltaLogSummaryLimit = 100
     private var nextRequestID = 1
     private var initialized = false
     private var resumedThreadIDs = Set<String>()
@@ -1116,11 +1122,16 @@ final class CodexAppServerClient: ObservableObject {
                 StationAIDiagnostics.record("codex.rpc.server_request", fields: Self.diagnosticNotificationFields(method: method, params: params))
                 await handleServerRequest(method: method, params: params, requestID: requestID)
             } else {
-                StationAIDiagnostics.record("codex.notification", fields: Self.diagnosticNotificationFields(
-                    method: method,
-                    params: message["params"] as? [String: Any] ?? [:]
-                ))
-                handleNotification(method: method, params: message["params"] as? [String: Any] ?? [:])
+                let params = message["params"] as? [String: Any] ?? [:]
+                if Self.highVolumeDeltaMethods.contains(method) {
+                    recordDeltaLogSummary(method: method, params: params)
+                } else {
+                    StationAIDiagnostics.record("codex.notification", fields: Self.diagnosticNotificationFields(
+                        method: method,
+                        params: params
+                    ))
+                }
+                handleNotification(method: method, params: params)
             }
             return
         }
@@ -1168,7 +1179,7 @@ final class CodexAppServerClient: ObservableObject {
             "method": method,
             "parameterNames": params.keys.sorted().joined(separator: ",")
         ]
-        for key in ["threadId", "itemId"] {
+        for key in ["threadId", "turnId", "itemId"] {
             if let value = params[key] as? String { fields[key] = value }
         }
         if let turn = params["turn"] as? [String: Any] {
@@ -1201,6 +1212,46 @@ final class CodexAppServerClient: ObservableObject {
             if let text = params[key] as? String { fields["\(key)Bytes"] = String(text.utf8.count) }
         }
         return fields
+    }
+
+    private static let highVolumeDeltaMethods: Set<String> = [
+        "item/agentMessage/delta", "item/plan/delta", "item/commandExecution/outputDelta"
+    ]
+
+    private func recordDeltaLogSummary(method: String, params: [String: Any]) {
+        let threadID = params["threadId"] as? String ?? ""
+        let turnID = params["turnId"] as? String
+            ?? (threadID == activeThreadID ? activeTurnID : nil)
+            ?? ""
+        let itemID = params["itemId"] as? String ?? (params["item"] as? [String: Any])?["id"] as? String ?? ""
+        let key = [threadID, turnID, itemID, method].joined(separator: "\u{1F}")
+        var entry = deltaLogSummaries[key] ?? (threadID, turnID, itemID, method, DeltaLogSummary())
+        entry.summary.notificationCount += 1
+        entry.summary.payloadBytes += (params["delta"] as? String)?.utf8.count ?? 0
+        deltaLogSummaries[key] = entry
+        if entry.summary.notificationCount >= deltaLogSummaryLimit {
+            flushDeltaLogSummary(for: key, reason: "batch")
+        }
+    }
+
+    private func flushDeltaLogSummary(for key: String, reason: String) {
+        guard let entry = deltaLogSummaries.removeValue(forKey: key) else { return }
+        StationAIDiagnostics.record("codex.notification.summary", fields: [
+            "method": entry.method,
+            "threadID": entry.threadID,
+            "turnID": entry.turnID,
+            "itemID": entry.itemID,
+            "notificationCount": String(entry.summary.notificationCount),
+            "payloadBytes": String(entry.summary.payloadBytes),
+            "flushReason": reason
+        ])
+    }
+
+    private func flushDeltaLogSummaries(threadID: String, turnID: String, reason: String) {
+        let keys = deltaLogSummaries.compactMap { key, entry in
+            entry.threadID == threadID && (entry.turnID == turnID || entry.turnID.isEmpty) ? key : nil
+        }
+        for key in keys { flushDeltaLogSummary(for: key, reason: reason) }
     }
 
     private func handleNotification(method: String, params: [String: Any]) {
@@ -1294,6 +1345,8 @@ final class CodexAppServerClient: ObservableObject {
             guard let threadID = params["threadId"] as? String,
                   let turn = params["turn"] as? [String: Any],
                   let turnID = turn["id"] as? String else { return }
+
+            flushDeltaLogSummaries(threadID: threadID, turnID: turnID, reason: "turn_completed")
 
             StationAIDiagnostics.record("codex.turn.ended", fields: diagnosticFields([
                 "threadID": threadID,
@@ -1443,6 +1496,8 @@ final class CodexAppServerClient: ObservableObject {
 
     private func processDidTerminate(_ terminatedProcess: Process) {
         guard process === terminatedProcess else { return }
+
+        for key in Array(deltaLogSummaries.keys) { flushDeltaLogSummary(for: key, reason: "app_server_exit") }
 
         let exitDetail = "Codex CLI exited with status \(terminatedProcess.terminationStatus)."
         StationAIDiagnostics.record("codex.app_server.exited", fields: diagnosticFields([

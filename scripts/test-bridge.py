@@ -3320,7 +3320,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertLess(user["timelineOrder"], reloaded_rows[0]["timelineOrder"])
         self.assertLess(reloaded_rows[0]["timelineOrder"], assistant["timelineOrder"])
 
-    # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs.
+    # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs.
     def test_conversation_shows_subagent_delegation(self):
         task_id = self.create_task(title="Subagent delegation")["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -3418,6 +3418,21 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(children["00000000-0000-0000-0000-000000000004"]["status"], "futureKind")
 
         diagnostics = self.diagnostic_events()
+        delta_summaries = [event for event in diagnostics if event.get("event") == "codex.notification.summary"]
+        self.assertTrue(delta_summaries, "Streamed Codex deltas should be summarized rather than logged individually.")
+        message_summary = next(event for event in delta_summaries if event.get("method") == "item/agentMessage/delta")
+        self.assertGreaterEqual(int(message_summary.get("notificationCount", "0")), 2)
+        self.assertGreater(int(message_summary.get("payloadBytes", "0")), 0)
+        self.assertEqual(message_summary.get("flushReason"), "turn_completed")
+        output_summary = next(event for event in delta_summaries if event.get("method") == "item/commandExecution/outputDelta")
+        self.assertEqual(int(output_summary.get("notificationCount", "0")), 2)
+        self.assertGreater(int(output_summary.get("payloadBytes", "0")), 0)
+        self.assertEqual(output_summary.get("flushReason"), "turn_completed")
+        self.assertFalse(any(
+            event.get("event") == "codex.notification" and event.get("method") in {
+                "item/agentMessage/delta", "item/plan/delta", "item/commandExecution/outputDelta"
+            } for event in diagnostics
+        ), "High-volume delta notifications should not each occupy a diagnostics record.")
         rpc_start = next(event for event in diagnostics if event.get("event") == "codex.rpc.request.started" and event.get("method") == "turn/start")
         self.assertIn("input", rpc_start.get("parameterNames", ""))
         self.assertTrue(any(
@@ -3445,6 +3460,7 @@ class StationAIBridgeTests(unittest.TestCase):
         serialized_diagnostics = json.dumps(diagnostics)
         self.assertNotIn("CODEX_OUTPUT_NOT_LOGGED", serialized_diagnostics)
         self.assertNotIn("CODEX_DIFF_NOT_LOGGED", serialized_diagnostics)
+        self.assertNotIn("CODEX_STREAMED_OUTPUT_NOT_LOGGED", serialized_diagnostics)
         self.assertNotIn("Delegate this task.", serialized_diagnostics)
 
         reloaded, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
@@ -3460,7 +3476,7 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assertTrue(any("subagent inspected" in message["text"].lower() for message in history["messages"]))
 
-    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; the first plan delta is visible before completion, and the completed plan item renders automatically as Markdown with visible spacing between distinct paragraphs and can be selected and copied as one complete text view, including after reopening, while CLI events and bridge history preserve the exact plan text as the latest assistant message.
+    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; the first plan delta is visible before completion, and the completed plan item renders automatically as Markdown with visible spacing between distinct paragraphs and can be selected and copied as one complete text view, including after reopening, while CLI events and bridge history preserve the exact plan text as the latest assistant message. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics.
     def test_plan_mode_renders_markdown_in_conversation(self):
         task_id = self.create_task(title="Plan mode Markdown", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -3495,6 +3511,16 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(any(message["role"] == "assistant" and message["text"] == markdown_reply
                             and message["phase"] == "final_answer" for message in reloaded_messages))
         self.assertEqual(reloaded_messages[-1]["role"], "assistant", "The latest response should be last in bridge history.")
+        plan_diagnostics = self.diagnostic_events()
+        plan_summary = next(event for event in plan_diagnostics
+                            if event.get("event") == "codex.notification.summary"
+                            and event.get("method") == "item/plan/delta")
+        self.assertGreaterEqual(int(plan_summary.get("notificationCount", "0")), 2)
+        self.assertGreater(int(plan_summary.get("payloadBytes", "0")), 0)
+        self.assertEqual(plan_summary.get("flushReason"), "turn_completed")
+        self.assertFalse(any(event.get("event") == "codex.notification" and event.get("method") == "item/plan/delta"
+                             for event in plan_diagnostics))
+        self.assertNotIn(markdown_reply, json.dumps(plan_diagnostics))
 
     # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer shows a Codex-reported model, while unsupported modes and malformed model IDs are rejected before creating history.
     def test_conversation_mode_rejects_unknown_mode_without_starting_a_turn(self):

@@ -4420,7 +4420,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertLessThan(reloaded.frame.minY, app.staticTexts["Context compaction completed."].frame.minY)
     }
 
-    // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs.
+    // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs.
     func test_conversation_shows_subagent_delegation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -4516,6 +4516,20 @@ final class StationAIUITests: XCTestCase {
             }) == true
         }, timeout: 5), "Codex diagnostics should be flushed before checking turn and notification details.")
         let codexDiagnostics = try diagnosticEvents()
+        let deltaSummaries = codexDiagnostics.filter { $0["event"] as? String == "codex.notification.summary" }
+        XCTAssertFalse(deltaSummaries.isEmpty, "Streamed Codex deltas should be summarized rather than logged individually.")
+        let messageSummary = try XCTUnwrap(deltaSummaries.first { $0["method"] as? String == "item/agentMessage/delta" })
+        XCTAssertGreaterThanOrEqual(Int(messageSummary["notificationCount"] as? String ?? "0") ?? 0, 2)
+        XCTAssertGreaterThan(Int(messageSummary["payloadBytes"] as? String ?? "0") ?? 0, 0)
+        XCTAssertEqual(messageSummary["flushReason"] as? String, "turn_completed")
+        let outputSummary = try XCTUnwrap(deltaSummaries.first { $0["method"] as? String == "item/commandExecution/outputDelta" })
+        XCTAssertEqual(Int(outputSummary["notificationCount"] as? String ?? "0") ?? 0, 2)
+        XCTAssertGreaterThan(Int(outputSummary["payloadBytes"] as? String ?? "0") ?? 0, 0)
+        XCTAssertEqual(outputSummary["flushReason"] as? String, "turn_completed")
+        XCTAssertFalse(codexDiagnostics.contains {
+            $0["event"] as? String == "codex.notification"
+                && ["item/agentMessage/delta", "item/plan/delta", "item/commandExecution/outputDelta"].contains($0["method"] as? String ?? "")
+        }, "High-volume delta notifications should not each occupy a diagnostics record.")
         XCTAssertTrue(codexDiagnostics.contains {
             $0["event"] as? String == "codex.rpc.request.started" && $0["method"] as? String == "turn/start"
         })
@@ -4543,6 +4557,7 @@ final class StationAIUITests: XCTestCase {
         let serializedCodexDiagnostics = String(data: try JSONSerialization.data(withJSONObject: codexDiagnostics), encoding: .utf8) ?? ""
         XCTAssertFalse(serializedCodexDiagnostics.contains("CODEX_OUTPUT_NOT_LOGGED"))
         XCTAssertFalse(serializedCodexDiagnostics.contains("CODEX_DIFF_NOT_LOGGED"))
+        XCTAssertFalse(serializedCodexDiagnostics.contains("CODEX_STREAMED_OUTPUT_NOT_LOGGED"))
         XCTAssertFalse(serializedCodexDiagnostics.contains(prompt), "Diagnostics must not store the conversation text.")
 
         app.activate()
@@ -4611,7 +4626,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Conversation shows and opens a subagent")
     }
 
-    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; the first plan delta is visible before completion, and the completed plan item renders automatically as Markdown with visible spacing between distinct paragraphs and can be selected and copied as one complete text view, including after reopening, while CLI events and bridge history preserve the exact plan text as the latest assistant message.
+    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; the first plan delta is visible before completion, and the completed plan item renders automatically as Markdown with visible spacing between distinct paragraphs and can be selected and copied as one complete text view, including after reopening, while CLI events and bridge history preserve the exact plan text as the latest assistant message. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics.
     func test_plan_mode_renders_markdown_in_conversation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -4667,6 +4682,19 @@ final class StationAIUITests: XCTestCase {
         let reloadedMessages = reloadedHistory?["messages"] as? [[String: Any]] ?? []
         XCTAssertTrue(reloadedMessages.contains { $0["role"] as? String == "assistant" && $0["text"] as? String == markdownReply }, "The exact Markdown source should persist after reopening the plan conversation.")
         XCTAssertEqual(reloadedMessages.last?["role"] as? String, "assistant", "The bridge history should keep the latest response last.")
+        let planDiagnostics = try diagnosticEvents()
+        let planSummary = try XCTUnwrap(planDiagnostics.first {
+            $0["event"] as? String == "codex.notification.summary"
+                && $0["method"] as? String == "item/plan/delta"
+        })
+        XCTAssertGreaterThanOrEqual(Int(planSummary["notificationCount"] as? String ?? "0") ?? 0, 2)
+        XCTAssertGreaterThan(Int(planSummary["payloadBytes"] as? String ?? "0") ?? 0, 0)
+        XCTAssertEqual(planSummary["flushReason"] as? String, "turn_completed")
+        XCTAssertFalse(planDiagnostics.contains {
+            $0["event"] as? String == "codex.notification" && $0["method"] as? String == "item/plan/delta"
+        })
+        let serializedPlanDiagnostics = String(data: try JSONSerialization.data(withJSONObject: planDiagnostics), encoding: .utf8) ?? ""
+        XCTAssertFalse(serializedPlanDiagnostics.contains(markdownReply), "Plan text must not be persisted in diagnostics.")
         let reloadedAssistant = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", "Implementation plan"))
             .firstMatch
