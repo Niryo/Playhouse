@@ -293,9 +293,6 @@ enum StationAICLI {
             case "set-appearance":
                 guard rest.count == 2 else { throw CLIError.usage("Use: stationai settings set-appearance <dark|light>") }
                 return BridgeRequest(command: "settings.set-appearance", arguments: ["appearance": .string(rest[1])])
-            case "set-pr-conflict-action":
-                guard rest.count == 2 else { throw CLIError.usage("Use: stationai settings set-pr-conflict-action <ask|resolve-and-push|resolve-only|keep>") }
-                return BridgeRequest(command: "settings.set-pr-conflict-action", arguments: ["action": .string(rest[1])])
             case "set-parent":
                 guard rest.count == 2 else { throw CLIError.usage("Use: stationai settings set-parent <path>") }
                 return BridgeRequest(command: "settings.set-parent", arguments: ["path": .string(rest[1])])
@@ -313,6 +310,14 @@ enum StationAICLI {
             switch operation {
             case "history": return BridgeRequest(command: "conversation.history", arguments: ["taskID": .string(id)])
             case "models": return BridgeRequest(command: "conversation.models", arguments: ["taskID": .string(id)])
+            case "goal":
+                guard tail.count >= 2 else { throw CLIError.usage("Use: stationai conversation goal <task-id> <get|set|pause|resume|clear> [--text <objective>]") }
+                let action = tail[1]
+                let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--text"])
+                var arguments: [String: BridgeValue] = ["taskID": .string(id), "action": .string(action)]
+                if let text = flags["--text"]?.first { arguments["objective"] = .string(text) }
+                if let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"] { arguments["__codexHome"] = .string(codexHome) }
+                return BridgeRequest(command: "conversation.goal", arguments: arguments)
             case "queue":
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message"])
                 return BridgeRequest(command: "conversation.queue", arguments: ["taskID": .string(id), "message": .string(flags["--message"]?.first ?? "")])
@@ -336,6 +341,13 @@ enum StationAICLI {
                     return .string("data:\(mime);base64,\(data.base64EncodedString())")
                 }
                 return BridgeRequest(command: "conversation.steer", arguments: ["taskID": .string(id), "message": .string(flags["--message"]?.first ?? ""), "images": .array(images)])
+            case "answer-async":
+                guard tail.count >= 2 else { throw CLIError.usage("Use: stationai conversation answer-async <task-id> <item-id> --answer <text> [--answer <text>]...") }
+                let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--answer"])
+                return BridgeRequest(command: "conversation.answer_async", arguments: [
+                    "taskID": .string(id), "itemID": .string(tail[1]),
+                    "answers": .array((flags["--answer"] ?? []).map(BridgeValue.string))
+                ])
             case "send":
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode", "--model", "--answer", "--image"])
                 var answers: [String: [String]] = [:]
@@ -472,7 +484,9 @@ enum StationAICLI {
       stationai conversation queue-remove <task-id> <message-id>
       stationai conversation queue-steer <task-id> <message-id>
       stationai conversation steer <task-id> --message <text> [--image <path>]...
+      stationai conversation answer-async <task-id> <item-id> --answer <text> [--answer <text>]...
       stationai conversation models <task-id>
+      stationai conversation goal <task-id> <get|set|pause|resume|clear> [--text <objective>]
       stationai conversation send <task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...]
 
     Results are JSON. Conversation send emits JSON event lines followed by a final response.

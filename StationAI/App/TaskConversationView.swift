@@ -32,6 +32,14 @@ struct TaskConversationView: View {
         var id: String { repository }
     }
 
+    private struct GoalAchievementTimelineEntry: Codable, Identifiable, Equatable {
+        let id: String
+        let summary: String
+        let afterMessageID: String
+
+        static let beforeFirstMessageID = "__before_first_message__"
+    }
+
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var codexClient: CodexAppServerClient
     @Environment(\.colorScheme) private var colorScheme
@@ -52,6 +60,14 @@ struct TaskConversationView: View {
     @State private var isShowingImagePicker = false
     @State private var isGeneratingTitle = false
     @State private var conversationMode: CodexConversationMode = .code
+    @State private var isEnteringGoal = false
+    @State private var activeGoal: CodexThreadGoal?
+    @State private var goalAchievementTimelineEntries: [GoalAchievementTimelineEntry] = []
+    @State private var currentGoalGenerationID: String?
+    @State private var currentGoalObjective: String?
+    @State private var currentGoalTimeBaselineSeconds: Double?
+    @State private var isGoalExpanded = false
+    @State private var goalStatusUpdatedAt = Date.now
     @State private var modelOptions = [CodexModelOption(id: CodexAppServerClient.modelID, name: "GPT-6 Luna", isDefault: true)]
     @State private var selectedModelID = CodexAppServerClient.modelID
     @State private var messages: [CodexChatMessage] = []
@@ -90,6 +106,8 @@ struct TaskConversationView: View {
     @State private var userInputAnswers: [String: [String]] = [:]
     @State private var userInputOther: [String: String] = [:]
     @State private var repositoryMismatch: RepositoryMismatchAssessment?
+    @State private var asyncQuestionAnswers: [String: String] = [:]
+    @State private var answeredAsyncQuestionIDs: Set<String> = []
     @State private var errorMessage: String?
     @State private var actionNotice: String?
     @State private var isShowingWorkspaceEditor = false
@@ -110,7 +128,7 @@ struct TaskConversationView: View {
     @FocusState private var isRepositorySearchFocused: Bool
 
     private var isSendDisabled: Bool {
-        !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty) || isResponding || isLoadingHistory
+        !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !isEnteringGoal) || isResponding || isLoadingHistory
     }
 
     private var isRepositoryRootConfigured: Bool {
@@ -154,6 +172,14 @@ struct TaskConversationView: View {
         return messages.filter { !completedProgressIDs.contains($0.id) }
     }
 
+    private func goalAchievementAnchorMessageID(for entry: GoalAchievementTimelineEntry) -> String? {
+        if entry.afterMessageID == GoalAchievementTimelineEntry.beforeFirstMessageID { return nil }
+        if conversationMessages.contains(where: { $0.id == entry.afterMessageID }) {
+            return entry.afterMessageID
+        }
+        return conversationMessages.last?.id
+    }
+
     private var activityDisclosureAnchorID: String? {
         if let latestUserIndex = conversationMessages.lastIndex(where: { $0.role == .user }) {
             return conversationMessages.dropFirst(latestUserIndex + 1).first(where: { $0.role == .assistant })?.id
@@ -176,7 +202,16 @@ struct TaskConversationView: View {
     }
 
     private var hasCompletedAssistantResponse: Bool {
-        messages.contains { $0.role == .assistant && $0.phase == "final_answer" }
+        guard let latestUserIndex = messages.lastIndex(where: { $0.role == .user }) else {
+            return messages.contains { $0.role == .assistant && $0.phase == "final_answer" }
+        }
+        return messages.dropFirst(latestUserIndex + 1).contains {
+            $0.role == .assistant && $0.phase == "final_answer"
+        }
+    }
+
+    private var isDisplayingActiveResponse: Bool {
+        isResponding && !hasCompletedAssistantResponse
     }
 
     private var responseStartedAtDefaultsKey: String {
@@ -185,6 +220,22 @@ struct TaskConversationView: View {
 
     private var completedResponseDurationDefaultsKey: String {
         "stationai.codex.completed-response-duration.\(task.id.uuidString)"
+    }
+
+    private var goalAchievementTimelineDefaultsKey: String {
+        "stationai.codex.goal-achievement-timeline.\(task.id.uuidString)"
+    }
+
+    private var goalGenerationDefaultsKey: String {
+        CodexGoalGenerationStore.generationIDKey(taskID: task.id)
+    }
+
+    private var goalGenerationObjectiveDefaultsKey: String {
+        CodexGoalGenerationStore.objectiveKey(taskID: task.id)
+    }
+
+    private var goalGenerationTimeBaselineDefaultsKey: String {
+        CodexGoalGenerationStore.timeBaselineKey(taskID: task.id)
     }
 
     var body: some View {
@@ -280,6 +331,9 @@ struct TaskConversationView: View {
             }
         }
         .onChange(of: codexClient.isTurnActive) { _, isTurnActive in
+            if !isTurnActive, !isReadOnly {
+                refreshQueuedMessages()
+            }
             let submittedTurnIsPending = task.pendingSubmittedPrompt != nil
                 && (task.status == .inProgress || task.status == .waitingResponse)
             guard let taskThreadID = task.codexThreadID else {
@@ -287,6 +341,41 @@ struct TaskConversationView: View {
                 return
             }
             isResponding = submittedTurnIsPending || (isTurnActive && codexClient.isTurnActive(threadID: taskThreadID))
+        }
+        .onChange(of: codexClient.goalStateRevision) { _, _ in
+            guard codexClient.goalStateThreadID == task.codexThreadID else { return }
+            Task { @MainActor in
+                activeGoal = try? await conversationManager.goal(taskID: task.id)
+                if let activeGoal { reconcileGoalGeneration(with: activeGoal) }
+                goalStatusUpdatedAt = .now
+            }
+        }
+        .onChange(of: codexClient.goalTurnRevision) { _, _ in
+            guard let threadID = task.codexThreadID, codexClient.isObservingGoal(threadID: threadID) else { return }
+            Task { @MainActor in await refreshGoalConversation() }
+        }
+        .onChange(of: codexClient.goalTurnCompletedRevision) { _, _ in
+            guard let threadID = task.codexThreadID, codexClient.isObservingGoal(threadID: threadID) else { return }
+            let completedTurnID = codexClient.goalTurnCompletedTurnID
+            Task { @MainActor in
+                activeGoal = try? await conversationManager.goal(taskID: task.id)
+                goalStatusUpdatedAt = .now
+                await refreshGoalConversation()
+                guard let activeGoal, activeGoal.status == "complete" else { return }
+                reconcileGoalGeneration(with: activeGoal)
+                guard let generationID = currentGoalGenerationID,
+                      !goalAchievementTimelineEntries.contains(where: { $0.id == generationID }) else { return }
+                let completionMessage = completedTurnID.flatMap { turnID in
+                    conversationMessages.last(where: { $0.turnID == turnID })
+                } ?? conversationMessages.last
+                let anchorID = completionMessage?.id ?? GoalAchievementTimelineEntry.beforeFirstMessageID
+                goalAchievementTimelineEntries.append(GoalAchievementTimelineEntry(
+                    id: generationID,
+                    summary: goalAchievementSummary(activeGoal),
+                    afterMessageID: anchorID
+                ))
+                persistGoalAchievementTimeline()
+            }
         }
         .task(id: task.workspaceRootPaths) {
             let watchPaths = await WorkspaceChangeWatcher.watchPaths(workspaceRoots: task.workspaceRootPaths)
@@ -1202,7 +1291,7 @@ struct TaskConversationView: View {
         ScrollViewReader { scrollProxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if messages.isEmpty && !isLoadingHistory {
+                    if messages.isEmpty && activeGoal?.status != "complete" && !isLoadingHistory {
                         VStack(spacing: 12) {
                             Image(systemName: "bubble.left.and.bubble.right")
                                 .font(.system(size: 25, weight: .regular))
@@ -1218,12 +1307,24 @@ struct TaskConversationView: View {
                         .accessibilityIdentifier("empty-conversation")
                     } else if !messages.isEmpty {
                         LazyVStack(alignment: .leading, spacing: 16) {
+                            ForEach(goalAchievementTimelineEntries.filter {
+                                goalAchievementAnchorMessageID(for: $0) == nil
+                            }) { entry in
+                                goalAchievementTimelineRow(entry)
+                                    .id(entry.id)
+                            }
                             ForEach(conversationMessages) { message in
                                 if shouldShowActivityDisclosure, message.id == activityDisclosureAnchorID {
                                     activityList
                                 }
                                 messageBubble(message)
                                     .id(message.id)
+                                ForEach(goalAchievementTimelineEntries.filter {
+                                    goalAchievementAnchorMessageID(for: $0) == message.id
+                                }) { entry in
+                                    goalAchievementTimelineRow(entry)
+                                        .id(entry.id)
+                                }
                                 let nextOrder = conversationMessages.first(where: {
                                     guard let current = message.timelineOrder, let candidate = $0.timelineOrder else { return false }
                                     return candidate > current
@@ -1245,9 +1346,19 @@ struct TaskConversationView: View {
                     if messages.isEmpty && shouldShowActivityDisclosure {
                         activityList
                     }
+                    if messages.isEmpty {
+                        ForEach(goalAchievementTimelineEntries.filter {
+                            goalAchievementAnchorMessageID(for: $0) == nil
+                        }) { entry in
+                            goalAchievementTimelineRow(entry)
+                                .id(entry.id)
+                        }
+                    }
 
-                    ForEach(activities.filter(\.isSubagent)) { activity in
-                        subagentTimelineRow(activity)
+                    if isDisplayingActiveResponse {
+                        ForEach(activeSubagents) { activity in
+                            subagentTimelineRow(activity)
+                        }
                     }
                     ForEach(activities.filter { $0.isContextCompaction && $0.timelineOrder == nil }) { activity in
                         contextCompactionTimelineRow(activity)
@@ -1272,13 +1383,28 @@ struct TaskConversationView: View {
             .onChange(of: messages.map(\.text)) { _, _ in
                 scrollToLatest(using: scrollProxy)
             }
+            .onChange(of: hasCompletedAssistantResponse) { _, hasCompletedResponse in
+                if hasCompletedResponse {
+                    isActivityExpanded = false
+                }
+            }
             .onChange(of: activities) { _, _ in
                 if isResponding { scrollToLatest(using: scrollProxy) }
             }
             .onChange(of: isResponding) { _, _ in
                 scrollToLatest(using: scrollProxy)
             }
+            .onChange(of: activeGoal?.status) { _, status in
+                if status == "complete" { scrollToLatest(using: scrollProxy) }
+            }
+            .onChange(of: goalAchievementTimelineEntries.count) { _, _ in
+                scrollToLatest(using: scrollProxy)
+            }
         }
+    }
+
+    private var activeSubagents: [CodexActivity] {
+        activities.filter { $0.isSubagent && ["inprogress", "running"].contains($0.status.lowercased()) }
     }
 
     private var activityList: some View {
@@ -1323,12 +1449,39 @@ struct TaskConversationView: View {
                     ForEach(activities.filter { !$0.isSubagent && !$0.isContextCompaction }) { activity in
                         activityRow(activity)
                     }
+                    let agentActivities = activities.filter(\.isSubagent)
+                    if !isDisplayingActiveResponse && !agentActivities.isEmpty {
+                        Text("Agents used")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 4)
+                        ForEach(agentActivities) { activity in
+                            subagentTimelineRow(activity)
+                        }
+                    }
                 }
                 .padding(.top, 6)
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("codex-activity-details")
             }
         }
+    }
+
+    private func goalAchievementTimelineRow(_ entry: GoalAchievementTimelineEntry) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "checkmark.circle")
+                .font(.system(size: 18, weight: .regular))
+                .foregroundStyle(.secondary)
+            Text(entry.summary)
+                .font(.system(size: 15))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("goal-achieved-banner")
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("goal-achievement-timeline-row")
     }
 
     private func subagentTimelineRow(_ activity: CodexActivity) -> some View {
@@ -1525,7 +1678,7 @@ struct TaskConversationView: View {
 
     @ViewBuilder
     private var activityDisclosureButtonLabel: some View {
-        if isResponding, let responseStartedAt {
+        if isDisplayingActiveResponse, let responseStartedAt {
             TimelineView(.periodic(from: responseStartedAt, by: 1)) { timeline in
                 activityDisclosureContents(
                     workingFor: Self.durationLabel(Self.elapsedSeconds(since: responseStartedAt, now: timeline.date))
@@ -1567,8 +1720,11 @@ struct TaskConversationView: View {
     private func messageBubble(_ message: CodexChatMessage) -> some View {
         HStack(alignment: .top, spacing: 0) {
             if message.role == .assistant {
-                if Self.displayableAssistantText(message.text).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && isResponding {
+                if message.asyncQuestions == nil &&
+                    Self.displayableAssistantText(message.text).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && isResponding {
                     EmptyView()
+                } else if message.asyncQuestions != nil {
+                    asyncQuestionBubble(message)
                 } else {
                     assistantBubble(message)
                 }
@@ -1579,6 +1735,110 @@ struct TaskConversationView: View {
             }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private func asyncQuestionKey(messageID: String, index: Int) -> String {
+        "\(messageID):\(index)"
+    }
+
+    private func asyncQuestionWasAnswered(_ message: CodexChatMessage) -> Bool {
+        answeredAsyncQuestionIDs.contains(message.id)
+            || queuedMessages.contains { $0.asyncQuestionItemID == message.id }
+    }
+
+    private func asyncQuestionBubble(_ message: CodexChatMessage) -> some View {
+        let questions = message.asyncQuestions ?? []
+        let answered = asyncQuestionWasAnswered(message)
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("Codex · Luna")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            ForEach(Array(questions.enumerated()), id: \.offset) { index, question in
+                let answerKey = asyncQuestionKey(messageID: message.id, index: index)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(question.title)
+                        .font(.system(size: 15, weight: .semibold))
+                    if let options = question.options, !options.isEmpty {
+                        if !answered && !isReadOnly {
+                            ForEach(Array(options.enumerated()), id: \.offset) { optionIndex, option in
+                                Button {
+                                    asyncQuestionAnswers[answerKey] = option
+                                } label: {
+                                    Label(option, systemImage: asyncQuestionAnswers[answerKey] == option ? "largecircle.fill.circle" : "circle")
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .buttonStyle(.plain)
+                                .buttonHoverPointer()
+                                .help("Choose this answer for \(question.title)")
+                                .accessibilityIdentifier("async-question-option-\(message.id)-\(index)-\(optionIndex)")
+                            }
+                            TextField("Other answer", text: Binding(
+                                get: {
+                                    let answer = asyncQuestionAnswers[answerKey] ?? ""
+                                    return options.contains(answer) ? "" : answer
+                                },
+                                set: { asyncQuestionAnswers[answerKey] = $0 }
+                            ))
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityIdentifier("async-question-other-\(message.id)-\(index)")
+                        } else {
+                            ForEach(Array(options.enumerated()), id: \.offset) { _, option in
+                                Text(option).font(.system(size: 13)).foregroundStyle(.secondary)
+                            }
+                        }
+                    } else if !answered && !isReadOnly {
+                        TextField("Your answer", text: Binding(
+                                get: { asyncQuestionAnswers[answerKey] ?? "" },
+                                set: { asyncQuestionAnswers[answerKey] = $0 }
+                            ))
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("async-question-answer-\(message.id)-\(index)")
+                    }
+                }
+            }
+            if answered {
+                Text(answeredAsyncQuestionIDs.contains(message.id) ? "Answered" : "Pending")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            } else if !isReadOnly {
+                Button("Send answers") { submitAsyncQuestions(message) }
+                    .buttonStyle(.borderedProminent)
+                    .buttonHoverPointer()
+                    .help("Send your answers to Codex")
+                    .disabled(isSubmittingLiveMessage || isLoadingHistory || questions.enumerated().contains { index, _ in
+                        let key = asyncQuestionKey(messageID: message.id, index: index)
+                        return (asyncQuestionAnswers[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    })
+                    .accessibilityIdentifier("submit-async-questions-\(message.id)")
+            }
+        }
+        .padding(15)
+        .frame(maxWidth: 620, alignment: .leading)
+        .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 17))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("async-question-\(message.id)")
+    }
+
+    private func submitAsyncQuestions(_ message: CodexChatMessage) {
+        guard let questions = message.asyncQuestions, !questions.isEmpty else { return }
+        let answers = questions.indices.map { asyncQuestionAnswers[asyncQuestionKey(messageID: message.id, index: $0)] ?? "" }
+        isSubmittingLiveMessage = true
+        Task { @MainActor in
+            defer { isSubmittingLiveMessage = false }
+            do {
+                let result = try await conversationManager.answerAsyncQuestion(taskID: task.id, question: message, answers: answers)
+                if !result.queued { answeredAsyncQuestionIDs.insert(message.id) }
+                if let history = result.history {
+                    messages = history.messages
+                    activities = history.activities
+                    answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
+                } else if result.queued {
+                    refreshQueuedMessages()
+                } else {
+                    messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: result.text))
+                }
+                errorMessage = nil
+            } catch { errorMessage = error.localizedDescription }
+        }
     }
 
     private func assistantBubble(_ message: CodexChatMessage) -> some View {
@@ -1841,6 +2101,46 @@ struct TaskConversationView: View {
             }
 
             VStack(alignment: .leading, spacing: 10) {
+                if let activeGoal, activeGoal.status != "complete", !isReadOnly {
+                    HStack(spacing: 10) {
+                        Image(systemName: "scope").font(.system(size: 17, weight: .medium)).foregroundStyle(.secondary)
+                        Text("\(activeGoal.status == "paused" ? "Paused goal" : "Pursuing goal") \(activeGoal.objective)")
+                            .lineLimit(1).truncationMode(.tail).font(.system(size: 15))
+                            .accessibilityIdentifier("active-goal-title")
+                        Spacer(minLength: 4)
+                        if let seconds = activeGoal.timeUsedSeconds {
+                            TimelineView(.periodic(from: .now, by: 1)) { context in
+                                Text(Self.goalDuration(goalElapsedTime(for: activeGoal, reportedSeconds: seconds)
+                                    + (activeGoal.status == "active" ? context.date.timeIntervalSince(goalStatusUpdatedAt) : 0)))
+                                    .foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("goal-elapsed-time")
+                            }
+                        }
+                        Button(role: .destructive) { Task { await mutateGoal("clear") } } label: { Image(systemName: "trash") }
+                            .buttonHoverPointer().buttonStyle(.plain).help("Clear goal")
+                            .accessibilityLabel("Clear goal").accessibilityIdentifier("goal-clear-button")
+                        Button { Task { await mutateGoal(activeGoal.status == "paused" ? "resume" : "pause") } } label: {
+                            Image(systemName: activeGoal.status == "paused" ? "play.fill" : "pause")
+                        }
+                            .buttonHoverPointer().buttonStyle(.plain).help(activeGoal.status == "paused" ? "Resume goal" : "Pause goal")
+                            .accessibilityLabel(activeGoal.status == "paused" ? "Resume goal" : "Pause goal")
+                            .accessibilityIdentifier("goal-pause-resume-button")
+                        Button { isGoalExpanded.toggle() } label: { Image(systemName: isGoalExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.and.arrow.down.left") }
+                            .buttonHoverPointer().buttonStyle(.plain).help(isGoalExpanded ? "Collapse goal" : "Expand goal")
+                            .accessibilityLabel(isGoalExpanded ? "Collapse goal" : "Expand goal").accessibilityIdentifier("goal-expand-button")
+                    }
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .background(Color.primary.opacity(0.10), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1) }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityValue(codexClient.goalTurnStartedThreadID == task.codexThreadID ? "Work started" : (codexClient.isTurnActive(threadID: task.codexThreadID ?? "") ? "Working" : "Waiting"))
+                    .accessibilityIdentifier("active-goal-progress-row")
+                    if isGoalExpanded {
+                        Text(activeGoal.objective).font(.system(size: 13)).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14)
+                            .accessibilityIdentifier("active-goal-details")
+                    }
+                }
                 NativeChatEditor(
                     text: $draft,
                     height: $composerHeight,
@@ -1872,7 +2172,7 @@ struct TaskConversationView: View {
                     .frame(height: composerHeight)
                     .overlay(alignment: .topLeading) {
                         if draft.isEmpty {
-                            Text(isResponding ? "Ask for follow-up changes" : "Message…")
+                            Text(isEnteringGoal ? "Set a goal to keep pursuing" : (isResponding || activeGoal != nil ? "Ask for follow-up changes" : "Message…"))
                                 .font(.system(size: 15))
                                 .foregroundStyle(.tertiary)
                                 .padding(.horizontal, 5)
@@ -1884,6 +2184,10 @@ struct TaskConversationView: View {
                     .onChange(of: draft) { _, newValue in
                         if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/plan" {
                             activatePlanMode()
+                        } else if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/goal" {
+                            isEnteringGoal = true
+                            conversationMode = .code
+                            draft = ""
                         }
                         if !isReadOnly, !isResponding, !isLoadingHistory {
                             draftNeedsAutosave = true
@@ -1900,8 +2204,19 @@ struct TaskConversationView: View {
                         .buttonStyle(.plain).accessibilityLabel("Attach image")
                         .accessibilityIdentifier("attach-chat-image-button")
                     Menu {
+                        Button {
+                            isEnteringGoal = true
+                            conversationMode = .code
+                            draft = ""
+                        } label: {
+                            Label("Goal", systemImage: "scope")
+                        }
+                        .buttonHoverPointer()
+                        .help("Set a goal to keep pursuing")
+                        .accessibilityIdentifier("conversation-mode-goal")
                         ForEach(CodexConversationMode.allCases, id: \.self) { mode in
                             Button {
+                                isEnteringGoal = false
                                 conversationMode = mode
                             } label: {
                                 if conversationMode == mode {
@@ -1918,19 +2233,23 @@ struct TaskConversationView: View {
                         HStack(spacing: 5) {
                             Image(systemName: "plus")
                                 .font(.system(size: 14, weight: .semibold))
-                            if conversationMode == .plan {
+                            if isEnteringGoal {
+                                Image(systemName: "scope")
+                                Text("Goal")
+                                    .font(.system(size: 11, weight: .semibold))
+                            } else if conversationMode == .plan {
                                 Text("Plan")
                                     .font(.system(size: 11, weight: .semibold))
                             }
                         }
-                        .foregroundStyle(conversationMode == .plan ? Color.accentColor : Color.secondary)
+                        .foregroundStyle(isEnteringGoal || conversationMode == .plan ? Color.accentColor : Color.secondary)
                         .frame(minWidth: 30, minHeight: 31)
                         .contentShape(Rectangle())
                     }
                     .buttonHoverPointer()
                     .menuStyle(.borderlessButton)
                     .help("Change conversation mode or add context")
-                    .accessibilityLabel("Conversation mode: \(conversationMode.title)")
+                    .accessibilityLabel(isEnteringGoal ? "Goal" : "Conversation mode: \(conversationMode.title)")
                     .accessibilityIdentifier("conversation-mode-menu")
 
                     Spacer(minLength: 0)
@@ -2138,7 +2457,32 @@ struct TaskConversationView: View {
                 actionNotice = "Codex requested an approval. StationAI denied it because approval prompts are disabled."
             }
             messages = history.messages
+            answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
             activities = history.activities
+            activeGoal = try? await conversationManager.goal(taskID: task.id)
+            let defaults = WorkspaceSettings.preferencesStore
+            if let data = defaults.data(forKey: goalAchievementTimelineDefaultsKey),
+               let entries = try? JSONDecoder().decode([GoalAchievementTimelineEntry].self, from: data) {
+                goalAchievementTimelineEntries = entries
+            }
+            currentGoalGenerationID = defaults.string(forKey: goalGenerationDefaultsKey)
+            currentGoalObjective = defaults.string(forKey: goalGenerationObjectiveDefaultsKey)
+            currentGoalTimeBaselineSeconds = defaults.object(forKey: goalGenerationTimeBaselineDefaultsKey) as? Double
+            if let activeGoal {
+                reconcileGoalGeneration(with: activeGoal)
+                if activeGoal.status == "complete",
+                   let generationID = currentGoalGenerationID,
+                   !goalAchievementTimelineEntries.contains(where: { $0.id == generationID }) {
+                    let anchorID = fallbackGoalCompletionAnchorID(in: history.messages, objective: activeGoal.objective)
+                    goalAchievementTimelineEntries.append(GoalAchievementTimelineEntry(
+                        id: generationID,
+                        summary: goalAchievementSummary(activeGoal),
+                        afterMessageID: anchorID
+                    ))
+                    persistGoalAchievementTimeline()
+                }
+            }
+            goalStatusUpdatedAt = .now
             let promptWasSent = task.savedPrompt.map { prompt in
                 history.messages.contains { $0.role == .user && $0.text == prompt }
             } ?? false
@@ -2163,7 +2507,6 @@ struct TaskConversationView: View {
             if let threadID = task.codexThreadID {
                 isResponding = isResponding || codexClient.isTurnActive(threadID: threadID)
             }
-            let defaults = UserDefaults.standard
             if isResponding {
                 responseStartedAt = defaults.object(forKey: responseStartedAtDefaultsKey) as? Date ?? Date()
                 defaults.set(responseStartedAt, forKey: responseStartedAtDefaultsKey)
@@ -2218,16 +2561,33 @@ struct TaskConversationView: View {
             return
         }
         let text = (overrideText ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (!text.isEmpty || !pendingImages.isEmpty), !isResponding, !isLoadingHistory else { return }
+        let usesComposerDraft = overrideText == nil
+        guard (!text.isEmpty || (usesComposerDraft && !pendingImages.isEmpty)), !isResponding, !isLoadingHistory else { return }
         let resolutionAttempt = conflictResolutionAttempt
-        if text == "/plan" {
+        if usesComposerDraft && text == "/plan" {
             activatePlanMode()
             return
         }
+        if usesComposerDraft && isEnteringGoal {
+            isPreparingSubmittedMessage = true
+            draft = ""
+            isEnteringGoal = false
+            isResponding = true
+            errorMessage = nil
+            Task { @MainActor in
+                let started = await mutateGoal("set", objective: text, observeRuntime: true)
+                isPreparingSubmittedMessage = false
+                isResponding = started && codexClient.isTurnActive(threadID: task.codexThreadID ?? "")
+                isComposerFocused = true
+            }
+            return
+        }
+        guard !text.isEmpty || (usesComposerDraft && !pendingImages.isEmpty) else { return }
         let userMessageID = UUID().uuidString
         let assistantMessageID = UUID().uuidString
         let previousResponseDuration = completedResponseDuration
-        messages.append(CodexChatMessage(id: userMessageID, role: .user, text: text, imageDataURLs: pendingImages.map(\.dataURL)))
+        messages.append(CodexChatMessage(id: userMessageID, role: .user, text: text,
+                                         imageDataURLs: usesComposerDraft ? pendingImages.map(\.dataURL) : []))
         messages.append(CodexChatMessage(id: assistantMessageID, role: .assistant, text: ""))
         isResponding = true
         let startedAt = Date()
@@ -2235,9 +2595,9 @@ struct TaskConversationView: View {
         completedResponseDuration = nil
         UserDefaults.standard.set(startedAt, forKey: responseStartedAtDefaultsKey)
         UserDefaults.standard.removeObject(forKey: completedResponseDurationDefaultsKey)
-        draft = ""
-        let imageDataURLs = pendingImages.map(\.dataURL)
-        pendingImages = []
+        if usesComposerDraft { draft = "" }
+        let imageDataURLs = usesComposerDraft ? pendingImages.map(\.dataURL) : []
+        if usesComposerDraft { pendingImages = [] }
         hasPausedResponse = false
         isPausingResponse = false
         errorMessage = nil
@@ -2259,10 +2619,12 @@ struct TaskConversationView: View {
                     onConflictResolutionChecked(false)
                 }
                 messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
-                draft = text
-                pendingImages = imageDataURLs.compactMap { dataURL in
-                    guard let image = Self.image(fromDataURL: dataURL) else { return nil }
-                    return PendingImage(dataURL: dataURL, image: image)
+                if usesComposerDraft {
+                    draft = text
+                    pendingImages = imageDataURLs.compactMap { dataURL in
+                        guard let image = Self.image(fromDataURL: dataURL) else { return nil }
+                        return PendingImage(dataURL: dataURL, image: image)
+                    }
                 }
                 isResponding = false
                 responseStartedAt = nil
@@ -2294,19 +2656,22 @@ struct TaskConversationView: View {
                         if let index = messages.firstIndex(where: { $0.id == itemID }) {
                             messages[index].text = text
                             messages[index].phase = update.phase
+                            messages[index].asyncQuestions = update.asyncQuestions
                         } else if let placeholderIndex = messages.firstIndex(where: { $0.id == assistantMessageID }) {
                             messages.insert(CodexChatMessage(
                                 id: itemID,
                                 role: .assistant,
                                 text: text,
-                                phase: update.phase
+                                phase: update.phase,
+                                asyncQuestions: update.asyncQuestions
                             ), at: placeholderIndex)
                         } else {
                             messages.append(CodexChatMessage(
                                 id: itemID,
                                 role: .assistant,
                                 text: text,
-                                phase: update.phase
+                                phase: update.phase,
+                                asyncQuestions: update.asyncQuestions
                             ))
                         }
                         if let placeholderIndex = messages.firstIndex(where: { $0.id == assistantMessageID }) {
@@ -2324,6 +2689,7 @@ struct TaskConversationView: View {
                     case "history", "completed":
                         guard let history = update.history else { return }
                         messages = history.messages
+                        answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
                         activities = history.activities
                         if update.type == "completed" {
                             if let responseStartedAt {
@@ -2399,10 +2765,12 @@ struct TaskConversationView: View {
                     hasPausedResponse = true
                 } else {
                     messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
-                    draft = text
-                    pendingImages = imageDataURLs.compactMap { dataURL in
-                        guard let image = Self.image(fromDataURL: dataURL) else { return nil }
-                        return PendingImage(dataURL: dataURL, image: image)
+                    if usesComposerDraft {
+                        draft = text
+                        pendingImages = imageDataURLs.compactMap { dataURL in
+                            guard let image = Self.image(fromDataURL: dataURL) else { return nil }
+                            return PendingImage(dataURL: dataURL, image: image)
+                        }
                     }
                     errorMessage = error.localizedDescription
                 }
@@ -2410,7 +2778,100 @@ struct TaskConversationView: View {
             }
 
             isResponding = false
+            if !usesComposerDraft, !draft.isEmpty {
+                do {
+                    _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: draft)
+                } catch { errorMessage = error.localizedDescription }
+            }
         }
+    }
+
+    private func mutateGoal(_ action: String, objective: String? = nil, observeRuntime: Bool = false) async -> Bool {
+        do {
+            activeGoal = try await conversationManager.goal(taskID: task.id, objective: objective, action: action, observeRuntime: observeRuntime)
+            if action == "set", let activeGoal { reconcileGoalGeneration(with: activeGoal) }
+            goalStatusUpdatedAt = .now
+            if action == "clear" { isGoalExpanded = false }
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            if action == "set" {
+                draft = objective ?? ""
+                isEnteringGoal = true
+                activeGoal = try? await conversationManager.goal(taskID: task.id)
+            }
+            return false
+        }
+    }
+
+    private func reconcileGoalGeneration(with goal: CodexThreadGoal) {
+        let defaults = WorkspaceSettings.preferencesStore
+        let savedID = defaults.string(forKey: goalGenerationDefaultsKey) ?? currentGoalGenerationID
+        let savedObjective = defaults.string(forKey: goalGenerationObjectiveDefaultsKey) ?? currentGoalObjective
+        let savedTimeBaseline = defaults.object(forKey: goalGenerationTimeBaselineDefaultsKey) as? Double
+            ?? currentGoalTimeBaselineSeconds
+        let priorGenerationCompleted = savedID.map { id in
+            goalAchievementTimelineEntries.contains { $0.id == id }
+        } ?? false
+        if savedID == nil || savedObjective != goal.objective || (goal.status == "active" && priorGenerationCompleted) {
+            let generationID = UUID().uuidString
+            let hasPreviousGoalGeneration = savedID != nil || !goalAchievementTimelineEntries.isEmpty
+            let timeBaseline = hasPreviousGoalGeneration ? Double(goal.timeUsedSeconds ?? 0) : 0
+            currentGoalGenerationID = generationID
+            currentGoalObjective = goal.objective
+            currentGoalTimeBaselineSeconds = timeBaseline
+            defaults.set(generationID, forKey: goalGenerationDefaultsKey)
+            defaults.set(goal.objective, forKey: goalGenerationObjectiveDefaultsKey)
+            defaults.set(timeBaseline, forKey: goalGenerationTimeBaselineDefaultsKey)
+        } else {
+            currentGoalGenerationID = savedID
+            currentGoalObjective = goal.objective
+            let timeBaseline = savedTimeBaseline ?? 0
+            currentGoalTimeBaselineSeconds = timeBaseline
+            defaults.set(timeBaseline, forKey: goalGenerationTimeBaselineDefaultsKey)
+        }
+    }
+
+    private func goalElapsedTime(for goal: CodexThreadGoal, reportedSeconds: Double? = nil) -> Double {
+        let seconds = reportedSeconds ?? Double(goal.timeUsedSeconds ?? 0)
+        return max(0, seconds - (currentGoalTimeBaselineSeconds ?? 0))
+    }
+
+    private func persistGoalAchievementTimeline() {
+        guard let data = try? JSONEncoder().encode(goalAchievementTimelineEntries) else { return }
+        WorkspaceSettings.preferencesStore.set(data, forKey: goalAchievementTimelineDefaultsKey)
+    }
+
+    private func fallbackGoalCompletionAnchorID(in historyMessages: [CodexChatMessage], objective: String) -> String {
+        if let goalMessage = historyMessages.last(where: { $0.role == .user && $0.text == objective }),
+           let turnID = goalMessage.turnID,
+           let finalMessage = historyMessages.last(where: { $0.turnID == turnID }) {
+            return finalMessage.id
+        }
+        return historyMessages.last?.id ?? GoalAchievementTimelineEntry.beforeFirstMessageID
+    }
+
+    private func refreshGoalConversation() async {
+        do {
+            let history = try await conversationManager.history(taskID: task.id) {
+                actionNotice = "Codex requested an approval. StationAI denied it because approval prompts are disabled."
+            }
+            messages = history.messages
+            activities = history.activities
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private static func goalDuration(_ seconds: Double) -> String {
+        if seconds < 60 { return "\(Int(seconds))s" }
+        let minutes = Int(seconds / 60)
+        return minutes < 60 ? "\(minutes)m" : "\(minutes / 60)h \(minutes % 60)m"
+    }
+
+    private func goalAchievementSummary(_ goal: CodexThreadGoal) -> String {
+        guard goal.timeUsedSeconds != nil else { return "Goal achieved" }
+        return "Goal achieved in \(Self.goalDuration(goalElapsedTime(for: goal)))"
     }
 
     private static func durationLabel(_ seconds: Int) -> String {
@@ -2424,6 +2885,7 @@ struct TaskConversationView: View {
 
     private func refreshQueuedMessages() {
         queuedMessages = (try? conversationManager.queuedMessages(taskID: task.id)) ?? []
+        answeredAsyncQuestionIDs = Set((try? conversationManager.answeredAsyncQuestionIDs(taskID: task.id)) ?? [])
     }
 
     private func queueDraftForAfterTurn() {
@@ -2452,7 +2914,13 @@ struct TaskConversationView: View {
                 let outcome = try await conversationManager.steerQueuedMessage(taskID: task.id, messageID: message.id)
                 refreshQueuedMessages()
                 guard outcome.accepted else {
-                    throw BridgeCommandError(code: "invalid_transition", message: "The active turn changed before the steering message could be sent.")
+                    if let history = try? await conversationManager.history(taskID: task.id) {
+                        messages = history.messages
+                        activities = history.activities
+                        answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
+                    }
+                    errorMessage = nil
+                    return
                 }
                 messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: outcome.message))
                 refreshQueuedMessages()
@@ -2472,8 +2940,18 @@ struct TaskConversationView: View {
         Task { @MainActor in
             defer { isSubmittingLiveMessage = false }
             do {
-                guard try await conversationManager.steer(taskID: task.id, text: text, imageDataURLs: imageDataURLs) else {
-                    throw BridgeCommandError(code: "invalid_transition", message: "The active turn changed before the steering message could be sent. Try again after the current turn is active.")
+                let accepted = try await conversationManager.steer(taskID: task.id, text: text, imageDataURLs: imageDataURLs)
+                guard accepted else {
+                    _ = try await conversationManager.queueMissedSteer(taskID: task.id, text: text, imageDataURLs: imageDataURLs)
+                    draft = ""
+                    pendingImages.removeAll()
+                    refreshQueuedMessages()
+                    if let history = try? await conversationManager.history(taskID: task.id) {
+                        messages = history.messages
+                        activities = history.activities
+                    }
+                    errorMessage = nil
+                    return
                 }
                 messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: text, imageDataURLs: imageDataURLs))
                 draft = ""
@@ -2500,6 +2978,7 @@ struct TaskConversationView: View {
                 let history = try await conversationManager.history(taskID: task.id)
                 messages = history.messages
                 activities = history.activities
+                answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
                 refreshQueuedMessages()
                 errorMessage = nil
             } catch { errorMessage = error.localizedDescription }
@@ -2753,6 +3232,7 @@ struct TaskConversationView: View {
     }
 
     private func activatePlanMode() {
+        isEnteringGoal = false
         conversationMode = .plan
         draft = ""
     }
@@ -2859,7 +3339,7 @@ struct TaskConversationView: View {
     }
 
     private func scrollToLatest(using proxy: ScrollViewProxy) {
-        guard !messages.isEmpty || !activities.isEmpty else { return }
+        guard !messages.isEmpty || !activities.isEmpty || activeGoal?.status == "complete" else { return }
         // Defer until the state-driven content update has had a layout pass.
         // Scrolling synchronously from onChange can run before LazyVStack has
         // created its final row, which intermittently leaves reopened chats at top.

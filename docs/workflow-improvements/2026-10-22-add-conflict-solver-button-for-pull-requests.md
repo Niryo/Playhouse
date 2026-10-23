@@ -1,6 +1,6 @@
 # Add Conflict Solver Button for Pull Requests — workflow observations
 
-Task: `C98F3770-2164-42E0-A036-2701506D3D99`  
+Task: `C98F3770-2164-42E0-A036-2701506D3D99`
 Client date: 2026-10-22
 
 ## Observed timeline

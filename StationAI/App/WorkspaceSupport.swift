@@ -35,10 +35,11 @@ extension View {
 
 private struct ActionButtonHoverEmphasis: ViewModifier {
     @State private var isHovering = false
+    var padding: CGFloat = 4
 
     func body(content: Content) -> some View {
         content
-            .padding(4)
+            .padding(padding)
             .background {
                 Capsule()
                     .fill(Color.accentColor.opacity(isHovering ? 0.14 : 0))
@@ -50,8 +51,8 @@ private struct ActionButtonHoverEmphasis: ViewModifier {
 }
 
 extension View {
-    func actionButtonHoverEmphasis() -> some View {
-        modifier(ActionButtonHoverEmphasis())
+    func actionButtonHoverEmphasis(padding: CGFloat = 4) -> some View {
+        modifier(ActionButtonHoverEmphasis(padding: padding))
     }
 }
 
@@ -59,7 +60,6 @@ enum WorkspaceSettings {
     static let defaultParentFolderKey = "defaultWorkspaceParentFolderPath"
     static let lastSelectedRepositoriesKey = "lastSelectedRepositories"
     static let appearanceKey = "appearance"
-    static let pullRequestConflictActionKey = "pullRequestConflictAction"
 
     static var preferencesStore: UserDefaults {
         #if DEBUG
@@ -472,6 +472,7 @@ struct CodexThreadHistory: Codable, Equatable {
     let messages: [CodexChatMessage]
     let activities: [CodexActivity]
     let diff: CodexTurnDiff?
+    var answeredAsyncQuestionIDs: [String] = []
 }
 
 enum RepositoryScanner {
@@ -1314,7 +1315,6 @@ struct FlowLayout: Layout {
 struct WorkspaceSettingsView: View {
     @AppStorage(WorkspaceSettings.defaultParentFolderKey, store: WorkspaceSettings.preferencesStore) private var defaultParentFolderPath = ""
     @AppStorage(WorkspaceSettings.appearanceKey, store: WorkspaceSettings.preferencesStore) private var appearance = "dark"
-    @AppStorage(WorkspaceSettings.pullRequestConflictActionKey, store: WorkspaceSettings.preferencesStore) private var pullRequestConflictAction = "ask"
     @State private var pickerError: String?
 
     private var parentFolderURL: URL? {
@@ -1375,34 +1375,14 @@ struct WorkspaceSettingsView: View {
                         .foregroundStyle(.orange)
                 }
             }
-            Section("Pull request conflicts") {
-                Picker("When conflicts are found", selection: Binding(
-                    get: { WorkspaceSettingsManager().pullRequestConflictAction },
-                    set: { value in
-                        do {
-                            try WorkspaceSettingsManager().setPullRequestConflictAction(value)
-                            pullRequestConflictAction = value
-                        } catch {
-                            pickerError = error.localizedDescription
-                        }
-                    }
-                )) {
-                    Text("Ask each time").tag("ask")
-                    Text("Resolve and push").tag("resolve-and-push")
-                    Text("Resolve without pushing").tag("resolve-only")
-                    Text("Keep the PR as is").tag("keep")
-                }
-                .accessibilityIdentifier("pr-conflict-action-picker")
-                .accessibilityValue(pullRequestConflictAction)
-            }
             Section {
-                    Text("Workspace suggestions affect new tasks. Pull request conflict behavior controls how StationAI handles conflicts when creating a pull request.")
+                    Text("Changing this setting affects suggestions for new tasks. It does not change the working folders saved on existing tasks.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
-        .frame(width: 560, height: 420)
+        .frame(width: 560, height: 320)
         .preferredColorScheme(appearance == "light" ? .light : .dark)
         .alert("Couldn't choose folder", isPresented: Binding(
             get: { pickerError != nil },

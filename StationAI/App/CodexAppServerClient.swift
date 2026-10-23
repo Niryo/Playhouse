@@ -15,8 +15,9 @@ struct CodexChatMessage: Codable, Identifiable, Equatable {
     var phase: String?
     var turnID: String?
     var timelineOrder: Int?
+    var asyncQuestions: [CodexAsyncUserQuestion]?
 
-    init(id: String, role: CodexChatRole, text: String, imageDataURLs: [String] = [], phase: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil) {
+    init(id: String, role: CodexChatRole, text: String, imageDataURLs: [String] = [], phase: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil, asyncQuestions: [CodexAsyncUserQuestion]? = nil) {
         self.id = id
         self.role = role
         self.text = text
@@ -24,9 +25,10 @@ struct CodexChatMessage: Codable, Identifiable, Equatable {
         self.phase = phase
         self.turnID = turnID
         self.timelineOrder = timelineOrder
+        self.asyncQuestions = asyncQuestions
     }
 
-    private enum CodingKeys: String, CodingKey { case id, role, text, imageDataURLs, phase, turnID, timelineOrder }
+    private enum CodingKeys: String, CodingKey { case id, role, text, imageDataURLs, phase, turnID, timelineOrder, asyncQuestions }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
@@ -36,7 +38,13 @@ struct CodexChatMessage: Codable, Identifiable, Equatable {
         phase = try container.decodeIfPresent(String.self, forKey: .phase)
         turnID = try container.decodeIfPresent(String.self, forKey: .turnID)
         timelineOrder = try container.decodeIfPresent(Int.self, forKey: .timelineOrder)
+        asyncQuestions = try container.decodeIfPresent([CodexAsyncUserQuestion].self, forKey: .asyncQuestions)
     }
+}
+
+struct CodexAsyncUserQuestion: Codable, Equatable {
+    let title: String
+    let options: [String]?
 }
 
 struct CodexUserQuestion: Identifiable, Codable, Equatable {
@@ -91,6 +99,19 @@ enum CodexConversationMode: String, CaseIterable, Hashable {
     }
 }
 
+struct CodexThreadGoal: Codable, Equatable {
+    let threadID: String
+    let objective: String
+    let status: String
+    let tokenBudget: Int?
+    let tokensUsed: Int?
+    let timeUsedSeconds: Double?
+
+    private enum CodingKeys: String, CodingKey {
+        case threadID = "threadId", objective, status, tokenBudget, tokensUsed, timeUsedSeconds
+    }
+}
+
 struct CodexModelOption: Codable, Identifiable, Hashable {
     let id: String
     let name: String
@@ -107,6 +128,13 @@ final class CodexAppServerClient: ObservableObject {
     @Published private(set) var isTurnActive = false
     @Published private(set) var activeThreadID: String?
     @Published private(set) var pendingUserInputRequest: CodexUserInputRequest?
+    @Published private(set) var goalStateThreadID: String?
+    @Published private(set) var goalStateRevision = 0
+    @Published private(set) var goalTurnRevision = 0
+    @Published private(set) var goalTurnCompletedRevision = 0
+    @Published private(set) var goalTurnCompletedTurnID: String?
+    @Published private(set) var goalTurnStartedThreadID: String?
+    let goalRuntimeEnabled: Bool
     private var activeConversationMode: CodexConversationMode = .code
 
     private enum ClientError: LocalizedError {
@@ -115,6 +143,7 @@ final class CodexAppServerClient: ObservableObject {
         case processExited(String)
         case protocolFailure(String)
         case server(String)
+        case staleTurn(String)
         case authentication(String)
         case modelMismatch(String, String)
         case turnFailed(String)
@@ -130,6 +159,8 @@ final class CodexAppServerClient: ObservableObject {
             case .protocolFailure(let detail):
                 "StationAI couldn't communicate with Codex: \(detail)"
             case .server(let detail):
+                detail
+            case .staleTurn(let detail):
                 detail
             case .authentication(let detail):
                 "Codex CLI needs a valid sign-in. Run `codex login` in Terminal, then try again. \(detail)"
@@ -149,6 +180,12 @@ final class CodexAppServerClient: ObservableObject {
     private var stderrPipe: Pipe?
     private var pendingRequests: [Int: CheckedContinuation<[String: Any], Error>] = [:]
     private var pendingRequestDiagnostics: [Int: (method: String, startedAt: UInt64)] = [:]
+    private struct DeltaLogSummary {
+        var notificationCount = 0
+        var payloadBytes = 0
+    }
+    private var deltaLogSummaries: [String: (threadID: String, turnID: String, itemID: String, method: String, summary: DeltaLogSummary)] = [:]
+    private let deltaLogSummaryLimit = 100
     private var nextRequestID = 1
     private var initialized = false
     private var resumedThreadIDs = Set<String>()
@@ -161,6 +198,8 @@ final class CodexAppServerClient: ObservableObject {
     private var activeActivityHandler: ((CodexActivity) -> Void)?
     private var activeDiffHandler: ((CodexTurnDiff) -> Void)?
     private var activeActivities: [String: CodexActivity] = [:]
+    private var goalObservationThreadID: String?
+    private var goalTurnStartRevision = 0
     private var activityStartedAtUptime: [String: UInt64] = [:]
     private var activityStartedAtDate: [String: Date] = [:]
     private(set) var lastTurnActivityDurations: [String: Int] = [:]
@@ -170,13 +209,18 @@ final class CodexAppServerClient: ObservableObject {
     private var pendingUserInputThreadID: String?
     private var pendingUserInputQuestions: [String: CodexUserQuestion] = [:]
     private let codexExecutableOverride: String?
+    private let codexHomeOverride: String?
+    private let goalFeatureEnabled: Bool
     var executableOverrideForTitleGeneration: String? { codexExecutableOverride }
     private var turnWaiters: [String: CheckedContinuation<Void, Error>] = [:]
     private var completedTurns: [String: Result<Void, Error>] = [:]
     private var rejectedTurnKeys = Set<String>()
 
-    init(codexExecutableOverride: String? = nil) {
+    init(codexExecutableOverride: String? = nil, codexHomeOverride: String? = nil, goalFeatureEnabled: Bool = false, goalRuntimeEnabled: Bool = false) {
         self.codexExecutableOverride = Self.ownedTestFixtureExecutable(codexExecutableOverride)
+        self.codexHomeOverride = codexHomeOverride
+        self.goalFeatureEnabled = goalFeatureEnabled
+        self.goalRuntimeEnabled = goalRuntimeEnabled
     }
 
     func diagnosticFields(_ additionalFields: [String: String] = [:]) -> [String: String] {
@@ -197,6 +241,15 @@ final class CodexAppServerClient: ObservableObject {
         onActionRequest: @escaping () -> Void
     ) async throws -> CodexThreadHistory {
         actionRequestHandler = onActionRequest
+        if goalRuntimeEnabled {
+            if activeThreadID != threadID {
+                activeTurnID = nil
+                isTurnActive = false
+            }
+            activeThreadID = threadID
+            goalObservationThreadID = threadID
+            Self.activeClientsByThreadID[threadID] = self
+        }
         try await resumeThreadIfNeeded(id: threadID, workspace: workspace, developerInstructions: developerInstructions)
         return try await readMessages(threadID: threadID)
     }
@@ -270,6 +323,57 @@ final class CodexAppServerClient: ObservableObject {
         }
     }
 
+    func getGoal(threadID: String, workspace: CodexWorkspaceContext) async throws -> CodexThreadGoal? {
+        try await resumeThreadIfNeeded(id: threadID, workspace: workspace)
+        let response = try await request(method: "thread/goal/get", params: ["threadId": threadID])
+        guard let value = response["goal"] as? [String: Any] else { return nil }
+        return Self.decodeGoal(value)
+    }
+
+    func setGoal(threadID: String, objective: String? = nil, status: String? = nil, workspace: CodexWorkspaceContext, observeRuntime: Bool = false) async throws -> CodexThreadGoal? {
+        let startRevision = goalTurnStartRevision
+        if observeRuntime && goalRuntimeEnabled {
+            activeThreadID = threadID
+            activeTurnID = nil
+            activeConversationMode = .code
+            goalObservationThreadID = threadID
+            goalTurnStartedThreadID = nil
+            isTurnActive = false
+            Self.activeClientsByThreadID[threadID] = self
+        }
+        try await resumeThreadIfNeeded(id: threadID, workspace: workspace)
+        var params: [String: Any] = ["threadId": threadID]
+        if let objective { params["objective"] = objective }
+        if let status { params["status"] = status }
+        let response = try await request(method: "thread/goal/set", params: params)
+        guard let value = response["goal"] as? [String: Any] else { return nil }
+        if observeRuntime && goalRuntimeEnabled {
+            try await waitForGoalTurnStart(threadID: threadID, after: startRevision)
+            goalTurnRevision += 1
+        }
+        return Self.decodeGoal(value)
+    }
+
+    func clearGoal(threadID: String, workspace: CodexWorkspaceContext) async throws {
+        try await resumeThreadIfNeeded(id: threadID, workspace: workspace)
+        _ = try await request(method: "thread/goal/clear", params: ["threadId": threadID])
+    }
+
+    func shutdown() {
+        guard let process, process.isRunning else { return }
+        process.terminate()
+        process.waitUntilExit()
+    }
+
+    private static func decodeGoal(_ value: [String: Any]) -> CodexThreadGoal? {
+        guard let threadID = value["threadId"] as? String,
+              let objective = value["objective"] as? String,
+              let status = value["status"] as? String else { return nil }
+        return CodexThreadGoal(threadID: threadID, objective: objective, status: status,
+            tokenBudget: value["tokenBudget"] as? Int, tokensUsed: value["tokensUsed"] as? Int,
+            timeUsedSeconds: value["timeUsedSeconds"] as? Double)
+    }
+
     func steerActiveTurn(threadID expectedThreadID: String, text: String, imageDataURLs: [String] = []) async throws -> Bool {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty || !imageDataURLs.isEmpty else { throw StationAIManagerError.invalidMessage }
@@ -288,13 +392,21 @@ final class CodexAppServerClient: ObservableObject {
     private func sendSteerRequest(threadID: String, turnID: String, text: String, imageDataURLs: [String] = []) async throws -> Bool {
         // Verified against `codex-cli 0.162.1` app-server schemas: params require
         // threadId/input/expectedTurnId and the response requires turnId.
-        let response = try await request(method: "turn/steer", params: [
-            "threadId": threadID,
-            "input": (text.isEmpty ? [] : [["type": "text", "text": text]]) + imageDataURLs.map { ["type": "image", "url": $0] },
-            "expectedTurnId": turnID
-        ])
+        let response: [String: Any]
+        do {
+            response = try await request(method: "turn/steer", params: [
+                "threadId": threadID,
+                "input": (text.isEmpty ? [] : [["type": "text", "text": text]]) + imageDataURLs.map { ["type": "image", "url": $0] },
+                "expectedTurnId": turnID
+            ])
+        } catch {
+            if case ClientError.staleTurn = error {
+                return false
+            }
+            throw error
+        }
         guard response["turnId"] as? String == turnID else {
-            throw ClientError.protocolFailure("Codex acknowledged steering for an unexpected turn.")
+            return false
         }
         return true
     }
@@ -325,7 +437,9 @@ final class CodexAppServerClient: ObservableObject {
         while Date() < deadline {
             if FileManager.default.fileExists(atPath: responseURL.path) {
                 let response = try JSONDecoder().decode(ConversationSteerMailboxResponse.self, from: Data(contentsOf: responseURL))
-                if let error = response.error { throw ClientError.server(error) }
+                if let error = response.error {
+                    throw ClientError.server(error)
+                }
                 return response.accepted
             }
             if !FileManager.default.fileExists(atPath: activeURL.path) { return false }
@@ -346,15 +460,23 @@ final class CodexAppServerClient: ObservableObject {
             let responseURL = directory.appendingPathComponent("\(request.id).response.json")
             let response: ConversationSteerMailboxResponse
             if request.expectedTurnID != turnID {
-                response = ConversationSteerMailboxResponse(accepted: false, error: "The active turn changed before the steering message could be sent.")
+                response = ConversationSteerMailboxResponse(accepted: false, error: nil)
             } else {
                 do {
                     let images = request.imageDataURLs ?? []
-                    _ = try await sendSteerRequest(threadID: threadID, turnID: turnID, text: request.text, imageDataURLs: images)
-                    activeSteerMessageHandler?(request.text, images)
-                    response = ConversationSteerMailboxResponse(accepted: true, error: nil)
+                    let accepted = try await sendSteerRequest(threadID: threadID, turnID: turnID, text: request.text, imageDataURLs: images)
+                    if accepted {
+                        activeSteerMessageHandler?(request.text, images)
+                        response = ConversationSteerMailboxResponse(accepted: true, error: nil)
+                    } else {
+                        response = ConversationSteerMailboxResponse(accepted: false, error: nil)
+                    }
                 } catch {
-                    response = ConversationSteerMailboxResponse(accepted: false, error: error.localizedDescription)
+                    if case ClientError.staleTurn = error {
+                        response = ConversationSteerMailboxResponse(accepted: false, error: nil)
+                    } else {
+                        response = ConversationSteerMailboxResponse(accepted: false, error: error.localizedDescription)
+                    }
                 }
             }
             if let data = try? JSONEncoder().encode(response) {
@@ -418,6 +540,7 @@ final class CodexAppServerClient: ObservableObject {
             modelID: modelID,
             developerInstructions: developerInstructions
         )
+        goalObservationThreadID = nil
         activeThreadID = threadID
         Self.activeClientsByThreadID[threadID] = self
         activeTurnID = nil
@@ -608,6 +731,10 @@ final class CodexAppServerClient: ObservableObject {
             || pendingUserInputThreadID == threadID
     }
 
+    func isObservingGoal(threadID: String) -> Bool {
+        goalObservationThreadID == threadID
+    }
+
     func activeTurnOwnerProcessID(threadID: String) -> Int32? {
         if let target = Self.activeClientsByThreadID[threadID],
            target.isTurnActive(threadID: threadID) {
@@ -682,7 +809,7 @@ final class CodexAppServerClient: ObservableObject {
         let stderr = Pipe()
 
         child.executableURL = URL(fileURLWithPath: executablePath)
-        child.arguments = [
+        var arguments = [
             "app-server",
             "--listen", "stdio://",
             "--disable", "apps",
@@ -690,6 +817,10 @@ final class CodexAppServerClient: ObservableObject {
             "--disable", "hooks",
             "-c", "mcp_servers={}"
         ]
+        if goalFeatureEnabled || goalRuntimeEnabled {
+            arguments += ["-c", "features.goals=true"]
+        }
+        child.arguments = arguments
         child.currentDirectoryURL = workspaceURL
         child.standardInput = stdin
         child.standardOutput = stdout
@@ -697,6 +828,7 @@ final class CodexAppServerClient: ObservableObject {
 
         var environment = ProcessInfo.processInfo.environment
         environment["PATH"] = Self.expandedSearchPath(environment["PATH"])
+        if let codexHomeOverride { environment["CODEX_HOME"] = codexHomeOverride }
         child.environment = environment
 
         process = child
@@ -857,11 +989,13 @@ final class CodexAppServerClient: ObservableObject {
                 if var message = Self.chatMessage(from: entry) {
                     message.timelineOrder = historyItemOrder
                     if message.role == .assistant,
+                       message.asyncQuestions == nil,
                        let turnID = entry["turnId"] as? String,
                        turnID == lastAssistantTurnID,
                        message.phase == lastAssistantPhase,
                        let lastIndex = messages.indices.last,
-                       messages[lastIndex].role == .assistant {
+                       messages[lastIndex].role == .assistant,
+                       messages[lastIndex].asyncQuestions == nil {
                         messages[lastIndex].text += "\n\n" + message.text
                     } else {
                         messages.append(message)
@@ -998,11 +1132,16 @@ final class CodexAppServerClient: ObservableObject {
                 StationAIDiagnostics.record("codex.rpc.server_request", fields: Self.diagnosticNotificationFields(method: method, params: params))
                 await handleServerRequest(method: method, params: params, requestID: requestID)
             } else {
-                StationAIDiagnostics.record("codex.notification", fields: Self.diagnosticNotificationFields(
-                    method: method,
-                    params: message["params"] as? [String: Any] ?? [:]
-                ))
-                handleNotification(method: method, params: message["params"] as? [String: Any] ?? [:])
+                let params = message["params"] as? [String: Any] ?? [:]
+                if Self.highVolumeDeltaMethods.contains(method) {
+                    recordDeltaLogSummary(method: method, params: params)
+                } else {
+                    StationAIDiagnostics.record("codex.notification", fields: Self.diagnosticNotificationFields(
+                        method: method,
+                        params: params
+                    ))
+                }
+                handleNotification(method: method, params: params)
             }
             return
         }
@@ -1027,7 +1166,10 @@ final class CodexAppServerClient: ObservableObject {
                 "errorCode": String(describing: serverError["code"] ?? "unknown"),
                 "errorDescription": "Codex returned an RPC error."
             ]) { _, new in new })
-            continuation.resume(throwing: Self.error(forServerMessage: detail))
+            continuation.resume(throwing: Self.error(
+                forServerMessage: detail,
+                method: requestDiagnostics?.method
+            ))
         } else if let result = message["result"] as? [String: Any] {
             StationAIDiagnostics.record("codex.rpc.response.succeeded", fields: responseFields.merging([
                 "resultFieldNames": result.keys.sorted().joined(separator: ",")
@@ -1047,7 +1189,7 @@ final class CodexAppServerClient: ObservableObject {
             "method": method,
             "parameterNames": params.keys.sorted().joined(separator: ",")
         ]
-        for key in ["threadId", "itemId"] {
+        for key in ["threadId", "turnId", "itemId"] {
             if let value = params[key] as? String { fields[key] = value }
         }
         if let turn = params["turn"] as? [String: Any] {
@@ -1082,8 +1224,52 @@ final class CodexAppServerClient: ObservableObject {
         return fields
     }
 
+    private static let highVolumeDeltaMethods: Set<String> = [
+        "item/agentMessage/delta", "item/plan/delta", "item/commandExecution/outputDelta"
+    ]
+
+    private func recordDeltaLogSummary(method: String, params: [String: Any]) {
+        let threadID = params["threadId"] as? String ?? ""
+        let turnID = params["turnId"] as? String
+            ?? (threadID == activeThreadID ? activeTurnID : nil)
+            ?? ""
+        let itemID = params["itemId"] as? String ?? (params["item"] as? [String: Any])?["id"] as? String ?? ""
+        let key = [threadID, turnID, itemID, method].joined(separator: "\u{1F}")
+        var entry = deltaLogSummaries[key] ?? (threadID, turnID, itemID, method, DeltaLogSummary())
+        entry.summary.notificationCount += 1
+        entry.summary.payloadBytes += (params["delta"] as? String)?.utf8.count ?? 0
+        deltaLogSummaries[key] = entry
+        if entry.summary.notificationCount >= deltaLogSummaryLimit {
+            flushDeltaLogSummary(for: key, reason: "batch")
+        }
+    }
+
+    private func flushDeltaLogSummary(for key: String, reason: String) {
+        guard let entry = deltaLogSummaries.removeValue(forKey: key) else { return }
+        StationAIDiagnostics.record("codex.notification.summary", fields: [
+            "method": entry.method,
+            "threadID": entry.threadID,
+            "turnID": entry.turnID,
+            "itemID": entry.itemID,
+            "notificationCount": String(entry.summary.notificationCount),
+            "payloadBytes": String(entry.summary.payloadBytes),
+            "flushReason": reason
+        ])
+    }
+
+    private func flushDeltaLogSummaries(threadID: String, turnID: String, reason: String) {
+        let keys = deltaLogSummaries.compactMap { key, entry in
+            entry.threadID == threadID && (entry.turnID == turnID || entry.turnID.isEmpty) ? key : nil
+        }
+        for key in keys { flushDeltaLogSummary(for: key, reason: reason) }
+    }
+
     private func handleNotification(method: String, params: [String: Any]) {
         switch method {
+        case "thread/goal/updated", "thread/goal/cleared":
+            guard let threadID = params["threadId"] as? String else { return }
+            goalStateThreadID = threadID
+            goalStateRevision += 1
         case "turn/started":
             // Server notifications use params {threadId, turn:{id,status,...}}.
             guard let threadID = params["threadId"] as? String,
@@ -1093,6 +1279,11 @@ final class CodexAppServerClient: ObservableObject {
             activeTurnID = turnID
             isTurnActive = true
             Self.processActiveThreadIDs.insert(threadID)
+            if goalObservationThreadID == threadID {
+                goalTurnStartRevision += 1
+                goalTurnRevision += 1
+                goalTurnStartedThreadID = threadID
+            }
         case "item/agentMessage/delta", "item/plan/delta":
             guard params["threadId"] as? String == activeThreadID,
                   let delta = params["delta"] as? String else { return }
@@ -1100,12 +1291,25 @@ final class CodexAppServerClient: ObservableObject {
         case "item/started", "item/completed":
             guard params["threadId"] as? String == activeThreadID,
                   let item = params["item"] as? [String: Any] else { return }
+            if goalObservationThreadID == activeThreadID { goalTurnRevision += 1 }
             if method == "item/completed",
                let itemType = item["type"] as? String,
-               itemType == "agentMessage" || itemType == "plan",
-               let text = item["text"] as? String,
-               !text.isEmpty {
-                if itemType == "agentMessage", item["phase"] as? String == "commentary" {
+               itemType == "agentMessage" || itemType == "plan" {
+                let text = item["text"] as? String ?? ""
+                let questions = itemType == "agentMessage" && item["delivery"] as? String == "async"
+                    ? Self.asyncQuestions(from: item) : nil
+                guard !text.isEmpty || questions != nil else { return }
+                if itemType == "agentMessage", item["delivery"] as? String == "async",
+                   let questions {
+                    activeProgressMessageHandler?(CodexChatMessage(
+                        id: item["id"] as? String ?? UUID().uuidString,
+                        role: .assistant,
+                        text: text,
+                        phase: item["phase"] as? String,
+                        turnID: params["turnId"] as? String,
+                        asyncQuestions: questions
+                    ))
+                } else if itemType == "agentMessage", item["phase"] as? String == "commentary" {
                     activeProgressMessageHandler?(CodexChatMessage(
                         id: item["id"] as? String ?? UUID().uuidString,
                         role: .assistant,
@@ -1164,11 +1368,24 @@ final class CodexAppServerClient: ObservableObject {
                   let turn = params["turn"] as? [String: Any],
                   let turnID = turn["id"] as? String else { return }
 
+            flushDeltaLogSummaries(threadID: threadID, turnID: turnID, reason: "turn_completed")
+
             StationAIDiagnostics.record("codex.turn.ended", fields: diagnosticFields([
                 "threadID": threadID,
                 "turnID": turnID,
                 "turnStatus": turn["status"] as? String ?? "unknown",
             ]))
+
+            if goalObservationThreadID == threadID, activeTurnID == turnID {
+                activeTurnID = nil
+                isTurnActive = false
+                goalTurnCompletedTurnID = turnID
+                Self.processActiveThreadIDs.remove(threadID)
+                clearActiveTurnForMailbox(threadID: threadID)
+                goalTurnRevision += 1
+                goalTurnCompletedRevision += 1
+                return
+            }
 
             let key = Self.turnKey(threadID: threadID, turnID: turnID)
             if rejectedTurnKeys.remove(key) != nil { return }
@@ -1287,8 +1504,22 @@ final class CodexAppServerClient: ObservableObject {
         }
     }
 
+    private func waitForGoalTurnStart(threadID: String, after revision: Int) async throws {
+        let deadline = Date().addingTimeInterval(30)
+        while Date() < deadline {
+            if goalObservationThreadID != threadID {
+                throw ClientError.protocolFailure("Goal turn observation ended before Codex started work.")
+            }
+            if goalTurnStartRevision > revision { return }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        throw ClientError.protocolFailure("Codex accepted the Goal but did not start a work turn within 30 seconds.")
+    }
+
     private func processDidTerminate(_ terminatedProcess: Process) {
         guard process === terminatedProcess else { return }
+
+        for key in Array(deltaLogSummaries.keys) { flushDeltaLogSummary(for: key, reason: "app_server_exit") }
 
         let exitDetail = "Codex CLI exited with status \(terminatedProcess.terminationStatus)."
         StationAIDiagnostics.record("codex.app_server.exited", fields: diagnosticFields([
@@ -1351,13 +1582,27 @@ final class CodexAppServerClient: ObservableObject {
             guard !text.isEmpty || !images.isEmpty else { return nil }
             return CodexChatMessage(id: itemID, role: .user, text: text, imageDataURLs: images, turnID: entry["turnId"] as? String)
         case "agentMessage", "plan":
-            guard let text = item["text"] as? String, !text.isEmpty else { return nil }
+            let text = item["text"] as? String ?? ""
+            let questions = type == "agentMessage" && item["delivery"] as? String == "async"
+                ? asyncQuestions(from: item) : nil
+            guard !text.isEmpty || questions != nil else { return nil }
             return CodexChatMessage(id: itemID, role: .assistant, text: text,
                                     phase: type == "plan" ? "final_answer" : item["phase"] as? String,
-                                    turnID: entry["turnId"] as? String)
+                                    turnID: entry["turnId"] as? String,
+                                    asyncQuestions: questions)
         default:
             return nil
         }
+    }
+
+    private static func asyncQuestions(from item: [String: Any]) -> [CodexAsyncUserQuestion]? {
+        guard let rawQuestions = item["questions"] as? [[String: Any]] else { return nil }
+        let questions = rawQuestions.compactMap { raw -> CodexAsyncUserQuestion? in
+            guard let title = raw["title"] as? String,
+                  !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return CodexAsyncUserQuestion(title: title, options: raw["options"] as? [String])
+        }
+        return questions.isEmpty ? nil : questions
     }
 
     private static func turnKey(threadID: String, turnID: String) -> String {
@@ -1388,8 +1633,16 @@ final class CodexAppServerClient: ObservableObject {
         return message
     }
 
-    private static func error(forServerMessage message: String) -> Error {
+    private static func error(forServerMessage message: String, method: String? = nil) -> Error {
         let normalized = message.lowercased()
+        let isMissedSteerTurn = method == "turn/steer" && (
+            normalized == "no active turn to steer" ||
+                (normalized.contains("expected active turn id") && normalized.contains("but found")) ||
+                (normalized.contains("expected turn id") && normalized.contains("stale"))
+        )
+        if isMissedSteerTurn {
+            return ClientError.staleTurn(message)
+        }
         if normalized.contains("unauthorized") || normalized.contains("authentication") ||
             normalized.contains("not logged in") || normalized.contains("sign in") ||
             normalized.contains("401") {
@@ -1482,6 +1735,36 @@ enum TaskThreadDeveloperInstructions {
         \(quotedExecutable) task repository remove \(id) --repo <path>
         \(quotedExecutable) settings get
         \(quotedExecutable) workspace repos list
+
+        At the very end of every turn, make exactly one definitive outcome call using this task ID:
+        \(quotedExecutable) task outcome \(id) <completed|waiting-response>
+        Use completed only when all work for this turn is finished and no user decision or response is needed. If you need the user to answer, choose between options, provide missing information, or take another action before you can continue, use waiting-response. The outcome call must be your final CLI action for the turn. StationAI moves the task to Review only for completed. If you omit the outcome call, StationAI moves it to Waiting Response.
+        """
+    }
+
+    private static func cliExecutableURL() -> URL {
+        let fileManager = FileManager.default
+        var candidate = Bundle.main.bundleURL
+        for _ in 0..<5 {
+            let cli = candidate.appendingPathComponent("Contents/MacOS/stationai-cli")
+            if fileManager.isExecutableFile(atPath: cli.path) { return cli }
+            candidate.deleteLastPathComponent()
+        }
+        return Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/stationai-cli")
+    }
+}
+
+enum TaskProgressReportInstructions {
+    static func make(taskID: UUID) -> String {
+        let executable = cliExecutableURL().path
+        let quotedExecutable = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let id = taskID.uuidString
+        return """
+        Report your current work on the StationAI task board using the StationAI CLI. Publish at every phase change, when starting or finishing a substantial tool call, and at least every 30 seconds during long commands, builds, tests, waits, or investigation. Keep the report current while a tool runs; after it finishes, replace it with the next active action. During tests, identify the active suite/case and position when known (for example, "CLI/XPC 3/8: task progress persistence"); during other work, name the concrete action and useful target. Keep each detail to a short subtitle, ideally under 80 characters. Do not report every tiny edit. Use these commands for this task:
+        \(quotedExecutable) task progress publish \(id) --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail "short detail"]
+        \(quotedExecutable) task progress custom \(id) --label "short label" [--detail "short detail"]
+        \(quotedExecutable) task progress clear \(id)
+        Progress reports are hidden from the conversation and shown on the task card. Keep details brief. Do not use lifecycle task status commands for progress.
 
         At the very end of every turn, make exactly one definitive outcome call using this task ID:
         \(quotedExecutable) task outcome \(id) <completed|waiting-response>
