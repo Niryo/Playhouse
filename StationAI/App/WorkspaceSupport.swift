@@ -138,14 +138,94 @@ enum WorkspaceError: LocalizedError {
 struct CodexActivity: Codable, Identifiable, Equatable {
     let id: String
     let title: String
-    let detail: String
+    var detail: String
     let status: String
     var childThreadID: String? = nil
     var agentPath: String? = nil
     var model: String? = nil
     var reasoningEffort: String? = nil
+    var toolKind: String? = nil
+    var server: String? = nil
+    var tool: String? = nil
+    var durationMs: Int? = nil
+    var startedAt: Date? = nil
+    var isContextCompaction: Bool = false
+    var turnID: String? = nil
+    var timelineOrder: Int? = nil
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, detail, status, childThreadID, agentPath, model, reasoningEffort
+        case toolKind, server, tool, durationMs, startedAt, isContextCompaction, turnID, timelineOrder
+    }
+
+    init(
+        id: String,
+        title: String,
+        detail: String,
+        status: String,
+        childThreadID: String? = nil,
+        agentPath: String? = nil,
+        model: String? = nil,
+        reasoningEffort: String? = nil,
+        toolKind: String? = nil,
+        server: String? = nil,
+        tool: String? = nil,
+        durationMs: Int? = nil,
+        startedAt: Date? = nil,
+        isContextCompaction: Bool = false,
+        turnID: String? = nil,
+        timelineOrder: Int? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.detail = detail
+        self.status = status
+        self.childThreadID = childThreadID
+        self.agentPath = agentPath
+        self.model = model
+        self.reasoningEffort = reasoningEffort
+        self.toolKind = toolKind
+        self.server = server
+        self.tool = tool
+        self.durationMs = durationMs
+        self.startedAt = startedAt
+        self.isContextCompaction = isContextCompaction
+        self.turnID = turnID
+        self.timelineOrder = timelineOrder
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        title = try values.decode(String.self, forKey: .title)
+        detail = try values.decode(String.self, forKey: .detail)
+        status = try values.decode(String.self, forKey: .status)
+        childThreadID = try values.decodeIfPresent(String.self, forKey: .childThreadID)
+        agentPath = try values.decodeIfPresent(String.self, forKey: .agentPath)
+        model = try values.decodeIfPresent(String.self, forKey: .model)
+        reasoningEffort = try values.decodeIfPresent(String.self, forKey: .reasoningEffort)
+        toolKind = try values.decodeIfPresent(String.self, forKey: .toolKind)
+        server = try values.decodeIfPresent(String.self, forKey: .server)
+        tool = try values.decodeIfPresent(String.self, forKey: .tool)
+        durationMs = try values.decodeIfPresent(Int.self, forKey: .durationMs)
+        startedAt = try values.decodeIfPresent(Date.self, forKey: .startedAt)
+        isContextCompaction = try values.decodeIfPresent(Bool.self, forKey: .isContextCompaction) ?? false
+        turnID = try values.decodeIfPresent(String.self, forKey: .turnID)
+        timelineOrder = try values.decodeIfPresent(Int.self, forKey: .timelineOrder)
+    }
 
     var isSubagent: Bool { childThreadID != nil }
+
+    var isActive: Bool { status.lowercased() == "inprogress" || status.lowercased() == "running" }
+
+    func durationLabel(at now: Date = .now) -> String? {
+        if let durationMs {
+            return "Duration · \(durationMs) ms"
+        }
+        guard isActive, let startedAt else { return nil }
+        let elapsedMs = max(0, Int(now.timeIntervalSince(startedAt) * 1_000))
+        return "Running · \(elapsedMs) ms"
+    }
 
     var statusLabel: String {
         switch status.lowercased() {
@@ -167,10 +247,24 @@ struct CodexActivity: Codable, Identifiable, Equatable {
         }
     }
 
-    static func from(item: [String: Any]) -> CodexActivity? {
+    static func from(item: [String: Any], lifecycle: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil, startedAt: Date? = nil, measuredDurationMs: Int? = nil) -> CodexActivity? {
         guard let id = item["id"] as? String, let type = item["type"] as? String else { return nil }
-        let status = item["status"] as? String ?? "inProgress"
+        let status = lifecycle ?? (item["status"] as? String ?? "inProgress")
         switch type {
+        case "contextCompaction":
+            // The installed app-server schema currently supplies only id/type.
+            // Never serialize unknown machine fields into user-visible prose.
+            return CodexActivity(
+                id: id,
+                title: "Context compacted",
+                detail: "",
+                status: status,
+                durationMs: item["durationMs"] as? Int ?? measuredDurationMs,
+                startedAt: startedAt,
+                isContextCompaction: true,
+                turnID: turnID,
+                timelineOrder: timelineOrder
+            )
         case "subAgentActivity":
             guard let childThreadID = item["agentThreadId"] as? String else { return nil }
             let kind = item["kind"] as? String ?? "unknown"
@@ -195,7 +289,9 @@ struct CodexActivity: Codable, Identifiable, Equatable {
                 childThreadID: childThreadID,
                 agentPath: path,
                 model: item["model"] as? String,
-                reasoningEffort: item["reasoningEffort"] as? String
+                reasoningEffort: item["reasoningEffort"] as? String,
+                durationMs: item["durationMs"] as? Int ?? measuredDurationMs,
+                startedAt: startedAt
             )
         case "commandExecution":
             let command = item["command"] as? String ?? (item["command"] as? [String])?.joined(separator: " ") ?? ""
@@ -209,7 +305,9 @@ struct CodexActivity: Codable, Identifiable, Equatable {
                 id: id,
                 title: command.isEmpty ? "Running command" : "Running \(command)",
                 detail: detail,
-                status: status
+                status: status,
+                durationMs: item["durationMs"] as? Int ?? measuredDurationMs,
+                startedAt: startedAt
             )
         case "fileChange":
             let changes = item["changes"] as? [[String: Any]] ?? []
@@ -218,12 +316,61 @@ struct CodexActivity: Codable, Identifiable, Equatable {
                 id: id,
                 title: paths.isEmpty ? "Editing files" : "Editing \(paths.count) \(paths.count == 1 ? "file" : "files")",
                 detail: paths.joined(separator: ", "),
-                status: status
+                status: status,
+                durationMs: item["durationMs"] as? Int ?? measuredDurationMs,
+                startedAt: startedAt
             )
         case "webSearch":
-            return CodexActivity(id: id, title: "Searching the web", detail: item["query"] as? String ?? "", status: status)
+            return CodexActivity(id: id, title: "Searching the web", detail: item["query"] as? String ?? "", status: status, durationMs: item["durationMs"] as? Int ?? measuredDurationMs, startedAt: startedAt)
         case "imageView":
-            return CodexActivity(id: id, title: "Viewing image", detail: item["path"] as? String ?? "", status: status)
+            return CodexActivity(id: id, title: "Viewing image", detail: item["path"] as? String ?? "", status: status, durationMs: item["durationMs"] as? Int ?? measuredDurationMs, startedAt: startedAt)
+        case "mcpToolCall":
+            let server = item["server"] as? String
+            let tool = item["tool"] as? String
+            let error = item["error"] as? [String: Any]
+            let summary: String
+            if status == "failed" || error != nil {
+                summary = "Tool call failed"
+            } else if status == "completed" {
+                let result = item["result"] as? [String: Any]
+                let count = (result?["content"] as? [Any])?.count ?? 0
+                summary = count > 0 ? "Returned \(count) result \(count == 1 ? "item" : "items")" : "Completed without result details"
+            } else {
+                summary = "Waiting for result"
+            }
+            return CodexActivity(
+                id: id,
+                title: "MCP · \(tool ?? "Tool")",
+                detail: [server.map { "Server · \($0)" }, summary].compactMap { $0 }.joined(separator: "\n"),
+                status: error == nil ? status : "failed",
+                toolKind: "mcp",
+                server: server,
+                tool: tool,
+                durationMs: item["durationMs"] as? Int ?? measuredDurationMs,
+                startedAt: startedAt
+            )
+        case "dynamicToolCall":
+            let tool = item["tool"] as? String
+            let success = item["success"] as? Bool
+            let summary: String
+            if status == "failed" || success == false {
+                summary = "Tool call failed"
+            } else if status == "completed" {
+                let count = (item["contentItems"] as? [Any])?.count ?? 0
+                summary = count > 0 ? "Returned \(count) result \(count == 1 ? "item" : "items")" : "Tool call completed without result details"
+            } else {
+                summary = "Waiting for result"
+            }
+            return CodexActivity(
+                id: id,
+                title: "Tool · \(tool ?? "Dynamic tool")",
+                detail: summary,
+                status: success == false ? "failed" : status,
+                toolKind: "dynamic",
+                tool: tool,
+                durationMs: item["durationMs"] as? Int ?? measuredDurationMs,
+                startedAt: startedAt
+            )
         case "collabAgentToolCall":
             guard item["tool"] as? String == "spawnAgent" else { return nil }
             let prompt = item["prompt"] as? String ?? ""
@@ -234,7 +381,7 @@ struct CodexActivity: Codable, Identifiable, Equatable {
                 return [agentStatus, message].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ": ")
             }
             let detail = ([prompt] + stateDetails).filter { !$0.isEmpty }.joined(separator: "\n")
-            return CodexActivity(id: id, title: "Task delegated to subagent", detail: detail, status: status)
+            return CodexActivity(id: id, title: "Task delegated to subagent", detail: detail, status: status, durationMs: item["durationMs"] as? Int ?? measuredDurationMs, startedAt: startedAt)
         default:
             return nil
         }

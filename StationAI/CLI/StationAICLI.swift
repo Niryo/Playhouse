@@ -99,17 +99,21 @@ enum StationAICLI {
                 ])
             case "pr":
                 guard tail.count >= 2 else {
-                    throw CLIError.usage("Use: stationai task pr create|conflicts|resolve <task-id> [action]")
+                    throw CLIError.usage("Use: stationai task pr create|conflicts|status|verify|resolve <task-id> [action]")
                 }
                 switch tail[0] {
                 case "create" where tail.count == 2:
                     return BridgeRequest(command: "task.pr.create", arguments: ["taskID": .string(tail[1])])
                 case "conflicts" where tail.count == 2:
                     return BridgeRequest(command: "task.pr.conflicts", arguments: ["taskID": .string(tail[1])])
+                case "status" where tail.count == 2:
+                    return BridgeRequest(command: "task.pr.status", arguments: ["taskID": .string(tail[1])])
+                case "verify" where tail.count == 2:
+                    return BridgeRequest(command: "task.pr.verify", arguments: ["taskID": .string(tail[1])])
                 case "resolve" where tail.count == 3:
                     return BridgeRequest(command: "task.pr.resolve", arguments: ["taskID": .string(tail[1]), "action": .string(tail[2])])
                 default:
-                    throw CLIError.usage("Use: stationai task pr create|conflicts|resolve <task-id> [resolve-and-push|resolve-only|keep]")
+                    throw CLIError.usage("Use: stationai task pr create|conflicts|status|verify|resolve <task-id> [resolve-and-push|resolve-only|keep]")
                 }
             case "progress":
                 guard let action = tail.first else { throw CLIError.usage("Use: stationai task progress publish|custom|clear <task-id> ...") }
@@ -190,7 +194,7 @@ enum StationAICLI {
                 }
             case "prompt":
                 guard let id = tail.first else { throw CLIError.usage("Use: stationai task prompt <task-id> --text <prompt> [--status <status>] [--submitted true]") }
-                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--text", "--status", "--submitted"])
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--text", "--status", "--submitted", "--image"])
                 let prompt = try requiredFlag("--text", flags: flags).first!
                 let status = flags["--status"]?.first
                 let submittedValue = flags["--submitted"]?.first
@@ -205,6 +209,16 @@ enum StationAICLI {
                     throw CLIError.usage("A submitted prompt requires nonblank text and --status \"In Progress\".")
                 }
                 var arguments: [String: BridgeValue] = ["taskID": .string(id), "prompt": .string(prompt)]
+                if let imagePaths = flags["--image"] {
+                    arguments["images"] = .array(try imagePaths.map { path in
+                        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+                        let mime: String
+                        if data.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]) { mime = "image/png" }
+                        else if data.starts(with: [255, 216, 255]) { mime = "image/jpeg" }
+                        else { throw CLIError.usage("Images must be PNG or JPEG files.") }
+                        return .string("data:\(mime);base64,\(data.base64EncodedString())")
+                    })
+                }
                 if let status { arguments["status"] = .string(status) }
                 if submitted { arguments["submitted"] = .boolean(true) }
                 return BridgeRequest(command: "task.prompt.save", arguments: arguments)
@@ -417,6 +431,8 @@ enum StationAICLI {
       stationai task move <task-id> Done
       stationai task move <task-id> Done --allow-unmerged
       stationai task pr create <task-id>
+      stationai task pr status <task-id>
+      stationai task pr verify <task-id>
       stationai task progress publish <task-id> --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail <text>]
       stationai task progress custom <task-id> --label <label> [--detail <text>]
       stationai task progress clear <task-id>

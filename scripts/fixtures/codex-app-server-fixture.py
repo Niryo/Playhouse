@@ -18,6 +18,8 @@ else:
     TURN_ID = "turn_stationai_fixture"
 
 
+MARKDOWN_PLAN = '## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening'
+
 def write(value):
     sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
     sys.stdout.flush()
@@ -49,7 +51,7 @@ def question_request(request_id):
     write({
         "jsonrpc": "2.0",
         "id": request_id,
-        "method": "item/tool/requestUserInput",
+        "method": "tool/requestUserInput",
         "params": {
             "threadId": THREAD_ID,
             "turnId": TURN_ID,
@@ -367,6 +369,8 @@ def main():
             elif mode.endswith("-success-wait") and not mode.endswith("-title-success-wait"):
                 ready = Path(str(sys.argv[0]) + ".resolve-ready")
                 resume = Path(str(sys.argv[0]) + ".resolve-continue")
+                with Path(str(sys.argv[0]) + ".resolve-start-count").open("a", encoding="utf-8") as stream:
+                    stream.write("start\n")
                 ready.write_text("Codex conflict-resolution turn is active.\n", encoding="utf-8")
                 deadline = time.monotonic() + 30
                 while not resume.exists() and time.monotonic() < deadline:
@@ -379,7 +383,32 @@ def main():
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
-            elif mode.endswith("-subagent") or mode.endswith("-subagent-wait"):
+            elif mode.endswith("-context-compaction"):
+                compaction_item = {"id": "item_stationai_compaction", "type": "contextCompaction", "payload": {"opaque": "COMPACTION_OPAQUE_SENTINEL"}}
+                write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID, "item": compaction_item,
+                }})
+                ready = Path(str(sys.argv[0]) + ".compaction-ready")
+                release = Path(str(sys.argv[0]) + ".compaction-release")
+                ready.unlink(missing_ok=True)
+                release.unlink(missing_ok=True)
+                ready.write_text("Context compaction is active.\n", encoding="utf-8")
+                deadline = time.monotonic() + 30
+                while not release.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                ready.unlink(missing_ok=True)
+                if not release.exists():
+                    return 3
+                release.unlink(missing_ok=True)
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID, "item": compaction_item,
+                }})
+                item = {"id": "item_stationai_final", "type": "agentMessage", "phase": "final_answer", "text": "Context compaction completed."}
+                write({"jsonrpc": "2.0", "method": "item/started", "params": {"threadId": THREAD_ID, "turnId": TURN_ID, "item": item}})
+                write({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"threadId": THREAD_ID, "turnId": TURN_ID, "itemId": item["id"], "delta": item["text"]}})
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "turnId": TURN_ID, "item": item}})
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"}}})
+            elif mode.endswith("-subagent") or mode.endswith("-subagent-wait") or mode.endswith("-tool-activity"):
                 if mode.endswith("-subagent-wait"):
                     active = Path(str(sys.argv[0]) + ".turn-active")
                     release = Path(str(sys.argv[0]) + ".turn-release")
@@ -414,18 +443,19 @@ def main():
                         model="gpt-6-sol", reasoning_effort="high",
                     ),
                 }})
-                ready = Path(str(sys.argv[0]) + ".subagent-ready")
-                release = Path(str(sys.argv[0]) + ".subagent-release")
-                ready.unlink(missing_ok=True)
-                release.unlink(missing_ok=True)
-                ready.write_text("Subagent activities are active.\n", encoding="utf-8")
-                deadline = time.monotonic() + 30
-                while not release.exists() and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                ready.unlink(missing_ok=True)
-                if not release.exists():
-                    return 3
-                release.unlink(missing_ok=True)
+                if not mode.endswith("-tool-activity"):
+                    ready = Path(str(sys.argv[0]) + ".subagent-ready")
+                    release = Path(str(sys.argv[0]) + ".subagent-release")
+                    ready.unlink(missing_ok=True)
+                    release.unlink(missing_ok=True)
+                    ready.write_text("Subagent activities are active.\n", encoding="utf-8")
+                    deadline = time.monotonic() + 30
+                    while not release.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    ready.unlink(missing_ok=True)
+                    if not release.exists():
+                        return 3
+                    release.unlink(missing_ok=True)
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID,
                     # A terminal event may omit metadata reported by the start.
@@ -442,6 +472,49 @@ def main():
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID, "item": subagent_item("completed"),
                 }})
+                if mode.endswith("-tool-activity"):
+                    mcp_item = {
+                        "id": "item_fixture_mcp_call", "type": "mcpToolCall", "server": "fixture-server",
+                        "tool": "lookup", "status": "inProgress", "arguments": {"token": "RAW_ARGUMENT_SECRET"},
+                    }
+                    dynamic_item = {
+                        "id": "item_fixture_dynamic_call", "type": "dynamicToolCall", "tool": "summarize",
+                        "status": "inProgress", "arguments": {"prompt": "RAW_ARGUMENT_SECRET"},
+                    }
+                    legacy_dynamic_item = {
+                        "id": "item_fixture_dynamic_legacy", "type": "dynamicToolCall", "tool": "legacySummary",
+                        "status": "inProgress", "arguments": {"input": "RAW_ARGUMENT_SECRET"},
+                    }
+                    for tool_item in [mcp_item, dynamic_item, legacy_dynamic_item]:
+                        write({"jsonrpc": "2.0", "method": "item/started", "params": {"threadId": THREAD_ID, "item": tool_item}})
+                    ready = Path(str(sys.argv[0]) + ".tool-ready")
+                    release = Path(str(sys.argv[0]) + ".tool-release")
+                    ready.unlink(missing_ok=True)
+                    release.unlink(missing_ok=True)
+                    ready.write_text("Tool lifecycle starts are visible.\n", encoding="utf-8")
+                    release_latest = Path(str(sys.argv[0]) + ".tool-release-latest")
+                    release_latest.unlink(missing_ok=True)
+                    deadline = time.monotonic() + 30
+                    while not release_latest.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    if not release_latest.exists():
+                        return 3
+                    release_latest.unlink(missing_ok=True)
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
+                        **legacy_dynamic_item, "status": "completed", "success": True, "contentItems": [{"type": "inputText", "text": "RAW_RESULT_SECRET"}],
+                    }}})
+                    while not release.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    ready.unlink(missing_ok=True)
+                    if not release.exists():
+                        return 3
+                    release.unlink(missing_ok=True)
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
+                        **mcp_item, "status": "completed", "result": {"content": [{"type": "text", "text": "RAW_RESULT_SECRET"}]},
+                    }}})
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
+                        **dynamic_item, "status": "failed", "success": False, "durationMs": 37,
+                    }}})
                 for action_item in diagnostic_action_items(os.environ.get("STATIONAI_FIXTURE_WORKSPACE", os.getcwd())):
                     write({"jsonrpc": "2.0", "method": "item/started", "params": {
                         "threadId": THREAD_ID, "item": {**action_item, "status": "inProgress"},
@@ -506,6 +579,31 @@ def main():
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
             elif mode.endswith("-markdown"):
+                plan_item_id = "item_stationai_plan"
+                write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID,
+                    "item": {"id": plan_item_id, "type": "plan", "text": ""},
+                }})
+                for index, delta in enumerate((MARKDOWN_PLAN[:64], MARKDOWN_PLAN[64:])):
+                    write({"jsonrpc": "2.0", "method": "item/plan/delta", "params": {
+                        "threadId": THREAD_ID, "turnId": TURN_ID,
+                        "itemId": plan_item_id, "delta": delta,
+                    }})
+                    if index == 0 and Path(str(sys.argv[0]) + ".plan-delta-hold").exists():
+                        ready = Path(str(sys.argv[0]) + ".plan-delta-ready")
+                        release = Path(str(sys.argv[0]) + ".plan-delta-release")
+                        ready.write_text("The first plan delta is visible before completion.\n", encoding="utf-8")
+                        deadline = time.monotonic() + 30
+                        while not release.exists() and time.monotonic() < deadline:
+                            time.sleep(0.02)
+                        if not release.exists():
+                            return 3
+                        ready.unlink()
+                        release.unlink()
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID,
+                    "item": {"id": plan_item_id, "type": "plan", "text": MARKDOWN_PLAN},
+                }})
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": "00000000-0000-0000-0000-000000000001",
                     "turn": {"id": "turn_stationai_fixture", "status": "completed"},
@@ -650,11 +748,25 @@ def main():
                     subagent_activity("futureKind", "00000000-0000-0000-0000-000000000004", "/agents/Future review"),
                     *diagnostic_action_items(os.environ.get("STATIONAI_FIXTURE_WORKSPACE", os.getcwd())),
                 ]
+            if mode.endswith("-context-compaction"):
+                contents = [
+                    {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": "Compact the context."}]},
+                    {"id": "item_stationai_compaction", "type": "contextCompaction", "payload": {"opaque": "COMPACTION_OPAQUE_SENTINEL"}},
+                    {"id": "item_stationai_final", "type": "agentMessage", "phase": "final_answer", "text": "Context compaction completed."},
+                ]
+            if mode.endswith("-tool-activity"):
+                contents.extend([
+                    {"id": "item_fixture_mcp_call", "type": "mcpToolCall", "server": "fixture-server", "tool": "lookup", "status": "completed", "arguments": {"token": "RAW_ARGUMENT_SECRET"}, "result": {"content": [{"type": "text", "text": "RAW_RESULT_SECRET"}]}},
+                    {"id": "item_fixture_dynamic_call", "type": "dynamicToolCall", "tool": "summarize", "status": "failed", "arguments": {"prompt": "RAW_ARGUMENT_SECRET"}, "success": False, "durationMs": 37},
+                    {"id": "item_fixture_dynamic_legacy", "type": "dynamicToolCall", "tool": "legacySummary", "status": "completed", "arguments": {"input": "RAW_ARGUMENT_SECRET"}, "success": True, "contentItems": [{"type": "inputText", "text": "RAW_RESULT_SECRET"}]},
+                    {"id": "item_user_fixture_later", "type": "userMessage", "content": [{"type": "text", "text": "A later turn starts."}]},
+                    {"id": "item_assistant_fixture_later", "type": "agentMessage", "text": "Later turn response."},
+                ])
             if mode.endswith("-markdown"):
                 saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
                 contents = [
                     {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": saved_history.get("userMessage", "Plan the task.")} ]},
-                    {"id": "item_assistant_fixture", "type": "agentMessage", "text": "<proposed_plan>\n## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening\n</proposed_plan>"},
+                    {"id": "item_stationai_plan", "type": "plan", "text": MARKDOWN_PLAN},
                 ]
             write({"jsonrpc": "2.0", "id": message["id"], "result": {
                 "data": [{"item": item, "turnId": TURN_ID} for item in contents],

@@ -40,6 +40,8 @@ struct TaskConversationView: View {
     let task: BoardTask
     var isNewTask = false
     var isReadOnly = false
+    var conflictResolutionRequested = false
+    var onConflictResolutionChecked: (Bool) -> Void = { _ in }
     let onBack: () -> Void
 
     @State private var draft = ""
@@ -78,6 +80,7 @@ struct TaskConversationView: View {
     @State private var isLoadingHistory = false
     @State private var isResponding = false
     @State private var isPreparingSubmittedMessage = false
+    @State private var conflictResolutionAttempt = 0
     @State private var hasPausedResponse = false
     @State private var isPausingResponse = false
     @State private var queuedMessages: [QueuedConversationMessage] = []
@@ -156,6 +159,16 @@ struct TaskConversationView: View {
         !activities.isEmpty || !progressMessages.isEmpty || isResponding || completedResponseDuration != nil || hasCompletedAssistantResponse
     }
 
+    private var currentActivity: CodexActivity? {
+        activities.enumerated()
+            .filter { $0.element.isActive }
+            .max { lhs, rhs in
+                let lhsStart = lhs.element.startedAt ?? .distantPast
+                let rhsStart = rhs.element.startedAt ?? .distantPast
+                return lhsStart == rhsStart ? lhs.offset < rhs.offset : lhsStart < rhsStart
+            }?.element
+    }
+
     private var hasCompletedAssistantResponse: Bool {
         guard let latestUserIndex = messages.lastIndex(where: { $0.role == .user }) else {
             return messages.contains { $0.role == .assistant && $0.phase == "final_answer" }
@@ -219,6 +232,10 @@ struct TaskConversationView: View {
             await loadConversation()
             if !isReadOnly { refreshQueuedMessages() }
             if !isReadOnly { await loadModels() }
+            if conflictResolutionRequested && !isReadOnly && !isResponding {
+                conflictResolutionAttempt = 1
+                sendMessage(overrideText: "The PR has conflicts. Fix them, commit, and push.")
+            }
         }
         .onChange(of: codexClient.isTurnActive) { _, isTurnActive in
             let submittedTurnIsPending = task.pendingSubmittedPrompt != nil
@@ -782,6 +799,9 @@ struct TaskConversationView: View {
                         .lineLimit(3)
                         .accessibilityIdentifier("task-status-message")
                 }
+                if isResponding {
+                    currentActivityIndicator
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -803,6 +823,39 @@ struct TaskConversationView: View {
         .padding(.vertical, 15)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(WorkspaceTheme.windowBackground.opacity(0.96))
+    }
+
+    private var currentActivityIndicator: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { timeline in
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: 6, height: 6)
+                if let currentActivity {
+                    Text(currentActivity.title)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                        .accessibilityIdentifier("current-activity-title")
+                    Spacer(minLength: 4)
+                    if currentActivity.startedAt != nil {
+                        Text(currentActivity.durationLabel(at: timeline.date) ?? "Running · 0 ms")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .accessibilityValue(currentActivity.durationLabel(at: timeline.date) ?? "Running · 0 ms")
+                            .accessibilityIdentifier("current-activity-duration")
+                    }
+                } else {
+                    Text("Thinking")
+                        .font(.system(size: 11, weight: .medium))
+                        .accessibilityIdentifier("current-activity-title")
+                    Spacer(minLength: 4)
+                }
+            }
+            .foregroundStyle(Color.accentColor)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("current-activity-indicator")
+        }
     }
 
     private var repositoryBadges: some View {
@@ -1123,6 +1176,17 @@ struct TaskConversationView: View {
                                 }
                                 messageBubble(message)
                                     .id(message.id)
+                                let nextOrder = conversationMessages.first(where: {
+                                    guard let current = message.timelineOrder, let candidate = $0.timelineOrder else { return false }
+                                    return candidate > current
+                                })?.timelineOrder
+                                ForEach(activities.filter {
+                                    guard $0.isContextCompaction, let eventOrder = $0.timelineOrder,
+                                          let messageOrder = message.timelineOrder, eventOrder > messageOrder else { return false }
+                                    return nextOrder.map { eventOrder < $0 } ?? true
+                                }) { activity in
+                                    contextCompactionTimelineRow(activity)
+                                }
                             }
                             if shouldShowActivityDisclosure, activityDisclosureAnchorID == nil {
                                 activityList
@@ -1138,6 +1202,9 @@ struct TaskConversationView: View {
                         ForEach(activeSubagents) { activity in
                             subagentTimelineRow(activity)
                         }
+                    }
+                    ForEach(activities.filter { $0.isContextCompaction && $0.timelineOrder == nil }) { activity in
+                        contextCompactionTimelineRow(activity)
                     }
                     // Keep a stable scroll target outside the LazyVStack. A newly
                     // loaded last message may not have been materialized yet when
@@ -1216,7 +1283,7 @@ struct TaskConversationView: View {
                                 .accessibilityIdentifier("codex-progress-message-\(message.id)")
                         }
                     }
-                    ForEach(activities.filter { !$0.isSubagent }) { activity in
+                    ForEach(activities.filter { !$0.isSubagent && !$0.isContextCompaction }) { activity in
                         activityRow(activity)
                     }
                     let agentActivities = activities.filter(\.isSubagent)
@@ -1231,6 +1298,8 @@ struct TaskConversationView: View {
                     }
                 }
                 .padding(.top, 6)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("codex-activity-details")
             }
         }
     }
@@ -1254,6 +1323,11 @@ struct TaskConversationView: View {
                     let metadata = [activity.agentPath, activity.model, activity.reasoningEffort]
                         .compactMap { $0 }
                         .filter { !$0.isEmpty }
+                    if let duration = activity.durationLabel() {
+                        Text(duration)
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
                     if !metadata.isEmpty {
                         Text(metadata.joined(separator: " · "))
                             .font(.system(size: 10))
@@ -1273,12 +1347,16 @@ struct TaskConversationView: View {
         .help("Open the read-only conversation for this agent")
         .buttonStyle(.plain)
         .accessibilityLabel("\(activity.title) \(activity.timelineStatus)")
-        .accessibilityValue(activity.detail)
+        .accessibilityValue([activity.detail, activity.durationLabel()].compactMap { $0 }.joined(separator: "\n"))
         .accessibilityIdentifier("codex-subagent-row-\(activity.childThreadID ?? activity.id)")
     }
 
     private func activityRow(_ activity: CodexActivity) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
+        let displayDetail = [activity.detail]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 7) {
                 Image(systemName: activity.status == "completed" ? "checkmark.circle.fill" : activity.status == "interrupted" ? "pause.circle.fill" : "gearshape.2.fill")
                     .foregroundStyle(activity.status == "completed" ? .green : activity.status == "interrupted" ? .orange : .accentColor)
@@ -1290,14 +1368,36 @@ struct TaskConversationView: View {
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
             }
-            if !activity.detail.isEmpty {
-                Text(activity.detail)
+            if !displayDetail.isEmpty {
+                Text(displayDetail)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .lineLimit(4)
                     .accessibilityIdentifier("codex-activity-detail-\(activity.id)")
-                    .accessibilityLabel(activity.detail)
+                    .accessibilityLabel(displayDetail)
+            }
+            if activity.isActive, activity.startedAt != nil {
+                TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                    let duration = activity.durationLabel(at: timeline.date) ?? ""
+                    Text(duration)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .accessibilityValue(duration)
+                        .accessibilityIdentifier("codex-activity-duration-\(activity.id)")
+                }
+            } else if let duration = activity.durationLabel() {
+                Text(duration)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .accessibilityValue(duration)
+                    .accessibilityIdentifier("codex-activity-duration-\(activity.id)")
+            } else {
+                Text("Duration unavailable")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityValue("Duration unavailable")
+                    .accessibilityIdentifier("codex-activity-duration-\(activity.id)")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1305,8 +1405,31 @@ struct TaskConversationView: View {
         .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 8))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(activity.title), \(activity.statusLabel)")
-        .accessibilityValue(activity.detail)
+        .accessibilityValue([displayDetail, activity.durationLabel()].compactMap { $0 }.joined(separator: "\n"))
         .accessibilityIdentifier(activity.isSubagent ? "codex-subagent-row-\(activity.childThreadID ?? activity.id)" : "codex-activity-row-\(activity.id)")
+    }
+
+    private func contextCompactionTimelineRow(_ activity: CodexActivity) -> some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(activity.status == "inProgress" ? "Compacting context…" : "Context compacted")
+                    .font(.system(size: 12, weight: .medium))
+                if !activity.detail.isEmpty {
+                    Text(activity.detail)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(4)
+                        .accessibilityIdentifier("context-compaction-summary-\(activity.id)")
+                }
+            }
+        }
+        .padding(.vertical, 5)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Context compaction, \(activity.statusLabel)")
+        .accessibilityValue(activity.statusLabel)
+        .accessibilityIdentifier("context-compaction-row-\(activity.id)")
     }
 
     private func openSubagent(_ activity: CodexActivity) {
@@ -1489,31 +1612,27 @@ struct TaskConversationView: View {
 
     private func assistantMarkdownContent(_ markdown: String) -> some View {
         let blocks = Self.markdownBlocks(markdown)
-        return VStack(alignment: .leading, spacing: 7) {
-            ForEach(blocks) { block in
-                switch block.kind {
-                case .heading(let level):
-                    Text(Self.markdownAttributedText(block.text))
-                        .font(.system(size: level == 1 ? 19 : level == 2 ? 17 : 15, weight: .semibold))
-                        .accessibilityIdentifier("assistant-markdown-heading-\(block.id)")
-                case .listItem:
-                    HStack(alignment: .firstTextBaseline, spacing: 7) {
-                        Text("•").foregroundStyle(.secondary)
-                        Text(Self.markdownAttributedText(block.text))
-                            .accessibilityIdentifier("assistant-markdown-list-content-\(block.id)")
-                    }
-                    .accessibilityElement(children: .combine)
-                    .accessibilityIdentifier("assistant-markdown-list-item-\(block.id)")
-                case .paragraph:
-                    Text(Self.markdownAttributedText(block.text))
-                        .accessibilityIdentifier("assistant-markdown-paragraph-\(block.id)")
-                        .padding(.bottom, 5)
-                }
+        var content = AttributedString()
+        for (index, block) in blocks.enumerated() {
+            if index > 0 {
+                content.append(AttributedString("\n\n"))
             }
+            if case .listItem = block.kind {
+                content.append(AttributedString("•  "))
+            }
+            var text = Self.markdownAttributedText(block.text)
+            switch block.kind {
+            case .heading(let level):
+                text.font = .system(size: level == 1 ? 19 : level == 2 ? 17 : 15, weight: .semibold)
+            case .listItem, .paragraph:
+                break
+            }
+            content.append(text)
         }
-        .lineSpacing(4)
-        .textSelection(.enabled)
-        .fixedSize(horizontal: false, vertical: true)
+        return Text(content)
+            .lineSpacing(4)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private static func markdownBlocks(_ markdown: String) -> [AssistantMarkdownBlock] {
@@ -1568,7 +1687,10 @@ struct TaskConversationView: View {
                             Image(nsImage: attachment.image).resizable().scaledToFill()
                                 .frame(width: 64, height: 52).clipShape(RoundedRectangle(cornerRadius: 8))
                                 .overlay(alignment: .topTrailing) {
-                                    Button { pendingImages.removeAll { $0.id == attachment.id } } label: {
+                                    Button {
+                                        pendingImages.removeAll { $0.id == attachment.id }
+                                        persistDraftImages()
+                                    } label: {
                                         Image(systemName: "xmark.circle.fill").foregroundStyle(.white, .black.opacity(0.7))
                                     }
                                     .buttonHoverPointer()
@@ -1970,6 +2092,14 @@ struct TaskConversationView: View {
                 messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: submittedPrompt))
             }
             draft = promptWasSent || hasPendingSubmittedPrompt ? "" : (task.savedPrompt ?? "")
+            if !promptWasSent && !hasPendingSubmittedPrompt {
+                pendingImages = task.draftImageDataURLs.compactMap { dataURL in
+                    guard let comma = dataURL.firstIndex(of: ","),
+                          let data = Data(base64Encoded: String(dataURL[dataURL.index(after: comma)...])),
+                          let image = NSImage(data: data) else { return nil }
+                    return PendingImage(dataURL: dataURL, image: image)
+                }
+            }
             isResponding = hasPendingSubmittedPrompt
                 && (task.status == .inProgress || task.status == .waitingResponse)
             if let threadID = task.codexThreadID {
@@ -2026,6 +2156,7 @@ struct TaskConversationView: View {
     private func sendMessage(overrideText: String? = nil) {
         let text = (overrideText ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
         guard (!text.isEmpty || !pendingImages.isEmpty), !isResponding, !isLoadingHistory else { return }
+        let resolutionAttempt = conflictResolutionAttempt
         if text == "/plan" {
             activatePlanMode()
             return
@@ -2060,6 +2191,10 @@ struct TaskConversationView: View {
             )
             isPreparingSubmittedMessage = false
             guard saved else {
+                if resolutionAttempt > 0 {
+                    conflictResolutionAttempt = 0
+                    onConflictResolutionChecked(false)
+                }
                 messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
                 draft = text
                 pendingImages = imageDataURLs.compactMap { dataURL in
@@ -2162,7 +2297,37 @@ struct TaskConversationView: View {
                     messages.removeAll { $0.id == assistantMessageID }
                 }
                 isComposerFocused = true
+                if resolutionAttempt > 0 {
+                    do {
+                        switch try await BoardTaskManager(modelContext: modelContext).verifyPullRequestResolution(task.id) {
+                        case .resolved:
+                            conflictResolutionAttempt = 0
+                            onConflictResolutionChecked(true)
+                        case .stillConflicted where resolutionAttempt == 1:
+                            conflictResolutionAttempt = 2
+                            isResponding = false
+                            sendMessage(overrideText: "The PR still has conflicts or your latest commit has not reached GitHub. Resolve the remaining conflicts, commit, and push. Verify the PR's merge status before finishing.")
+                            return
+                        case .stillConflicted:
+                            conflictResolutionAttempt = 0
+                            onConflictResolutionChecked(false)
+                            errorMessage = "The PR still has conflicts after two turns. Review the PR and try again."
+                        case .inconclusive:
+                            conflictResolutionAttempt = 0
+                            onConflictResolutionChecked(false)
+                            errorMessage = "GitHub hasn't confirmed that the PR is conflict-free at the pushed head. Try again after its merge check finishes."
+                        }
+                    } catch {
+                        conflictResolutionAttempt = 0
+                        onConflictResolutionChecked(false)
+                        errorMessage = error.localizedDescription
+                    }
+                }
             } catch {
+                if resolutionAttempt > 0 {
+                    conflictResolutionAttempt = 0
+                    onConflictResolutionChecked(false)
+                }
                 responseStartedAt = nil
                 UserDefaults.standard.removeObject(forKey: responseStartedAtDefaultsKey)
                 if codexClient.wasLastTurnInterrupted {
@@ -2300,6 +2465,16 @@ struct TaskConversationView: View {
             throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images that fit within 10 MB after encoding.")
         }
         pendingImages.append(PendingImage(dataURL: "data:\(encoded.mimeType);base64,\(encoded.data.base64EncodedString())", image: previewImage))
+        persistDraftImages()
+    }
+
+    private func persistDraftImages() {
+        let images = pendingImages.map(\.dataURL)
+        Task { @MainActor in
+            do {
+                _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: draft, imageDataURLs: images)
+            } catch { errorMessage = error.localizedDescription }
+        }
     }
 
     private static func encodedImage(_ bitmap: NSBitmapImageRep) -> (data: Data, mimeType: String)? {
@@ -2350,7 +2525,7 @@ struct TaskConversationView: View {
         draftAutosaveTask?.cancel()
         if isReadOnly { onBack(); return }
         if isResponding { onBack(); return }
-        if isNewTask, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+        if isNewTask, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, pendingImages.isEmpty,
            messages.isEmpty, activities.isEmpty, !isLoadingHistory {
             Task { @MainActor in
                 do {

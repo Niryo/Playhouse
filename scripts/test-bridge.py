@@ -9,6 +9,7 @@ import plistlib
 import os
 import select
 import shutil
+import shlex
 import sqlite3
 import stat
 import subprocess
@@ -1091,7 +1092,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(all(record["repositoryWorktrees"][0]["worktreePath"] == str(self.primary) for record in records))
         self.assertTrue(all(record["status"] == "Backlog" for record in records))
 
-    # case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR; an unmerged PR keeps its link and suppresses the completion button. After all PRs merge, focus replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files without loading conversation histories, while the visible archive loads the newest 40 first and reveals older tasks as the user scrolls.
+    # case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR; an unmerged PR keeps its link and suppresses the completion button. After all PRs merge, focus replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls.
     def test_task_done_preserves_worktree_and_branch(self):
         task = self.create_repo_task("Untitled task", [self.primary, self.secondary])
         draft = "Please update the README and add concise setup steps for first time contributors tomorrow."
@@ -1179,11 +1180,18 @@ class StationAIBridgeTests(unittest.TestCase):
         sessions = self.data_directory / "codex-home" / "sessions" / "2026" / "10" / "22"
         sessions.mkdir(parents=True)
         session_file = sessions / f"rollout-2026-10-22T00-00-00-{thread_id}.jsonl"
-        session_file.write_text(json.dumps({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "text", "text": "LOCAL-SESSION-ONLY-token"}]}}) + "\n", encoding="utf-8")
+        session_file.write_text(
+            json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "LOCAL-SESSION-ONLY-user-token"}]}})
+            + "\n"
+            + json.dumps({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "LOCAL-SESSION-ONLY-assistant-token"}]}})
+            + "\n",
+            encoding="utf-8",
+        )
         search_env = {"CODEX_HOME": str(self.data_directory / "codex-home")}
-        search, _ = self.call_cli("archive", "search", "local-session-only-TOKEN", extra_environment=search_env)
-        search_results = self.assert_success(search)
-        self.assertEqual([result["id"] for result in search_results], [task["id"]], "Archive search should find conversation text from the task's local session file.")
+        for query in ("local-session-only-user-TOKEN", "local-session-only-assistant-TOKEN"):
+            search, _ = self.call_cli("archive", "search", query, extra_environment=search_env)
+            search_results = self.assert_success(search)
+            self.assertEqual([result["id"] for result in search_results], [task["id"]], "Archive search should find current Codex input_text/output_text content in the task's local session file.")
         invalid_search, _ = self.call_cli("archive", "search", "   ", expected_status=2, extra_environment=search_env)
         self.assert_failure(invalid_search, "invalid_argument")
         filler_ids = []
@@ -1262,6 +1270,66 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIsNone(record.get("pullRequestNumber"))
         self.assertIsNone(record.get("pullRequestURL"))
         self.assertEqual(current["status"], "Done")
+
+    # case-contract: test_review_pr_conflicts_probe_and_verify | Separate Review task cards probe their linked pull requests concurrently on app focus. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action beside its PR link; clicking it sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head.
+    def test_review_pr_conflicts_probe_and_verify(self):
+        task = self.create_repo_task("Review PR conflict probe", [self.primary, self.secondary], materialize=True)
+        self.assertEqual(task["status"], "Review")
+        self.assertEqual(self.assert_success(self.call_cli("task", "pr", "status", task["id"])[0]), [])
+        self.seed_done_task_pull_request(task["id"], number=123)
+        self.seed_done_task_pull_request(task["id"], number=456, repository_index=1)
+
+        directory = self.data_directory / "review-pr-gh-fixture"
+        directory.mkdir()
+        state = directory / "state"
+        state.write_text("123=CONFLICTING\n456=MERGEABLE\n", encoding="utf-8")
+        started = directory / "started"
+        started.mkdir()
+        executable = directory / "gh"
+        executable.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" != pr ] || [ \"$2\" != view ] || { [ \"$3\" != 123 ] && [ \"$3\" != 456 ]; } || [ \"$4\" != --json ] || [ \"$5\" != mergedAt,mergeable,headRefOid ]; then\n"
+            "  echo 'Unexpected gh fixture command' >&2\n"
+            "  exit 2\n"
+            "fi\n"
+            f"touch {shlex.quote(str(started))}/\"$3\"\n"
+            f"for attempt in $(seq 1 100); do [ -f {shlex.quote(str(started / '123'))} ] && [ -f {shlex.quote(str(started / '456'))} ] && break; sleep 0.02; done\n"
+            f"if [ ! -f {shlex.quote(str(started / '123'))} ] || [ ! -f {shlex.quote(str(started / '456'))} ]; then echo 'PR probes did not run in parallel' >&2; exit 3; fi\n"
+            f"mergeable=$(awk -F= -v number=\"$3\" '$1 == number {{ print $2 }}' {shlex.quote(str(state))})\n"
+            "head=$(git rev-parse HEAD)\n"
+            "if [ \"$mergeable\" = HEAD_MISMATCH ]; then head=remote-head-not-pushed; mergeable=MERGEABLE; fi\n"
+            "if [ \"$mergeable\" = CONFLICTING ]; then printf '{\"mergedAt\":null,\"mergeable\":\"CONFLICTING\",\"headRefOid\":\"%s\"}\\n' \"$head\"; else printf '{\"mergedAt\":null,\"mergeable\":\"MERGEABLE\",\"headRefOid\":\"%s\"}\\n' \"$head\"; fi\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
+        environment = {"PATH": f"{directory}:{os.environ.get('PATH', '')}"}
+        status, _ = self.call_cli("task", "pr", "status", task["id"], extra_environment=environment)
+        states = self.assert_success(status)
+        self.assertEqual({item["number"] for item in states}, {123, 456})
+        self.assertEqual({item["number"] for item in states if item["hasConflicts"]}, {123})
+        self.assertTrue(all(item["headRefOid"] == item["localHeadOid"] for item in states))
+        self.assertTrue((started / "123").is_file() and (started / "456").is_file(), "Both linked PR probes should overlap.")
+
+        (started / "123").unlink()
+        (started / "456").unlink()
+        still_conflicted, _ = self.call_cli("task", "pr", "verify", task["id"], extra_environment=environment)
+        self.assertEqual(self.assert_success(still_conflicted)["status"], "stillConflicted")
+        self.assertTrue((started / "123").is_file() and (started / "456").is_file())
+
+        state.write_text("123=MERGEABLE\n456=HEAD_MISMATCH\n", encoding="utf-8")
+        for number in (123, 456):
+            (started / str(number)).unlink()
+        mismatch, _ = self.call_cli("task", "pr", "verify", task["id"], extra_environment=environment)
+        self.assertEqual(self.assert_success(mismatch)["status"], "stillConflicted", "A mergeable PR with a remote head that is not pushed locally must retain the conflict indicator.")
+        mismatch_status, _ = self.call_cli("task", "pr", "status", task["id"], extra_environment=environment)
+        mismatch_state = next(item for item in self.assert_success(mismatch_status) if item["number"] == 456)
+        self.assertNotEqual(mismatch_state["headRefOid"], mismatch_state["localHeadOid"])
+
+        state.write_text("123=MERGEABLE\n456=MERGEABLE\n", encoding="utf-8")
+        for number in (123, 456):
+            (started / str(number)).unlink()
+        verification, _ = self.call_cli("task", "pr", "verify", task["id"], extra_environment=environment)
+        self.assertEqual(self.assert_success(verification)["status"], "resolved")
 
     # case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects conflicts without mutation, requires confirmation by default, honors saved keep without publishing, resolves staged conflicts locally without pushing, and commits and pushes a staged resolution without changing the target; unknown actions are rejected. The paired UI verifies unresolved conflicts stay uncommitted and unpublished, presents keep, resolve-only, and resolve-and-push with the remember checkbox, verifies remembered choices skip confirmation and persist in Settings, and confirms resolve-only commits staged resolution locally while the remote task branch remains absent.
     def test_task_pr_conflicts_detect_without_mutation(self):
@@ -1456,7 +1524,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(waiting["status"], "Waiting Response")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", blocked_id)[0])["status"], "Blocked")
 
-    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Only an explicit completed outcome reaches Review.
+    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review.
     def test_task_progress_reports_publish_persist_and_clear(self):
         task_id = self.create_task("Progress reports", roots=[self.primary])["id"]
         response, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "building", expected_status=1)
@@ -1580,9 +1648,9 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assertIn(str(self.cli), instructions)
             self.assertIn("task progress publish", instructions)
             self.assertIn("hidden from the conversation", instructions)
-            self.assertIn("periodically during substantial work", instructions)
-            self.assertIn("active test and position", instructions)
-            self.assertIn("Test 3/8", instructions)
+            self.assertIn("at least every 30 seconds", instructions)
+            self.assertIn("active suite/case and position", instructions)
+            self.assertIn("CLI/XPC 3/8", instructions)
             self.assertIn("under 80 characters", instructions)
             self.assertIn("task outcome", instructions)
             self.assertIn("waiting-response", instructions)
@@ -2861,7 +2929,7 @@ class StationAIBridgeTests(unittest.TestCase):
         queue_after_completion, _ = self.call_cli("conversation", "queue-list", task_id)
         self.assertEqual(self.assert_success(queue_after_completion), [], "Successful dispatch must be durable and nonduplicating across reload.")
 
-    # case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. Diagnostics record image MIME and encoded size without storing image payloads.
+    # case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. Diagnostics record image MIME and encoded size without storing image payloads.
     def test_conversation_sends_image_attachments(self):
         task_id = self.create_task(title="Image conversation") ["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -2873,6 +2941,21 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         image = self.data_directory / "tiny.png"
         image.write_bytes(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"))
+        backlog_task = self.create_task(title="Backlog image draft")
+        draft_result, _ = self.call_cli("task", "prompt", backlog_task["id"], "--text", "", "--image", str(image))
+        saved_draft = self.assert_success(draft_result)
+        self.assertEqual(len(saved_draft["draftImageDataURLs"]), 1)
+        self.assertTrue(saved_draft["draftImageDataURLs"][0].startswith("data:image/png;base64,"))
+        fresh_draft, _ = self.call_cli("task", "get", backlog_task["id"])
+        self.assertEqual(self.assert_success(fresh_draft)["draftImageDataURLs"], saved_draft["draftImageDataURLs"])
+        excess_draft, _ = self.call_cli(
+            "task", "prompt", backlog_task["id"], "--text", "",
+            *[argument for _ in range(9) for argument in ("--image", str(image))],
+            expected_status=2,
+        )
+        self.assertEqual(excess_draft.get("error", {}).get("code"), "invalid_argument")
+        unchanged_draft, _ = self.call_cli("task", "get", backlog_task["id"])
+        self.assertEqual(self.assert_success(unchanged_draft)["draftImageDataURLs"], saved_draft["draftImageDataURLs"])
         result, _ = self.call_cli(
             "conversation", "send", task_id, "--image", str(image),
             extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
@@ -2943,6 +3026,191 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(task)["status"], "Backlog")
         history, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(history)["messages"], [])
+
+    # case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. The conversation header shows only the newest active call; when it completes, the indicator falls back to the next still-active call. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
+    def test_conversation_shows_mcp_and_dynamic_tool_activity(self):
+        task_id = self.create_task(title="Tool activity")['id']
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-tool-activity"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {
+            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
+            "STATIONAI_FIXTURE_WORKSPACE": str(self.primary),
+        }
+        send_command = ("conversation", "send", task_id, "--message", "Show tool activity.")
+        process = self.start_cli(*send_command, extra_environment=env, binary_output=True)
+        ready = Path(str(executable) + ".tool-ready")
+        release_latest = Path(str(executable) + ".tool-release-latest")
+        release = Path(str(executable) + ".tool-release")
+        captured_lines = []
+        stream_buffer = bytearray()
+        active_rows = {}
+        completed_rows = {}
+        expected_tool_ids = {"item_fixture_mcp_call", "item_fixture_dynamic_call", "item_fixture_dynamic_legacy"}
+        try:
+            deadline = time.monotonic() + 20
+            while (not ready.exists() or not expected_tool_ids.issubset(active_rows)) and time.monotonic() < deadline:
+                if process.stdout is not None:
+                    readable, _, _ = select.select([process.stdout], [], [], 0.02)
+                    if readable:
+                        chunk = os.read(process.stdout.fileno(), 65536)
+                        stream_buffer.extend(chunk)
+                        while b"\n" in stream_buffer:
+                            line, _, remainder = stream_buffer.partition(b"\n")
+                            stream_buffer = bytearray(remainder)
+                            if not line.strip():
+                                continue
+                            captured_lines.append(line.decode("utf-8"))
+                            event = json.loads(line)
+                            activity = event.get("payload", {}).get("activity", {})
+                            if event.get("type") == "activity" and activity.get("status") == "inProgress":
+                                active_rows[activity.get("id")] = activity
+                            elif event.get("type") == "activity" and activity.get("status") in {"completed", "failed"}:
+                                completed_rows[activity.get("id")] = activity
+            self.assertTrue(ready.exists(), "The fixture should hold both tool calls after their start notifications.")
+            self.assertTrue(expected_tool_ids.issubset(active_rows), "All expected tool calls should publish their started state.")
+            self.assertEqual(active_rows["item_fixture_mcp_call"]["toolKind"], "mcp")
+            self.assertEqual(active_rows["item_fixture_dynamic_call"]["toolKind"], "dynamic")
+            self.assertEqual(active_rows["item_fixture_dynamic_legacy"]["toolKind"], "dynamic")
+            self.assertTrue(all(row.get("startedAt") for row in active_rows.values()), "Every active call should report its start time.")
+            release_latest.write_text("Finish the newest call first.\n", encoding="utf-8")
+            latest_deadline = time.monotonic() + 20
+            while "item_fixture_dynamic_legacy" not in completed_rows and time.monotonic() < latest_deadline:
+                if process.stdout is not None:
+                    readable, _, _ = select.select([process.stdout], [], [], 0.02)
+                    if readable:
+                        chunk = os.read(process.stdout.fileno(), 65536)
+                        stream_buffer.extend(chunk)
+                        while b"\n" in stream_buffer:
+                            line, _, remainder = stream_buffer.partition(b"\n")
+                            stream_buffer = bytearray(remainder)
+                            if not line.strip():
+                                continue
+                            captured_lines.append(line.decode("utf-8"))
+                            event = json.loads(line)
+                            activity = event.get("payload", {}).get("activity", {})
+                            if event.get("type") == "activity" and activity.get("status") in {"completed", "failed"}:
+                                completed_rows[activity.get("id")] = activity
+            self.assertIn("item_fixture_dynamic_legacy", completed_rows, "The newest call should finish before older active calls.")
+            self.assertGreater(completed_rows["item_fixture_dynamic_legacy"].get("durationMs", 0), 0)
+            self.assertNotIn("item_fixture_dynamic_call", completed_rows, "Finishing the newest call must leave older calls active.")
+            release.write_text("Release tool completions.\n", encoding="utf-8")
+            remaining_stdout, remaining_stderr = process.communicate(timeout=60)
+            self.assertEqual(process.returncode, 0, f"CLI exit mismatch for {send_command}: {remaining_stderr!r}")
+            all_output = "\n".join(captured_lines).encode("utf-8") + b"\n" + remaining_stdout
+            response_lines = [line for line in all_output.splitlines() if line.strip()]
+            sent = json.loads(response_lines[-1])
+            self.assertEqual(sent.get("version"), 1)
+            self.assertTrue(sent.get("ok"), sent.get("error"))
+        finally:
+            if process.poll() is None:
+                release_latest.write_text("Release newest call after assertion failure.\n", encoding="utf-8")
+                release.write_text("Release tool completions after assertion failure.\n", encoding="utf-8")
+                process.communicate(timeout=30)
+        result = self.assert_success(sent)
+        activities = result["activities"]
+        mcp_rows = [row for row in activities if row["id"] == "item_fixture_mcp_call"]
+        dynamic_rows = [row for row in activities if row["id"] == "item_fixture_dynamic_call"]
+        self.assertEqual(len(mcp_rows), 1)
+        self.assertEqual(len(dynamic_rows), 1)
+        self.assertEqual(mcp_rows[0]["status"], "completed")
+        self.assertEqual(mcp_rows[0]["server"], "fixture-server")
+        self.assertEqual(mcp_rows[0]["tool"], "lookup")
+        self.assertIn("Returned 1 result item", mcp_rows[0]["detail"])
+        self.assertEqual(dynamic_rows[0]["status"], "failed")
+        self.assertEqual(dynamic_rows[0]["durationMs"], 37)
+        legacy_rows = [row for row in activities if row["id"] == "item_fixture_dynamic_legacy"]
+        self.assertEqual(len(legacy_rows), 1)
+        self.assertEqual(legacy_rows[0]["status"], "completed")
+        self.assertGreater(legacy_rows[0].get("durationMs", 0), 0)
+        self.assertGreater(mcp_rows[0].get("durationMs", 0), 0)
+        self.assertIn("Returned 1 result item", legacy_rows[0]["detail"])
+        serialized = json.dumps(activities)
+        self.assertNotIn("RAW_ARGUMENT_SECRET", serialized)
+        self.assertNotIn("RAW_RESULT_SECRET", serialized)
+        reloaded_response, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        reloaded_rows = self.assert_success(reloaded_response)["activities"]
+        reloaded_mcp = [row for row in reloaded_rows if row["id"] == "item_fixture_mcp_call"]
+        reloaded_dynamic = [row for row in reloaded_rows if row["id"] == "item_fixture_dynamic_call"]
+        reloaded_legacy = [row for row in reloaded_rows if row["id"] == "item_fixture_dynamic_legacy"]
+        self.assertEqual(len(reloaded_mcp), 1)
+        self.assertEqual(len(reloaded_dynamic), 1)
+        self.assertEqual(len(reloaded_legacy), 1)
+        self.assertEqual(reloaded_mcp[0]["tool"], "lookup")
+        self.assertEqual(reloaded_dynamic[0]["tool"], "summarize")
+        self.assertEqual(reloaded_dynamic[0]["durationMs"], 37)
+        self.assertGreater(reloaded_legacy[0].get("durationMs", 0), 0)
+        self.assertGreater(reloaded_mcp[0].get("durationMs", 0), 0)
+        reloaded_serialized = json.dumps(reloaded_rows)
+        self.assertNotIn("RAW_ARGUMENT_SECRET", reloaded_serialized)
+        self.assertNotIn("RAW_RESULT_SECRET", reloaded_serialized)
+        reloaded_result = self.assert_success(reloaded_response)
+        self.assertIn("A later turn starts.", [message["text"] for message in reloaded_result["messages"]])
+
+    # case-contract: test_conversation_shows_context_compaction | contextCompaction item/started and item/completed coalesce into one concise timeline event; missing summaries ignore malformed opaque payload fields and never render their data, and the event survives thread history reload with correct prompt/response ordering.
+    def test_conversation_shows_context_compaction(self):
+        task_id = self.create_task(title="Context compaction")["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-context-compaction"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable), "STATIONAI_FIXTURE_WORKSPACE": str(self.primary)}
+        command = ("conversation", "send", task_id, "--message", "Compact the context.")
+        process = self.start_cli(*command, extra_environment=env, binary_output=True)
+        ready = Path(str(executable) + ".compaction-ready")
+        release = Path(str(executable) + ".compaction-release")
+        captured, buffer, active = [], bytearray(), []
+        try:
+            deadline = time.monotonic() + 20
+            while (not ready.exists() or not active) and time.monotonic() < deadline:
+                if process.stdout is not None:
+                    readable, _, _ = select.select([process.stdout], [], [], 0.02)
+                    if readable:
+                        buffer.extend(os.read(process.stdout.fileno(), 65536))
+                        while b"\n" in buffer:
+                            line, _, remainder = buffer.partition(b"\n")
+                            buffer = bytearray(remainder)
+                            if not line.strip():
+                                continue
+                            captured.append(line.decode("utf-8"))
+                            event = json.loads(line)
+                            activity = event.get("payload", {}).get("activity", {})
+                            if event.get("type") == "activity" and activity.get("isContextCompaction"):
+                                active.append(activity)
+            self.assertTrue(ready.exists())
+            self.assertEqual(len(active), 1)
+            self.assertEqual(active[0]["status"], "inProgress")
+            release.write_text("Release compaction completion.\n", encoding="utf-8")
+            stdout, stderr = process.communicate(timeout=60)
+            self.assertEqual(process.returncode, 0, f"CLI exit mismatch for {command}: {stderr!r}")
+            sent = json.loads(("\n".join(captured).encode() + b"\n" + stdout).splitlines()[-1])
+        finally:
+            if process.poll() is None:
+                release.write_text("Release compaction after assertion failure.\n", encoding="utf-8")
+                process.communicate(timeout=30)
+        result = self.assert_success(sent)
+        rows = [item for item in result["activities"] if item.get("isContextCompaction")]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "item_stationai_compaction")
+        self.assertEqual(rows[0]["status"], "completed")
+        self.assertEqual(rows[0]["detail"], "")
+        reloaded_response, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        reloaded = self.assert_success(reloaded_response)
+        reloaded_rows = [item for item in reloaded["activities"] if item.get("isContextCompaction")]
+        self.assertEqual(len(reloaded_rows), 1)
+        self.assertEqual(reloaded_rows[0]["status"], "completed")
+        self.assertNotIn("COMPACTION_OPAQUE_SENTINEL", json.dumps(reloaded_rows))
+        user = next(item for item in reloaded["messages"] if item.get("role") == "user")
+        assistant = next(item for item in reloaded["messages"] if item.get("role") == "assistant")
+        self.assertLess(user["timelineOrder"], reloaded_rows[0]["timelineOrder"])
+        self.assertLess(reloaded_rows[0]["timelineOrder"], assistant["timelineOrder"])
 
     # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs.
     def test_conversation_shows_subagent_delegation(self):
@@ -3084,7 +3352,7 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assertTrue(any("subagent inspected" in message["text"].lower() for message in history["messages"]))
 
-    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; a completed <proposed_plan> is automatically rendered as Markdown with visible spacing between distinct paragraphs and without exposing its wrapper tags, including after reopening, while bridge history preserves the exact source and the reopened conversation shows its latest message.
+    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; the first plan delta is visible before completion, and the completed plan item renders automatically as Markdown with visible spacing between distinct paragraphs and can be selected and copied as one complete text view, including after reopening, while CLI events and bridge history preserve the exact plan text as the latest assistant message.
     def test_plan_mode_renders_markdown_in_conversation(self):
         task_id = self.create_task(title="Plan mode Markdown", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -3095,16 +3363,29 @@ class StationAIBridgeTests(unittest.TestCase):
             "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
-        markdown_reply = "<proposed_plan>\n## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening\n</proposed_plan>"
-        sent, _ = self.call_cli(
+        markdown_reply = "## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening"
+        sent, events = self.call_cli(
             "conversation", "send", task_id, "--message", "Plan the task.", "--mode", "plan",
             extra_environment=env,
         )
+        deltas = [event["payload"]["text"] for event in events if event["type"] == "text_delta"]
+        self.assertEqual("".join(deltas), markdown_reply, "The live plan deltas should stream the full plan.")
+        delta_positions = [index for index, event in enumerate(events) if event["type"] == "text_delta"]
+        final_positions = [index for index, event in enumerate(events) if event["type"] == "assistant_final"]
+        self.assertEqual(len(final_positions), 1, "The plan should produce one final assistant event.")
+        self.assertLess(max(delta_positions), final_positions[0], "Plan deltas should arrive before completion.")
+        self.assertEqual(
+            [event["payload"]["text"] for event in events if event["type"] == "assistant_final"],
+            [markdown_reply],
+            "The completed plan item should publish one final assistant response.",
+        )
         messages = self.assert_success(sent)["messages"]
-        self.assertTrue(any(message["role"] == "assistant" and message["text"] == markdown_reply for message in messages))
+        self.assertTrue(any(message["role"] == "assistant" and message["text"] == markdown_reply
+                            and message["phase"] == "final_answer" for message in messages))
         history, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         reloaded_messages = self.assert_success(history)["messages"]
-        self.assertTrue(any(message["role"] == "assistant" and message["text"] == markdown_reply for message in reloaded_messages))
+        self.assertTrue(any(message["role"] == "assistant" and message["text"] == markdown_reply
+                            and message["phase"] == "final_answer" for message in reloaded_messages))
         self.assertEqual(reloaded_messages[-1]["role"], "assistant", "The latest response should be last in bridge history.")
 
     # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer shows a Codex-reported model, while unsupported modes and malformed model IDs are rejected before creating history.
@@ -3128,7 +3409,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(history)["messages"], [])
         self.assertEqual(self.assert_success(history)["activities"], [])
 
-    # case-contract: test_codex_questions_can_be_answered_over_cli_xpc | Structured questions raised in Plan mode move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome.
+    # case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode use the existing question path, move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome.
     def test_codex_questions_can_be_answered_over_cli_xpc(self):
         task_id = self.create_task("Codex questions", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"

@@ -222,7 +222,8 @@ enum StationAIStore {
                    t0.ZPROGRESSTYPERAWVALUE, t0.ZPROGRESSLABEL, t0.ZPROGRESSDETAIL,
                    t0.ZCREATEDAT, t0.ZCODEXTHREADID, t0.ZSAVEDPROMPT,
                    t0.ZPENDINGSUBMITTEDPROMPT, t0.ZWORKSPACEROOTPATHSDATA,
-                   t0.ZREPOSITORYWORKTREESDATA, t0.ZCONTEXTFOLDERPATHSDATA
+                   t0.ZREPOSITORYWORKTREESDATA, t0.ZCONTEXTFOLDERPATHSDATA,
+                   t0.ZDRAFTIMAGEDATAURLSDATA
             FROM ZBOARDTASK t0 LIMIT 0
             """
         var statement: OpaquePointer?
@@ -347,7 +348,8 @@ enum StationAIStore {
             let requiredColumns = [
                 "ZPENDINGSUBMITTEDPROMPT",
                 "ZINPROGRESSSTARTEDAT",
-                "ZTOTALINPROGRESSSECONDS"
+                "ZTOTALINPROGRESSSECONDS",
+                "ZDRAFTIMAGEDATAURLSDATA"
             ]
             return requiredColumns.contains { !columns.contains($0) }
         }
@@ -428,7 +430,8 @@ enum StationAIStore {
                 let requiredColumns: [(String, String)] = [
                     ("ZPENDINGSUBMITTEDPROMPT", "VARCHAR"),
                     ("ZINPROGRESSSTARTEDAT", "TIMESTAMP"),
-                    ("ZTOTALINPROGRESSSECONDS", "FLOAT")
+                    ("ZTOTALINPROGRESSSECONDS", "FLOAT"),
+                    ("ZDRAFTIMAGEDATAURLSDATA", "BLOB")
                 ]
                 for (column, declaration) in requiredColumns where !columns.contains(column) {
                     let sql = "ALTER TABLE ZBOARDTASK ADD COLUMN \(column) \(declaration)"
@@ -601,8 +604,9 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let workspaceRoots: [String]
     let repositoryWorktrees: [RepositoryWorktreeRecord]
     let contextFolders: [String]
+    let draftImageDataURLs: [String]?
 
-    init(task: BoardTask) {
+    init(task: BoardTask, includeDraftImages: Bool = true) {
         id = task.id
         title = task.title
         status = task.status.rawValue
@@ -617,6 +621,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         workspaceRoots = task.workspaceRootPaths
         repositoryWorktrees = task.repositoryWorktrees
         contextFolders = task.contextFolderPaths
+        draftImageDataURLs = includeDraftImages ? task.draftImageDataURLs : nil
     }
 }
 
@@ -640,6 +645,35 @@ enum GitHubPullRequestManager {
 
     private struct PullRequestState: Decodable {
         let mergedAt: String?
+    }
+
+    private struct PullRequestReviewResponse: Decodable {
+        let mergedAt: String?
+        let mergeable: String?
+        let headRefOid: String?
+    }
+
+    static func reviewState(_ record: RepositoryWorktreeRecord, executable: String) throws -> PullRequestReviewState {
+        guard let number = record.pullRequestNumber else {
+            throw BridgeCommandError(code: "invalid_transition", message: "This repository has no linked pull request.")
+        }
+        let result = try run(executable, ["pr", "view", String(number), "--json", "mergedAt,mergeable,headRefOid"], directory: record.worktreePath)
+        let response = try JSONDecoder().decode(PullRequestReviewResponse.self, from: Data(result.utf8))
+        let localHead: String?
+        if response.headRefOid != nil {
+            let git = try StationAIProcessRunner.run(executable: "/usr/bin/git", arguments: ["rev-parse", "HEAD"], directory: record.worktreePath)
+            guard git.status == 0 else {
+                throw BridgeCommandError(code: "operation_failed", message: "Couldn't inspect the local head for pull request #\(number).")
+            }
+            localHead = String(data: git.stdout, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            localHead = nil
+        }
+        return PullRequestReviewState(
+            repositoryPath: record.repositoryPath, number: number,
+            merged: response.mergedAt != nil, mergeable: response.mergeable ?? "UNKNOWN",
+            headRefOid: response.headRefOid, localHeadOid: localHead
+        )
     }
 
     static func resolveExecutable() throws -> String {
@@ -725,6 +759,38 @@ enum GitHubPullRequestManager {
     }
 }
 
+struct PullRequestReviewState: Codable, Sendable {
+    let repositoryPath: String
+    let number: Int
+    let merged: Bool
+    let mergeable: String
+    let headRefOid: String?
+    let localHeadOid: String?
+    let hasConflicts: Bool
+    let isConfirmedResolved: Bool
+
+    var requiresConflictResolution: Bool {
+        hasConflicts || (!merged && mergeable == "MERGEABLE" && headRefOid != nil && headRefOid != localHeadOid)
+    }
+
+    init(repositoryPath: String, number: Int, merged: Bool, mergeable: String, headRefOid: String?, localHeadOid: String?) {
+        self.repositoryPath = repositoryPath
+        self.number = number
+        self.merged = merged
+        self.mergeable = mergeable
+        self.headRefOid = headRefOid
+        self.localHeadOid = localHeadOid
+        hasConflicts = !merged && mergeable == "CONFLICTING"
+        isConfirmedResolved = merged || (mergeable == "MERGEABLE" && headRefOid != nil && headRefOid == localHeadOid)
+    }
+}
+
+enum PullRequestResolutionCheck: String, Codable, Sendable {
+    case resolved
+    case stillConflicted
+    case inconclusive
+}
+
 struct StationAIPullRequestService {
 
     func resolveExecutable() throws -> String {
@@ -751,6 +817,12 @@ struct StationAIPullRequestService {
     func isMerged(_ record: RepositoryWorktreeRecord, executable: String) async throws -> Bool {
         try await StationAIBackgroundOperation.run {
             try GitHubPullRequestManager.isMerged(record, executable: executable)
+        }
+    }
+
+    func reviewState(_ record: RepositoryWorktreeRecord, executable: String) async throws -> PullRequestReviewState {
+        try await StationAIBackgroundOperation.run {
+            try GitHubPullRequestManager.reviewState(record, executable: executable)
         }
     }
 }
@@ -1176,7 +1248,7 @@ final class BoardTaskManager {
         let readStartedAt = DispatchTime.now().uptimeNanoseconds
         StationAIDiagnostics.record("persistence.read.started", fields: readFields)
         do {
-            let tasks = try modelContext.fetch(descriptor).map(BoardTaskRecord.init(task:))
+            let tasks = try modelContext.fetch(descriptor).map { BoardTaskRecord(task: $0, includeDraftImages: false) }
             var fields = readFields
             fields["resultCount"] = String(tasks.count)
             fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - readStartedAt) / 1_000_000)
@@ -1642,6 +1714,36 @@ final class BoardTaskManager {
         }
     }
 
+    func reviewPullRequests(_ id: UUID) async throws -> [PullRequestReviewState] {
+        let task = try requireTask(id)
+        let records = task.repositoryWorktrees.filter { !$0.isPending && $0.pullRequestNumber != nil }
+        guard !records.isEmpty else { return [] }
+        let executable = try pullRequestService.resolveExecutable()
+        return try await withThrowingTaskGroup(of: PullRequestReviewState.self) { group in
+            for record in records {
+                group.addTask {
+                    try await StationAIPullRequestService().reviewState(record, executable: executable)
+                }
+            }
+            var states: [PullRequestReviewState] = []
+            for try await state in group { states.append(state) }
+            return states.sorted { $0.repositoryPath < $1.repositoryPath }
+        }
+    }
+
+    func verifyPullRequestResolution(_ id: UUID) async throws -> PullRequestResolutionCheck {
+        var latest: [PullRequestReviewState] = []
+        for attempt in 0..<5 {
+            latest = try await reviewPullRequests(id)
+            if !latest.isEmpty && latest.allSatisfy(\.isConfirmedResolved) { return .resolved }
+            if attempt < 4 { try await Task.sleep(for: .seconds(1)) }
+        }
+        guard !latest.isEmpty else { return .inconclusive }
+        return latest.contains(where: {
+            $0.hasConflicts || ($0.headRefOid != nil && $0.headRefOid != $0.localHeadOid)
+        }) ? .stillConflicted : .inconclusive
+    }
+
     private func pullRequestConflictRepositoriesUnlocked(_ id: UUID) async throws -> [String] {
         let task = try requireTask(id)
         guard !task.repositoryWorktrees.isEmpty else { return [] }
@@ -1799,6 +1901,24 @@ final class BoardTaskManager {
         }
     }
 
+    func recordConversationActivityDuration(taskID: UUID, activityID: String, durationMs: Int) async throws {
+        guard !activityID.isEmpty, durationMs >= 0 else { return }
+        try await withTaskOperationLock(taskID) {
+            let task = try self.requireTask(taskID)
+            var durations = (try? task.conversationActivityDurationsData.map {
+                try JSONDecoder().decode([String: Int].self, from: $0)
+            }) ?? [:]
+            durations[activityID] = durationMs
+            task.conversationActivityDurationsData = try? JSONEncoder().encode(durations)
+            try await self.saveTaskContext(taskID: taskID)
+        }
+    }
+
+    func conversationActivityDurations(taskID: UUID) -> [String: Int] {
+        guard let task = try? requireTask(taskID), let data = task.conversationActivityDurationsData else { return [:] }
+        return (try? JSONDecoder().decode([String: Int].self, from: data)) ?? [:]
+    }
+
     @discardableResult
     func clearProgressReport(_ id: UUID) async throws -> BoardTaskRecord {
         return try await withTaskOperationLock(id) {
@@ -1924,7 +2044,7 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func savePrompt(_ id: UUID, prompt: String, status: TaskStatus? = nil, submitted: Bool = false) async throws -> BoardTaskRecord {
+    func savePrompt(_ id: UUID, prompt: String, status: TaskStatus? = nil, submitted: Bool = false, imageDataURLs: [String]? = nil) async throws -> BoardTaskRecord {
         StationAIDiagnostics.record("task.prompt.write.started", fields: [
             "taskID": id.uuidString,
             "promptByteCount": String(prompt.utf8.count),
@@ -1937,9 +2057,13 @@ final class BoardTaskManager {
         if submitted, status != .inProgress {
             throw StationAIManagerError.invalidTransition("A submitted prompt must place the task in Progress.")
         }
+        if let imageDataURLs, imageDataURLs.count > 8 || imageDataURLs.contains(where: { !CodexConversationManager.isValidImageDataURL($0) }) {
+            throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
+        }
         return try await withTaskOperationLock(id) {
             let task = try requireTask(id)
             task.savedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : prompt
+            if let imageDataURLs { task.draftImageDataURLs = imageDataURLs }
             task.pendingSubmittedPrompt = submitted ? prompt : nil
             if let status {
                 task.status = status
@@ -2691,13 +2815,19 @@ final class CodexConversationManager {
                 developerInstructions: TaskProgressReportInstructions.make(taskID: taskID),
                 onActionRequest: onActionRequest
             )
+            let savedDurations = tasks.conversationActivityDurations(taskID: taskID)
+            let activities = history.activities.map { activity -> CodexActivity in
+                var activity = activity
+                if activity.durationMs == nil { activity.durationMs = savedDurations[activity.id] }
+                return activity
+            }
             StationAIDiagnostics.record("conversation.history.succeeded", fields: client.diagnosticFields([
                 "taskID": taskID.uuidString,
                 "threadID": threadID,
                 "messageCount": String(history.messages.count),
                 "activityCount": String(history.activities.count)
             ]))
-            return history
+            return CodexThreadHistory(messages: history.messages, activities: activities, diff: history.diff)
         } catch {
             var fields = StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
             fields["taskID"] = taskID.uuidString
@@ -2793,7 +2923,11 @@ final class CodexConversationManager {
         if type == "response_item", let itemType = payload["type"] as? String, itemType == "message",
            let role = payload["role"] as? String, role == "user" || role == "assistant",
            let content = payload["content"] as? [[String: Any]] {
-            return content.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
+            let searchableTextTypes: Set<String> = ["text", "input_text", "output_text"]
+            return content.compactMap {
+                guard let contentType = $0["type"] as? String, searchableTextTypes.contains(contentType) else { return nil }
+                return $0["text"] as? String
+            }
         }
         if type == "event_msg", let eventType = payload["type"] as? String,
            eventType == "UserMessage" || eventType == "AgentMessage",
@@ -3113,7 +3247,18 @@ final class CodexConversationManager {
                 developerInstructions: TaskProgressReportInstructions.make(taskID: taskID),
                 onDelta: { delta in onUpdate(ConversationUpdate(type: "text_delta", text: delta)) },
                 onFinalMessage: { message in onUpdate(ConversationUpdate(type: "assistant_final", text: message)) },
-                onActivity: { activity in onUpdate(ConversationUpdate(type: "activity", activity: activity)) },
+                onActivity: { activity in
+                    if let durationMs = activity.durationMs {
+                        Task { @MainActor in
+                            try? await self.tasks.recordConversationActivityDuration(
+                                taskID: taskID,
+                                activityID: activity.id,
+                                durationMs: durationMs
+                            )
+                        }
+                    }
+                    onUpdate(ConversationUpdate(type: "activity", activity: activity))
+                },
                 onDiff: { diff in onUpdate(ConversationUpdate(type: "diff", diff: diff.unifiedDiff)) },
                 onHistory: { history in onUpdate(ConversationUpdate(type: "history", history: history)) },
                 onActionRequest: {
@@ -3159,6 +3304,13 @@ final class CodexConversationManager {
                     ))
                 }
             )
+            for (activityID, durationMs) in client.lastTurnActivityDurations {
+                try await tasks.recordConversationActivityDuration(
+                    taskID: taskID,
+                    activityID: activityID,
+                    durationMs: durationMs
+                )
+            }
             phase = "worktree-finalization"
             phase = "review-status-persistence"
             let reportedOutcome = try await tasks.finishConversationTurnOutcome(taskID)
@@ -3166,6 +3318,13 @@ final class CodexConversationManager {
             _ = try await tasks.setLifecycleStatus(taskID, to: finalStatus)
         } catch {
             await titleGeneration?.value
+            for (activityID, durationMs) in client.lastTurnActivityDurations {
+                try? await tasks.recordConversationActivityDuration(
+                    taskID: taskID,
+                    activityID: activityID,
+                    durationMs: durationMs
+                )
+            }
             var fields = StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
             fields["taskID"] = taskID.uuidString
             fields["threadID"] = persistedThreadID ?? ""
@@ -3283,7 +3442,7 @@ final class CodexConversationManager {
         }
     }
 
-    private static func isValidImageDataURL(_ value: String) -> Bool {
+    static func isValidImageDataURL(_ value: String) -> Bool {
         guard let separator = value.firstIndex(of: ",") else { return false }
         let mime = String(value[..<separator])
         guard let data = Data(base64Encoded: String(value[value.index(after: separator)...])), data.count <= 10_000_000 else { return false }
@@ -3397,6 +3556,10 @@ final class StationAIBridgeRuntime {
                 ))
             case "task.pr.conflicts":
                 result = .object(["repositories": .array(try await taskManager.pullRequestConflictRepositories(request.requiredUUID("taskID")).map(BridgeValue.string))])
+            case "task.pr.status":
+                result = try Self.value(await taskManager.reviewPullRequests(request.requiredUUID("taskID")))
+            case "task.pr.verify":
+                result = .object(["status": .string(try await taskManager.verifyPullRequestResolution(request.requiredUUID("taskID")).rawValue)])
             case "task.pr.resolve":
                 result = try Self.value(await taskManager.resolvePullRequestConflicts(
                     request.requiredUUID("taskID"), action: request.requiredString("action"),
@@ -3467,7 +3630,8 @@ final class StationAIBridgeRuntime {
                     request.requiredUUID("taskID"),
                     prompt: prompt,
                     status: status,
-                    submitted: submitted
+                    submitted: submitted,
+                    imageDataURLs: request.arguments["images"]?.strings
                 ))
             case "task.delete":
                 try await taskManager.delete(request.requiredUUID("taskID"))

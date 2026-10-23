@@ -14,17 +14,19 @@ struct CodexChatMessage: Codable, Identifiable, Equatable {
     var imageDataURLs: [String]
     var phase: String?
     var turnID: String?
+    var timelineOrder: Int?
 
-    init(id: String, role: CodexChatRole, text: String, imageDataURLs: [String] = [], phase: String? = nil, turnID: String? = nil) {
+    init(id: String, role: CodexChatRole, text: String, imageDataURLs: [String] = [], phase: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil) {
         self.id = id
         self.role = role
         self.text = text
         self.imageDataURLs = imageDataURLs
         self.phase = phase
         self.turnID = turnID
+        self.timelineOrder = timelineOrder
     }
 
-    private enum CodingKeys: String, CodingKey { case id, role, text, imageDataURLs, phase, turnID }
+    private enum CodingKeys: String, CodingKey { case id, role, text, imageDataURLs, phase, turnID, timelineOrder }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
@@ -33,6 +35,7 @@ struct CodexChatMessage: Codable, Identifiable, Equatable {
         imageDataURLs = try container.decodeIfPresent([String].self, forKey: .imageDataURLs) ?? []
         phase = try container.decodeIfPresent(String.self, forKey: .phase)
         turnID = try container.decodeIfPresent(String.self, forKey: .turnID)
+        timelineOrder = try container.decodeIfPresent(Int.self, forKey: .timelineOrder)
     }
 }
 
@@ -158,6 +161,9 @@ final class CodexAppServerClient: ObservableObject {
     private var activeActivityHandler: ((CodexActivity) -> Void)?
     private var activeDiffHandler: ((CodexTurnDiff) -> Void)?
     private var activeActivities: [String: CodexActivity] = [:]
+    private var activityStartedAtUptime: [String: UInt64] = [:]
+    private var activityStartedAtDate: [String: Date] = [:]
+    private(set) var lastTurnActivityDurations: [String: Int] = [:]
     private var actionRequestHandler: (() -> Void)?
     private var userInputHandler: ((CodexUserInputRequest) async -> Void)?
     private var pendingUserInputRequestID: Any?
@@ -425,6 +431,9 @@ final class CodexAppServerClient: ObservableObject {
         activeActivityHandler = onActivity
         activeDiffHandler = onDiff
         activeActivities.removeAll()
+        activityStartedAtUptime.removeAll()
+        activityStartedAtDate.removeAll()
+        lastTurnActivityDurations.removeAll()
         defer {
             Self.processActiveThreadIDs.remove(threadID)
             clearActiveTurnForMailbox(threadID: threadID)
@@ -782,12 +791,16 @@ final class CodexAppServerClient: ObservableObject {
     private func readMessages(threadID: String) async throws -> CodexThreadHistory {
         var messages: [CodexChatMessage] = []
         var latestTurnItems: [[String: Any]] = []
+        var compactionHistory: [(item: [String: Any], turnID: String?, order: Int)] = []
+        var historicalToolItems: [[String: Any]] = []
+        var toolItemIndexes: [String: Int] = [:]
         var historicalSubagentItems: [[String: Any]] = []
         var subagentIndexes: [String: Int] = [:]
         var lastAssistantTurnID: String?
         var lastAssistantPhase: String?
         var cursor: String?
         var visitedCursors = Set<String>()
+        var historyItemOrder = 0
 
         repeat {
             var params: [String: Any] = [
@@ -804,6 +817,22 @@ final class CodexAppServerClient: ObservableObject {
             let data = response["data"] as? [[String: Any]] ?? []
             for entry in data {
                 guard let item = entry["item"] as? [String: Any] else { continue }
+                if item["type"] as? String == "contextCompaction" {
+                    compactionHistory.append((item, entry["turnId"] as? String, historyItemOrder))
+                    // Preserve the event boundary between same-phase assistant
+                    // items so timeline ordering is not collapsed into one bubble.
+                    lastAssistantTurnID = nil
+                    lastAssistantPhase = nil
+                }
+                if ["mcpToolCall", "dynamicToolCall"].contains(item["type"] as? String ?? ""),
+                   let itemID = item["id"] as? String {
+                    if let index = toolItemIndexes[itemID] {
+                        historicalToolItems[index] = item
+                    } else {
+                        toolItemIndexes[itemID] = historicalToolItems.count
+                        historicalToolItems.append(item)
+                    }
+                }
                 if item["type"] as? String == "subAgentActivity",
                    let activity = CodexActivity.from(item: item),
                    let childThreadID = activity.childThreadID {
@@ -825,7 +854,8 @@ final class CodexAppServerClient: ObservableObject {
                     lastAssistantPhase = nil
                 }
                 latestTurnItems.append(item)
-                if let message = Self.chatMessage(from: entry) {
+                if var message = Self.chatMessage(from: entry) {
+                    message.timelineOrder = historyItemOrder
                     if message.role == .assistant,
                        let turnID = entry["turnId"] as? String,
                        turnID == lastAssistantTurnID,
@@ -839,6 +869,7 @@ final class CodexAppServerClient: ObservableObject {
                     lastAssistantTurnID = message.role == .assistant ? entry["turnId"] as? String : nil
                     lastAssistantPhase = message.role == .assistant ? message.phase : nil
                 }
+                historyItemOrder += 1
             }
             cursor = response["nextCursor"] as? String
 
@@ -849,7 +880,10 @@ final class CodexAppServerClient: ObservableObject {
 
         var activityIndexes: [String: Int] = [:]
         var activities: [CodexActivity] = []
-        for activity in (latestTurnItems + historicalSubagentItems).compactMap(CodexActivity.from) {
+        for record in compactionHistory {
+            guard var activity = CodexActivity.from(item: record.item, lifecycle: "completed") else { continue }
+            activity.turnID = record.turnID
+            activity.timelineOrder = record.order
             let key = activity.childThreadID ?? activity.id
             if let index = activityIndexes[key] {
                 activities[index] = activity
@@ -857,6 +891,24 @@ final class CodexAppServerClient: ObservableObject {
                 activityIndexes[key] = activities.count
                 activities.append(activity)
             }
+        }
+        for activity in historicalToolItems.compactMap({ CodexActivity.from(item: $0) }) {
+            let key = activity.childThreadID ?? activity.id
+            if let index = activityIndexes[key] { activities[index] = activity }
+            else { activityIndexes[key] = activities.count; activities.append(activity) }
+        }
+        for activity in latestTurnItems
+            .filter({ $0["type"] as? String != "contextCompaction" })
+            .filter({ !["mcpToolCall", "dynamicToolCall"].contains($0["type"] as? String ?? "") })
+            .compactMap({ CodexActivity.from(item: $0) }) {
+            let key = activity.childThreadID ?? activity.id
+            if let index = activityIndexes[key] { activities[index] = activity }
+            else { activityIndexes[key] = activities.count; activities.append(activity) }
+        }
+        for activity in historicalSubagentItems.compactMap({ CodexActivity.from(item: $0) }) {
+            let key = activity.childThreadID ?? activity.id
+            if let index = activityIndexes[key] { activities[index] = activity }
+            else { activityIndexes[key] = activities.count; activities.append(activity) }
         }
         return CodexThreadHistory(
             messages: messages,
@@ -1041,7 +1093,7 @@ final class CodexAppServerClient: ObservableObject {
             activeTurnID = turnID
             isTurnActive = true
             Self.processActiveThreadIDs.insert(threadID)
-        case "item/agentMessage/delta":
+        case "item/agentMessage/delta", "item/plan/delta":
             guard params["threadId"] as? String == activeThreadID,
                   let delta = params["delta"] as? String else { return }
             activeDeltaHandler?(delta)
@@ -1049,10 +1101,11 @@ final class CodexAppServerClient: ObservableObject {
             guard params["threadId"] as? String == activeThreadID,
                   let item = params["item"] as? [String: Any] else { return }
             if method == "item/completed",
-               item["type"] as? String == "agentMessage",
+               let itemType = item["type"] as? String,
+               itemType == "agentMessage" || itemType == "plan",
                let text = item["text"] as? String,
                !text.isEmpty {
-                if item["phase"] as? String == "commentary" {
+                if itemType == "agentMessage", item["phase"] as? String == "commentary" {
                     activeProgressMessageHandler?(CodexChatMessage(
                         id: item["id"] as? String ?? UUID().uuidString,
                         role: .assistant,
@@ -1064,7 +1117,32 @@ final class CodexAppServerClient: ObservableObject {
                     activeFinalMessageHandler?(text)
                 }
             }
-            guard let activity = CodexActivity.from(item: item) else { return }
+            let activityID = item["type"] as? String == "subAgentActivity"
+                ? (item["agentThreadId"] as? String ?? item["id"] as? String)
+                : item["id"] as? String
+            guard let activityID else { return }
+            if method == "item/started" {
+                activityStartedAtUptime[activityID] = activityStartedAtUptime[activityID] ?? DispatchTime.now().uptimeNanoseconds
+                activityStartedAtDate[activityID] = activityStartedAtDate[activityID] ?? .now
+            }
+            let measuredDuration: Int?
+            if method == "item/completed", let started = activityStartedAtUptime[activityID] {
+                measuredDuration = max(1, Int((DispatchTime.now().uptimeNanoseconds - started) / 1_000_000))
+            } else {
+                measuredDuration = nil
+            }
+            guard let activity = CodexActivity.from(
+                item: item,
+                lifecycle: method == "item/completed" ? "completed" : "inProgress",
+                turnID: params["turnId"] as? String,
+                startedAt: activityStartedAtDate[activityID],
+                measuredDurationMs: measuredDuration
+            ) else { return }
+            if method == "item/completed" {
+                if let durationMs = activity.durationMs { lastTurnActivityDurations[activity.id] = durationMs }
+                activityStartedAtUptime.removeValue(forKey: activityID)
+                activityStartedAtDate.removeValue(forKey: activityID)
+            }
             activeActivities[activity.id] = activity
             activeActivityHandler?(activity)
         case "item/commandExecution/outputDelta":
@@ -1073,12 +1151,7 @@ final class CodexAppServerClient: ObservableObject {
                   let delta = params["delta"] as? String,
                   var activity = activeActivities[itemID] else { return }
             let output = String((activity.detail + delta).suffix(2_000))
-            activity = CodexActivity(
-                id: activity.id,
-                title: activity.title,
-                detail: output,
-                status: activity.status
-            )
+            activity.detail = output
             activeActivities[itemID] = activity
             activeActivityHandler?(activity)
         case "turn/diff/updated":
@@ -1124,13 +1197,14 @@ final class CodexAppServerClient: ObservableObject {
     private func handleServerRequest(method: String, params: [String: Any], requestID: Any) async {
         let normalizedMethod = method.lowercased()
         if normalizedMethod.contains("approval") || normalizedMethod.contains("item/tool/") ||
-            normalizedMethod.contains("elicitation"), method != "item/tool/requestUserInput" {
+            normalizedMethod.contains("elicitation"),
+           method != "item/tool/requestUserInput", method != "tool/requestUserInput" {
             actionRequestHandler?()
         }
 
         let result: [String: Any]
         switch method {
-        case "item/tool/requestUserInput":
+        case "item/tool/requestUserInput", "tool/requestUserInput":
             guard let questionsRaw = params["questions"] as? [[String: Any]],
                   let threadID = params["threadId"] as? String,
                   let requestIDString = requestID as? String ?? (requestID as? NSNumber)?.stringValue else {
@@ -1276,9 +1350,11 @@ final class CodexAppServerClient: ObservableObject {
             }
             guard !text.isEmpty || !images.isEmpty else { return nil }
             return CodexChatMessage(id: itemID, role: .user, text: text, imageDataURLs: images, turnID: entry["turnId"] as? String)
-        case "agentMessage":
+        case "agentMessage", "plan":
             guard let text = item["text"] as? String, !text.isEmpty else { return nil }
-            return CodexChatMessage(id: itemID, role: .assistant, text: text, phase: item["phase"] as? String, turnID: entry["turnId"] as? String)
+            return CodexChatMessage(id: itemID, role: .assistant, text: text,
+                                    phase: type == "plan" ? "final_answer" : item["phase"] as? String,
+                                    turnID: entry["turnId"] as? String)
         default:
             return nil
         }
@@ -1377,7 +1453,7 @@ enum TaskProgressReportInstructions {
         let quotedExecutable = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
         let id = taskID.uuidString
         return """
-        Report your current work on the StationAI task board using the StationAI CLI. Publish at phase changes and periodically during substantial work so the card stays current, without reporting every small step. During tests, identify the active test and position when known (for example, "Test 3/8: task progress persistence"); during other work, name the current concrete activity. Keep each detail to a short subtitle, ideally under 80 characters, and update it as the work moves on. Use these commands for this task:
+        Report your current work on the StationAI task board using the StationAI CLI. Publish at every phase change, when starting or finishing a substantial tool call, and at least every 30 seconds during long commands, builds, tests, waits, or investigation. Keep the report current while a tool runs; after it finishes, replace it with the next active action. During tests, identify the active suite/case and position when known (for example, "CLI/XPC 3/8: task progress persistence"); during other work, name the concrete action and useful target. Keep each detail to a short subtitle, ideally under 80 characters. Do not report every tiny edit. Use these commands for this task:
         \(quotedExecutable) task progress publish \(id) --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail \"short detail\"]
         \(quotedExecutable) task progress custom \(id) --label \"short label\" [--detail \"short detail\"]
         \(quotedExecutable) task progress clear \(id)
