@@ -27,7 +27,7 @@ struct KanbanBoardView: View {
     @State private var taskCreatingPullRequests = Set<UUID>()
     @State private var mergedReviewTaskIDs = Set<UUID>()
     @State private var checkingMergedPullRequests = false
-    @State private var mergedPullRequestCheckPending = false
+    @State private var lastMergedPullRequestCheckAt: Date?
     @State private var taskAwaitingUnmergedConfirmation: UUID?
     @State private var taskAwaitingPRConflictChoice: BoardTask?
     @State private var rememberPRConflictAction = false
@@ -716,18 +716,14 @@ struct KanbanBoardView: View {
     }
 
     private func checkMergedReviewPullRequests() {
-        guard !checkingMergedPullRequests else {
-            mergedPullRequestCheckPending = true
-            return
-        }
+        let now = Date()
+        guard !checkingMergedPullRequests,
+              lastMergedPullRequestCheckAt.map({ now.timeIntervalSince($0) >= 10 }) ?? true else { return }
+        lastMergedPullRequestCheckAt = now
         checkingMergedPullRequests = true
         Task { @MainActor in
             defer {
                 checkingMergedPullRequests = false
-                if mergedPullRequestCheckPending {
-                    mergedPullRequestCheckPending = false
-                    checkMergedReviewPullRequests()
-                }
             }
             var merged = Set<UUID>()
             let reviewTasks = tasks.filter { task in
