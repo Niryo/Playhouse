@@ -448,6 +448,12 @@ def main():
                     write({"jsonrpc": "2.0", "method": "item/started", "params": {
                         "threadId": THREAD_ID, "item": {**action_item, "status": "inProgress"},
                     }})
+                    if action_item["type"] == "commandExecution":
+                        for delta in ("CODEX_STREAMED_", "OUTPUT_NOT_LOGGED"):
+                            write({"jsonrpc": "2.0", "method": "item/commandExecution/outputDelta", "params": {
+                                "threadId": THREAD_ID, "turnId": TURN_ID,
+                                "itemId": action_item["id"], "delta": delta,
+                            }})
                     write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                         "threadId": THREAD_ID, "item": action_item,
                     }})
@@ -457,9 +463,11 @@ def main():
                     write({"jsonrpc": "2.0", "method": "item/started", "params": {
                         "threadId": THREAD_ID, "turnId": TURN_ID, "item": item,
                     }})
-                    write({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {
-                        "threadId": THREAD_ID, "turnId": TURN_ID, "itemId": item_id, "delta": text,
-                    }})
+                    midpoint = len(text) // 2
+                    for delta in (text[:midpoint], text[midpoint:]):
+                        write({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {
+                            "threadId": THREAD_ID, "turnId": TURN_ID, "itemId": item_id, "delta": delta,
+                        }})
                     write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                         "threadId": THREAD_ID,
                         "turnId": TURN_ID,
@@ -482,9 +490,11 @@ def main():
                 write({"jsonrpc": "2.0", "method": "item/started", "params": {
                     "threadId": THREAD_ID, "turnId": TURN_ID, "item": item,
                 }})
-                write({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {
-                    "threadId": THREAD_ID, "turnId": TURN_ID, "itemId": item_id, "delta": text,
-                }})
+                midpoint = len(text) // 2
+                for delta in (text[:midpoint], text[midpoint:]):
+                    write({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {
+                        "threadId": THREAD_ID, "turnId": TURN_ID, "itemId": item_id, "delta": delta,
+                    }})
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID,
                     "turnId": TURN_ID,
