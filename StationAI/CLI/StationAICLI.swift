@@ -156,13 +156,20 @@ enum StationAICLI {
                 let title = try requiredFlag("--title", flags: flags).first!
                 return BridgeRequest(command: "task.rename", arguments: ["taskID": .string(id), "title": .string(title)])
             case "repository":
-                guard tail.count >= 2 else { throw CLIError.usage("Use: stationai task repository add|add-batch|edit|remove <task-id> ...") }
+                guard tail.count >= 2 else { throw CLIError.usage("Use: stationai task repository add|add-batch|replace|edit|remove <task-id> ...") }
                 let id = tail[1]
                 switch tail[0] {
                 case "add-batch":
                     let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--repo"])
                     let repositories = try requiredFlag("--repo", flags: flags)
                     return BridgeRequest(command: "task.repository.add-batch", arguments: [
+                        "taskID": .string(id),
+                        "repositoryPaths": .array(repositories.map(BridgeValue.string))
+                    ])
+                case "replace":
+                    let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--repo"])
+                    let repositories = try requiredFlag("--repo", flags: flags)
+                    return BridgeRequest(command: "task.repository.replace", arguments: [
                         "taskID": .string(id),
                         "repositoryPaths": .array(repositories.map(BridgeValue.string))
                     ])
@@ -190,7 +197,7 @@ enum StationAICLI {
                         "mergeTarget": .string(mergeTarget)
                     ])
                 default:
-                    throw CLIError.usage("Use: stationai task repository add|add-batch|edit|remove <task-id> ...")
+                    throw CLIError.usage("Use: stationai task repository add|add-batch|replace|edit|remove <task-id> ...")
                 }
             case "prompt":
                 guard let id = tail.first else { throw CLIError.usage("Use: stationai task prompt <task-id> --text <prompt> [--status <status>] [--submitted true]") }
@@ -268,7 +275,12 @@ enum StationAICLI {
                 throw CLIError.usage("Unknown task operation '\(operation)'.")
             }
         case "workspace":
-            guard rest.first == "suggest" else { throw CLIError.usage("Use: stationai workspace suggest --parent <path>") }
+            if rest == ["repos", "list"] {
+                return BridgeRequest(command: "workspace.repositories.list")
+            }
+            guard rest.first == "suggest" else {
+                throw CLIError.usage("Use: stationai workspace repos list or workspace suggest --parent <path>")
+            }
             let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--parent"])
             return BridgeRequest(command: "workspace.suggest", arguments: [
                 "parent": .string(try requiredFlag("--parent", flags: flags).first!)
@@ -440,6 +452,7 @@ enum StationAICLI {
       stationai task rename <task-id> --title <title>
       stationai task repository add <task-id> --repo <path>
       stationai task repository add-batch <task-id> --repo <path> [--repo <path>...]
+      stationai task repository replace <task-id> --repo <path> [--repo <path>...]
       stationai task repository edit <task-id> --repo <path> --branch <name> --branch-from <ref> [--merge-target <ref>]
       stationai task repository remove <task-id> --repo <path>
       stationai task prompt <task-id> --text <prompt> [--status <status>] [--submitted true]
@@ -450,6 +463,7 @@ enum StationAICLI {
       stationai task delete <task-id>
       stationai task delete-check <task-id>
       stationai workspace suggest --parent <path>
+      stationai workspace repos list
       stationai settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>
       stationai conversation history <task-id>
       stationai conversation queue <task-id> --message <text>

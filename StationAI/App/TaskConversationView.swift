@@ -78,6 +78,7 @@ struct TaskConversationView: View {
     @State private var monacoError: String?
     @State private var diffChangeCount: Int?
     @State private var isLoadingHistory = false
+    @State private var isApplyingSavedRepositories = false
     @State private var isResponding = false
     @State private var isPreparingSubmittedMessage = false
     @State private var conflictResolutionAttempt = 0
@@ -88,6 +89,7 @@ struct TaskConversationView: View {
     @State private var userInputRequest: CodexUserInputRequest?
     @State private var userInputAnswers: [String: [String]] = [:]
     @State private var userInputOther: [String: String] = [:]
+    @State private var repositoryMismatch: RepositoryMismatchAssessment?
     @State private var errorMessage: String?
     @State private var actionNotice: String?
     @State private var isShowingWorkspaceEditor = false
@@ -108,7 +110,11 @@ struct TaskConversationView: View {
     @FocusState private var isRepositorySearchFocused: Bool
 
     private var isSendDisabled: Bool {
-        (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty) || workspaceRootURLs.isEmpty || isResponding || isLoadingHistory
+        !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty) || isResponding || isLoadingHistory
+    }
+
+    private var isRepositoryRootConfigured: Bool {
+        WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) != nil
     }
 
     private var canPauseResponse: Bool {
@@ -193,11 +199,50 @@ struct TaskConversationView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(WorkspaceTheme.windowBackground)
+        .alert(
+            "Possible repository mismatch",
+            isPresented: Binding(
+                get: { repositoryMismatch != nil },
+                set: { if !$0 { repositoryMismatch = nil } }
+            )
+        ) {
+            Button("Review repository context") {
+                let assessment = repositoryMismatch
+                repositoryMismatch = nil
+                steerRepositoryAssessment(
+                    "The fast repository assessment reported: \(assessment?.reason ?? "the selected context may not match"). Suggested repository: \(assessment?.suggestedRepositoryPath ?? "none"). Please ask me to confirm whether to keep, add, replace, or use standalone context before editing. Use StationAI's task repository APIs and workspace repos list API; do not scan the root yourself."
+                )
+            }
+            .buttonHoverPointer()
+            .help("Ask the assistant to review repository choices before editing.")
+            Button("Continue with current context", role: .cancel) {
+                let assessment = repositoryMismatch
+                repositoryMismatch = nil
+                let detail = assessment.map {
+                    "StationAI's fast repository assessment reported: \($0.reason) Suggested repository: \($0.suggestedRepositoryPath ?? "none")."
+                } ?? "StationAI flagged a possible repository mismatch."
+                steerRepositoryAssessment("\(detail) I confirm that you should continue with the current task context. Do not change repositories.")
+            }
+            .buttonHoverPointer()
+            .help("Continue using the selected repositories for this task.")
+        } message: {
+            Text(repositoryMismatch.map {
+                if let suggestion = $0.suggestedRepositoryPath {
+                    return "\($0.reason) StationAI found a possible match: \(suggestion). Review the repository context before continuing, or keep the current context."
+                }
+                return "\($0.reason) StationAI did not find a clear matching repository. Review the context or continue with the current selection."
+            } ?? "The current repository may not match this task.")
+        }
         .onAppear {
             guard isNewTask else { return }
-            isShowingRepositoryPicker = true
+            isShowingRepositoryPicker = false
             lastSelectedRepositoryPaths = WorkspaceSettingsManager().lastSelectedRepositories
+            isComposerFocused = true
             loadSuggestedRepositories()
+            let savedRepositories = validLastSelectedRepositoryURLs
+            if !savedRepositories.isEmpty {
+                selectRepositories(savedRepositories, reopenPickerOnError: false, isApplyingDefault: true)
+            }
         }
         .sheet(isPresented: $isShowingWorkspaceEditor) {
             WorkspaceRootsEditor(
@@ -206,6 +251,12 @@ struct TaskConversationView: View {
                 repositoryWorktrees: task.repositoryWorktrees,
                 onSave: updateWorkspaceRoots
             )
+        }
+        .sheet(item: $userInputRequest) { request in
+            userInputForm(request)
+                .frame(minWidth: 420, idealWidth: 560, maxWidth: 720, minHeight: 260)
+                .padding(12)
+                .accessibilityIdentifier("ai-question-confirmation-sheet")
         }
         .fileImporter(isPresented: $isShowingImagePicker, allowedContentTypes: [.image], allowsMultipleSelection: true) { result in
             do {
@@ -471,8 +522,6 @@ struct TaskConversationView: View {
                 safetyNotice
 
                 conversation
-
-                if !isReadOnly, let userInputRequest { userInputForm(userInputRequest) }
 
                 Rectangle()
                     .fill(Color.primary.opacity(0.07))
@@ -925,7 +974,7 @@ struct TaskConversationView: View {
                         .truncationMode(.middle)
                         .help(parentFolderURL.path)
                     Spacer(minLength: 0)
-                    Button("Change…", action: chooseRepositoryParentFolder)
+                    Button("Change…") { chooseRepositoryParentFolder() }
                         .buttonHoverPointer()
                         .help("Choose a different repository suggestion folder")
                         .disabled(isChoosingRepositoryParent)
@@ -937,7 +986,7 @@ struct TaskConversationView: View {
                 Text("Choose a parent folder to find Git repositories.")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
-                Button("Choose suggestion folder…", action: chooseRepositoryParentFolder)
+                Button("Choose suggestion folder…") { chooseRepositoryParentFolder() }
                     .buttonHoverPointer()
                     .help("Choose a folder to find repository suggestions")
                     .disabled(isChoosingRepositoryParent)
@@ -1045,10 +1094,18 @@ struct TaskConversationView: View {
         selectRepositories([repository])
     }
 
-    private func selectRepositories(_ repositories: [URL]) {
+    private func selectRepositories(
+        _ repositories: [URL],
+        reopenPickerOnError: Bool = true,
+        isApplyingDefault: Bool = false
+    ) {
         isShowingRepositoryPicker = false
         repositorySearch = ""
+        if isApplyingDefault { isApplyingSavedRepositories = true }
         Task { @MainActor in
+            defer {
+                if isApplyingDefault { isApplyingSavedRepositories = false }
+            }
             do {
                 var selectedPaths = task.repositoryWorktrees.map { $0.repositoryPath }
                 var repositoriesToAdd: [String] = []
@@ -1069,7 +1126,7 @@ struct TaskConversationView: View {
                 await refreshWorkspaceChanges()
             } catch {
                 errorMessage = "Couldn't add repository: \(error.localizedDescription)"
-                isShowingRepositoryPicker = true
+                isShowingRepositoryPicker = reopenPickerOnError
             }
         }
     }
@@ -1083,12 +1140,12 @@ struct TaskConversationView: View {
         }
     }
 
-    private func chooseRepositoryParentFolder() {
+    private func chooseRepositoryParentFolder(showRepositoryPickerWhenFinished: Bool = true) {
         guard !isChoosingRepositoryParent else { return }
         isShowingRepositoryPicker = false
         let panel = NSOpenPanel()
-        panel.title = "Choose default parent folder"
-        panel.message = "StationAI will suggest Git repositories found under this folder."
+        panel.title = "Choose repository root folder"
+        panel.message = "StationAI will search below this folder for repositories. A root folder is required before sending conversations."
         panel.prompt = "Use This Folder"
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -1099,7 +1156,7 @@ struct TaskConversationView: View {
             DispatchQueue.main.async {
                 isChoosingRepositoryParent = false
                 guard response == .OK, let selected = panel.url else {
-                    isShowingRepositoryPicker = true
+                    isShowingRepositoryPicker = showRepositoryPickerWhenFinished
                     return
                 }
                 let path = selected.standardizedFileURL.path
@@ -1107,10 +1164,10 @@ struct TaskConversationView: View {
                     try WorkspaceSettingsManager().setDefaultParentFolder(path)
                     defaultParentFolderPath = path
                     loadSuggestedRepositories()
-                    isShowingRepositoryPicker = true
+                    isShowingRepositoryPicker = showRepositoryPickerWhenFinished
                 } catch {
                     errorMessage = "Couldn't set the repository suggestion folder: \(error.localizedDescription)"
-                    isShowingRepositoryPicker = true
+                    isShowingRepositoryPicker = showRepositoryPickerWhenFinished
                 }
             }
         }
@@ -1677,18 +1734,24 @@ struct TaskConversationView: View {
                     .accessibilityIdentifier("codex-action-notice")
             }
 
-            if workspaceRootURLs.isEmpty {
-                Label("Choose at least one working folder before sending a message.", systemImage: "exclamationmark.triangle.fill")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("Choose at least one working folder before sending a message.")
-                    .accessibilityIdentifier("no-working-folders-error")
+            if !isRepositoryRootConfigured {
+                HStack(spacing: 8) {
+                    Label("Set the repository root folder before sending.", systemImage: "folder.badge.questionmark")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier("repository-root-required-notice")
+                    Spacer(minLength: 0)
+                    Button("Set root folder…") {
+                        chooseRepositoryParentFolder(showRepositoryPickerWhenFinished: false)
+                    }
+                    .buttonHoverPointer()
+                    .buttonStyle(.bordered)
+                    .help("Choose the folder that contains your repositories.")
+                    .accessibilityIdentifier("set-conversation-repository-root-button")
+                }
             }
 
-            if let errorMessage,
-               errorMessage != WorkspaceError.noRoots.localizedDescription {
+            if let errorMessage {
                 Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.red)
@@ -2040,6 +2103,31 @@ struct TaskConversationView: View {
         userInputOther = [:]
     }
 
+    private func steerRepositoryAssessment(_ message: String) {
+        Task { @MainActor in
+            do {
+                guard try await conversationManager.steer(taskID: task.id, text: message) else {
+                    preserveRepositoryAssessmentForFollowup(message)
+                    return
+                }
+            } catch {
+                preserveRepositoryAssessmentForFollowup(message)
+                errorMessage = "Couldn't update Codex about the repository assessment: \(error.localizedDescription). Its result and your choice are in the composer; send them to continue."
+            }
+        }
+    }
+
+    private func preserveRepositoryAssessmentForFollowup(_ message: String) {
+        let existingDraft = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if existingDraft.isEmpty {
+            draft = message
+        } else if !existingDraft.contains(message) {
+            draft = "\(message)\n\n\(draft)"
+        }
+        isComposerFocused = true
+        actionNotice = "The repository check finished after the active turn. I added its result to the composer; send it to continue."
+    }
+
     private func loadConversation() async {
         isLoadingHistory = true
         errorMessage = nil
@@ -2124,6 +2212,11 @@ struct TaskConversationView: View {
     }
 
     private func sendMessage(overrideText: String? = nil) {
+        guard !isApplyingSavedRepositories else { return }
+        guard isRepositoryRootConfigured else {
+            errorMessage = "Set the repository root folder before sending a conversation."
+            return
+        }
         let text = (overrideText ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
         guard (!text.isEmpty || !pendingImages.isEmpty), !isResponding, !isLoadingHistory else { return }
         let resolutionAttempt = conflictResolutionAttempt
@@ -2254,6 +2347,8 @@ struct TaskConversationView: View {
                         if let message = update.message, draft == message { draft = "" }
                     case "action_notice":
                         actionNotice = update.message
+                    case "repository_mismatch":
+                        repositoryMismatch = update.repositoryMismatch
                     default:
                         break
                     }

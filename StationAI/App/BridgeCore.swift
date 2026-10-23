@@ -1034,7 +1034,7 @@ final class BoardTaskManager {
             .appendingPathComponent("conversation-turn-locks", isDirectory: true)
     }
 
-    private func withTaskOperationLock<T>(
+    fileprivate func withTaskOperationLock<T>(
         _ id: UUID,
         operation: @MainActor () async throws -> T
     ) async throws -> T {
@@ -1104,6 +1104,39 @@ final class BoardTaskManager {
             throw BridgeFileLockError(message: "Couldn't inspect the conversation-turn reservation (errno \(errno)).")
         }
         return lock.l_type != Int16(F_UNLCK)
+    }
+
+    fileprivate func queueDeferredRepositoryRemoval(taskID: UUID, record: RepositoryWorktreeRecord) throws -> URL {
+        guard let conversationTurnLockDirectory else {
+            throw BridgeFileLockError(message: "Couldn't determine the task-store location for deferred repository cleanup.")
+        }
+        try FileManager.default.createDirectory(at: conversationTurnLockDirectory, withIntermediateDirectories: true)
+        let payload = DeferredRepositoryRemoval(taskID: taskID, record: record)
+        let url = conversationTurnLockDirectory.appendingPathComponent("\(taskID.uuidString).\(UUID().uuidString).repository-removal.json")
+        try JSONEncoder().encode(payload).write(to: url, options: .atomic)
+        guard Darwin.chmod(url.path, mode_t(0o600)) == 0 else {
+            let code = errno
+            try? FileManager.default.removeItem(at: url)
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+        }
+        return url
+    }
+
+    fileprivate func deferredRepositoryRemovals() throws -> [(URL, DeferredRepositoryRemoval)] {
+        guard let conversationTurnLockDirectory else {
+            throw BridgeFileLockError(message: "Couldn't determine the task-store location for deferred repository cleanup.")
+        }
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: conversationTurnLockDirectory,
+            includingPropertiesForKeys: nil
+        ) else { return [] }
+        return try urls.filter { $0.lastPathComponent.hasSuffix(".repository-removal.json") }.compactMap { url in
+            (url, try JSONDecoder().decode(DeferredRepositoryRemoval.self, from: Data(contentsOf: url)))
+        }
+    }
+
+    fileprivate func clearDeferredRepositoryRemoval(at url: URL) throws {
+        try FileManager.default.removeItem(at: url)
     }
 
     private func conversationTurnOutcomeURL(_ id: UUID) throws -> URL {
@@ -1321,12 +1354,24 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func addRepository(_ id: UUID, repositoryPath: String) async throws -> BoardTaskRecord {
-        return try await addRepositories(id, repositoryPaths: [repositoryPath])
+    func addRepository(
+        _ id: UUID,
+        repositoryPath: String,
+        duringActiveConversation: Bool = false
+    ) async throws -> BoardTaskRecord {
+        return try await addRepositories(
+            id,
+            repositoryPaths: [repositoryPath],
+            duringActiveConversation: duringActiveConversation
+        )
     }
 
     @discardableResult
-    func addRepositories(_ id: UUID, repositoryPaths: [String]) async throws -> BoardTaskRecord {
+    func addRepositories(
+        _ id: UUID,
+        repositoryPaths: [String],
+        duringActiveConversation: Bool = false
+    ) async throws -> BoardTaskRecord {
         guard !repositoryPaths.isEmpty else {
             throw BridgeCommandError(code: "invalid_argument", message: "Add at least one repository.")
         }
@@ -1369,10 +1414,10 @@ final class BoardTaskManager {
             )
         }
 
-        return try await withConversationTurnReservation(id) {
-            return try await withTaskOperationLock(id) {
-                return try await withRepositoryAllocationLocks(records.map(\.repositoryPath)) {
-                    let task = try requireTask(id)
+        let mutation = {
+            try await self.withTaskOperationLock(id) {
+                return try await self.withRepositoryAllocationLocks(records.map(\.repositoryPath)) {
+                    let task = try self.requireTask(id)
                     guard task.status != .done else {
                         throw BridgeCommandError(code: "invalid_transition", message: "Repositories can't be changed on a completed task.")
                     }
@@ -1384,7 +1429,7 @@ final class BoardTaskManager {
                             message: "This repository is already attached to the task: \(duplicate.repositoryPath)"
                         )
                     }
-                    try validateRepositoryAssignments(records, excludingTaskID: id)
+                    try self.validateRepositoryAssignments(records, excludingTaskID: id)
 
                     let repositories = task.repositoryWorktrees + records
                     let contextFolders = try Self.normalizeOptionalRoots(
@@ -1396,7 +1441,7 @@ final class BoardTaskManager {
                     task.repositoryWorktrees = repositories
                     task.contextFolderPaths = contextFolders
                     task.workspaceRootPaths = roots
-                    try await saveTaskContext(taskID: id)
+                    try await self.saveTaskContext(taskID: id)
                     StationAIDiagnostics.record("workspace.repository.add.succeeded", fields: [
                         "taskID": id.uuidString,
                         "repositoryCount": String(records.count),
@@ -1406,6 +1451,71 @@ final class BoardTaskManager {
                 }
             }
         }
+        if duringActiveConversation {
+            return try await mutation()
+        }
+        return try await withConversationTurnReservation(id) {
+            try await mutation()
+        }
+    }
+
+    @discardableResult
+    func replaceRepositories(
+        _ id: UUID,
+        repositoryPaths: [String],
+        duringActiveConversation: Bool = false
+    ) async throws -> BoardTaskRecord {
+        guard !repositoryPaths.isEmpty else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Replace with at least one repository.")
+        }
+        let initialTask = try requireTask(id)
+        guard initialTask.status != .done else {
+            throw BridgeCommandError(code: "invalid_transition", message: "Repositories can't be changed on a completed task.")
+        }
+
+        var seen = Set<String>()
+        var normalizedPaths: [String] = []
+        for path in repositoryPaths {
+            let record = try await worktreeService.pendingRecord(
+                spec: RepositoryWorktreeSpec(repositoryPath: path, branch: nil, branchFrom: nil)
+            )
+            let canonical = Self.canonicalPath(record.repositoryPath)
+            guard seen.insert(canonical).inserted else {
+                throw BridgeCommandError(code: "invalid_argument", message: "A repository can be selected only once per task: \(record.repositoryPath)")
+            }
+            normalizedPaths.append(record.repositoryPath)
+        }
+
+        let desired = Set(normalizedPaths.map(Self.canonicalPath))
+        let existing = Set(initialTask.repositoryWorktrees.map { Self.canonicalPath($0.repositoryPath) })
+        let additions = normalizedPaths.filter { !existing.contains(Self.canonicalPath($0)) }
+        if !additions.isEmpty {
+            _ = try await addRepositories(
+                id,
+                repositoryPaths: additions,
+                duringActiveConversation: duringActiveConversation
+            )
+        }
+
+        let latestTask = try requireTask(id)
+        let removals = latestTask.repositoryWorktrees
+            .filter { !desired.contains(Self.canonicalPath($0.repositoryPath)) }
+            .map(\.repositoryPath)
+        for path in removals {
+            do {
+                _ = try await removeRepository(
+                    id,
+                    repositoryPath: path,
+                    duringActiveConversation: duringActiveConversation
+                )
+            } catch {
+                throw BridgeCommandError(
+                    code: "operation_failed",
+                    message: "The replacement repositories were added, but the old repository \(path) couldn't be removed. The task keeps both contexts. \(error.localizedDescription)"
+                )
+            }
+        }
+        return try get(id)
     }
 
     @discardableResult
@@ -1458,7 +1568,18 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func removeRepository(_ id: UUID, repositoryPath: String) async throws -> BoardTaskRecord {
+    func removeRepository(
+        _ id: UUID,
+        repositoryPath: String,
+        duringActiveConversation: Bool = false
+    ) async throws -> BoardTaskRecord {
+        if duringActiveConversation {
+            return try await removeRepositoryWhileTurnReserved(
+                id,
+                repositoryPath: repositoryPath,
+                deferWorktreeRemovalUntilTurnEnds: true
+            )
+        }
         return try await withConversationTurnReservation(id) {
             try await self.removeRepositoryWhileTurnReserved(id, repositoryPath: repositoryPath)
         }
@@ -1466,7 +1587,8 @@ final class BoardTaskManager {
 
     private func removeRepositoryWhileTurnReserved(
         _ id: UUID,
-        repositoryPath: String
+        repositoryPath: String,
+        deferWorktreeRemovalUntilTurnEnds: Bool = false
     ) async throws -> BoardTaskRecord {
         return try await withTaskOperationLock(id) {
             let task = try requireTask(id)
@@ -1478,7 +1600,7 @@ final class BoardTaskManager {
             let originalRoots = task.workspaceRootPaths
             let updatedRepositories = originalRepositories.filter { $0.repositoryPath != record.repositoryPath }
             let roots = try Self.normalizeOptionalRoots(updatedRepositories.map(\.worktreePath) + task.contextFolderPaths)
-            guard !roots.isEmpty || record.isPending else { throw StationAIManagerError.noWorkspaceRoots }
+            // A task with no repository roots is a valid standalone conversation.
             let shouldRemoveWorktree = record.createdByStationAI && !record.isPending
                 && FileManager.default.fileExists(atPath: record.worktreePath)
 
@@ -1496,11 +1618,75 @@ final class BoardTaskManager {
                     )
                 }
 
+                let deferredIntentURL = shouldRemoveWorktree && deferWorktreeRemovalUntilTurnEnds
+                    ? try queueDeferredRepositoryRemoval(taskID: id, record: record)
+                    : nil
+
                 currentTask.repositoryWorktrees = updatedRepositories
                 currentTask.workspaceRootPaths = roots
-                try await saveTaskContext(taskID: id)
+                do {
+                    try await saveTaskContext(taskID: id)
+                } catch {
+                    currentTask.repositoryWorktrees = originalRepositories
+                    currentTask.workspaceRootPaths = originalRoots
+                    throw error
+                }
 
                 if shouldRemoveWorktree {
+                    if deferWorktreeRemovalUntilTurnEnds {
+                        StationAIDiagnostics.record("workspace.repository.deferred_removal_scheduled", fields: [
+                            "taskID": id.uuidString,
+                            "repositoryPath": record.repositoryPath,
+                            "worktreePath": record.worktreePath
+                        ])
+                        Task.detached { @MainActor in
+                            do {
+                                StationAIDiagnostics.record("workspace.repository.deferred_removal_waiting", fields: [
+                                    "taskID": id.uuidString,
+                                    "repositoryPath": record.repositoryPath,
+                                    "worktreePath": record.worktreePath
+                                ])
+                                try await self.withConversationTurnReservation(id) {
+                                    try await self.withTaskOperationLock(id) {
+                                        guard let deferredIntentURL,
+                                              FileManager.default.fileExists(atPath: deferredIntentURL.path) else { return }
+                                        if try self.isRepositoryAttached(record, to: id) {
+                                            try self.clearDeferredRepositoryRemoval(at: deferredIntentURL)
+                                            return
+                                        }
+                                        StationAIDiagnostics.record("workspace.repository.deferred_removal_reservation_acquired", fields: [
+                                            "taskID": id.uuidString,
+                                            "repositoryPath": record.repositoryPath,
+                                            "worktreePath": record.worktreePath
+                                        ])
+                                        if try await self.worktreeService.hasChanges(record) {
+                                            StationAIDiagnostics.record("workspace.repository.deferred_removal_kept_dirty", fields: [
+                                                "taskID": id.uuidString,
+                                                "repositoryPath": record.repositoryPath,
+                                                "worktreePath": record.worktreePath
+                                            ])
+                                            try self.clearDeferredRepositoryRemoval(at: deferredIntentURL)
+                                            return
+                                        }
+                                        try await self.worktreeService.remove(record)
+                                        StationAIDiagnostics.record("workspace.repository.deferred_removal_succeeded", fields: [
+                                            "taskID": id.uuidString,
+                                            "repositoryPath": record.repositoryPath,
+                                            "worktreePath": record.worktreePath
+                                        ])
+                                        try self.clearDeferredRepositoryRemoval(at: deferredIntentURL)
+                                    }
+                                }
+                            } catch {
+                                StationAIDiagnostics.record("workspace.repository.deferred_removal_failed", fields: [
+                                    "taskID": id.uuidString,
+                                    "repositoryPath": record.repositoryPath,
+                                    "worktreePath": record.worktreePath,
+                                    "error": error.localizedDescription
+                                ])
+                            }
+                        }
+                    } else {
                     do {
                         try await worktreeService.remove(record)
                     } catch {
@@ -1521,6 +1707,7 @@ final class BoardTaskManager {
                             )
                         }
                         throw removalError
+                    }
                     }
                 }
                 return try get(id)
@@ -2222,6 +2409,16 @@ final class BoardTaskManager {
         try requireTask(id)
     }
 
+    fileprivate func isRepositoryAttached(_ record: RepositoryWorktreeRecord, to taskID: UUID) throws -> Bool {
+        do {
+            return try requireTask(taskID).repositoryWorktrees.contains {
+                $0.repositoryPath == record.repositoryPath && $0.worktreePath == record.worktreePath
+            }
+        } catch StationAIManagerError.taskNotFound(_) {
+            return false
+        }
+    }
+
     func prepareRepositoryWorktrees(_ id: UUID, fallbackPrompt: String? = nil) async throws -> BoardTask {
         let initialTask = try requireTask(id)
         let initialRecords = initialTask.repositoryWorktrees
@@ -2507,6 +2704,11 @@ final class BoardTaskManager {
 
 }
 
+private struct DeferredRepositoryRemoval: Codable {
+    var taskID: UUID
+    var record: RepositoryWorktreeRecord
+}
+
 @MainActor
 final class WorkspaceSettingsManager {
     private let defaults: UserDefaults
@@ -2572,6 +2774,16 @@ final class WorkspaceSettingsManager {
         WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath)
     }
 
+    func requireRepositoryRootFolder() throws -> URL {
+        guard let rootFolder = defaultParentFolderURL else {
+            throw BridgeCommandError(
+                code: "settings_required",
+                message: "Set the repository root folder in Settings before sending a conversation."
+            )
+        }
+        return rootFolder
+    }
+
     func setDefaultParentFolder(_ path: String?) throws {
         StationAIDiagnostics.record("settings.write.started", fields: [
             "setting": "defaultParentFolder",
@@ -2633,9 +2845,15 @@ final class WorkspaceSettingsManager {
 @MainActor
 final class WorkspaceManager {
     private let taskManager: BoardTaskManager?
+    private let settingsManager: WorkspaceSettingsManager
+    private let worktreeService = StationAIWorktreeService()
 
-    init(taskManager: BoardTaskManager? = nil) {
+    init(
+        taskManager: BoardTaskManager? = nil,
+        settingsManager: WorkspaceSettingsManager? = nil
+    ) {
         self.taskManager = taskManager
+        self.settingsManager = settingsManager ?? WorkspaceSettingsManager()
     }
 
     func suggestedRepositories(parentPath: String) async throws -> [String] {
@@ -2688,13 +2906,19 @@ final class WorkspaceManager {
             "taskID": taskID.uuidString,
             "repositoryPath": repositoryPath
         ])
-        let record = try await taskManager.addRepository(taskID, repositoryPath: repositoryPath)
+        _ = try await taskManager.addRepository(
+            taskID,
+            repositoryPath: repositoryPath,
+            duringActiveConversation: true
+        )
+        let prepared = try await taskManager.prepareRepositoryWorktrees(taskID)
+        try settingsManager.setLastSelectedRepositories(prepared.repositoryWorktrees.map(\.repositoryPath))
         StationAIDiagnostics.record("workspace.repository.add.succeeded", fields: [
             "taskID": taskID.uuidString,
             "repositoryPath": repositoryPath,
-            "repositoryCount": String(record.repositoryWorktrees.count)
+            "repositoryCount": String(prepared.repositoryWorktrees.count)
         ])
-        return record
+        return BoardTaskRecord(task: prepared)
     }
 
     @discardableResult
@@ -2705,12 +2929,94 @@ final class WorkspaceManager {
             "repositoryPaths": repositoryPaths.joined(separator: "\n"),
             "repositoryCount": String(repositoryPaths.count)
         ])
-        let record = try await taskManager.addRepositories(taskID, repositoryPaths: repositoryPaths)
+        _ = try await taskManager.addRepositories(
+            taskID,
+            repositoryPaths: repositoryPaths,
+            duringActiveConversation: true
+        )
+        let record = try await taskManager.prepareRepositoryWorktrees(taskID)
+        try settingsManager.setLastSelectedRepositories(record.repositoryWorktrees.map(\.repositoryPath))
         StationAIDiagnostics.record("workspace.repositories.add.succeeded", fields: [
             "taskID": taskID.uuidString,
             "repositoryCount": String(record.repositoryWorktrees.count)
         ])
+        return BoardTaskRecord(task: record)
+    }
+
+    @discardableResult
+    func replaceRepositories(_ repositoryPaths: [String], on taskID: UUID) async throws -> BoardTaskRecord {
+        guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
+        StationAIDiagnostics.record("workspace.repositories.replace.started", fields: [
+            "taskID": taskID.uuidString,
+            "repositoryPaths": repositoryPaths.joined(separator: "\n"),
+            "repositoryCount": String(repositoryPaths.count)
+        ])
+        _ = try await taskManager.replaceRepositories(
+            taskID,
+            repositoryPaths: repositoryPaths,
+            duringActiveConversation: true
+        )
+        let record = try await taskManager.prepareRepositoryWorktrees(taskID)
+        try settingsManager.setLastSelectedRepositories(record.repositoryWorktrees.map(\.repositoryPath))
+        StationAIDiagnostics.record("workspace.repositories.replace.succeeded", fields: [
+            "taskID": taskID.uuidString,
+            "repositoryCount": String(record.repositoryWorktrees.count)
+        ])
+        return BoardTaskRecord(task: record)
+    }
+
+    @discardableResult
+    func removeRepository(_ repositoryPath: String, from taskID: UUID) async throws -> BoardTaskRecord {
+        guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
+        let record = try await taskManager.removeRepository(
+            taskID,
+            repositoryPath: repositoryPath,
+            duringActiveConversation: true
+        )
+        try settingsManager.setLastSelectedRepositories(record.repositoryWorktrees.map(\.repositoryPath))
         return record
+    }
+
+    func reconcileDeferredRepositoryRemovals() async throws {
+        guard let taskManager else { return }
+        for (intentURL, intent) in try taskManager.deferredRepositoryRemovals() {
+            guard try !taskManager.hasConversationTurnReservation(intent.taskID) else { continue }
+            do {
+                try await taskManager.withConversationTurnReservation(intent.taskID) {
+                    try await taskManager.withTaskOperationLock(intent.taskID) {
+                        guard FileManager.default.fileExists(atPath: intentURL.path) else { return }
+                        if try taskManager.isRepositoryAttached(intent.record, to: intent.taskID) {
+                            // The intent is written before detaching the task record. If the save failed or
+                            // the service exited before it, leave the still-attached worktree in place.
+                            try taskManager.clearDeferredRepositoryRemoval(at: intentURL)
+                            return
+                        }
+                        if try await self.worktreeService.hasChanges(intent.record) {
+                            StationAIDiagnostics.record("workspace.repository.deferred_removal_kept_dirty", fields: [
+                                "taskID": intent.taskID.uuidString,
+                                "repositoryPath": intent.record.repositoryPath,
+                                "worktreePath": intent.record.worktreePath
+                            ])
+                        } else if FileManager.default.fileExists(atPath: intent.record.worktreePath) {
+                            try await self.worktreeService.remove(intent.record)
+                            StationAIDiagnostics.record("workspace.repository.deferred_removal_succeeded", fields: [
+                                "taskID": intent.taskID.uuidString,
+                                "repositoryPath": intent.record.repositoryPath,
+                                "worktreePath": intent.record.worktreePath
+                            ])
+                        }
+                        try taskManager.clearDeferredRepositoryRemoval(at: intentURL)
+                    }
+                }
+            } catch {
+                StationAIDiagnostics.record("workspace.repository.deferred_removal_failed", fields: [
+                    "taskID": intent.taskID.uuidString,
+                    "repositoryPath": intent.record.repositoryPath,
+                    "worktreePath": intent.record.worktreePath,
+                    "error": error.localizedDescription
+                ])
+            }
+        }
     }
 
     func changes(for taskID: UUID) async throws -> WorkspaceChangeInventory {
@@ -2775,18 +3081,34 @@ struct ConversationUpdate: Codable {
     var message: String?
     var imageDataURLs: [String]?
     var userInputRequest: CodexUserInputRequest?
+    var repositoryMismatch: RepositoryMismatchAssessment?
     var taskStatus: String?
+}
+
+struct RepositoryMismatchAssessment: Codable, Identifiable {
+    var id: String { suggestedRepositoryPath ?? "no-repository-match" }
+    let reason: String
+    let selectedRepositoryPaths: [String]
+    let suggestedRepositoryPath: String?
+}
+
+private struct RepositoryMismatchAssessmentResult: Decodable {
+    let likelyMismatch: Bool
+    let suggestedRepositoryPath: String?
+    let reason: String
 }
 
 @MainActor
 final class CodexConversationManager {
     private let tasks: BoardTaskManager
     private let client: CodexAppServerClient
+    private let settingsManager: WorkspaceSettingsManager
     private var dispatchingQueuedMessages = false
 
-    init(tasks: BoardTaskManager, client: CodexAppServerClient) {
+    init(tasks: BoardTaskManager, client: CodexAppServerClient, settingsManager: WorkspaceSettingsManager? = nil) {
         self.tasks = tasks
         self.client = client
+        self.settingsManager = settingsManager ?? WorkspaceSettingsManager()
         if let directory = try? tasks.conversationSteerMailboxDirectory() {
             CodexAppServerClient.configureSteerMailbox(directory: directory)
         }
@@ -2803,6 +3125,8 @@ final class CodexConversationManager {
         let workspace = try CodexWorkspaceContext(roots: historyRoots.map {
             URL(fileURLWithPath: $0, isDirectory: true)
         })
+        let settings = WorkspaceSettingsManager()
+        let repositoryRoot = settings.defaultParentFolderURL
         StationAIDiagnostics.record("conversation.history.started", fields: client.diagnosticFields([
             "taskID": taskID.uuidString,
             "threadID": threadID,
@@ -2812,7 +3136,12 @@ final class CodexConversationManager {
             let history = try await client.loadThread(
                 id: threadID,
                 workspace: workspace,
-                developerInstructions: TaskProgressReportInstructions.make(taskID: taskID),
+                developerInstructions: TaskThreadDeveloperInstructions.make(
+                    taskID: taskID,
+                    repositories: task.repositoryWorktrees,
+                    contextFolders: task.contextFolderPaths,
+                    repositoryRootPath: repositoryRoot?.path
+                ),
                 onActionRequest: onActionRequest
             )
             let savedDurations = tasks.conversationActivityDurations(taskID: taskID)
@@ -3035,6 +3364,7 @@ final class CodexConversationManager {
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in },
         onUserInput: @escaping (CodexUserInputRequest) async -> Void = { _ in }
     ) async throws -> CodexThreadHistory {
+        _ = try settingsManager.requireRepositoryRootFolder()
         let history: CodexThreadHistory
         do {
             history = try await tasks.withConversationTurnReservation(taskID) {
@@ -3123,8 +3453,6 @@ final class CodexConversationManager {
         guard Self.isValidModelID(modelID) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
         }
-        try tasks.prepareConversationTurnOutcome(taskID)
-        defer { tasks.clearConversationTurnOutcome(taskID) }
         var task = try tasks.taskModel(taskID)
         var persistedThreadID = task.codexThreadID
         StationAIDiagnostics.record("conversation.send.started", fields: client.diagnosticFields([
@@ -3141,39 +3469,11 @@ final class CodexConversationManager {
         guard task.status != .done else {
             throw StationAIManagerError.invalidTransition("Done tasks are closed. Create a new task for follow-up work.")
         }
+        let repositoryRoot = try settingsManager.requireRepositoryRootFolder()
+        try tasks.prepareConversationTurnOutcome(taskID)
+        defer { tasks.clearConversationTurnOutcome(taskID) }
         let shouldGenerateTitle = !normalizedText.isEmpty && ["Untitled task", "Generating title…"].contains(task.title)
         _ = try await tasks.savePrompt(taskID, prompt: normalizedText, status: .inProgress, submitted: true)
-        let titleMustPrecedeAutoWorktree = task.repositoryWorktrees.contains {
-            $0.isPending && $0.branch == "auto"
-        }
-        let resolveTitleBeforeWorktree = shouldGenerateTitle && titleMustPrecedeAutoWorktree
-        if resolveTitleBeforeWorktree {
-            let reserved = try await tasks.renameIfTitleMatches(
-                taskID,
-                expectedTitle: task.title,
-                title: "Generating title…"
-            )
-            if reserved != nil {
-                let titleRoots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
-                let titleWorkspace = try CodexWorkspaceContext(roots: titleRoots)
-                let titleClient = CodexAppServerClient(
-                    codexExecutableOverride: client.executableOverrideForTitleGeneration
-                )
-                try await generateAndApplyTitle(
-                    taskID: taskID,
-                    prompt: normalizedText,
-                    workspace: titleWorkspace,
-                    client: titleClient
-                )
-            }
-            task = try tasks.taskModel(taskID)
-            if ["Untitled task", "Generating title…"].contains(task.title) {
-                throw BridgeCommandError(
-                    code: "invalid_transition",
-                    message: "The task title changed while it was being prepared. Try sending again."
-                )
-            }
-        }
         task = try await tasks.prepareRepositoryWorktrees(taskID, fallbackPrompt: normalizedText)
         if !normalizedText.isEmpty {
             _ = try await tasks.savePrompt(taskID, prompt: normalizedText, status: .inProgress, submitted: true)
@@ -3182,7 +3482,7 @@ final class CodexConversationManager {
         let workspace = try CodexWorkspaceContext(roots: roots)
         _ = try await tasks.clearProgressReport(taskID)
         let titleGeneration: Task<Void, Never>?
-        if shouldGenerateTitle && !resolveTitleBeforeWorktree {
+        if shouldGenerateTitle {
             let latest = try tasks.taskModel(taskID)
             let titleReserved = ["Untitled task", "Generating title…"].contains(latest.title)
                 ? try await tasks.renameIfTitleMatches(
@@ -3219,17 +3519,36 @@ final class CodexConversationManager {
         var phase = "thread-start"
         do {
             let threadID: String
+            let isNewConversation = task.codexThreadID == nil
             if let existing = task.codexThreadID {
                 threadID = existing
             } else {
                 threadID = try await client.startThread(
                     workspace: workspace,
                     modelID: modelID,
-                    developerInstructions: TaskProgressReportInstructions.make(taskID: taskID)
+                    developerInstructions: TaskThreadDeveloperInstructions.make(
+                        taskID: taskID,
+                        repositories: task.repositoryWorktrees,
+                        contextFolders: task.contextFolderPaths,
+                        repositoryRootPath: repositoryRoot.path
+                    )
                 )
                 phase = "thread-persistence"
                 _ = try await tasks.persistCodexThreadID(taskID, threadID: threadID)
                 persistedThreadID = threadID
+            }
+            if isNewConversation {
+                Task { @MainActor in
+                    await self.assessRepositorySelection(
+                        taskID: taskID,
+                        prompt: normalizedText,
+                        threadID: threadID,
+                        workspace: workspace,
+                        repositories: task.repositoryWorktrees,
+                        repositoryRoot: repositoryRoot,
+                        onUpdate: onUpdate
+                    )
+                }
             }
             if onTurnStarting != nil {
                 client.markTurnStarting(threadID: threadID)
@@ -3244,7 +3563,12 @@ final class CodexConversationManager {
                 modelID: modelID,
                 threadID: threadID,
                 workspace: workspace,
-                developerInstructions: TaskProgressReportInstructions.make(taskID: taskID),
+                developerInstructions: TaskThreadDeveloperInstructions.make(
+                    taskID: taskID,
+                    repositories: task.repositoryWorktrees,
+                    contextFolders: task.contextFolderPaths,
+                    repositoryRootPath: repositoryRoot.path
+                ),
                 onDelta: { delta in onUpdate(ConversationUpdate(type: "text_delta", text: delta)) },
                 onFinalMessage: { message in onUpdate(ConversationUpdate(type: "assistant_final", text: message)) },
                 onActivity: { activity in
@@ -3344,6 +3668,141 @@ final class CodexConversationManager {
         }
         onUpdate(ConversationUpdate(type: "completed", history: finalHistory))
         return finalHistory
+    }
+
+    private func assessRepositorySelection(
+        taskID: UUID,
+        prompt: String,
+        threadID: String,
+        workspace: CodexWorkspaceContext,
+        repositories: [RepositoryWorktreeRecord],
+        repositoryRoot: URL,
+        onUpdate: @escaping (ConversationUpdate) -> Void
+    ) async {
+        do {
+            let assessmentClient = CodexAppServerClient(codexExecutableOverride: client.executableOverrideForTitleGeneration)
+            let assessmentInstructions = """
+            You are StationAI's fast repository-context assessor. You run in a separate process from the main assistant.
+            Compare the user's task with the selected repository worktrees. If selected repositories appear relevant, return likelyMismatch=false. If selected repositories appear unrelated, return likelyMismatch=true. With no repositories selected, return likelyMismatch=false and let the main assistant decide whether this is standalone or should use the workspace repos list and task repository add APIs to choose and attach a clear match. A request that needs no repository is standalone.
+            Do not edit files or run commands that change files. Do not scan the configured repository root. You may inspect only the selected worktree's top-level project description when the task text and repository name are insufficient. Return exactly one JSON object with keys likelyMismatch (boolean), reason (one short sentence). Treat uncertainty as likelyMismatch=false.
+            """
+            let assessmentThread = try await assessmentClient.startThread(
+                workspace: workspace,
+                modelID: CodexAppServerClient.modelID,
+                developerInstructions: assessmentInstructions
+            )
+            let repositoryMappings = repositories.map { "\($0.repositoryPath) -> \($0.worktreePath)" }.joined(separator: "\n")
+            let assessmentPrompt = """
+            User request:
+            \(prompt)
+
+            Selected source repository to active task worktree mappings:
+            \(repositoryMappings.isEmpty ? "none" : repositoryMappings)
+
+            """
+            var finalMessage = ""
+            try await assessmentClient.sendMessage(
+                assessmentPrompt,
+                mode: .plan,
+                modelID: CodexAppServerClient.modelID,
+                threadID: assessmentThread,
+                workspace: workspace,
+                onDelta: { _ in },
+                onFinalMessage: { finalMessage = $0 },
+                onActivity: { _ in },
+                onDiff: { _ in },
+                onHistory: { _ in },
+                onActionRequest: {},
+                onUserInput: { _ in }
+            )
+            guard let result = Self.decodeRepositoryAssessment(finalMessage) else {
+                StationAIDiagnostics.record("conversation.repository_assessment.inconclusive", fields: [
+                    "taskID": taskID.uuidString,
+                    "threadID": threadID
+                ])
+                return
+            }
+            guard result.likelyMismatch else {
+                StationAIDiagnostics.record("conversation.repository_assessment.matched", fields: [
+                    "taskID": taskID.uuidString,
+                    "threadID": threadID,
+                    "steered": "false"
+                ])
+                return
+            }
+            let availableRepositories = try await WorkspaceManager().suggestedRepositories(parentPath: repositoryRoot.path)
+            let recommendationPrompt = """
+            The first assessment found a likely repository-context mismatch: \(result.reason)
+            StationAI has now called its workspace repos list API. These are the only repositories you may recommend:
+            \(availableRepositories.isEmpty ? "none found" : availableRepositories.joined(separator: "\n"))
+            Return exactly one JSON object with keys likelyMismatch (boolean, true), suggestedRepositoryPath (one exact listed path or null when no clear match), and reason (one short sentence). Do not inspect or enumerate the configured root.
+            """
+            finalMessage = ""
+            try await assessmentClient.sendMessage(
+                recommendationPrompt,
+                mode: .plan,
+                modelID: CodexAppServerClient.modelID,
+                threadID: assessmentThread,
+                workspace: workspace,
+                onDelta: { _ in },
+                onFinalMessage: { finalMessage = $0 },
+                onActivity: { _ in },
+                onDiff: { _ in },
+                onHistory: { _ in },
+                onActionRequest: {},
+                onUserInput: { _ in }
+            )
+            let recommendation = Self.decodeRepositoryAssessment(finalMessage)
+            let validSuggestion = recommendation?.suggestedRepositoryPath.flatMap { candidate in
+                availableRepositories.contains(candidate) ? candidate : nil
+            }
+            let mismatch = RepositoryMismatchAssessment(
+                reason: recommendation?.reason ?? result.reason,
+                selectedRepositoryPaths: repositories.map(\.repositoryPath),
+                suggestedRepositoryPath: validSuggestion
+            )
+            onUpdate(ConversationUpdate(type: "repository_mismatch", message: mismatch.reason, repositoryMismatch: mismatch))
+            let steeringMessage = """
+            A separate fast repository assessment found a possible context mismatch: \(mismatch.reason)
+            Suggested repository from StationAI's list: \(validSuggestion ?? "none clearly matched")
+            Pause repository edits. Ask the user to confirm whether to keep the current context, add a repository, replace the selected repositories, or treat the task as standalone. Use the StationAI task repository API after the user's choice; do not search the filesystem or switch context silently.
+            """
+            let steered = await steerMainTurnWhenActive(threadID: threadID, message: steeringMessage)
+            if !steered {
+                onUpdate(ConversationUpdate(type: "action_notice", message: "The mismatch confirmation is ready, but the first AI turn already ended. Choose a repository context above, then send a follow-up to continue."))
+            }
+            StationAIDiagnostics.record("conversation.repository_assessment.mismatch", fields: [
+                "taskID": taskID.uuidString,
+                "threadID": threadID,
+                "hasSuggestion": String(validSuggestion != nil),
+                "steered": String(steered)
+            ])
+        } catch {
+            StationAIDiagnostics.record("conversation.repository_assessment.failed", fields: [
+                "taskID": taskID.uuidString,
+                "threadID": threadID,
+                "error": error.localizedDescription
+            ])
+        }
+    }
+
+    private func steerMainTurnWhenActive(threadID: String, message: String) async -> Bool {
+        for _ in 0..<50 {
+            if client.activeThreadID == threadID, client.isTurnActive {
+                return (try? await client.steerActiveTurn(threadID: threadID, text: message)) == true
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return false
+    }
+
+    private static func decodeRepositoryAssessment(_ message: String) -> RepositoryMismatchAssessmentResult? {
+        guard let firstBrace = message.firstIndex(of: "{"),
+              let lastBrace = message.lastIndex(of: "}"), firstBrace <= lastBrace else { return nil }
+        return try? JSONDecoder().decode(
+            RepositoryMismatchAssessmentResult.self,
+            from: Data(message[firstBrace...lastBrace].utf8)
+        )
     }
 
     private func generateAndApplyTitle(
@@ -3518,7 +3977,8 @@ final class StationAIBridgeRuntime {
             preferences = UserDefaults(suiteName: applicationIdentifier) ?? .standard
             #endif
             let settings = WorkspaceSettingsManager(defaults: preferences)
-            let workspaces = WorkspaceManager(taskManager: taskManager)
+            let workspaces = WorkspaceManager(taskManager: taskManager, settingsManager: settings)
+            try await workspaces.reconcileDeferredRepositoryRemovals()
 
             let result: BridgeValue
             switch request.command {
@@ -3601,6 +4061,11 @@ final class StationAIBridgeRuntime {
                     request.requiredStrings("repositoryPaths"),
                     to: request.requiredUUID("taskID")
                 ))
+            case "task.repository.replace":
+                result = try Self.value(await workspaces.replaceRepositories(
+                    request.requiredStrings("repositoryPaths"),
+                    on: request.requiredUUID("taskID")
+                ))
             case "task.repository.edit":
                 result = try Self.value(await taskManager.updateRepository(
                     request.requiredUUID("taskID"),
@@ -3610,9 +4075,9 @@ final class StationAIBridgeRuntime {
                     mergeTarget: request.arguments["mergeTarget"]?.string
                 ))
             case "task.repository.remove":
-                result = try Self.value(await taskManager.removeRepository(
-                    request.requiredUUID("taskID"),
-                    repositoryPath: request.requiredString("repositoryPath")
+                result = try Self.value(await workspaces.removeRepository(
+                    request.requiredString("repositoryPath"),
+                    from: request.requiredUUID("taskID")
                 ))
             case "task.prompt.save":
                 let status = try request.arguments["status"]?.string.map { value -> TaskStatus in
@@ -3656,6 +4121,13 @@ final class StationAIBridgeRuntime {
             case "workspace.suggest":
                 let parent = try request.requiredString("parent")
                 result = .object(["repositories": .array(try await workspaces.suggestedRepositories(parentPath: parent).map(BridgeValue.string))])
+            case "workspace.repositories.list":
+                let root = try settings.requireRepositoryRootFolder()
+                let repositories = try await workspaces.suggestedRepositories(parentPath: root.path)
+                result = .object([
+                    "root": .string(root.path),
+                    "repositories": .array(repositories.map(BridgeValue.string))
+                ])
             case "settings.get":
                 result = .object([
                     "defaultParentFolder": settings.defaultParentFolderPath.isEmpty ? .null : .string(settings.defaultParentFolderPath),
@@ -3695,7 +4167,11 @@ final class StationAIBridgeRuntime {
                 result = .object(["models": .array(try await conversations.models(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })])
             case "conversation.queue", "conversation.queue.list", "conversation.queue.retry", "conversation.queue.remove", "conversation.queue.steer", "conversation.steer":
                 let taskID = try request.requiredUUID("taskID")
-                let conversations = CodexConversationManager(tasks: taskManager, client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string))
+                let conversations = CodexConversationManager(
+                    tasks: taskManager,
+                    client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string),
+                    settingsManager: settings
+                )
                 switch request.command {
                 case "conversation.queue": result = try Self.value(conversations.queueMessage(taskID: taskID, text: request.requiredString("message")))
                 case "conversation.queue.list": result = .array(try conversations.queuedMessages(taskID: taskID).map { try Self.value($0) })
@@ -3727,7 +4203,8 @@ final class StationAIBridgeRuntime {
                 let imageDataURLs = request.arguments["images"]?.strings ?? []
                 let conversations = CodexConversationManager(
                     tasks: taskManager,
-                    client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
+                    client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string),
+                    settingsManager: settings
                 )
                 let history = try await conversations.send(taskID: taskID, text: message, imageDataURLs: imageDataURLs, mode: mode, modelID: modelID, userInputAnswers: answers, onUpdate: { update in
                     if let payload = try? Self.value(update) {

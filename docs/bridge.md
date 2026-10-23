@@ -2,7 +2,7 @@
 
 The `stationai-cli` executable is bundled at `StationAI.app/Contents/MacOS/stationai-cli` beside the GUI executable. Its distinct filename avoids macOS case-insensitive name collisions while keeping it in the application bundle's executable directory for private XPC service discovery. It connects to the app's private on-demand XPC service in `Contents/XPCServices/StationAIBridge.xpc`. Run it through `scripts/stationai.sh`, which builds the app if needed. CLI calls and app instances do not acquire the UI test lock; worktree profiles isolate app identity, XPC identity, data stores, logs, and build paths.
 
-The service accepts a versioned JSON request, returns a versioned JSON response, and uses a reverse XPC callback for streamed conversation events. Errors include a stable code and a readable message; the CLI exits nonzero for failed operations.
+The service accepts a versioned JSON request, returns a versioned JSON response, and uses a reverse XPC callback for streamed conversation events. The bundled CLI reads the service identifier from its sibling app bundle, so linked worktree app profiles connect to their own XPC service when Codex invokes the executable directly. Errors include a stable code and a readable message; the CLI exits nonzero for failed operations.
 
 ## Commands
 
@@ -15,11 +15,15 @@ The service accepts a versioned JSON request, returns a versioned JSON response,
 | `task get <task-id>` | Read a task and its thread/root state |
 | `task move <task-id> <Backlog\|Ready\|In Progress\|Done>` | Change task status |
 | `task rename <task-id> --title <title>` | Rename a task |
+| `task repository add <task-id> --repo <path>` / `task repository add-batch <task-id> --repo <path> [--repo <path>...]` | Add repository context, prepare managed worktrees immediately, and update saved repository selection |
+| `task repository replace <task-id> --repo <path> [--repo <path>...]` | Replace the task's repository set while preserving folder-only context |
+| `task repository remove <task-id> --repo <path>` | Remove a repository from a task, subject to managed-worktree safety checks |
 | `task roots get <task-id>` | Read ordered task roots |
 | `task roots set <task-id> --root <path> [--root <path>...]` | Replace ordered task roots |
 | `task delete <task-id>` | Delete a task |
 | `workspace suggest --parent <path>` | Find Git repository roots below a parent folder |
-| `settings get` | Read the default parent folder |
+| `workspace repos list` | Return the configured repository root and its discovered Git repositories |
+| `settings get` | Read the default parent folder and saved repository defaults |
 | `settings set-parent <path>` / `settings clear-parent` | Change the default parent folder |
 | `conversation history <task-id>` | Load the task's Codex transcript |
 | `conversation send <task-id> --message <text>` | Send a Codex turn and stream JSON event lines |
@@ -35,6 +39,14 @@ For example:
 Repository worktrees are created under `~/.stationAI/worktrees`; if the requested branch already has a worktree, StationAI reuses its current path. By default, the branch name is derived from the task title. `--branch` and `--branch-from` values are keyed to the repository path as `<repo-path>=<value>`. Branch creation uses `master`, or the detected default branch if `master` is absent. Moving a task to Done removes clean worktree directories while leaving their branches; a dirty worktree blocks the status change. Folder-only tasks store their roots directly.
 
 The selected worktrees and context folders define task context and the initial working directory; they do not restrict Codex's full-access sandbox configuration.
+
+New conversations start with the picker closed and the composer focused. StationAI applies the saved ordered repository selection when available. An empty repository selection is valid: the conversation may be standalone, and the composer remains enabled without a working-folder warning. For an empty-root task, Codex starts in the user's home folder while its task repository roots remain empty, so the configured repository root is not used as a task working directory.
+
+The configured repository root folder (the parent that contains the user's repositories) must be set to an available directory before a conversation can be sent. The GUI disables send and offers a setup button while it is missing or unavailable. The CLI/XPC conversation-send operation also rejects the turn with `settings_required`, so callers cannot bypass the requirement.
+
+The thread developer instructions are sent to the Codex app-server when a conversation thread starts or resumes. They distinguish source repository paths from active task worktree paths and require repository edits to use the worktree. On a new task, StationAI starts the user's conversation immediately and runs a separate fast Codex assessment process in parallel. The primary agent is instructed to avoid repository edits while that assessment is pending. Only if a mismatch is likely does StationAI call its repository-list operation and steer the primary turn to request user confirmation. If the first turn ends before the assessment can steer it, StationAI surfaces a notice with the result and asks the user to continue in a follow-up. StationAI displays mismatch confirmation as a dialog and blocking AI questions in a modal sheet.
+
+Codex must not scan or enumerate folders under the configured repository root to discover repositories. When it needs another repository or a refreshed list, it must use `workspace repos list`, which returns `{ "root": "...", "repositories": ["..."] }`; it may recommend only paths from that response. If no listed repository clearly matches, it should ask the user rather than searching or guessing. The task repository add APIs are available in the thread instructions. They can run while the main conversation is active, prepare an editable managed worktree immediately, update the saved repository selection, and return the repository-to-worktree mapping. The active turn's original `cwd` does not change mid-turn, so after adding a repository Codex must use the returned worktree path for edits in that repository; subsequent turns automatically receive the updated workspace roots. Repository replacement validates/adds the requested repositories before removing old ones. If an old managed worktree is dirty or removal fails, the operation reports failure and preserves both contexts. Codex can ask a blocking question using the app-server's user-input request; StationAI shows it in a modal sheet.
 
 ## Shared implementation
 

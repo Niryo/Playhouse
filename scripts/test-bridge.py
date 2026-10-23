@@ -8,6 +8,7 @@ import json
 import plistlib
 import os
 import select
+import signal
 import shutil
 import shlex
 import sqlite3
@@ -200,6 +201,8 @@ class StationAIBridgeTests(unittest.TestCase):
         self.worktree_directory.mkdir()
         (self.worktree_directory / ".stationai-test-owner").write_text("StationAI bridge test owns this worktree root.\n", encoding="utf-8")
         self.defaults_suite = f"com.stationai.bridge-tests.{uuid.uuid4()}"
+        if self._testMethodName != "test_task_store_repairs_missing_pending_prompt_column":
+            self.assert_success(self.call_cli("settings", "set-parent", self.fixture / "suggested-parent")[0])
 
     def tearDown(self):
         marker = self.worktree_directory / ".stationai-test-owner"
@@ -543,7 +546,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(reopened["title"], "Profile restart")
         self.assertEqual(reopened["savedPrompt"], "Keep this draft after restart.")
 
-    # case-contract: test_task_creation_rejects_invalid_title_roots_and_missing_folder | New Task immediately opens an empty conversation with the repository picker focused and a visible red missing-working-folder warning; sending stays disabled until a working folder is added. A persisted empty-root task shows the same red warning when its conversation is reopened. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets.
+    # case-contract: test_task_creation_rejects_invalid_title_roots_and_missing_folder | New Task opens with the repository picker closed and composer focused; no selected repository is valid and shows no red missing-folder warning when the required repository root is configured. A standalone conversation can be sent without repository roots, while GUI and CLI reject sends if the configured repository root is missing. The UI and CLI accept standalone sends after the root is configured, and a matched parallel assessment returns likelyMismatch=false without steering the user turn or showing a mismatch confirmation. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets.
     def test_task_creation_rejects_invalid_title_roots_and_missing_folder(self):
         response, _ = self.call_cli(
             "task", "create", "--title", "   ", "--root", self.primary,
@@ -566,7 +569,37 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(persisted_empty_task["title"], "No roots")
         self.assertEqual(persisted_empty_task["workspaceRoots"], [])
         self.assertEqual(persisted_empty_task["repositoryWorktrees"], [])
+        self.complete_fixture_turn(empty_task["id"], message="Explain what nothingness means without editing a repository.")
+        completed_standalone = self.assert_success(self.call_cli("task", "get", empty_task["id"])[0])
+        self.assertEqual(completed_standalone["workspaceRoots"], [])
+        self.assertEqual(completed_standalone["repositoryWorktrees"], [])
+        self.assertEqual(completed_standalone["status"], "Review")
+        assessment_history = self.data_directory / "codex-fixture.assessment.history"
+        deadline = time.monotonic() + 10
+        while not assessment_history.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(assessment_history.is_file(), "The parallel repository assessment should complete.")
+        main_history = json.loads(Path(str(self.data_directory / "codex-fixture") + ".history").read_text(encoding="utf-8"))
+        self.assertEqual(main_history.get("steerRequests", []), [], "A matched assessment should not steer the active user turn.")
+        assessment_turns = json.loads(assessment_history.read_text(encoding="utf-8"))["turns"]
+        self.assertEqual(len(assessment_turns), 1)
+        self.assertFalse(json.loads(assessment_turns[0]["assistantMessage"])["likelyMismatch"], "An unselected repository should leave standalone-versus-repository selection to the main assistant.")
         deleted, _ = self.call_cli("task", "delete", empty_task["id"])
+        self.assertTrue(self.assert_success(deleted)["deleted"])
+
+        no_root_task = self.assert_success(self.call_cli("task", "create", "--title", "Root required")[0])
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        response, _ = self.call_cli(
+            "conversation", "send", no_root_task["id"], "--message", "This must be blocked",
+            expected_status=1,
+        )
+        self.assert_failure(response, "settings_required")
+        untouched = self.assert_success(self.call_cli("task", "get", no_root_task["id"])[0])
+        self.assertEqual(untouched["status"], "Backlog", "Missing root validation must happen before task state changes.")
+        self.assertIsNone(untouched.get("savedPrompt"))
+        self.assertEqual(untouched["repositoryWorktrees"], [])
+        self.assert_success(self.call_cli("settings", "set-parent", self.fixture / "suggested-parent")[0])
+        deleted, _ = self.call_cli("task", "delete", no_root_task["id"])
         self.assertTrue(self.assert_success(deleted)["deleted"])
 
         response, _ = self.call_cli(
@@ -1092,7 +1125,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(all(record["repositoryWorktrees"][0]["worktreePath"] == str(self.primary) for record in records))
         self.assertTrue(all(record["status"] == "Backlog" for record in records))
 
-    # case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR; an unmerged PR keeps its link and suppresses the completion button. After all PRs merge, focus replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls.
+    # case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the prompt before title generation, so starting the user turn does not wait for title assessment. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR; an unmerged PR keeps its link and suppresses the completion button. After all PRs merge, focus replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls.
     def test_task_done_preserves_worktree_and_branch(self):
         task = self.create_repo_task("Untitled task", [self.primary, self.secondary])
         draft = "Please update the README and add concise setup steps for first time contributors tomorrow."
@@ -1101,12 +1134,16 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(task["repositoryWorktrees"][0]["branch"], "auto")
         self.assertEqual(task["repositoryWorktrees"][0]["worktreePath"], str(self.primary))
         executable = self.data_directory / "codex-fixture"
-        self.complete_fixture_turn(task["id"])
+        self.complete_fixture_turn(task["id"], message=draft)
         started = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         record = started["repositoryWorktrees"][0]
         self.assertFalse(record["isPending"])
-        self.assertEqual(record["branch"], "generated-fixture-title")
+        self.assertEqual(record["branch"], "please-update-the-readme-and-add-concise-setup")
         worktree = Path(record["worktreePath"])
+        codex_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        self.assertEqual(codex_history["threadStartCwd"], str(worktree), "The Codex thread must start in the managed task worktree.")
+        self.assertEqual(codex_history["turns"][0]["cwd"], str(worktree), "The user turn must run from the managed task worktree.")
+        self.assertEqual(codex_history["turns"][0]["runtimeWorkspaceRoots"], [item["worktreePath"] for item in started["repositoryWorktrees"]])
         target_head = self.run_git(self.primary, "rev-parse", "main")
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), target_head)
         current, _ = self.call_cli("task", "get", task["id"])
@@ -1160,13 +1197,13 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(response)["status"], "Done")
         self.assertEqual(gh_calls.read_text(encoding="utf-8").splitlines(), ["123", "456", "123", "456"])
         self.assertTrue(worktree.exists(), "Moving a task to Done must preserve its worktree.")
-        self.assertTrue(self.branch_exists(self.primary, "generated-fixture-title"))
+        self.assertTrue(self.branch_exists(self.primary, "please-update-the-readme-and-add-concise-setup"))
         self.assertEqual(self.run_git(self.primary, "rev-parse", "main"), target_head, "Moving a task to Done must not merge into the local target.")
         self.assertEqual((self.primary / "target-only.txt").read_text(encoding="utf-8"), "Master advanced after this task branch was created.\n")
         self.assertFalse((self.primary / "task-result.txt").exists())
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["repositoryWorktrees"][0]["mergeTarget"], "main")
         completed, _ = self.call_cli("task", "get", task["id"])
-        self.assertEqual(self.assert_success(completed)["savedPrompt"], "Complete this task.")
+        self.assertEqual(self.assert_success(completed)["savedPrompt"], draft)
         board, _ = self.call_cli("board", "list")
         archived = next(item for item in self.assert_success(board)["tasks"] if item["id"] == task["id"])
         self.assertEqual(archived["status"], "Done")
@@ -1655,6 +1692,10 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assertIn("task outcome", instructions)
             self.assertIn("waiting-response", instructions)
             self.assertIn("final CLI action", instructions)
+            self.assertIn("Active task worktrees for edits", instructions)
+            self.assertIn("never edit files in those source paths", instructions)
+            self.assertIn("workspace repos list", instructions)
+            self.assertIn("StationAI launches a separate fast, read-only repository assessment process", instructions)
             resume_instructions = turn_data["threadResumeDeveloperInstructions"]
             self.assertTrue(resume_instructions, "Resumed task threads should receive updated task instructions.")
             self.assertTrue(all("task outcome" in instructions for instructions in resume_instructions))
@@ -1665,7 +1706,7 @@ class StationAIBridgeTests(unittest.TestCase):
             active_marker.unlink(missing_ok=True)
             release_marker.unlink(missing_ok=True)
 
-    # case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; a staged completed outcome is discarded if its turn fails, leaving the task Blocked. The task card removes the report while lifecycle states remain Blocked or Waiting Response, and answering the question resumes the task successfully.
+    # case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; a staged completed outcome is discarded if its turn fails, leaving the task Blocked. The task card removes the report while lifecycle states remain Blocked or Waiting Response. Blocking AI questions appear in a confirmation sheet and answering resumes the task successfully. First-thread instructions distinguish source repository paths from active task worktree paths, require edits in the worktree, provide repository context APIs, and tell the AI to wait for StationAI's separate fast assessment before repository edits.
     def test_task_progress_reports_clear_on_failed_turns_and_questions(self):
         for fixture_name, expected_reason in [
             ("codex-fixture-progress-hold-release-failed", "failed"),
@@ -1818,51 +1859,85 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "roots", "get", task_id)
         self.assertEqual(self.assert_success(response)["roots"], expected_roots)
 
-    # case-contract: test_conversation_repository_picker_adds_repository_worktree | Repository suggestions can be filtered and navigated with Up/Down, and Enter selects the highlighted repository; adding it waits for an active conversation turn, then persists a pending auto branch with labeled branch, merge-from, and merge-to values, and no worktree exists before the first send.
+    # case-contract: test_conversation_repository_picker_adds_repository_worktree | Repository suggestions can be filtered and navigated with Up/Down, and Enter selects the highlighted repository; UI selection waits for an active turn and persists a pending auto branch. The task repository API remains available during an active turn, prepares a managed worktree, updates saved repository selection, replaces repository context safely, and the paired UI shows API additions/removals. A separate assessment process checks the initial request, asks StationAI for repo suggestions on a mismatch, steers the active main turn, and leaves context unchanged until user choice; the UI review action reaches the AI confirmation flow.
     def test_conversation_repository_picker_adds_repository_worktree(self):
         task = self.create_task("Add repository in conversation", [self.primary])
         task_id = task["id"]
         self.assertEqual(task["repositoryWorktrees"], [])
         self.assertEqual(task["workspaceRoots"], [str(self.primary)])
         reservation = ConversationTurnLockBarrier(self.data_directory, task_id)
-        add_command = ["task", "repository", "add", task_id, "--repo", self.primary]
-        add_process = None
-        continue_add_process = False
         try:
-            add_process = self.start_cli(*add_command)
-            time.sleep(0.25)
-            self.assertIsNone(add_process.poll(), "Adding a repository should wait for the active conversation-turn reservation.")
+            added_response, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.primary)
+            updated = self.assert_success(added_response)
+            self.assertEqual(len(updated["repositoryWorktrees"]), 1)
+            added = updated["repositoryWorktrees"][0]
+            self.assertEqual(added["repositoryPath"], str(self.primary))
+            self.assertFalse(added["isPending"], "The AI-facing repository API should prepare an editable worktree immediately.")
+            self.assertNotEqual(added["worktreePath"], str(self.primary))
+            self.assertTrue(Path(added["worktreePath"]).is_dir())
+            self.assertTrue(Path(added["worktreePath"]).is_relative_to(self.worktree_directory))
+            replacement_response, _ = self.call_cli(
+                "task", "repository", "replace", task_id, "--repo", self.secondary
+            )
+            replaced = self.assert_success(replacement_response)
+            self.assertEqual([item["repositoryPath"] for item in replaced["repositoryWorktrees"]], [str(self.secondary)])
+            self.assertFalse(replaced["repositoryWorktrees"][0]["isPending"])
+            self.assertTrue(Path(replaced["repositoryWorktrees"][0]["worktreePath"]).is_dir())
+            self.assertTrue(Path(added["worktreePath"]).is_dir(), "The active turn must keep its old cwd until it releases the reservation.")
             unchanged, _ = self.call_cli("task", "get", task_id)
-            self.assertEqual(self.assert_success(unchanged)["repositoryWorktrees"], [])
-            continue_add_process = True
+            self.assertEqual(self.assert_success(unchanged)["repositoryWorktrees"], replaced["repositoryWorktrees"])
         finally:
             reservation.release()
-            if not continue_add_process and add_process is not None and add_process.poll() is None:
-                add_process.terminate()
-                try:
-                    add_process.communicate(timeout=20)
-                except subprocess.TimeoutExpired:
-                    add_process.kill()
-                    add_process.communicate()
-        self.assertIsNotNone(add_process)
-        response, _ = self.finish_cli(add_process, add_command)
-        updated = self.assert_success(response)
-        self.assertEqual(len(updated["repositoryWorktrees"]), 1)
-        added = updated["repositoryWorktrees"][0]
-        self.assertEqual(added["repositoryPath"], str(self.primary))
-        self.assertEqual(added["worktreePath"], str(self.primary))
-        self.assertTrue(added["isPending"])
-        self.assertEqual(added["branch"], "auto")
+        response, _ = self.call_cli("settings", "get")
+        self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.secondary)])
+        self.assertEqual(added["branch"], "add-repository-in-conversation")
         self.assertTrue(added["branchFrom"])
         self.assertTrue(added["mergeTarget"])
-        self.assertEqual(updated["workspaceRoots"], [str(self.primary)])
+        self.assertEqual(updated["workspaceRoots"], [added["worktreePath"]])
         self.assertEqual(updated["contextFolders"], [])
-        duplicate, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.primary, expected_status=2)
+        duplicate, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.secondary, expected_status=2)
         self.assert_failure(duplicate, "invalid_argument")
         invalid, _ = self.call_cli("task", "repository", "add", task_id, "--repo", self.custom, expected_status=1)
         self.assert_failure(invalid, "operation_failed")
         fresh, _ = self.call_cli("task", "get", task_id)
-        self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"], updated["repositoryWorktrees"])
+        self.assertEqual(self.assert_success(fresh)["repositoryWorktrees"], replaced["repositoryWorktrees"])
+
+        mismatch_task = self.create_repo_task("Repository mismatch assessment", [self.primary])
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-assessment-wait"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        assessment_environment = {
+            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
+            "STATIONAI_E2E_REPOSITORY_ASSESSMENT": "mismatch",
+        }
+        sent, _ = self.call_cli(
+            "conversation", "send", mismatch_task["id"], "--message", "Change the mobile app login screen.",
+            "--answer", "repository_action=Keep current repository",
+            extra_environment=assessment_environment,
+        )
+        self.assert_success(sent)
+        assessment_history_path = Path(str(executable) + ".assessment.history")
+        deadline = time.monotonic() + 10
+        while not assessment_history_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(assessment_history_path.is_file(), "The separate repository assessment process should complete.")
+        assessment_history = json.loads(assessment_history_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(assessment_history["turns"]), 2, "A mismatch must trigger a recommendation pass after StationAI lists repositories.")
+        self.assertTrue(json.loads(assessment_history["turns"][0]["assistantMessage"])["likelyMismatch"])
+        recommendation_prompt = assessment_history["turns"][1]["userMessage"]
+        self.assertIn("StationAI has now called its workspace repos list API", recommendation_prompt)
+        listed_path = json.loads(assessment_history["turns"][1]["assistantMessage"])["suggestedRepositoryPath"]
+        self.assertIn(listed_path, recommendation_prompt, "Recommendations must be chosen only from StationAI's repository list.")
+        main_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        self.assertTrue(main_history.get("steerRequests"), "The mismatch assessment should steer the still-active main turn.")
+        self.assertIn("Pause repository edits", main_history["steerRequests"][0]["input"][0]["text"])
+        unchanged_task = self.assert_success(self.call_cli("task", "get", mismatch_task["id"])[0])
+        self.assertEqual(unchanged_task["repositoryWorktrees"][0]["repositoryPath"], str(self.primary))
+        self.assertIn("worktrees", unchanged_task["repositoryWorktrees"][0]["worktreePath"])
 
     # case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation.
     def test_task_repository_settings_validate_persist_and_lock_after_start(self):
@@ -1992,7 +2067,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(fresh_record["workspaceRoots"], [str(self.custom)])
         self.assertEqual(fresh_record["contextFolders"], [str(self.custom)])
 
-    # case-contract: test_task_repository_removal_preserves_state_on_dirty_worktree | Removing the only pending repository leaves the task with no workspace and preserves the source repository; removing a pending repository preserves other context folders; removing a clean managed worktree waits for an active conversation turn and then succeeds, while a dirty worktree rejects removal and preserves its task record and files.
+    # case-contract: test_task_repository_removal_preserves_state_on_dirty_worktree | Removing the only pending repository leaves the task with no workspace and preserves the source repository; removing a pending repository preserves other context folders; removing a clean managed worktree through the GUI waits for an active turn, while the task repository API removes it from context immediately and defers clean worktree deletion until the turn releases; a bridge service restart preserves the cleanup intent and a fresh request completes removal; if the active turn writes files before release, deferred cleanup preserves that worktree and its changes; a dirty worktree rejects removal and preserves its task record and files.
     def test_task_repository_removal_preserves_state_on_dirty_worktree(self):
         sole = self.create_repo_task("Sole repository removal", [self.primary])
         sole_removed, _ = self.call_cli("task", "repository", "remove", sole["id"], "--repo", self.primary)
@@ -2011,11 +2086,48 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(pending_result["workspaceRoots"], [str(self.custom)])
         self.assertTrue(self.primary.is_dir(), "Removing a pending repository must preserve its source repository.")
 
+        clean_active = self.create_repo_task("Clean active repository removal", [self.alternate], roots=[self.custom])
+        clean_active_id = clean_active["id"]
+        self.complete_fixture_turn(clean_active_id)
+        clean_active, _ = self.call_cli("task", "get", clean_active_id)
+        clean_record = self.assert_success(clean_active)["repositoryWorktrees"][0]
+        clean_worktree = Path(clean_record["worktreePath"])
+        clean_lock = ConversationTurnLockBarrier(self.data_directory, clean_active_id)
+        clean_removed, _ = self.call_cli("task", "repository", "remove", clean_active_id, "--repo", self.alternate)
+        self.assertEqual(self.assert_success(clean_removed)["repositoryWorktrees"], [])
+        self.assertTrue(clean_worktree.exists())
+        scheduled = next(
+            event for event in self.diagnostic_events()
+            if event.get("event") == "workspace.repository.deferred_removal_scheduled"
+            and event.get("taskID") == clean_active_id
+        )
+        bridge_pid = int(scheduled["processID"])
+        try:
+            os.kill(bridge_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        service_exit_deadline = time.monotonic() + 5
+        while time.monotonic() < service_exit_deadline:
+            try:
+                os.kill(bridge_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("The isolated bridge service should exit before testing durable cleanup recovery.")
+        clean_lock.release()
+        self.call_cli("task", "get", clean_active_id)
+        clean_deadline = time.monotonic() + 30
+        while clean_worktree.exists() and time.monotonic() < clean_deadline:
+            time.sleep(0.02)
+        self.assertFalse(clean_worktree.exists(), "Deferred cleanup should remove an unchanged managed worktree after the turn releases.")
+
         active = self.create_repo_task("Started repository removal", [self.secondary], roots=[self.custom])
         active_id = active["id"]
         self.complete_fixture_turn(active_id)
         active, _ = self.call_cli("task", "get", active_id)
         record = self.assert_success(active)["repositoryWorktrees"][0]
+        self.assertTrue(record["createdByStationAI"], "Started task worktrees should be eligible for cleanup after the turn reservation releases.")
         worktree = Path(record["worktreePath"])
         dirty_file = worktree / "repository-removal-dirty.txt"
         dirty_file.write_text("keep this worktree intact\n", encoding="utf-8")
@@ -2034,34 +2146,24 @@ class StationAIBridgeTests(unittest.TestCase):
 
         dirty_file.unlink()
         lock_barrier = ConversationTurnLockBarrier(self.data_directory, active_id)
-        remove_command = ["task", "repository", "remove", active_id, "--repo", self.secondary]
-        remove_process = None
-        continue_remove_process = False
-        try:
-            remove_process = self.start_cli(*remove_command)
-            time.sleep(0.25)
-            self.assertIsNone(remove_process.poll(), "Repository removal should wait for the active conversation-turn reservation.")
-            still_attached, _ = self.call_cli("task", "get", active_id)
-            still_attached_record = self.assert_success(still_attached)
-            self.assertEqual(len(still_attached_record["repositoryWorktrees"]), 1)
-            self.assertTrue(worktree.exists())
-            continue_remove_process = True
-        finally:
-            lock_barrier.release()
-            if not continue_remove_process and remove_process is not None and remove_process.poll() is None:
-                remove_process.terminate()
-                try:
-                    remove_process.communicate(timeout=20)
-                except subprocess.TimeoutExpired:
-                    remove_process.kill()
-                    remove_process.communicate()
-        self.assertIsNotNone(remove_process)
-        removed_active, _ = self.finish_cli(remove_process, remove_command)
+        removed_active, _ = self.call_cli("task", "repository", "remove", active_id, "--repo", self.secondary)
         active_result = self.assert_success(removed_active)
         self.assertEqual(active_result["repositoryWorktrees"], [])
         self.assertEqual(active_result["contextFolders"], [str(self.custom)])
         self.assertEqual(active_result["workspaceRoots"], [str(self.custom)])
-        self.assertFalse(worktree.exists())
+        self.assertTrue(worktree.exists(), "The active turn's cwd must remain until the reservation is released.")
+        still_attached, _ = self.call_cli("task", "get", active_id)
+        self.assertEqual(self.assert_success(still_attached)["repositoryWorktrees"], [])
+        in_flight_file = worktree / "written-during-removal.txt"
+        in_flight_file.write_text("preserve edits made before the turn ended\n", encoding="utf-8")
+        lock_barrier.release()
+        self.call_cli("task", "get", active_id)
+        cleanup_deadline = time.monotonic() + 30
+        while not any(event.get("event") == "workspace.repository.deferred_removal_kept_dirty" for event in self.diagnostic_events()) and time.monotonic() < cleanup_deadline:
+            time.sleep(0.02)
+        self.assertTrue(any(event.get("event") == "workspace.repository.deferred_removal_kept_dirty" for event in self.diagnostic_events()), "Deferred cleanup should report that active-turn edits were preserved.")
+        self.assertTrue(worktree.exists(), "Deferred cleanup must preserve a worktree dirtied by the active turn.")
+        self.assertTrue(in_flight_file.is_file(), "Deferred cleanup must preserve files written by the active turn.")
     # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; confirmed deletion waits for an active conversation turn; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives and reports the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree.
     def test_task_delete_removes_task_and_later_lookup_is_not_found(self):
         pending = self.create_repo_task("Pending delete", [self.primary])
@@ -2204,6 +2306,7 @@ class StationAIBridgeTests(unittest.TestCase):
 
     # case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, and the ask-each-time, resolve-and-push, resolve-only, and keep-PR conflict preferences validate and persist across fresh CLI/XPC reads and are editable in Settings; appearance changes update the open Settings picker.
     def test_default_parent_settings_read_write_clear_and_validation(self):
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
         response, _ = self.call_cli("settings", "get")
         self.assertIsNone(self.assert_success(response)["defaultParentFolder"])
         self.assertEqual(self.assert_success(response)["appearance"], "dark")
@@ -2254,15 +2357,24 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("settings", "clear-parent")
         self.assertIsNone(self.assert_success(response)["defaultParentFolder"])
 
-    # case-contract: test_repository_suggestions_skip_nested_repositories_and_symlinks | The CLI returns top-level Git repository suggestions while excluding nested repositories and symlink targets. The conversation picker shows those suggestions, filters by repository name or parent path, and reports no matches for non-repository folders.
+    # case-contract: test_repository_suggestions_skip_nested_repositories_and_symlinks | The configured-root workspace repos list API returns top-level Git repositories while excluding nested repositories and symlink targets. The conversation picker shows those suggestions, filters by repository name or parent path, and reports no matches for non-repository folders.
     def test_repository_suggestions_skip_nested_repositories_and_symlinks(self):
+        root = self.fixture / "suggested-parent"
+        _, _ = self.call_cli("settings", "set-parent", root)
+        response, _ = self.call_cli("workspace", "repos", "list")
+        repository_list = self.assert_success(response)
+        self.assertEqual(repository_list["root"], str(root))
+        self.assertEqual(repository_list["repositories"], sorted([str(self.primary), str(self.secondary), str(self.alternate), str(self.changes)]))
+        self.assertNotIn(str(self.nested), repository_list["repositories"])
+        self.assertNotIn(str(self.external), repository_list["repositories"])
+
         response, _ = self.call_cli("workspace", "suggest", "--parent", self.fixture / "suggested-parent")
         repositories = self.assert_success(response)["repositories"]
         self.assertEqual(repositories, sorted([str(self.primary), str(self.secondary), str(self.alternate), str(self.changes)]))
         self.assertNotIn(str(self.nested), repositories)
         self.assertNotIn(str(self.external), repositories)
 
-    # case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections and applies them to empty tasks through repository batches with ordered roots and default auto/main/main branch settings; a newly saved list applies to a fresh task and remains saved. Invalid repository paths are rejected without changing the saved preference. In the UI, the picker placeholder shows saved repository names in order followed immediately by a Return key indicator; blank Return restores the saved repositories, while typing and arrow selection replaces and persists the list for the next conversation.
+    # case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections; repository batches prepare managed worktrees in order, use task-title-derived branches and main/main merge settings, and set the active task roots to those worktrees. The selected source repository list remains saved and applies to subsequent tasks. Invalid repository paths are rejected without changing the saved preference. In the UI, a new conversation automatically attaches saved repositories in order while the picker stays closed and the composer remains focused. Opening the picker and choosing another suggestion adds it to the ordered context and saved selection for subsequent conversations.
     def test_new_task_remembers_last_selected_repositories(self):
         response, _ = self.call_cli("settings", "set-last-repositories", "--repo", self.secondary, "--repo", self.primary)
         self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.secondary), str(self.primary)])
@@ -2278,10 +2390,15 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         restored_task = self.assert_success(restored)
         expected_repositories = [str(self.secondary), str(self.primary)]
-        self.assertEqual(restored_task["workspaceRoots"], expected_repositories)
         first_repositories = restored_task["repositoryWorktrees"]
         self.assertEqual([item["repositoryPath"] for item in first_repositories], expected_repositories)
-        self.assertEqual([item["branch"] for item in first_repositories], ["auto", "auto"])
+        self.assertEqual(
+            restored_task["workspaceRoots"],
+            [item["worktreePath"] for item in first_repositories],
+            "The AI-facing repository API should return active managed worktrees as task roots.",
+        )
+        self.assertEqual([item["branch"] for item in first_repositories], ["apply-remembered-repositories"] * 2)
+        self.assertTrue(all(not item["isPending"] for item in first_repositories))
         self.assertEqual([item["branchFrom"] for item in first_repositories], ["main", "main"])
         self.assertEqual([item["mergeTarget"] for item in first_repositories], ["main", "main"])
 
@@ -2297,10 +2414,10 @@ class StationAIBridgeTests(unittest.TestCase):
             "--repo", self.alternate,
         )
         restored_task = self.assert_success(restored)
-        self.assertEqual(restored_task["workspaceRoots"], [str(self.alternate)])
         second_repositories = restored_task["repositoryWorktrees"]
         self.assertEqual([item["repositoryPath"] for item in second_repositories], [str(self.alternate)])
-        self.assertEqual([item["branch"] for item in second_repositories], ["auto"])
+        self.assertEqual(restored_task["workspaceRoots"], [second_repositories[0]["worktreePath"]])
+        self.assertEqual([item["branch"] for item in second_repositories], ["apply-updated-remembered-repository"])
         self.assertEqual([item["branchFrom"] for item in second_repositories], ["main"])
         self.assertEqual([item["mergeTarget"] for item in second_repositories], ["main"])
         response, _ = self.call_cli("settings", "get")
@@ -2311,7 +2428,7 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("settings", "get")
         self.assertEqual(self.assert_success(response)["lastSelectedRepositories"], [str(self.alternate)])
 
-    # case-contract: test_new_task_repository_restore_is_atomic_on_invalid_default | Applying an ordered repository batch with a valid repository followed by an empty Git repository fails without mutation: the CLI reports invalid_argument and fresh reads show no repository attachments or workspace roots; New Task blank Return keeps the picker open, shows an error, attaches neither repository, keeps roots empty, and preserves the saved repository order.
+    # case-contract: test_new_task_repository_restore_is_atomic_on_invalid_default | Applying an ordered repository batch with a valid repository followed by an empty Git repository fails without mutation: the CLI reports invalid_argument and fresh reads show no repository attachments or workspace roots; New Task automatically applies saved repositories; an invalid batch shows an error, attaches neither repository, keeps roots empty, preserves the saved order, and leaves the picker closed by default.
     def test_new_task_repository_restore_is_atomic_on_invalid_default(self):
         created, _ = self.call_cli("task", "create", "--title", "Atomic repository restore")
         task_id = self.assert_success(created)["id"]
@@ -2360,7 +2477,7 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "roots", "get", task_id)
         self.assertEqual(self.assert_success(response)["roots"], [str(self.primary)])
 
-    # case-contract: test_new_task_has_empty_conversation_history | The CLI creates an Untitled task with no roots, logs task.create.succeeded for its ID, verifies empty history, and deletes it cleanly. New Task logs start and completion events with the same attempt ID and created task ID, then opens one empty conversation with its repository picker focused and no create sheet. Adding folder-only context leaves history empty, and backing out deletes the pending task without confirmation.
+    # case-contract: test_new_task_has_empty_conversation_history | The CLI creates an Untitled task with no roots, logs task.create.succeeded for its ID, verifies empty history, and deletes it cleanly. New Task logs start and completion events with the same attempt ID and created task ID, then opens one empty conversation with the repository picker closed, the composer focused, and no create sheet. Typing starts immediately; with a configured repository root and no selected repository, the UI enables standalone Send; adding folder-only context leaves history empty, and backing out deletes the pending task without confirmation.
     def test_new_task_has_empty_conversation_history(self):
         response, _ = self.call_cli("task", "create", "--title", "Untitled task")
         task_id = self.assert_success(response)["id"]
@@ -2486,7 +2603,7 @@ class StationAIBridgeTests(unittest.TestCase):
         serialized_title_events = json.dumps(title_events)
         self.assertNotIn("Explain the delayed title result.", serialized_title_events)
         self.assertNotIn("Generated fixture title", serialized_title_events)
-    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline prompts persist as typed text, the composer expands beyond five lines, stops at its 12-line limit, and retains all lines while scrolling. Long saved drafts reopen intact and immediately expand before typing, including after restart, remain editable, grow for wrapped text, shrink when shortened, and show their own overflow scrollbar for earlier and later content. The CLI/XPC preserves a 15-line draft. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. During title preparation, CLI/XPC confirms the submitted prompt and conversation thread remain attached to the task, while the UI keeps Pause disabled until the task's conversation client has an interruptible turn. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, Return queues a follow-up, queued rows offer Steer, and queued follow-ups persist across reopening. The obsolete footer Queue and Steer buttons are absent.
+    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline prompts persist as typed text, the composer expands beyond five lines, stops at its 12-line limit, and retains all lines while scrolling. Long saved drafts reopen intact and immediately expand before typing, including after restart, remain editable, grow for wrapped text, shrink when shortened, and show their own overflow scrollbar for earlier and later content. The CLI/XPC preserves a 15-line draft. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the prompt immediately while title generation runs in parallel. CLI/XPC and UI confirm the submitted prompt, worktree, Codex thread, and user turn start without waiting for title generation; Pause stays disabled only until the task turn becomes interruptible. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, Return queues a follow-up, queued rows offer Steer, and queued follow-ups persist across reopening. The obsolete footer Queue and Steer buttons are absent.
     def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         task_id = self.create_task(title="Blank conversation send", roots=[self.primary])["id"]
@@ -2597,10 +2714,10 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(titled_record["savedPrompt"], title_prompt)
         self.assertEqual(titled_record["title"], "Generated fixture title")
         generated_title_worktree = titled_record["repositoryWorktrees"][0]
-        self.assertEqual(generated_title_worktree["branch"], "generated-fixture-title")
+        self.assertEqual(generated_title_worktree["branch"], "transcript-entry-readable-chat-content-for-scrolling-readable")
         self.assertFalse(generated_title_worktree["isPending"])
         self.assertTrue(Path(generated_title_worktree["worktreePath"]).is_dir())
-        self.assertTrue(self.branch_exists(self.primary, "generated-fixture-title"))
+        self.assertTrue(self.branch_exists(self.primary, "transcript-entry-readable-chat-content-for-scrolling-readable"))
         title_events = [
             json.loads(line)
             for line in (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8").splitlines()
@@ -3554,6 +3671,9 @@ class StationAIBridgeTests(unittest.TestCase):
     # case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes persist Blocked across connections, and diagnostics identify the failed turn phase and store path; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
     def test_codex_interrupted_turn_blocks_with_reason_and_can_retry(self):
         task_id = self.create_task("Interrupted turn", roots=[self.primary])["id"]
+        self.complete_fixture_turn(task_id, message="Create the conversation thread before interruption.")
+        queued_text = "Follow up after the interrupted turn."
+        queued = self.assert_success(self.call_cli("conversation", "queue", task_id, "--message", queued_text)[0])
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-interrupted"
         shutil.copyfile(fixture, executable)
@@ -3587,6 +3707,18 @@ class StationAIBridgeTests(unittest.TestCase):
         self.complete_fixture_turn(task_id, executable_name="codex-fixture-retry")
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Review")
+        retained = self.assert_success(self.call_cli("conversation", "queue-list", task_id)[0])
+        self.assertEqual([(item["id"], item["state"]) for item in retained], [(queued["id"], "needsAction")])
+        retry_executable = self.data_directory / "codex-fixture-retry-success"
+        shutil.copyfile(fixture, retry_executable)
+        retry_executable.chmod(0o755)
+        retried, _ = self.call_cli(
+            "conversation", "queue-retry", task_id, queued["id"],
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(retry_executable)},
+        )
+        self.assertTrue(self.assert_success(retried)["retried"])
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "queue-list", task_id)[0]), [])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["savedPrompt"], queued_text)
 
     # case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation. Diagnostics record inventory and file-read outcomes with paths and byte counts, without logging file contents.
     def test_task_workspace_changes_group_staged_and_unstaged_diffs(self):

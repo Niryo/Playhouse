@@ -2,7 +2,9 @@ import Foundation
 
 final class BridgeClient {
     func send(_ request: BridgeRequest, onEvent: @escaping (BridgeEvent) -> Void) throws -> BridgeResponse {
-        let serviceName = ProcessInfo.processInfo.environment["STATIONAI_BRIDGE_SERVICE_NAME"] ?? BridgeContract.serviceName
+        let serviceName = ProcessInfo.processInfo.environment["STATIONAI_BRIDGE_SERVICE_NAME"]
+            ?? Self.bundledServiceName()
+            ?? BridgeContract.serviceName
         let connection = NSXPCConnection(serviceName: serviceName)
         connection.exportedInterface = NSXPCInterface(with: StationAIBridgeClientProtocol.self)
         let receiver = BridgeEventReceiver(onEvent: onEvent)
@@ -46,6 +48,20 @@ final class BridgeClient {
         return try Self.decoder.decode(BridgeResponse.self, from: data)
     }
 
+    private static func bundledServiceName() -> String? {
+        guard let executablePath = CommandLine.arguments.first, !executablePath.isEmpty else { return nil }
+        let executableURL = URL(fileURLWithPath: executablePath).standardizedFileURL
+        let appBundleURL = executableURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let serviceBundleURL = appBundleURL.appendingPathComponent(
+            "Contents/XPCServices/StationAIBridge.xpc",
+            isDirectory: true
+        )
+        return Bundle(url: serviceBundleURL)?.bundleIdentifier
+    }
+
     private static var encoder: JSONEncoder {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -79,7 +95,7 @@ enum BridgeClientError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .connection: "Couldn't connect to StationAI's bundled XPC service. Run the CLI through scripts/stationai.sh from the StationAI repository."
+        case .connection: "Couldn't connect to StationAI's bundled XPC service. Confirm StationAI is running and use the CLI bundled in that app."
         case .timeout: "StationAI's XPC service did not respond before the request timed out."
         }
     }

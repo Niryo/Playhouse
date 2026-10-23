@@ -1447,8 +1447,14 @@ final class CodexAppServerClient: ObservableObject {
     }
 }
 
-enum TaskProgressReportInstructions {
-    static func make(taskID: UUID) -> String {
+enum TaskThreadDeveloperInstructions {
+    /// Instructions StationAI attaches to Codex's thread/start and thread/resume requests.
+    static func make(
+        taskID: UUID,
+        repositories: [RepositoryWorktreeRecord] = [],
+        contextFolders: [String] = [],
+        repositoryRootPath: String? = nil
+    ) -> String {
         let executable = cliExecutableURL().path
         let quotedExecutable = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
         let id = taskID.uuidString
@@ -1458,6 +1464,24 @@ enum TaskProgressReportInstructions {
         \(quotedExecutable) task progress custom \(id) --label \"short label\" [--detail \"short detail\"]
         \(quotedExecutable) task progress clear \(id)
         Progress reports are hidden from the conversation and shown on the task card. Keep details brief. Do not use lifecycle task status commands for progress.
+
+        Repository context for this task:
+        - Selected repositories (source identity): \(repositories.isEmpty ? "none" : repositories.map(\.repositoryPath).joined(separator: ", "))
+        - Active task worktrees for edits: \(repositories.isEmpty ? "none" : repositories.map { "\($0.repositoryPath) -> \($0.worktreePath)" }.joined(separator: "; "))
+        - Additional context folders: \(contextFolders.isEmpty ? "none" : contextFolders.joined(separator: ", "))
+        - Configured repository root: \(repositoryRootPath ?? "not available")
+        A task may intentionally have no selected repository. Decide whether the request is standalone (no repository context or Git changes are needed) or needs repository context. For standalone work, proceed without adding a repository. If repository work is needed and none is selected, call \(quotedExecutable) workspace repos list and choose only a clearly matching path from its `repositories` result. Attach it with \(quotedExecutable) task repository add <task-id> --repo <path> (or add-batch for multiple repositories). If the list has no clear match, ask the user which repository to use instead of guessing.
+        For repository code changes, use the corresponding active task worktree path above. Source repository paths identify repositories for StationAI's API; never edit files in those source paths for this task. For folder-only tasks, use the selected additional context folder; with no repository or folder context, treat the task as standalone unless the user asks for files that clearly belong in a repository. StationAI starts the Codex thread and user turn with the active task worktree as cwd and runtime workspace root. Temporary files under /tmp and other non-repository directories remain available when useful.
+        Do not scan, enumerate, or search folders under the configured repository root yourself, including with shell commands or filesystem tools. StationAI owns repository discovery. If you need to find another repository or refresh the available list, call \(quotedExecutable) workspace repos list and use only the paths returned by that API. If the API returns no matching repository, ask the user rather than searching the filesystem.
+            A selected repository can be a sticky default from an earlier task. Follow an explicitly named repository in the user's request. StationAI launches a separate fast, read-only repository assessment process alongside the first turn in a new task; do not launch a duplicate assessment. Start the user's work immediately in the active task worktree; the assessment runs in parallel and does not block the turn. If StationAI steers the active turn with a likely mismatch, stop repository edits, tell the user what seems mismatched, and ask a blocking question using the request-user-input flow with clear options to keep the current repository, add another repository, replace the selected repository, or treat the task as standalone. StationAI displays blocking questions in a confirmation sheet. Never change a selected repository context without the user's choice. With no selected repository, decide whether the request is standalone or needs repository context; for repository work, use workspace repos list and task repository add/add-batch to select and attach a clearly matching repository, and for standalone work proceed without adding one. After the user confirms a selected-context mismatch, use task repository add/add-batch for additive context, task repository replace for replacement, or task repository remove for repositories they want removed. Replacement adds and validates the new repository set before removing old repositories; if an old managed worktree is dirty or removal fails, the command reports that both contexts remain. Repository add APIs prepare a managed worktree immediately and return the source-to-worktree mapping. The active turn's original cwd and runtime roots do not change mid-turn, so use the returned worktreePath explicitly for edits in a newly added repository; later turns automatically receive updated task roots. The task UI and saved repository selection follow API changes. The separate assessment steers only when it finds a likely mismatch; an inconclusive or matched result leaves the selected context unchanged. Do not scan the configured root yourself; use StationAI's workspace repos list API whenever you need to find a repository. Treat an uncertain assessment as no mismatch.
+        Repository context commands for this task:
+        \(quotedExecutable) task get \(id)
+        \(quotedExecutable) task repository add \(id) --repo <path>
+        \(quotedExecutable) task repository add-batch \(id) --repo <path> [--repo <path>...]
+        \(quotedExecutable) task repository replace \(id) --repo <path> [--repo <path>...]
+        \(quotedExecutable) task repository remove \(id) --repo <path>
+        \(quotedExecutable) settings get
+        \(quotedExecutable) workspace repos list
 
         At the very end of every turn, make exactly one definitive outcome call using this task ID:
         \(quotedExecutable) task outcome \(id) <completed|waiting-response>
