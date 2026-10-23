@@ -1425,7 +1425,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assert_failure(invalid, "invalid_argument")
         self.run_git(self.primary, "remote", "remove", "origin")
 
-    # case-contract: test_done_archive_displays_existing_pull_request_link | A Done task's real SwiftData record retains a linked PR number and URL across fresh CLI/XPC reads so the archive renders the PR link with distinct hover emphasis and useful help; an active repository-backed task card renders a saved PR link with the same hover indication.
+    # case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC fresh reads confirm saved PR data; the UI shows active and archived PR links and an active task's Create PR button. Hovering the outer padded edge of each control triggers its hover feedback.
     def test_done_archive_displays_existing_pull_request_link(self):
         task = self.create_repo_task("Archived linked PR", [self.primary], materialize=True)
         completed, _ = self.call_cli("task", "move", task["id"], "Done")

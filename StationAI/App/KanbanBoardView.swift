@@ -580,8 +580,8 @@ struct KanbanBoardView: View {
                     Text("PR").font(.system(size: 10, weight: .semibold))
                 }
             }
-            .buttonHoverPointer()
             .actionButtonHoverEmphasis()
+            .buttonHoverPointer()
             .help("Create a pull request for each repository linked to this completed task")
             .disabled(taskCreatingPullRequests.contains(task.id))
             .accessibilityIdentifier("done-archive-create-pr-\(task.id.uuidString)")
@@ -591,8 +591,8 @@ struct KanbanBoardView: View {
                     if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
                         Link("#\(number)", destination: url)
                             .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .buttonHoverPointer()
                             .actionButtonHoverEmphasis()
+                            .buttonHoverPointer()
                             .help("Open pull request #\(number) in your browser")
                             .accessibilityIdentifier("done-archive-pr-link-\(task.id.uuidString)-\(number)")
                     }
@@ -1242,8 +1242,8 @@ private struct TaskCardView: View {
                                 Text("PR").font(.system(size: 10, weight: .semibold))
                             }
                         }
-                        .buttonHoverPointer()
                         .actionButtonHoverEmphasis(padding: 10)
+                        .buttonHoverPointer()
                         .help("Create a pull request for each repository linked to this task")
                         .disabled(isCreatingPullRequests)
                         .accessibilityIdentifier("task-create-pr-\(task.id.uuidString)")
@@ -1254,8 +1254,8 @@ private struct TaskCardView: View {
                                     .font(.system(size: 11, weight: .bold))
                                     .foregroundStyle(.green)
                             }
-                            .buttonHoverPointer()
                             .actionButtonHoverEmphasis(padding: 10)
+                            .buttonHoverPointer()
                             .help("Complete task: all linked pull requests have merged")
                             .accessibilityLabel("Green checkmark. Complete task, all linked pull requests merged")
                             .accessibilityIdentifier("task-complete-merged-pr-\(task.id.uuidString)")
@@ -1267,8 +1267,8 @@ private struct TaskCardView: View {
                                         .scaledToFit()
                                         .frame(width: 30, height: 12)
                                 }
-                                .buttonHoverPointer()
                                 .actionButtonHoverEmphasis(padding: 10)
+                                .buttonHoverPointer()
                                 .help("Resolve pull request conflicts with Codex")
                                 .accessibilityLabel("Resolve pull request conflicts")
                                 .accessibilityIdentifier("task-resolve-pr-conflicts-\(task.id.uuidString)")
@@ -1277,8 +1277,8 @@ private struct TaskCardView: View {
                                 if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
                                     Link("#\(number)", destination: url)
                                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                        .buttonHoverPointer()
                                         .actionButtonHoverEmphasis(padding: 10)
+                                        .buttonHoverPointer()
                                         .help("Open pull request #\(number) in your browser")
                                         .accessibilityIdentifier("task-pr-link-\(task.id.uuidString)-\(number)")
                                 }

@@ -1715,7 +1715,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertNil(finalRecord["pullRequestNumber"])
     }
 
-    // case-contract: test_done_archive_displays_existing_pull_request_link | A Done task's real SwiftData record retains a linked PR number and URL across fresh CLI/XPC reads so the archive renders the PR link with distinct hover emphasis and useful help; an active repository-backed task card renders a saved PR link with the same hover indication.
+    // case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC fresh reads confirm saved PR data; the UI shows active and archived PR links and an active task's Create PR button. Hovering the outer padded edge of each control triggers its hover feedback.
     func test_done_archive_displays_existing_pull_request_link() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -1735,6 +1735,9 @@ final class StationAIUITests: XCTestCase {
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Active linked PR UI")
         element("back-to-board-button").click()
         XCTAssertEqual(try taskRecord(id: activeTaskID)?["status"] as? String, "Review")
+        let createPRButton = element("task-create-pr-\(activeTaskID)")
+        XCTAssertTrue(createPRButton.waitForExistence(timeout: 5), "An active repository task should expose its Create PR button.")
+        assertHoverEmphasis(for: createPRButton)
 
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 10), "The app must close its SwiftData container before seeding the isolated store.")
@@ -5935,7 +5938,8 @@ final class StationAIUITests: XCTestCase {
 
     private func assertHoverEmphasis(for element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
         let before = element.screenshot().image
-        element.hover()
+        // XCTest cannot read NSCursor.current from the app process; hover inside the padded edge to verify that region receives hover events.
+        element.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).hover()
         Thread.sleep(forTimeInterval: 0.2)
         let after = element.screenshot().image
         guard let beforeCG = before.cgImage(forProposedRect: nil, context: nil, hints: nil),
