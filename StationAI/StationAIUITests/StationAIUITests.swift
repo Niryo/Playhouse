@@ -1234,7 +1234,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
     }
 
-    // case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR; an unmerged PR keeps its link and suppresses the completion button. After all PRs merge, focus replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls.
+    // case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 10 seconds; rapid focus changes are suppressed. An unmerged PR keeps its link and suppresses the completion button. After all PRs merge, a later focus check replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls.
     func test_task_done_preserves_worktree_and_branch() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture()
@@ -1312,6 +1312,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(Set(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), Set(["123", "456"]))
         XCTAssertTrue(prLink.exists, "An unmerged PR should stay as a link.")
         XCTAssertTrue(secondPRLink.exists, "A second unmerged PR should stay as a link.")
+        Thread.sleep(forTimeInterval: 10.1)
         let ghStateURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["STATIONAI_E2E_GH_STATE_PATH"]))
         try "123=merged\n456=unmerged\n".write(to: ghStateURL, atomically: true, encoding: .utf8)
         let previousCheckCount = (try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count
@@ -1323,6 +1324,11 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(completionButton.exists, "The task should remain incomplete while any linked PR is unmerged.")
         XCTAssertTrue(prLink.exists)
         XCTAssertTrue(secondPRLink.exists)
+        let rapidFocusCheckCount = (try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count
+        activateOtherAppThenReturn()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual((try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count, rapidFocusCheckCount, "Rapid focus changes should not repeat GitHub checks.")
+        Thread.sleep(forTimeInterval: 10.1)
         try "123=unmerged\n456=merged\n".write(to: ghStateURL, atomically: true, encoding: .utf8)
         let thirdCheckCount = (try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count
         activateOtherAppThenReturn()
@@ -1333,6 +1339,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(completionButton.exists, "Either unmerged PR should suppress task completion.")
         XCTAssertTrue(prLink.exists)
         XCTAssertTrue(secondPRLink.exists)
+        Thread.sleep(forTimeInterval: 10.1)
         try "123=merged\n456=merged\n".write(to: ghStateURL, atomically: true, encoding: .utf8)
         let fourthCheckCount = (try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count
         activateOtherAppThenReturn()
@@ -1441,7 +1448,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Completed task opens from the searchable read-only archive")
     }
 
-    // case-contract: test_review_pr_conflicts_probe_and_verify | Separate Review task cards probe their linked pull requests concurrently on app focus. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action beside its PR link; clicking it sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head.
+    // case-contract: test_review_pr_conflicts_probe_and_verify | Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 10 seconds. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action beside its PR link; clicking it sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head.
     func test_review_pr_conflicts_probe_and_verify() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         var ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [123, 456])
@@ -1496,6 +1503,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("123").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("456").path), "Both Review task probes should overlap on focus.")
         XCTAssertFalse(resolveButton.exists, "A mergeable PR should not show the conflict action.")
+        Thread.sleep(forTimeInterval: 10.1)
         let stateURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["STATIONAI_E2E_GH_STATE_PATH"]))
         try "123=conflicting\n".write(to: stateURL, atomically: true, encoding: .utf8)
         for number in [123, 456] { try? FileManager.default.removeItem(at: startedDirectory.appendingPathComponent("\(number)")) }
@@ -1541,6 +1549,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/pr-123"), resolvedLocalHead)
         try "123=remote\n456=unmerged\n".write(to: stateURL, atomically: true, encoding: .utf8)
         for number in [123, 456] { try? FileManager.default.removeItem(at: startedDirectory.appendingPathComponent("\(number)")) }
+        Thread.sleep(forTimeInterval: 10.1)
         activateOtherAppThenReturn()
         XCTAssertTrue(waitUntil({ !resolveButton.exists }, timeout: 10), "The action should disappear after GitHub confirms the pushed head.")
     }
