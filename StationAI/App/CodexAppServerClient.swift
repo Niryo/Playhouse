@@ -1131,7 +1131,7 @@ final class CodexAppServerClient: ObservableObject {
             } else {
                 measuredDuration = nil
             }
-            guard var activity = CodexActivity.from(
+            guard let activity = CodexActivity.from(
                 item: item,
                 lifecycle: method == "item/completed" ? "completed" : "inProgress",
                 turnID: params["turnId"] as? String,

@@ -828,7 +828,7 @@ struct TaskConversationView: View {
                         .lineLimit(1)
                         .accessibilityIdentifier("current-activity-title")
                     Spacer(minLength: 4)
-                    if let startedAt = currentActivity.startedAt {
+                    if currentActivity.startedAt != nil {
                         Text(currentActivity.durationLabel(at: timeline.date) ?? "Running · 0 ms")
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundStyle(.secondary)
