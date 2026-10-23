@@ -1,8 +1,10 @@
+import AppKit
 import SwiftData
 import SwiftUI
 
 @main
 struct StationAIApp: App {
+    @NSApplicationDelegateAdaptor(StationAIApplicationDelegate.self) private var applicationDelegate
     private let modelContainer: ModelContainer
     private let appPreferences: UserDefaults
     @StateObject private var codexClient: CodexAppServerClient
@@ -22,6 +24,9 @@ struct StationAIApp: App {
             codexExecutableOverride: environment["STATIONAI_E2E_CODEX_EXECUTABLE"],
             goalRuntimeEnabled: true
         ))
+        StationAIApplicationDelegate.terminationHandler = { [weak client = _codexClient.wrappedValue] in
+            await client?.prepareForApplicationTermination()
+        }
         #if DEBUG
         if let suiteName = environment["STATIONAI_E2E_DEFAULTS_SUITE"],
            let isolatedPreferences = UserDefaults(suiteName: suiteName) {
@@ -64,6 +69,20 @@ struct StationAIApp: App {
             .modelContainer(modelContainer)
             .environmentObject(codexClient)
             .defaultAppStorage(appPreferences)
+    }
+}
+
+@MainActor
+private final class StationAIApplicationDelegate: NSObject, NSApplicationDelegate {
+    static var terminationHandler: (() async -> Void)?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let terminationHandler = Self.terminationHandler else { return .terminateNow }
+        Task {
+            await terminationHandler()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 }
 

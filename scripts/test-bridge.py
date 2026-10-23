@@ -2490,7 +2490,7 @@ class StationAIBridgeTests(unittest.TestCase):
         serialized_title_events = json.dumps(title_events)
         self.assertNotIn("Explain the delayed title result.", serialized_title_events)
         self.assertNotIn("Generated fixture title", serialized_title_events)
-    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline prompts persist as typed text, the composer expands beyond five lines, stops at its 12-line limit, and retains all lines while scrolling. Long saved drafts reopen intact and immediately expand before typing, including after restart, remain editable, grow for wrapped text, shrink when shortened, and show their own overflow scrollbar for earlier and later content. The CLI/XPC preserves a 15-line draft. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. During title preparation, CLI/XPC confirms the submitted prompt and conversation thread remain attached to the task, while the UI keeps Pause disabled until the task's conversation client has an interruptible turn. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, Return queues a follow-up, queued rows offer Steer, and queued follow-ups persist across reopening. The obsolete footer Queue and Steer buttons are absent.
+    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline prompts persist as typed text, the composer expands beyond five lines, stops at its 12-line limit, and retains all lines while scrolling. Long saved drafts reopen intact and immediately expand before typing, including after restart, remain editable, grow for wrapped text, shrink when shortened, and show their own overflow scrollbar for earlier and later content. The CLI/XPC preserves a 15-line draft. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI recover a submitted prompt with no Codex thread or active send reservation to Waiting Response, clear the pending marker, preserve the draft, and return it to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. During title preparation, CLI/XPC confirms the submitted prompt and conversation thread remain attached to the task, while the UI keeps Pause disabled until the task's conversation client has an interruptible turn. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, Return queues a follow-up, queued rows offer Steer, and queued follow-ups persist across reopening. The obsolete footer Queue and Steer buttons are absent.
     def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         task_id = self.create_task(title="Blank conversation send", roots=[self.primary])["id"]
@@ -2703,7 +2703,8 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(stale_history)["messages"], [])
         recovered, _ = self.call_cli("task", "get", stale_task["id"])
         recovered_record = self.assert_success(recovered)
-        self.assertEqual(recovered_record["status"], "Blocked")
+        self.assertEqual(recovered_record["status"], "Waiting Response")
+        self.assertIn("restarted", recovered_record["statusMessage"].lower())
         self.assertEqual(recovered_record["savedPrompt"], stale_prompt)
         self.assertIsNone(recovered_record.get("pendingSubmittedPrompt"))
 
@@ -3767,7 +3768,7 @@ class StationAIBridgeTests(unittest.TestCase):
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Waiting Response")
 
-    # case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes persist Blocked across connections, and diagnostics identify the failed turn phase and store path; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
+    # case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; clean and unexpected relaunch preserve the prompt and conversation and allow a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
     def test_codex_interrupted_turn_blocks_with_reason_and_can_retry(self):
         task_id = self.create_task("Interrupted turn", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -3803,6 +3804,73 @@ class StationAIBridgeTests(unittest.TestCase):
         self.complete_fixture_turn(task_id, executable_name="codex-fixture-retry")
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Review")
+
+        restart_task = self.create_task("Restart recovery", roots=[self.primary])
+        restart_prompt = "Restore this submitted prompt after an unexpected restart."
+        saved_prompt, _ = self.call_cli(
+            "task", "prompt", restart_task["id"], "--text", restart_prompt,
+            "--status", "In Progress", "--submitted", "true",
+        )
+        self.assertEqual(self.assert_success(saved_prompt)["pendingSubmittedPrompt"], restart_prompt)
+        restarted_history, _ = self.call_cli("conversation", "history", restart_task["id"])
+        self.assertEqual(self.assert_success(restarted_history)["messages"], [])
+        restarted_task, _ = self.call_cli("task", "get", restart_task["id"])
+        restarted_record = self.assert_success(restarted_task)
+        self.assertEqual(restarted_record["status"], "Waiting Response")
+        self.assertIn("restarted", restarted_record["statusMessage"].lower())
+        self.assertEqual(restarted_record["savedPrompt"], restart_prompt)
+        self.assertIsNone(restarted_record.get("pendingSubmittedPrompt"))
+        continued_history = self.complete_fixture_turn(
+            restart_task["id"], executable_name="codex-fixture-restart-retry",
+            message="Continue the saved work after restart.",
+        )
+        self.assertTrue(any(
+            message["role"] == "user" and message["text"] == "Continue the saved work after restart."
+            for message in continued_history["messages"]
+        ))
+        restarted_task, _ = self.call_cli("task", "get", restart_task["id"])
+        self.assertEqual(self.assert_success(restarted_task)["status"], "Review")
+
+        threaded_restart = self.create_task("Thread restart recovery", roots=[self.primary])
+        thread_executable = "codex-fixture-thread-restart"
+        first_thread_history = self.complete_fixture_turn(
+            threaded_restart["id"], executable_name=thread_executable,
+            message="Save this conversation before restarting.",
+        )
+        self.assertTrue(any(
+            message["role"] == "user" and message["text"] == "Save this conversation before restarting."
+            for message in first_thread_history["messages"]
+        ))
+        threaded_prompt = "Continue the existing conversation after restart."
+        saved_thread_prompt, _ = self.call_cli(
+            "task", "prompt", threaded_restart["id"], "--text", threaded_prompt,
+            "--status", "In Progress", "--submitted", "true",
+        )
+        self.assertEqual(self.assert_success(saved_thread_prompt)["pendingSubmittedPrompt"], threaded_prompt)
+        recovered_thread_history, _ = self.call_cli(
+            "conversation", "history", threaded_restart["id"],
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(self.data_directory / thread_executable)},
+        )
+        recovered_messages = self.assert_success(recovered_thread_history)["messages"]
+        self.assertTrue(any(
+            message["role"] == "user" and message["text"] == "Save this conversation before restarting."
+            for message in recovered_messages
+        ), "Restart recovery should preserve earlier messages from the real Codex thread.")
+        recovered_thread, _ = self.call_cli("task", "get", threaded_restart["id"])
+        recovered_thread_record = self.assert_success(recovered_thread)
+        self.assertEqual(recovered_thread_record["status"], "Waiting Response")
+        self.assertIn("restarted", recovered_thread_record["statusMessage"].lower())
+        self.assertIsNone(recovered_thread_record.get("pendingSubmittedPrompt"))
+        continued_thread = self.complete_fixture_turn(
+            threaded_restart["id"], executable_name=thread_executable,
+            message="Continue the existing conversation after restart.",
+        )
+        self.assertTrue(any(
+            message["role"] == "user" and message["text"] == threaded_prompt
+            for message in continued_thread["messages"]
+        ))
+        recovered_thread, _ = self.call_cli("task", "get", threaded_restart["id"])
+        self.assertEqual(self.assert_success(recovered_thread)["status"], "Review")
 
     # case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation. Diagnostics record inventory and file-read outcomes with paths and byte counts, without logging file contents.
     def test_task_workspace_changes_group_staged_and_unstaged_diffs(self):

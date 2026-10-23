@@ -3288,7 +3288,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Unsent task prompt is saved after returning to backlog")
     }
 
-    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline prompts persist as typed text, the composer expands beyond five lines, stops at its 12-line limit, and retains all lines while scrolling. Long saved drafts reopen intact and immediately expand before typing, including after restart, remain editable, grow for wrapped text, shrink when shortened, and show their own overflow scrollbar for earlier and later content. The CLI/XPC preserves a 15-line draft. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. During title preparation, CLI/XPC confirms the submitted prompt and conversation thread remain attached to the task, while the UI keeps Pause disabled until the task's conversation client has an interruptible turn. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, Return queues a follow-up, queued rows offer Steer, and queued follow-ups persist across reopening. The obsolete footer Queue and Steer buttons are absent.
+    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline prompts persist as typed text, the composer expands beyond five lines, stops at its 12-line limit, and retains all lines while scrolling. Long saved drafts reopen intact and immediately expand before typing, including after restart, remain editable, grow for wrapped text, shrink when shortened, and show their own overflow scrollbar for earlier and later content. The CLI/XPC preserves a 15-line draft. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI recover a submitted prompt with no Codex thread or active send reservation to Waiting Response, clear the pending marker, preserve the draft, and return it to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. During title preparation, CLI/XPC confirms the submitted prompt and conversation thread remain attached to the task, while the UI keeps Pause disabled until the task's conversation client has an interruptible turn. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, Return queues a follow-up, queued rows offer Steer, and queued follow-ups persist across reopening. The obsolete footer Queue and Steer buttons are absent.
     func test_conversation_composer_rejects_blank_and_supports_live_turn_controls() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -3516,9 +3516,9 @@ final class StationAIUITests: XCTestCase {
             recoveryTaskCard.click()
             XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
             XCTAssertTrue(waitUntil({
-                ((try? self.taskRecord(id: recoveryTaskID)?["status"] as? String) ?? nil) == "Blocked"
+                ((try? self.taskRecord(id: recoveryTaskID)?["status"] as? String) ?? nil) == "Waiting Response"
                     && ((try? self.taskRecord(id: recoveryTaskID)?["pendingSubmittedPrompt"]) is NSNull || (try? self.taskRecord(id: recoveryTaskID)?["pendingSubmittedPrompt"]) == nil)
-            }, timeout: 10), "Reopening a task whose send never reached Codex should clear the pending marker and expose the interrupted state.")
+            }, timeout: 10), "Reopening a task whose send never reached Codex should clear the pending marker and leave the task ready to continue.")
             XCTAssertEqual(element("message-composer").value as? String, recoveryPrompt, "A stale submitted prompt should return to the composer for retry.")
             XCTAssertFalse(app.staticTexts[recoveryPrompt].exists, "A turn that never reached Codex should not be shown as a sent message.")
 
@@ -5183,7 +5183,7 @@ final class StationAIUITests: XCTestCase {
         assertTaskVisible("Non-blocking question", inColumn: "Waiting Response")
     }
 
-    // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes persist Blocked across connections, and diagnostics identify the failed turn phase and store path; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
+    // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; clean and unexpected relaunch preserve the prompt and conversation and allow a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
     func test_codex_interrupted_turn_blocks_with_reason_and_can_retry() throws {
         _ = try runCLI(["task", "create", "--title", "Interrupted turn", "--root", fixture.primary.path])
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-interrupted").path
@@ -5237,8 +5237,10 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: interruptedID)?["savedPrompt"] as? String, queuedText, "The successfully retried follow-up should become the latest saved prompt.")
 
         _ = try runCLI(["task", "create", "--title", "Reopen active turn", "--root", fixture.primary.path])
-        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-hold").path
-        app.launchEnvironment["STATIONAI_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
+        let cleanRestartFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-hold").path
+        codexFixtureExecutable = cleanRestartFixtureExecutable
+        try? FileManager.default.removeItem(atPath: cleanRestartFixtureExecutable + ".hold-used")
+        app.launchEnvironment["STATIONAI_E2E_CODEX_EXECUTABLE"] = cleanRestartFixtureExecutable
         relaunchApp()
         openTask(named: "Reopen active turn")
         element("message-composer").click()
@@ -5252,14 +5254,101 @@ final class StationAIUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.05)
         }
         XCTAssertEqual(activeStatus, "In Progress")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: cleanRestartFixtureExecutable + ".hold-used") }, timeout: 10), "Codex should reach the deliberate held turn before the app closes.")
         attachScreenshot(named: "Task remains In Progress while the Codex turn is active")
 
         relaunchApp()
         openTask(named: "Reopen active turn")
         let recovered = try XCTUnwrap(taskRecord(named: "Reopen active turn"))
-        XCTAssertEqual(recovered["status"] as? String, "Blocked")
-        XCTAssertTrue((recovered["statusMessage"] as? String)?.localizedCaseInsensitiveContains("reopened before codex") == true)
-        attachScreenshot(named: "Reopening StationAI recovers a stale In Progress task as Blocked")
+        XCTAssertEqual(recovered["status"] as? String, "Waiting Response")
+        XCTAssertTrue((recovered["statusMessage"] as? String)?.localizedCaseInsensitiveContains("closed while this turn was running") == true)
+        XCTAssertTrue(app.staticTexts["Leave this turn active while StationAI closes."].waitForExistence(timeout: 10), "The visible transcript should restore the prompt after a clean quit.")
+        let interruptedHistory = try runCLI(["conversation", "history", try taskID(named: "Reopen active turn")])["result"] as? [String: Any]
+        XCTAssertTrue(
+            ((interruptedHistory?["messages"] as? [[String: Any]]) ?? []).contains {
+                $0["role"] as? String == "user" && $0["text"] as? String == "Leave this turn active while StationAI closes."
+            },
+            "The interrupted turn's prompt should remain in the saved conversation after a clean quit."
+        )
+        let shutdownEvents = try diagnosticEvents()
+        XCTAssertTrue(shutdownEvents.contains { $0["event"] as? String == "application.shutdown.started" })
+        XCTAssertTrue(shutdownEvents.contains {
+            $0["event"] as? String == "application.shutdown.turn_drained"
+                && $0["interruptAttempted"] as? String == "true"
+                && $0["drainTimedOut"] as? String == "true"
+        }, "Shutdown diagnostics should record the active turn interrupt and bounded drain result.")
+        let processShutdown = try XCTUnwrap(shutdownEvents.first { $0["event"] as? String == "codex.app_server.shutdown.finished" })
+        let terminationStatus = try XCTUnwrap(processShutdown["terminationStatus"] as? String, "Shutdown diagnostics must include a process termination result.")
+        XCTAssertNotEqual(terminationStatus, "still_running", "Shutdown diagnostics should confirm the Codex process exited.")
+        let shutdownRecords = shutdownEvents.filter { ($0["event"] as? String)?.contains("shutdown") == true }
+        XCTAssertFalse(
+            shutdownRecords.map { String(describing: $0) }.joined(separator: "\n").contains("Leave this turn active while StationAI closes."),
+            "Shutdown diagnostics must not contain the conversation prompt."
+        )
+        try completeCurrentTaskWithFixtureAnswers(
+            taskTitle: "Reopen active turn",
+            prompt: "Continue the saved work after relaunch.",
+            reportCompletedOutcome: false
+        )
+        XCTAssertEqual(try taskRecord(named: "Reopen active turn")?["status"] as? String, "Waiting Response")
+        attachScreenshot(named: "StationAI resumes the saved conversation after a clean quit")
+
+        let unexpectedTask = try XCTUnwrap(
+            (try runCLI(["task", "create", "--title", "Unexpected restart", "--root", fixture.primary.path])["result"] as? [String: Any])
+        )
+        let unexpectedTaskID = try XCTUnwrap(unexpectedTask["id"] as? String)
+        let unexpectedRestartFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-hold").path
+        codexFixtureExecutable = unexpectedRestartFixtureExecutable
+        try? FileManager.default.removeItem(atPath: unexpectedRestartFixtureExecutable + ".hold-used")
+        app.launchEnvironment["STATIONAI_E2E_CODEX_EXECUTABLE"] = unexpectedRestartFixtureExecutable
+        relaunchApp()
+        openTask(named: "Unexpected restart")
+        let unexpectedPrompt = "Keep this work available after an unexpected restart."
+        element("message-composer").click()
+        element("message-composer").typeText(unexpectedPrompt)
+        element("send-message-button").click()
+        let unexpectedDeadline = Date().addingTimeInterval(10)
+        var unexpectedStatus: String?
+        while Date() < unexpectedDeadline {
+            unexpectedStatus = try taskRecord(id: unexpectedTaskID)?["status"] as? String
+            if unexpectedStatus == "In Progress" { break }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        XCTAssertEqual(unexpectedStatus, "In Progress")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: unexpectedRestartFixtureExecutable + ".hold-used") }, timeout: 10), "Codex should reach the deliberate held turn before simulated process loss.")
+        let appBundleIdentifier = try XCTUnwrap(Bundle(url: appBundle)?.bundleIdentifier)
+        let appProcessID = try XCTUnwrap(
+            NSRunningApplication.runningApplications(withBundleIdentifier: appBundleIdentifier).first,
+            "The app process should be visible before simulating unexpected termination."
+        ).processIdentifier
+        XCTAssertGreaterThan(appProcessID, 0)
+        XCTAssertEqual(Darwin.kill(appProcessID, SIGKILL), 0, "The fixture app should be terminated without running its quit cleanup.")
+        XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 10), "StationAI should stop after the simulated unexpected termination.")
+
+        launchAppWithOpen()
+        waitForBoardOrAbortSuite()
+        openTask(named: "Unexpected restart")
+        let unexpectedlyRecovered = try XCTUnwrap(taskRecord(id: unexpectedTaskID))
+        XCTAssertEqual(unexpectedlyRecovered["status"] as? String, "Waiting Response")
+        XCTAssertTrue((unexpectedlyRecovered["statusMessage"] as? String)?.localizedCaseInsensitiveContains("restarted before codex") == true)
+        XCTAssertTrue(app.staticTexts[unexpectedPrompt].waitForExistence(timeout: 10), "The visible transcript should restore the prompt after unexpected termination.")
+        let unexpectedHistory = try runCLI(["conversation", "history", unexpectedTaskID])["result"] as? [String: Any]
+        XCTAssertTrue(
+            ((unexpectedHistory?["messages"] as? [[String: Any]]) ?? []).contains {
+                $0["role"] as? String == "user" && $0["text"] as? String == unexpectedPrompt
+            },
+            "The unexpected restart should preserve the last submitted message in conversation history."
+        )
+        try completeCurrentTaskWithFixtureAnswers(
+            taskTitle: "Unexpected restart",
+            prompt: "Continue after an unexpected restart.",
+            reportCompletedOutcome: false
+        )
+        XCTAssertEqual(try taskRecord(id: unexpectedTaskID)?["status"] as? String, "Waiting Response")
+        let abandonedFixtureRelease = URL(fileURLWithPath: unexpectedRestartFixtureExecutable + ".turn-release")
+        try Data("Clean up the fixture process after simulated app crash.\n".utf8).write(to: abandonedFixtureRelease, options: .atomic)
+        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: abandonedFixtureRelease.path) }, timeout: 5), "The fixture orphaned by SIGKILL should stop after cleanup release.")
+        attachScreenshot(named: "StationAI recovers and continues work after an unexpected restart")
     }
 
     // case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation. Diagnostics record inventory and file-read outcomes with paths and byte counts, without logging file contents.
@@ -5751,7 +5840,11 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
     }
 
-    private func completeCurrentTaskWithFixtureAnswers(taskTitle: String, prompt: String = "Complete this task.") throws {
+    private func completeCurrentTaskWithFixtureAnswers(
+        taskTitle: String,
+        prompt: String = "Complete this task.",
+        reportCompletedOutcome: Bool = true
+    ) throws {
         let taskID = try taskID(named: taskTitle)
         let executablePath = try XCTUnwrap(codexFixtureExecutable, "The task fixture has no Codex executable.")
         let hold = URL(fileURLWithPath: executablePath + ".outcome-hold")
@@ -5776,11 +5869,16 @@ final class StationAIUITests: XCTestCase {
         element("ai-question-answer-token").typeText("fixture-secret")
         element("submit-ai-answers-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: active.path) }, timeout: 10), "The fixture should hold after receiving answers so the task outcome can be reported.")
-        let outcome = try runCLI(["task", "outcome", taskID, "completed"])
-        XCTAssertEqual((outcome["result"] as? [String: Any])?["outcome"] as? String, "completed")
+        if reportCompletedOutcome {
+            let outcome = try runCLI(["task", "outcome", taskID, "completed"])
+            XCTAssertEqual((outcome["result"] as? [String: Any])?["outcome"] as? String, "completed")
+        }
         try "Release the answered fixture turn.\n".write(to: release, atomically: true, encoding: .utf8)
         XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
-        XCTAssertEqual(try taskRecord(named: taskTitle)?["status"] as? String, "Review")
+        XCTAssertEqual(
+            try taskRecord(named: taskTitle)?["status"] as? String,
+            reportCompletedOutcome ? "Review" : "Waiting Response"
+        )
     }
 
     private func assertTaskVisible(_ title: String, inColumn status: String) {
