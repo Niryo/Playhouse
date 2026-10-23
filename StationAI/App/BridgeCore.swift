@@ -1584,22 +1584,10 @@ final class BoardTaskManager {
         }
     }
 
-    func createPullRequests(_ id: UUID, client: CodexAppServerClient, conflictAction: String = "ask") async throws -> BoardTaskRecord {
+    func createPullRequests(_ id: UUID, client: CodexAppServerClient) async throws -> BoardTaskRecord {
         let conflicts = try await pullRequestConflictRepositories(id)
         if !conflicts.isEmpty {
-            switch conflictAction {
-            case "ask":
-                throw BridgeCommandError(code: "conflicts_require_confirmation", message: "Pull request conflicts were found. Choose how to resolve them in StationAI.")
-            case "keep":
-                return try get(id)
-            case "resolve-only":
-                _ = try await resolvePullRequestConflicts(id, action: conflictAction, client: client)
-                return try get(id)
-            case "resolve-and-push":
-                _ = try await resolvePullRequestConflicts(id, action: conflictAction, client: client)
-            default:
-                throw BridgeCommandError(code: "invalid_argument", message: "Unknown pull request conflict action '\(conflictAction)'.")
-            }
+            throw BridgeCommandError(code: "conflicts_require_confirmation", message: "Pull request conflicts were found. Resolve conflicts in the task worktree before creating pull requests.")
         }
         let lookup = try await withTaskOperationLock(id) {
             let initialTask = try requireTask(id)
@@ -2540,18 +2528,6 @@ final class WorkspaceSettingsManager {
         let appearance = value == "light" ? "light" : "dark"
         StationAIDiagnostics.record("settings.read", fields: ["setting": "appearance", "value": appearance])
         return appearance
-    }
-
-    var pullRequestConflictAction: String {
-        let value = defaults.string(forKey: WorkspaceSettings.pullRequestConflictActionKey) ?? "ask"
-        return ["ask", "resolve-and-push", "resolve-only", "keep"].contains(value) ? value : "ask"
-    }
-
-    func setPullRequestConflictAction(_ value: String) throws {
-        guard ["ask", "resolve-and-push", "resolve-only", "keep"].contains(value) else {
-            throw BridgeCommandError(code: "invalid_argument", message: "Pull request conflict action must be ask, resolve-and-push, resolve-only, or keep.")
-        }
-        defaults.set(value, forKey: WorkspaceSettings.pullRequestConflictActionKey)
     }
 
     func setAppearance(_ value: String) throws {
@@ -3551,8 +3527,7 @@ final class StationAIBridgeRuntime {
             case "task.pr.create":
                 result = try Self.value(await taskManager.createPullRequests(
                     request.requiredUUID("taskID"),
-                    client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string),
-                    conflictAction: settings.pullRequestConflictAction
+                    client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
                 ))
             case "task.pr.conflicts":
                 result = .object(["repositories": .array(try await taskManager.pullRequestConflictRepositories(request.requiredUUID("taskID")).map(BridgeValue.string))])
@@ -3661,12 +3636,8 @@ final class StationAIBridgeRuntime {
                     "defaultParentFolder": settings.defaultParentFolderPath.isEmpty ? .null : .string(settings.defaultParentFolderPath),
                     "defaultParentAvailable": .boolean(settings.defaultParentFolderURL != nil),
                     "lastSelectedRepositories": .array(settings.lastSelectedRepositories.map(BridgeValue.string)),
-                    "appearance": .string(settings.appearance),
-                    "pullRequestConflictAction": .string(settings.pullRequestConflictAction)
+                    "appearance": .string(settings.appearance)
                 ])
-            case "settings.set-pr-conflict-action":
-                try settings.setPullRequestConflictAction(request.requiredString("action"))
-                result = .object(["pullRequestConflictAction": .string(settings.pullRequestConflictAction)])
             case "settings.set-appearance":
                 try settings.setAppearance(request.requiredString("appearance"))
                 result = .object(["appearance": .string(settings.appearance)])

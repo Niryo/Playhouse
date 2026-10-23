@@ -1331,7 +1331,7 @@ class StationAIBridgeTests(unittest.TestCase):
         verification, _ = self.call_cli("task", "pr", "verify", task["id"], extra_environment=environment)
         self.assertEqual(self.assert_success(verification)["status"], "resolved")
 
-    # case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects conflicts without mutation, requires confirmation by default, honors saved keep without publishing, resolves staged conflicts locally without pushing, and commits and pushes a staged resolution without changing the target; unknown actions are rejected. The paired UI verifies unresolved conflicts stay uncommitted and unpublished, presents keep, resolve-only, and resolve-and-push with the remember checkbox, verifies remembered choices skip confirmation and persist in Settings, and confirms resolve-only commits staged resolution locally while the remote task branch remains absent.
+    # case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects conflicts without mutation and blocks PR creation until the explicit Fix Conflicts action is used; it resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI verifies PR creation directs the user to resolve conflicts in the task worktree and leaves unresolved conflicts uncommitted and unpublished.
     def test_task_pr_conflicts_detect_without_mutation(self):
         task = self.create_repo_task("PR conflict detection", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
         record = task["repositoryWorktrees"][0]
@@ -1361,17 +1361,13 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(target_file.read_text(encoding="utf-8"), "target branch version\n")
         requires_ui, _ = self.call_cli("task", "pr", "create", task["id"], expected_status=1)
         self.assert_failure(requires_ui, "conflicts_require_confirmation")
-        self.call_cli("settings", "set-pr-conflict-action", "keep")
-        kept_creation, _ = self.call_cli("task", "pr", "create", task["id"])
-        self.assertEqual(self.assert_success(kept_creation)["id"], task["id"])
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), branch_head)
         task_branch_ref = f"refs/heads/{record['branch']}"
         kept_remote_branch = subprocess.run(
             ["git", "--git-dir", str(remote), "show-ref", "--verify", "--quiet", task_branch_ref],
             check=False, capture_output=True, text=True,
         )
-        self.assertEqual(kept_remote_branch.returncode, 1, "Keep must not publish the task branch to the bare remote.")
-        self.call_cli("settings", "set-pr-conflict-action", "ask")
+        self.assertEqual(kept_remote_branch.returncode, 1, "A blocked PR creation must not publish the task branch.")
         self.run_git(worktree, "fetch", "origin", "main")
         merge = subprocess.run(
             ["git", "-C", str(worktree), "merge", "--no-commit", "--no-ff", "FETCH_HEAD"],
@@ -2202,21 +2198,13 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(self.assert_success(response)["deleted"])
         self.assertFalse(broken_worktree.exists())
 
-    # case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, and the ask-each-time, resolve-and-push, resolve-only, and keep-PR conflict preferences validate and persist across fresh CLI/XPC reads and are editable in Settings; appearance changes update the open Settings picker.
+    # case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, the removed PR conflict preference is absent from CLI/XPC and Settings, and appearance changes update the open Settings picker.
     def test_default_parent_settings_read_write_clear_and_validation(self):
         response, _ = self.call_cli("settings", "get")
         self.assertIsNone(self.assert_success(response)["defaultParentFolder"])
         self.assertEqual(self.assert_success(response)["appearance"], "dark")
-        response, _ = self.call_cli("settings", "get")
-        self.assertEqual(self.assert_success(response)["pullRequestConflictAction"], "ask")
-        for action in ("resolve-and-push", "resolve-only", "keep", "ask"):
-            response, _ = self.call_cli("settings", "set-pr-conflict-action", action)
-            self.assertEqual(self.assert_success(response)["pullRequestConflictAction"], action)
-            persisted, _ = self.call_cli("settings", "get")
-            self.assertEqual(self.assert_success(persisted)["pullRequestConflictAction"], action)
-        invalid, _ = self.call_cli("settings", "set-pr-conflict-action", "bad-choice", expected_status=2)
-        self.assert_failure(invalid, "invalid_argument")
-
+        self.assertNotIn("pullRequestConflictAction", self.assert_success(response))
+        self.call_cli("settings", "set-pr-conflict-action", "ask", expected_status=2)
         response, _ = self.call_cli("settings", "set-appearance", "light")
         self.assertEqual(self.assert_success(response)["appearance"], "light")
         response, _ = self.call_cli("settings", "set-appearance", "dark")
