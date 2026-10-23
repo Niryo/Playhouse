@@ -61,7 +61,7 @@
   },
   {
     "id": "test_task_done_preserves_worktree_and_branch",
-    "expectation": "Sending the first message derives an auto branch from the generated task title. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR; an unmerged PR keeps its link and suppresses the completion button. After all PRs merge, focus replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files without loading conversation histories, while the visible archive loads the newest 40 first and reveals older tasks as the user scrolls."
+    "expectation": "Sending the first message derives an auto branch from the generated task title. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 10 seconds; rapid focus changes are suppressed. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls."
   },
   {
     "id": "test_task_done_preserves_dirty_worktree",
@@ -77,7 +77,7 @@
   },
   {
     "id": "test_task_progress_reports_publish_persist_and_clear",
-    "expectation": "The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Only an explicit completed outcome reaches Review."
+    "expectation": "The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review."
   },
   {
     "id": "test_task_progress_reports_clear_on_failed_turns_and_questions",
@@ -117,7 +117,7 @@
   },
   {
     "id": "test_default_parent_settings_read_write_clear_and_validation",
-    "expectation": "The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, and the ask-each-time, resolve-and-push, resolve-only, and keep-PR conflict preferences validate and persist across fresh CLI/XPC reads and are editable in Settings; appearance changes update the open Settings picker."
+    "expectation": "The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, the removed PR conflict preference is absent from CLI/XPC and Settings, and appearance changes update the open Settings picker."
   },
   {
     "id": "test_repository_suggestions_skip_nested_repositories_and_symlinks",
@@ -157,23 +157,31 @@
   },
   {
     "id": "test_conversation_steers_and_queues_active_turn",
-    "expectation": "While a Codex turn is active, stale CLI/XPC steering reports an error and preserves the composer draft; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview. Plain Return queues a follow-up; its row Steer uses the active turn ID, appears in the transcript, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and rejected steering remains available as needsAction. A distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue."
+    "expectation": "When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; with no active turn, a missed queued-row steer dispatches synchronously as its own turn and leaves the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up; its row Steer uses the active turn ID, appears in the transcript, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue."
   },
   {
     "id": "test_conversation_sends_image_attachments",
-    "expectation": "The conversation composer accepts images from the picker and paste, previews them before sending, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. Diagnostics record image MIME and encoded size without storing image payloads."
+    "expectation": "Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. Diagnostics record image MIME and encoded size without storing image payloads."
   },
   {
     "id": "test_conversation_rejects_invalid_image_attachments",
     "expectation": "Malformed image data is rejected with a visible composer error and an invalid_argument bridge response, without creating conversation history or advancing task status."
   },
   {
+    "id": "test_conversation_shows_mcp_and_dynamic_tool_activity",
+    "expectation": "MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. The conversation header shows only the newest active call; when it completes, the indicator falls back to the next still-active call. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed."
+  },
+  {
+    "id": "test_conversation_shows_context_compaction",
+    "expectation": "contextCompaction item/started and item/completed coalesce into one concise timeline event; missing summaries ignore malformed opaque payload fields and never render their data, and the event survives thread history reload with correct prompt/response ordering."
+  },
+  {
     "id": "test_conversation_shows_subagent_delegation",
-      "expectation": "During a parent turn, started and interacted updates coalesce by child thread ID into clear named timeline rows outside the collapsible Codex activity section, with sentence-style names, available path/model/reasoning metadata, and started-working wording; completed and interrupted states, optional metadata, and unknown kinds survive history reload and remain visible after reopening the task conversation. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs."
+    "expectation": "During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs."
   },
   {
     "id": "test_plan_mode_renders_markdown_in_conversation",
-    "expectation": "Selecting Plan mode sends a planning turn; the first plan delta is visible before completion, and the completed plan item renders automatically as Markdown with visible spacing between distinct paragraphs, including after reopening, while CLI events and bridge history preserve the exact plan text as the latest assistant message. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics."
+    "expectation": "Selecting Plan mode sends a planning turn; the first plan delta is visible before completion, and the completed plan item renders automatically as Markdown with visible spacing between distinct paragraphs and can be selected and copied as one complete text view, including after reopening, while CLI events and bridge history preserve the exact plan text as the latest assistant message. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics."
   },
   {
     "id": "test_conversation_mode_rejects_unknown_mode_without_starting_a_turn",
@@ -181,7 +189,7 @@
   },
   {
     "id": "test_codex_questions_can_be_answered_over_cli_xpc",
-    "expectation": "Structured questions raised in Plan mode move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome."
+    "expectation": "MCP tool/requestUserInput structured questions raised in Plan mode use the existing question path, move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome."
   },
   {
     "id": "test_codex_nonblocking_question_keeps_task_in_progress",
@@ -205,11 +213,15 @@
   },
   {
     "id": "test_task_pr_create_reports_real_gh_failure",
-    "expectation": "The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes. The Done archive control retains its help and waits for the task lock before publication failure without saving a PR link or changing Done status."
+    "expectation": "The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target. The Done archive control retains its help and waits for the task lock before publication failure without saving a PR link or changing Done status."
   },
   {
     "id": "test_task_pr_conflicts_detect_without_mutation",
-    "expectation": "The real Git CLI detects conflicts without mutation, requires confirmation by default, honors saved keep without publishing, resolves staged conflicts locally without pushing, and commits and pushes a staged resolution without changing the target; unknown actions are rejected. The paired UI verifies unresolved conflicts stay uncommitted and unpublished, presents keep, resolve-only, and resolve-and-push with the remember checkbox, verifies remembered choices skip confirmation and persist in Settings, and confirms resolve-only commits staged resolution locally while the remote task branch remains absent."
+    "expectation": "The real Git CLI detects conflicts without mutation and blocks PR creation until the explicit Fix Conflicts action is used; it resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI verifies PR creation directs the user to resolve conflicts in the task worktree and leaves unresolved conflicts uncommitted and unpublished."
+  },
+  {
+    "id": "test_review_pr_conflicts_probe_and_verify",
+    "expectation": "Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 10 seconds. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action beside its PR link; the conflict action and PR link have hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head."
   },
   {
     "id": "test_done_archive_displays_existing_pull_request_link",

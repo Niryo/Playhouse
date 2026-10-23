@@ -1234,7 +1234,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
     }
 
-    // case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR; an unmerged PR keeps its link and suppresses the completion button. After all PRs merge, focus replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files without loading conversation histories, while the visible archive loads the newest 40 first and reveals older tasks as the user scrolls.
+    // case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 10 seconds; rapid focus changes are suppressed. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls.
     func test_task_done_preserves_worktree_and_branch() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture()
@@ -1303,15 +1303,20 @@ final class StationAIUITests: XCTestCase {
         let secondPRLink = element("task-pr-link-\(taskID)-456")
         XCTAssertTrue(prLink.waitForExistence(timeout: 10), "The linked unmerged PR should remain available on the Review card.")
         XCTAssertTrue(secondPRLink.waitForExistence(timeout: 10), "The task's second linked PR should also be visible.")
+        XCTAssertGreaterThanOrEqual(prLink.frame.width, 30, "A PR link should have a comfortable horizontal hit target.")
+        XCTAssertGreaterThanOrEqual(prLink.frame.height, 30, "A PR link should have a comfortable vertical hit target.")
+        XCTAssertGreaterThanOrEqual(secondPRLink.frame.width, 30, "The second PR link should have a comfortable horizontal hit target.")
+        XCTAssertGreaterThanOrEqual(secondPRLink.frame.height, 30, "The second PR link should have a comfortable vertical hit target.")
         let completionButton = element("task-complete-merged-pr-\(taskID)")
         XCTAssertFalse(completionButton.exists)
         let ghCallsURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["STATIONAI_E2E_GH_CALL_LOG"]))
         XCTAssertTrue(waitUntil({
             ((try? String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) ?? 0) >= 2
         }, timeout: 10), "Opening the board should check the linked PR.")
-        XCTAssertEqual(Array(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), ["123", "456"])
+        XCTAssertEqual(Set(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), Set(["123", "456"]))
         XCTAssertTrue(prLink.exists, "An unmerged PR should stay as a link.")
         XCTAssertTrue(secondPRLink.exists, "A second unmerged PR should stay as a link.")
+        Thread.sleep(forTimeInterval: 10.1)
         let ghStateURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["STATIONAI_E2E_GH_STATE_PATH"]))
         try "123=merged\n456=unmerged\n".write(to: ghStateURL, atomically: true, encoding: .utf8)
         let previousCheckCount = (try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count
@@ -1319,28 +1324,36 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({
             ((try? String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) ?? 0) >= previousCheckCount + 2
         }, timeout: 10), "Regaining focus should refresh the PR merge state.")
-        XCTAssertEqual(Array(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), ["123", "456"])
+        XCTAssertEqual(Set(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), Set(["123", "456"]))
         XCTAssertFalse(completionButton.exists, "The task should remain incomplete while any linked PR is unmerged.")
         XCTAssertTrue(prLink.exists)
         XCTAssertTrue(secondPRLink.exists)
+        let rapidFocusCheckCount = (try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count
+        activateOtherAppThenReturn()
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual((try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count, rapidFocusCheckCount, "Rapid focus changes should not repeat GitHub checks.")
+        Thread.sleep(forTimeInterval: 10.1)
         try "123=unmerged\n456=merged\n".write(to: ghStateURL, atomically: true, encoding: .utf8)
         let thirdCheckCount = (try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count
         activateOtherAppThenReturn()
         XCTAssertTrue(waitUntil({
             ((try? String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) ?? 0) >= thirdCheckCount + 2
         }, timeout: 10), "Focus should query both PRs when the second PR is already merged.")
-        XCTAssertEqual(Array(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), ["123", "456"])
+        XCTAssertEqual(Set(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), Set(["123", "456"]))
         XCTAssertFalse(completionButton.exists, "Either unmerged PR should suppress task completion.")
         XCTAssertTrue(prLink.exists)
         XCTAssertTrue(secondPRLink.exists)
+        Thread.sleep(forTimeInterval: 10.1)
         try "123=merged\n456=merged\n".write(to: ghStateURL, atomically: true, encoding: .utf8)
         let fourthCheckCount = (try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline)).count
         activateOtherAppThenReturn()
         XCTAssertTrue(waitUntil({
             ((try? String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) ?? 0) >= fourthCheckCount + 2
         }, timeout: 10), "Regaining focus should refresh both PR merge states.")
-        XCTAssertEqual(Array(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), ["123", "456"])
+        XCTAssertEqual(Set(try String(contentsOf: ghCallsURL, encoding: .utf8).split(whereSeparator: \.isNewline).suffix(2)), Set(["123", "456"]))
         XCTAssertTrue(completionButton.waitForExistence(timeout: 10), "A merged PR should replace its link with the completion button.")
+        XCTAssertGreaterThanOrEqual(completionButton.frame.width, 30, "The completion action should have a comfortable horizontal hit target.")
+        XCTAssertGreaterThanOrEqual(completionButton.frame.height, 30, "The completion action should have a comfortable vertical hit target.")
         XCTAssertEqual(completionButton.label, "Green checkmark. Complete task, all linked pull requests merged")
         assertContainsGreenForeground(in: completionButton)
         XCTAssertFalse(prLink.exists)
@@ -1395,9 +1408,12 @@ final class StationAIUITests: XCTestCase {
         let sessions = dataDirectory.appendingPathComponent("codex-home/sessions/2026/10/22", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         let sessionFile = sessions.appendingPathComponent("rollout-2026-10-22T00-00-00-\(threadID).jsonl")
-        let sessionLine: [String: Any] = ["type": "response_item", "payload": ["type": "message", "role": "assistant", "content": [["type": "text", "text": "LOCAL-SESSION-ONLY-token"]]]]
-        let sessionData = try JSONSerialization.data(withJSONObject: sessionLine)
-        try (sessionData + Data([0x0A])).write(to: sessionFile, options: .atomic)
+        let sessionLines: [[String: Any]] = [
+            ["type": "response_item", "payload": ["type": "message", "role": "user", "content": [["type": "input_text", "text": "LOCAL-SESSION-ONLY-input-token"]]]],
+            ["type": "response_item", "payload": ["type": "message", "role": "assistant", "content": [["type": "output_text", "text": "LOCAL-SESSION-ONLY-output-token"]]]]
+        ]
+        let sessionData = try sessionLines.map { try JSONSerialization.data(withJSONObject: $0) + Data([0x0A]) }.reduce(into: Data()) { $0.append($1) }
+        try sessionData.write(to: sessionFile, options: .atomic)
 
         let archiveButton = element("done-archive-button")
         archiveButton.click()
@@ -1419,9 +1435,11 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(archiveResult.waitForExistence(timeout: 10), "Searching saved conversation text should find the completed task.")
         XCTAssertLessThan(titleMatchResult.frame.minY, archiveResult.frame.minY, "Title matches should precede conversation-only matches.")
         element("clear-archive-search-button").click()
-        archiveSearch.typeText("local-session-only-TOKEN")
-        XCTAssertTrue(archiveResult.waitForExistence(timeout: 10), "Searching text found only in the local JSONL file should find its completed task.")
-        XCTAssertFalse(titleMatchResult.exists, "A conversation-only query should not return a task whose title does not match.")
+        archiveSearch.typeText("local-session-only-output-TOKEN")
+        XCTAssertTrue(waitUntil({ archiveResult.exists && !titleMatchResult.exists }, timeout: 10), "Searching assistant output_text should show its conversation match and filter out unrelated title matches.")
+        element("clear-archive-search-button").click()
+        archiveSearch.typeText("local-session-only-input-TOKEN")
+        XCTAssertTrue(waitUntil({ archiveResult.exists && !titleMatchResult.exists }, timeout: 10), "Searching user input_text should show its conversation match and filter out unrelated title matches.")
         element("clear-archive-search-button").click()
         archiveSearch.typeText("FiXtUrE-SeCrEt")
         XCTAssertTrue(titleMatchResult.waitForExistence(timeout: 10))
@@ -1434,6 +1452,119 @@ final class StationAIUITests: XCTestCase {
         element("back-to-board-button").click()
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done", "Leaving the read-only conversation must not alter the archived task.")
         attachScreenshot(named: "Completed task opens from the searchable read-only archive")
+    }
+
+    // case-contract: test_review_pr_conflicts_probe_and_verify | Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 10 seconds. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action beside its PR link; the conflict action and PR link have hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head.
+    func test_review_pr_conflicts_probe_and_verify() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        var ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [123, 456])
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Review PR conflict UI", "--repo", fixture.primary.path,
+            "--merge-target", "\(fixture.primary.path)=main",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Review PR conflict UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Review PR conflict UI")
+        element("back-to-board-button").click()
+        XCTAssertTrue(waitUntil({ element("task-card-\(taskID)").exists }, timeout: 10))
+        let secondCreated = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Second Review PR conflict UI", "--repo", fixture.secondary.path,
+            "--merge-target", "\(fixture.secondary.path)=main",
+        ])["result"] as? [String: Any])
+        let secondTaskID = try XCTUnwrap(secondCreated["id"] as? String)
+        openTask(named: "Second Review PR conflict UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Second Review PR conflict UI")
+        element("back-to-board-button").click()
+        XCTAssertTrue(waitUntil({ element("task-card-\(secondTaskID)").exists }, timeout: 10))
+        XCTAssertTrue(terminateAppAndWait(app))
+        try seedTaskPullRequest(taskID: taskID, number: 123, url: "https://github.com/stationai-test/fixture/pull/123")
+        try seedTaskPullRequest(taskID: secondTaskID, number: 456, url: "https://github.com/stationai-test/fixture/pull/456")
+        let remote = runDirectory.appendingPathComponent("conflict-solver-origin.git", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: remote.path), "Each UI case should use a fresh owned bare remote.")
+        _ = try runGitOutput(remote, "init", "--bare")
+        for (id, number) in [(taskID, 123), (secondTaskID, 456)] {
+            let record = try XCTUnwrap((try taskRecord(id: id)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+            let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String), isDirectory: true)
+            try runGit(worktree, "push", remote.path, "HEAD:refs/heads/pr-\(number)")
+        }
+        ghEnvironment["STATIONAI_E2E_GH_REMOTE_REPOSITORY"] = remote.path
+
+        let resolutionFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success-wait")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: resolutionFixture.path))
+        codexFixtureExecutable = resolutionFixture.path
+        let readyURL = URL(fileURLWithPath: resolutionFixture.path + ".resolve-ready")
+        let continueURL = URL(fileURLWithPath: resolutionFixture.path + ".resolve-continue")
+        let startCountURL = URL(fileURLWithPath: resolutionFixture.path + ".resolve-start-count")
+        try? FileManager.default.removeItem(at: readyURL)
+        try? FileManager.default.removeItem(at: continueURL)
+        try? FileManager.default.removeItem(at: startCountURL)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+
+        let link = element("task-pr-link-\(taskID)-123")
+        let resolveButton = element("task-resolve-pr-conflicts-\(taskID)")
+        XCTAssertTrue(link.waitForExistence(timeout: 10))
+        let secondLink = element("task-pr-link-\(secondTaskID)-456")
+        XCTAssertTrue(secondLink.waitForExistence(timeout: 10))
+        XCTAssertGreaterThanOrEqual(secondLink.frame.width, 30, "The second task's PR link should have a comfortable horizontal hit target.")
+        XCTAssertGreaterThanOrEqual(secondLink.frame.height, 30, "The second task's PR link should have a comfortable vertical hit target.")
+        let startedDirectory = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["STATIONAI_E2E_GH_STARTED_DIRECTORY"]))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("123").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("456").path), "Both Review task probes should overlap on focus.")
+        XCTAssertFalse(resolveButton.exists, "A mergeable PR should not show the conflict action.")
+        Thread.sleep(forTimeInterval: 10.1)
+        let stateURL = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["STATIONAI_E2E_GH_STATE_PATH"]))
+        try "123=conflicting\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        for number in [123, 456] { try? FileManager.default.removeItem(at: startedDirectory.appendingPathComponent("\(number)")) }
+        activateOtherAppThenReturn()
+        XCTAssertTrue(resolveButton.waitForExistence(timeout: 10), "Focus should discover the conflicting PR.")
+        XCTAssertGreaterThanOrEqual(resolveButton.frame.width, 30, "The conflict action should have a comfortable horizontal hit target.")
+        XCTAssertGreaterThanOrEqual(resolveButton.frame.height, 30, "The conflict action should have a comfortable vertical hit target.")
+        XCTAssertGreaterThanOrEqual(link.frame.width, 30, "A PR link should have a comfortable horizontal hit target.")
+        XCTAssertGreaterThanOrEqual(link.frame.height, 30, "A PR link should have a comfortable vertical hit target.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("123").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("456").path), "Focus refresh should probe separate Review cards concurrently.")
+
+        resolveButton.click()
+        let initialPrompt = "The PR has conflicts. Fix them, commit, and push."
+        let initialPromptElement = app.staticTexts.matching(NSPredicate(format: "label == %@", initialPrompt)).firstMatch
+        XCTAssertTrue(initialPromptElement.waitForExistence(timeout: 10), "The conflict action should send the corrected instruction into the task conversation.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: readyURL.path) }, timeout: 10), "Codex should start the conflict resolution turn.")
+        try "Continue after first conflict attempt.\n".write(to: continueURL, atomically: true, encoding: .utf8)
+
+        let retryPrompt = "The PR still has conflicts or your latest commit has not reached GitHub. Resolve the remaining conflicts, commit, and push. Verify the PR's merge status before finishing."
+        let retryPromptElement = app.staticTexts.matching(NSPredicate(format: "label == %@", retryPrompt)).firstMatch
+        XCTAssertTrue(retryPromptElement.waitForExistence(timeout: 15), "A still-conflicting PR should receive one follow-up turn.")
+        XCTAssertTrue(waitUntil({
+            (try? String(contentsOf: startCountURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) == 2
+        }, timeout: 10), "Codex should start exactly two resolution turns.")
+        let primaryRecord = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let primaryWorktree = URL(fileURLWithPath: try XCTUnwrap(primaryRecord["worktreePath"] as? String), isDirectory: true)
+        try "Resolution from the conflict solver.\n".write(
+            to: primaryWorktree.appendingPathComponent("conflict-solver-resolution.txt"), atomically: true, encoding: .utf8
+        )
+        try runGit(primaryWorktree, "add", "conflict-solver-resolution.txt")
+        try runGit(primaryWorktree, "commit", "-m", "Resolve pull request conflicts")
+        let resolvedLocalHead = try runGitOutput(primaryWorktree, "rev-parse", "HEAD")
+        let staleRemoteHead = try runGitOutput(remote, "rev-parse", "refs/heads/pr-123")
+        XCTAssertNotEqual(resolvedLocalHead, staleRemoteHead, "A local resolution commit must remain unconfirmed until it is pushed.")
+        try "123=remote\n456=unmerged\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        _ = try runCLI(
+            ["task", "outcome", taskID, "completed"],
+            extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": resolutionFixture.path]
+        )
+        try "Continue after verified conflict resolution.\n".write(to: continueURL, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ element("send-message-button").exists }, timeout: 15), "The second Codex turn should finish after the verified push.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
+        element("back-to-board-button").click()
+        XCTAssertTrue(resolveButton.exists, "A mergeable PR with a mismatched remote head must retain the conflict action.")
+        try runGit(primaryWorktree, "push", remote.path, "HEAD:refs/heads/pr-123")
+        XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/pr-123"), resolvedLocalHead)
+        try "123=remote\n456=unmerged\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        for number in [123, 456] { try? FileManager.default.removeItem(at: startedDirectory.appendingPathComponent("\(number)")) }
+        Thread.sleep(forTimeInterval: 10.1)
+        activateOtherAppThenReturn()
+        XCTAssertTrue(waitUntil({ !resolveButton.exists }, timeout: 10), "The action should disappear after GitHub confirms the pushed head.")
     }
 
     // case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done changes only task status and preserves dirty worktree files, branch, and target commit without committing or merging.
@@ -1463,7 +1594,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Done preserves the task worktree without merging")
     }
 
-    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes. The Done archive control retains its help and waits for the task lock before publication failure without saving a PR link or changing Done status.
+    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target. The Done archive control retains its help and waits for the task lock before publication failure without saving a PR link or changing Done status.
     func test_task_pr_create_reports_real_gh_failure() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -1487,6 +1618,8 @@ final class StationAIUITests: XCTestCase {
         element("back-to-board-button").click()
         let activeCreateButton = element("task-create-pr-\(taskID)")
         XCTAssertTrue(activeCreateButton.waitForExistence(timeout: 5), "An active repository task should expose its PR action on the card.")
+        XCTAssertGreaterThanOrEqual(activeCreateButton.frame.width, 30, "The PR action should have a comfortable horizontal hit target.")
+        XCTAssertGreaterThanOrEqual(activeCreateButton.frame.height, 30, "The PR action should have a comfortable vertical hit target.")
         assertHoverEmphasis(for: activeCreateButton)
         assertHelpTag(for: activeCreateButton, equals: "Create a pull request for each repository linked to this task")
         moveTaskToDone(taskID: taskID)
@@ -1523,7 +1656,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(current["status"] as? String, "Done")
     }
 
-    // case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects conflicts without mutation, requires confirmation by default, honors saved keep without publishing, resolves staged conflicts locally without pushing, and commits and pushes a staged resolution without changing the target; unknown actions are rejected. The paired UI verifies unresolved conflicts stay uncommitted and unpublished, presents keep, resolve-only, and resolve-and-push with the remember checkbox, verifies remembered choices skip confirmation and persist in Settings, and confirms resolve-only commits staged resolution locally while the remote task branch remains absent.
+    // case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects conflicts without mutation and blocks PR creation until the explicit Fix Conflicts action is used; it resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI verifies PR creation directs the user to resolve conflicts in the task worktree and leaves unresolved conflicts uncommitted and unpublished.
     func test_task_pr_conflicts_detect_without_mutation() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -1564,67 +1697,20 @@ final class StationAIUITests: XCTestCase {
         let prButton = element("task-create-pr-\(taskID)")
         XCTAssertTrue(prButton.waitForExistence(timeout: 5))
         prButton.click()
-        XCTAssertTrue(element("pr-conflict-confirmation").waitForExistence(timeout: 10), "The PR action should ask how to handle actual merge conflicts.")
-        XCTAssertTrue(app.buttons["Resolve and push"].waitForExistence(timeout: 5), "The conflict sheet should expose its resolve-and-push option. \(app.debugDescription)")
-        XCTAssertTrue(app.buttons["Keep PR as is"].waitForExistence(timeout: 5), "The conflict sheet should expose its keep option.")
-        app.buttons["Resolve without pushing"].click()
-        XCTAssertTrue(waitUntil({ !element("pr-conflict-confirmation").exists }, timeout: 10))
-        let unresolvedAlert = app.alerts["Couldn't create pull request"]
-        XCTAssertTrue(unresolvedAlert.waitForExistence(timeout: 20), "Resolve without pushing should run conflict resolution and report that unresolved files remain. \(app.debugDescription)")
-        XCTAssertTrue((unresolvedAlert.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "couldn't resolve every merge conflict")).firstMatch).exists)
-        unresolvedAlert.buttons["OK"].click()
-        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), branchHead, "Resolve without pushing must not advance the task branch when conflicts remain unresolved.")
+        let blockedAlert = app.alerts["Couldn't create pull request"]
+        XCTAssertTrue(blockedAlert.waitForExistence(timeout: 10), "PR creation should direct the user to resolve conflicts in the task worktree.")
+        XCTAssertTrue(blockedAlert.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Resolve conflicts in the task worktree")).firstMatch.exists)
+        blockedAlert.buttons["OK"].click()
+        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), branchHead, "Blocked PR creation must leave the task branch unchanged.")
         XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetHead)
-
-        prButton.click()
-        XCTAssertTrue(element("pr-conflict-confirmation").waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["Resolve and push"].exists)
-        XCTAssertTrue(app.buttons["Resolve without pushing"].exists)
-        let remember = app.checkBoxes["Remember this choice"]
-        remember.click()
-        app.buttons["Resolve and push"].click()
-        XCTAssertTrue(waitUntil({ !element("pr-conflict-confirmation").exists }, timeout: 10))
-        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["pullRequestConflictAction"] as? String, "resolve-and-push", "The push choice should persist its own policy before starting resolution.")
-        XCTAssertTrue(unresolvedAlert.waitForExistence(timeout: 20))
-        XCTAssertTrue((unresolvedAlert.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "couldn't resolve every merge conflict")).firstMatch).exists)
-        unresolvedAlert.buttons["OK"].click()
-        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), branchHead, "An unresolved conflict must not be committed or pushed.")
-        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetHead)
-        try runCLI(["settings", "set-pr-conflict-action", "ask"])
-
-        prButton.click()
-        XCTAssertTrue(element("pr-conflict-confirmation").waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["Resolve and push"].exists)
-        XCTAssertTrue(app.buttons["Resolve without pushing"].exists)
-        XCTAssertTrue(remember.exists)
-        remember.click()
-        app.buttons["Keep PR as is"].click()
-        XCTAssertTrue(waitUntil({ !element("pr-conflict-confirmation").exists }, timeout: 10))
-        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["pullRequestConflictAction"] as? String, "keep")
-        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), branchHead)
-        XCTAssertTrue(waitUntil({ prButton.isEnabled }, timeout: 10))
-        prButton.click()
-        XCTAssertFalse(element("pr-conflict-confirmation").waitForExistence(timeout: 1), "A remembered action should skip the confirmation next time.")
-
-        try "resolved task and target versions\n".write(to: worktree.appendingPathComponent(conflictPath), atomically: true, encoding: .utf8)
-        try runGit(worktree, "add", conflictPath)
-        try runCLI(["settings", "set-pr-conflict-action", "ask"])
-        prButton.click()
-        XCTAssertTrue(element("pr-conflict-confirmation").waitForExistence(timeout: 10))
-        element("pr-conflict-resolve-only-button").click()
-        XCTAssertTrue(waitUntil({ !element("pr-conflict-confirmation").exists }, timeout: 10))
-        XCTAssertTrue(waitUntil({
-            (try? runGitOutput(worktree, "rev-parse", "HEAD")) != branchHead
-        }, timeout: 10), "Resolve-only should commit the staged resolution locally.")
-        XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetHead, "Resolve-only must leave the target branch unchanged.")
         XCTAssertEqual(
             try runGitOutput(fixture.primary, "ls-remote", "--heads", "origin", try XCTUnwrap(completedRecord["branch"] as? String))
                 .trimmingCharacters(in: .whitespacesAndNewlines),
             "",
-            "Resolve-only must keep the task branch unpublished."
+            "Blocked PR creation must not publish the task branch."
         )
+        XCTAssertTrue(waitUntil({ prButton.isEnabled }, timeout: 10))
         XCTAssertNil((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"])
-        XCTAssertFalse(app.alerts["Couldn't create pull request"].exists, "Resolve-only should finish without starting PR publication.")
         let finalRecord = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
         XCTAssertNil(finalRecord["pullRequestNumber"])
     }
@@ -1882,7 +1968,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ lowestTask.exists && lowestTask.isHittable }, timeout: 10), "Vertical board scrolling should make lower backlog tasks reachable.")
     }
 
-    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Only an explicit completed outcome reaches Review.
+    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review.
     func test_task_progress_reports_publish_persist_and_clear() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Progress reports", roots: [fixture.primary.path])
@@ -2018,9 +2104,10 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(instructions.contains(cliURL.path))
         XCTAssertTrue(instructions.contains("task progress publish"))
         XCTAssertTrue(instructions.contains("hidden from the conversation"))
-        XCTAssertTrue(instructions.contains("periodically during substantial work"))
-        XCTAssertTrue(instructions.contains("active test and position"))
-        XCTAssertTrue(instructions.contains("Test 3/8"))
+        XCTAssertTrue(instructions.contains("at least every 30 seconds"))
+        XCTAssertTrue(instructions.contains("starting or finishing a substantial tool call"))
+        XCTAssertTrue(instructions.contains("active suite/case and position"))
+        XCTAssertTrue(instructions.contains("CLI/XPC 3/8"))
         XCTAssertTrue(instructions.contains("under 80 characters"))
         XCTAssertTrue(instructions.contains("task outcome"))
         XCTAssertTrue(instructions.contains("waiting-response"))
@@ -2791,12 +2878,11 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Failed task deletion can be retried after repository recovery")
     }
 
-    // case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, and the ask-each-time, resolve-and-push, resolve-only, and keep-PR conflict preferences validate and persist across fresh CLI/XPC reads and are editable in Settings; appearance changes update the open Settings picker.
+    // case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, the removed PR conflict preference is absent from CLI/XPC and Settings, and appearance changes update the open Settings picker.
     func test_default_parent_settings_read_write_clear_and_validation() throws {
         launchApp(defaultParent: nil)
         let initialSettings = try runCLI(["settings", "get"])["result"] as? [String: Any]
         XCTAssertNil(initialSettings?["defaultParentFolder"] as? String)
-        XCTAssertEqual(initialSettings?["pullRequestConflictAction"] as? String, "ask")
         openNewTaskConversation()
         XCTAssertEqual(try tasksFromBoardList().count, 1, "New Task should create its pending conversation before folder discovery.")
         element("choose-repository-suggestion-parent-button").click()
@@ -2837,23 +2923,7 @@ final class StationAIUITests: XCTestCase {
         let appearancePicker = preferencesWindow.descendants(matching: .any)
             .matching(identifier: "appearance-picker").firstMatch
         XCTAssertTrue(appearancePicker.waitForExistence(timeout: 5), "Workspace Settings should expose the Dark and Light theme choices.")
-        let conflictPicker = preferencesWindow.descendants(matching: .any).matching(identifier: "pr-conflict-action-picker").firstMatch
-        XCTAssertTrue(conflictPicker.waitForExistence(timeout: 5), "Workspace Settings should expose the saved PR conflict behavior.")
-        conflictPicker.click()
-        let resolveOnlyChoice = preferencesWindow.menuItems["Resolve without pushing"]
-        if resolveOnlyChoice.waitForExistence(timeout: 2) {
-            resolveOnlyChoice.click()
-        } else {
-            preferencesWindow.buttons["Resolve without pushing"].click()
-        }
-        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["pullRequestConflictAction"] as? String, "resolve-only")
-        _ = try runCLI(["settings", "set-pr-conflict-action", "keep"])
-        let conflictPickerUpdated = waitUntil({ conflictPicker.value as? String == "Keep the PR as is" }, timeout: 5)
-        if !conflictPickerUpdated {
-            attachScreenshot(named: "Conflict preference picker after external write")
-        }
-        XCTAssertTrue(conflictPickerUpdated, "An external CLI write should update the saved conflict behavior picker. \(conflictPicker.debugDescription); \(preferencesWindow.debugDescription)")
-        _ = try runCLI(["settings", "set-pr-conflict-action", "ask"])
+        XCTAssertFalse(preferencesWindow.descendants(matching: .any).matching(identifier: "pr-conflict-action-picker").firstMatch.exists, "Workspace Settings should no longer expose automatic PR conflict behavior.")
         XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["appearance"] as? String, "dark")
         appearancePicker.click()
         let lightChoice = preferencesWindow.menuItems["Light"]
@@ -3682,16 +3752,16 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts[secondPrompt].waitForExistence(timeout: 10), "Reopening the task should load the completed second send from the real app-server thread.")
     }
 
-    // case-contract: test_conversation_steers_and_queues_active_turn | While a Codex turn is active, stale CLI/XPC steering reports an error and preserves the composer draft; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview. Plain Return queues a follow-up; its row Steer uses the active turn ID, appears in the transcript, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and rejected steering remains available as needsAction. A distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
+    // case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; with no active turn, a missed queued-row steer dispatches synchronously as its own turn and leaves the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up; its row Steer uses the active turn ID, appears in the transcript, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
     func test_conversation_steers_and_queues_active_turn() throws {
         let sharedFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-steer-queue-serial-success-wait")
         let fixtureOwner = try String(contentsOf: WorkspaceFixture.root.appendingPathComponent(WorkspaceFixture.ownerMarker), encoding: .utf8)
         XCTAssertEqual(fixtureOwner, WorkspaceFixture.ownerContents, "Only the prepared, owned fixture root may contain the executable app-server fixture.")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: sharedFixture.path), "The focused active-turn fixture should be prepared as an executable by the UI runner.")
-        for suffix in ["resolve-ready", "resolve-continue", "serial-second-turn-started", "history", "reject-next-steer"] {
+        for suffix in ["resolve-ready", "resolve-continue", "serial-second-turn-started", "history", "reject-next-steer", "hold-next-queued-turn", "queued-turn-ready", "queued-turn-release", "fail-next-turn-start"] {
             try? FileManager.default.removeItem(at: URL(fileURLWithPath: sharedFixture.path + ".\(suffix)"))
         }
-        try "reject one stale steer\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".reject-next-steer"), atomically: true, encoding: .utf8)
+        try "no active turn to steer\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".reject-next-steer"), atomically: true, encoding: .utf8)
         codexFixtureExecutable = sharedFixture.path
         launchWindowTitle = "StationAI · steer-queue-test"
         launchApp(defaultParent: fixture.parent.path)
@@ -3702,6 +3772,7 @@ final class StationAIUITests: XCTestCase {
         let taskID = try taskID(named: "Active turn message controls")
         let firstPrompt = "Start the active turn before steering and queueing."
         let steeringText = "Keep the current approach and simplify the final change."
+        let missedRowSteerText = "Queue this missed row steer for its own turn."
         let rowSteeringText = "Send this queued follow-up into the active turn."
         let queuedText = "After the current work, verify the saved follow-up."
         XCTAssertTrue(app.staticTexts["Start a conversation"].waitForExistence(timeout: 15), "Conversation history should finish loading before the composer is used.")
@@ -3742,12 +3813,14 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Ask for follow-up changes"].exists, "The active composer should identify follow-up changes.")
         let preservedDraft = "Keep this unsent draft while steering."
         composer.typeText(preservedDraft)
-        let rejectedSteer = try runCLI(
-            ["conversation", "steer", taskID, "--message", "Reject this stale steer."],
-            expectedStatus: 1
-        )
-        XCTAssertEqual((rejectedSteer["error"] as? [String: Any])?["code"] as? String, "operation_failed")
-        XCTAssertEqual(composer.value as? String, preservedDraft, "A rejected CLI steer should leave a non-empty composer draft unchanged.")
+        let missedSteer = try runCLI(["conversation", "steer", taskID, "--message", "Queue this missed steer."])["result"] as? [String: Any]
+        XCTAssertEqual(missedSteer?["accepted"] as? Bool, true)
+        XCTAssertEqual(missedSteer?["queued"] as? Bool, true)
+        XCTAssertEqual(composer.value as? String, preservedDraft, "A CLI steer should leave a non-empty composer draft unchanged.")
+        let missedQueue = try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
+        let missedQueueItem = try XCTUnwrap(missedQueue?.first(where: { $0["text"] as? String == "Queue this missed steer." }))
+        XCTAssertEqual(missedQueueItem["state"] as? String, "queued")
+        try runCLI(["conversation", "queue-remove", taskID, try XCTUnwrap(missedQueueItem["id"] as? String)])
         composer.typeKey("a", modifierFlags: .command)
         composer.typeKey(.delete, modifierFlags: [])
         let invalidImage = dataDirectory.appendingPathComponent("invalid-steer.png")
@@ -3781,40 +3854,54 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(transcriptImages.count, 2)
         XCTAssertFalse(element("pending-chat-images").exists, "An accepted steer should clear its image preview.")
         XCTAssertEqual(composer.value as? String, "", "An accepted Command-Return steer should clear the draft.")
+        try "no active turn to steer\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".reject-next-steer"), atomically: true, encoding: .utf8)
+        let missedUISteerText = "Queue this missed UI steer with its image."
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setData(uiPNG, forType: .png)
         composer.click()
-        composer.typeText(rowSteeringText)
+        composer.typeText(missedUISteerText)
+        composer.typeKey("v", modifierFlags: .command)
+        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "The fallback steer's image should remain attached until queue acceptance.")
+        composer.typeKey(.return, modifierFlags: .command)
+        XCTAssertTrue(waitUntil({ (composer.value as? String) == "" }, timeout: 10), "A missed UI steer should be accepted into the follow-up queue and clear the composer.")
+        XCTAssertFalse(element("codex-chat-error").exists, "A missed UI steer should not show an error.")
+        let missedUISteerQueue = try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
+        let missedUISteerItem = try XCTUnwrap(missedUISteerQueue?.first(where: { $0["text"] as? String == missedUISteerText }))
+        XCTAssertEqual(missedUISteerItem["state"] as? String, "queued")
+        let queuedImages = try XCTUnwrap(missedUISteerItem["imageDataURLs"] as? [String])
+        XCTAssertEqual(queuedImages.count, 1, "The queued fallback should preserve its attached image.")
+        XCTAssertTrue(queuedImages[0].hasPrefix("data:image/png;base64,"))
+        XCTAssertFalse(element("pending-chat-images").exists, "Queue acceptance should clear the attached image preview.")
+        composer.click()
+        composer.typeText(missedRowSteerText)
         composer.typeKey(.return, modifierFlags: [])
         let queued = try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
-        XCTAssertEqual(queued?.count, 1)
-        XCTAssertEqual(queued?.first?["text"] as? String, rowSteeringText)
-        let queuedID = try XCTUnwrap(queued?.first?["id"] as? String)
+        XCTAssertEqual(queued?.count, 2, "Both the missed composer steer and the ordinary follow-up should be queued.")
+        let missedRowItem = try XCTUnwrap(queued?.first(where: { $0["text"] as? String == missedRowSteerText }))
+        let queuedID = try XCTUnwrap(missedRowItem["id"] as? String)
         let queuedRowText = element("queued-message-text-\(queuedID)")
         XCTAssertTrue(queuedRowText.waitForExistence(timeout: 10), "Queued text should be visible in its composer row. app=\(app.debugDescription)")
-        XCTAssertEqual(queuedRowText.value as? String, rowSteeringText, "The queue row should expose the actual follow-up text.")
+        XCTAssertEqual(queuedRowText.value as? String, missedRowSteerText, "The queue row should expose the actual follow-up text.")
         XCTAssertTrue(element("steer-queued-message-\(queuedID)").exists, "A queued follow-up should offer a per-row steer action.")
         XCTAssertTrue(element("queued-message-more-\(queuedID)").exists, "A queued follow-up should offer its more-actions menu.")
         element("back-to-board-button").click()
         openTask(named: "Active turn message controls")
         let reopenedQueuedRow = element("queued-message-text-\(queuedID)")
         XCTAssertTrue(reopenedQueuedRow.waitForExistence(timeout: 10), "The queued row should render after reopening the task during the active turn.")
-        XCTAssertEqual(reopenedQueuedRow.value as? String, rowSteeringText)
+        XCTAssertEqual(reopenedQueuedRow.value as? String, missedRowSteerText)
         XCTAssertTrue(element("steer-queued-message-\(queuedID)").exists, "Reopening should restore the queued row Steer action.")
-        try "reject queued steer\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".reject-next-steer"), atomically: true, encoding: .utf8)
+        try "expected active turn id stale-turn but found fixture-turn\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".reject-next-steer"), atomically: true, encoding: .utf8)
         element("steer-queued-message-\(queuedID)").click()
-        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10), "A rejected queued steer should surface an error.")
-        let rejectedQueue = try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
-        let needsActionVisible = waitUntil({ element("queued-message-needs-action-\(queuedID)").exists }, timeout: 10)
-        if !needsActionVisible { attachScreenshot(named: "Rejected follow-up state missing from composer row") }
-        let needsActionIndicator = element("queued-message-needs-action-\(queuedID)")
-        XCTAssertTrue(needsActionVisible, "A rejected row should visibly change to needs-action state. Queue=\(rejectedQueue ?? []); app=\(app.debugDescription)")
-        XCTAssertEqual(needsActionIndicator.value as? String, "Follow-up needs your action")
-        XCTAssertTrue(element("retry-queued-message-\(queuedID)").exists, "A row needing action should expose its retry control.")
-        XCTAssertEqual(rejectedQueue?.first?["state"] as? String, "needsAction", "A rejected queued steer should remain visible for action.")
-        element("remove-queued-message-\(queuedID)").click()
-        XCTAssertTrue(waitUntil({
-            ((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).isEmpty
-        }, timeout: 10), "A rejected queued row should remain removable.")
-        XCTAssertTrue(waitUntil({ !element("queued-message-text-\(queuedID)").exists }, timeout: 5), "Removing a rejected row should also remove it from the visible composer stack.")
+        XCTAssertFalse(element("codex-chat-error").exists, "A missed queued steer should not surface an error.")
+        let fallbackQueue = try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
+        let missedRowFallback = try XCTUnwrap(fallbackQueue?.first(where: { $0["id"] as? String == queuedID }))
+        XCTAssertEqual(missedRowFallback["state"] as? String, "queued", "A missed row steer should remain queued for its own turn.")
+        XCTAssertTrue(element("queued-message-text-\(queuedID)").exists, "A missed queued steer should remain visible in the queue.")
+        element("back-to-board-button").click()
+        openTask(named: "Active turn message controls")
+        let reopenedMissedRow = element("queued-message-text-\(queuedID)")
+        XCTAssertTrue(reopenedMissedRow.waitForExistence(timeout: 10), "The missed row steer should persist in queued state after reopening.")
+        XCTAssertEqual(missedRowFallback["text"] as? String, missedRowSteerText)
         let retainedAfterInvalidRemoval = try runCLI(["conversation", "queue", taskID, "--message", "Keep this queued after an unknown removal."])["result"] as? [String: Any]
         let retainedQueueID = try XCTUnwrap(retainedAfterInvalidRemoval?["id"] as? String)
         let invalidRemoval = try runCLI(
@@ -3823,7 +3910,8 @@ final class StationAIUITests: XCTestCase {
         )
         assertCLIError(invalidRemoval, code: "invalid_transition")
         let retainedQueue = try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
-        XCTAssertEqual(retainedQueue?.compactMap { $0["id"] as? String }, [retainedQueueID], "Removing an unknown ID must leave the existing queue unchanged.")
+        let retainedQueueIDs = retainedQueue?.compactMap { $0["id"] as? String } ?? []
+        XCTAssertTrue(retainedQueueIDs.contains(retainedQueueID), "Removing an unknown ID must leave existing queued follow-ups unchanged.")
         composer.click()
         composer.typeText(rowSteeringText)
         XCTAssertEqual(composer.value as? String, rowSteeringText, "The native composer should contain the second follow-up before Return.")
@@ -3832,22 +3920,22 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(activeTurnControl.isEnabled, "The active-turn control should be enabled before Return queues a second follow-up. app=\(app.debugDescription)")
         composer.typeKey(.return, modifierFlags: [])
         let acceptedQueue = try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
-        XCTAssertEqual(acceptedQueue?.first?["text"] as? String, rowSteeringText, "Return should queue the typed follow-up while the active turn is held. activeControl=\(element("pause-response-button").label), composer=\(composer.value as? String ?? "<none>"), error=\(element("codex-chat-error").exists ? element("codex-chat-error").label : "<none>"), fixtureHeld=\(FileManager.default.fileExists(atPath: ready.path))")
-        let acceptedQueueID = try XCTUnwrap(acceptedQueue?.first?["id"] as? String)
+        XCTAssertTrue(acceptedQueue?.contains(where: { $0["text"] as? String == rowSteeringText }) == true, "Return should queue the typed follow-up while the active turn is held. activeControl=\(element("pause-response-button").label), composer=\(composer.value as? String ?? "<none>"), error=\(element("codex-chat-error").exists ? element("codex-chat-error").label : "<none>"), fixtureHeld=\(FileManager.default.fileExists(atPath: ready.path))")
+        let acceptedQueueID = try XCTUnwrap(acceptedQueue?.first(where: { $0["text"] as? String == rowSteeringText })?["id"] as? String)
         element("steer-queued-message-\(acceptedQueueID)").click()
         XCTAssertTrue(waitUntil({
-            ((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).isEmpty
+            !((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).contains { $0["id"] as? String == acceptedQueueID }
         }, timeout: 10), "Steering a queued row should remove it after successful delivery.")
         XCTAssertFalse(element("queued-message-text-\(acceptedQueueID)").exists, "Successful steering should remove the queued text from its row.")
         XCTAssertTrue(app.staticTexts[rowSteeringText].waitForExistence(timeout: 10), "Per-row steering should appear in the active conversation.")
         composer.click()
         composer.typeText("Remove this queued row.")
         composer.typeKey(.return, modifierFlags: [])
-        let removable = try XCTUnwrap((try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.first)
+        let removable = try XCTUnwrap((try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.first(where: { $0["text"] as? String == "Remove this queued row." }))
         let removableID = try XCTUnwrap(removable["id"] as? String)
         element("remove-queued-message-\(removableID)").click()
         XCTAssertTrue(waitUntil({
-            ((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).isEmpty
+            !((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).contains { $0["id"] as? String == removableID }
         }, timeout: 10), "Removing a queued row should persist through CLI/XPC.")
         XCTAssertTrue(waitUntil({ !element("queued-message-text-\(removableID)").exists }, timeout: 5), "Removing a queued follow-up should remove the visible row.")
         composer.click()
@@ -3858,6 +3946,103 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({
             ((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).isEmpty
         }, timeout: 20), "The queued message should dispatch once after the matching completed notification.")
+        let targetedText = "Retry this row as its own turn."
+        composer.click()
+        composer.typeText(targetedText)
+        composer.typeKey(.return, modifierFlags: [])
+        let targetedRow = try XCTUnwrap((try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.first(where: { $0["text"] as? String == targetedText }))
+        let targetedID = try XCTUnwrap(targetedRow["id"] as? String)
+        try "hold targeted delivery\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".hold-next-queued-turn"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(element("steer-queued-message-\(targetedID)").waitForExistence(timeout: 5))
+        element("steer-queued-message-\(targetedID)").click()
+        let targetedReady = URL(fileURLWithPath: sharedFixture.path + ".queued-turn-ready")
+        let targetedRelease = URL(fileURLWithPath: sharedFixture.path + ".queued-turn-release")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: targetedReady.path) }, timeout: 10), "A row steer with no active turn should start a targeted own-turn delivery.")
+        let overlapText = "Queue this steer behind the targeted turn."
+        try "no active turn to steer\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".reject-next-steer"), atomically: true, encoding: .utf8)
+        let overlapSteer = try runCLI(["conversation", "steer", taskID, "--message", overlapText], extraEnvironment: [
+            "STATIONAI_E2E_CODEX_EXECUTABLE": sharedFixture.path
+        ])["result"] as? [String: Any]
+        XCTAssertEqual(overlapSteer?["accepted"] as? Bool, true)
+        XCTAssertEqual(overlapSteer?["queued"] as? Bool, true, "A missed steer during targeted dispatch should queue for the deferred full drain.")
+        let overlapRow = try XCTUnwrap((try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.first(where: { $0["text"] as? String == overlapText }))
+        XCTAssertEqual(overlapRow["state"] as? String, "queued")
+        try "Release targeted delivery.\n".write(to: targetedRelease, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).isEmpty
+        }, timeout: 20), "The deferred full drain should deliver the overlapping missed steer after targeted dispatch.")
+        let targetedRowText = "Retry another row as its own turn."
+        composer.click()
+        composer.typeText(targetedRowText)
+        composer.typeKey(.return, modifierFlags: [])
+        let targetedRowOverlap = try XCTUnwrap((try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.first(where: { $0["text"] as? String == targetedRowText }))
+        let targetedRowID = try XCTUnwrap(targetedRowOverlap["id"] as? String)
+        try "hold targeted row delivery\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".hold-next-queued-turn"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(element("steer-queued-message-\(targetedRowID)").waitForExistence(timeout: 5))
+        element("steer-queued-message-\(targetedRowID)").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: targetedReady.path) }, timeout: 10), "The targeted row turn should be held while a second row steer is submitted.")
+        let missedRowOverlapText = "Queue this missed row steer behind targeted dispatch."
+        composer.click()
+        composer.typeText(missedRowOverlapText)
+        composer.typeKey(.return, modifierFlags: [])
+        let missedRowOverlap = try XCTUnwrap((try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.first(where: { $0["text"] as? String == missedRowOverlapText }))
+        let missedRowOverlapID = try XCTUnwrap(missedRowOverlap["id"] as? String)
+        try "expected active turn id stale-turn but found fixture-turn\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".reject-next-steer"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(element("steer-queued-message-\(missedRowOverlapID)").waitForExistence(timeout: 5))
+        element("steer-queued-message-\(missedRowOverlapID)").click()
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).first(where: { $0["id"] as? String == missedRowOverlapID })?["state"] as? String == "queued"
+        }, timeout: 10), "The missed queued-row steer should remain queued until the targeted turn ends.")
+        relaunchApp()
+        openTask(named: "Active turn message controls")
+        let relaunchedMissedRow = element("queued-message-text-\(missedRowOverlapID)")
+        XCTAssertTrue(relaunchedMissedRow.waitForExistence(timeout: 10), "The missed queued-row steer should remain visible after app relaunch.")
+        XCTAssertEqual(relaunchedMissedRow.value as? String, missedRowOverlapText)
+        let persistedMissedRow = try XCTUnwrap((try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.first(where: { $0["id"] as? String == missedRowOverlapID }))
+        XCTAssertEqual(persistedMissedRow["state"] as? String, "queued", "App relaunch must not turn a durable queued steer into Needs action.")
+        try "Release targeted row delivery.\n".write(to: targetedRelease, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).isEmpty
+        }, timeout: 20), "The pending drain should deliver the missed queued-row steer after targeted delivery.")
+        XCTAssertFalse(element("codex-chat-error").exists, "A missed queued-row steer during targeted delivery should not show an error.")
+        let immediateSteerText = "Deliver this missed row immediately as its own turn."
+        let immediateRow = try XCTUnwrap(try runCLI(["conversation", "queue", taskID, "--message", immediateSteerText])["result"] as? [String: Any])
+        let immediateRowID = try XCTUnwrap(immediateRow["id"] as? String)
+        let immediateSteerButton = element("steer-queued-message-\(immediateRowID)")
+        XCTAssertTrue(immediateSteerButton.waitForExistence(timeout: 10), "A queued follow-up should be visible while no turn is active.")
+        immediateSteerButton.click()
+        XCTAssertTrue(app.staticTexts[immediateSteerText].waitForExistence(timeout: 10), "A missed steer with no active turn should be delivered visibly in its own turn.")
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).isEmpty
+        }, timeout: 10), "The synchronous own-turn drain should remove the queued row before completion is reported.")
+        let immediateHistory = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        let immediateMessages = (immediateHistory?["messages"] as? [[String: Any]] ?? []).filter { $0["role"] as? String == "user" }
+        XCTAssertEqual(immediateMessages.filter { $0["text"] as? String == immediateSteerText }.count, 1)
+        let failedTargetText = "This targeted queued turn should need action."
+        let laterText = "Keep this later message queued after a failure."
+        composer.click()
+        composer.typeText(failedTargetText)
+        composer.typeKey(.return, modifierFlags: [])
+        composer.typeText(laterText)
+        composer.typeKey(.return, modifierFlags: [])
+        let failureQueue = try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
+        let failedTarget = try XCTUnwrap(failureQueue?.first(where: { $0["text"] as? String == failedTargetText }))
+        let laterItem = try XCTUnwrap(failureQueue?.first(where: { $0["text"] as? String == laterText }))
+        let failedTargetID = try XCTUnwrap(failedTarget["id"] as? String)
+        let laterID = try XCTUnwrap(laterItem["id"] as? String)
+        try "fail targeted turn start\n".write(to: URL(fileURLWithPath: sharedFixture.path + ".fail-next-turn-start"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(element("steer-queued-message-\(failedTargetID)").waitForExistence(timeout: 5))
+        element("steer-queued-message-\(failedTargetID)").click()
+        XCTAssertTrue(waitUntil({
+            let items = (try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []
+            return items.first(where: { $0["id"] as? String == failedTargetID })?["state"] as? String == "needsAction" &&
+                items.first(where: { $0["id"] as? String == laterID })?["state"] as? String == "queued"
+        }, timeout: 10), "A failed targeted turn should need action while later follow-ups stay queued.")
+        let needsActionIndicator = element("queued-message-needs-action-\(failedTargetID)")
+        XCTAssertTrue(needsActionIndicator.waitForExistence(timeout: 5), "The failed targeted row should visibly require user action.")
+        XCTAssertEqual(needsActionIndicator.label, "Follow-up needs your action")
+        XCTAssertTrue(element("retry-queued-message-\(failedTargetID)").exists, "The failed targeted row should expose its retry action.")
+        XCTAssertTrue(element("queued-message-text-\(laterID)").exists, "The later queued row should remain visible after the targeted failure.")
         let history = try runCLI(["conversation", "history", taskID], extraEnvironment: [
             "STATIONAI_E2E_CODEX_EXECUTABLE": sharedFixture.path
         ])["result"] as? [String: Any]
@@ -3866,8 +4051,19 @@ final class StationAIUITests: XCTestCase {
         let fixtureHistory = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: sharedFixture.path + ".history"))) as? [String: Any]
         )
+        let deliveredTurns = try XCTUnwrap(fixtureHistory["messages"] as? [[String: Any]])
+        XCTAssertEqual(deliveredTurns.filter { $0["userMessage"] as? String == missedRowSteerText }.count, 1, "A missed row steer should dispatch exactly once as its own turn.")
+        XCTAssertEqual(deliveredTurns.filter { $0["userMessage"] as? String == targetedText }.count, 1, "A targeted row dispatch should be delivered exactly once.")
+        XCTAssertEqual(deliveredTurns.filter { $0["userMessage"] as? String == overlapText }.count, 1, "A missed steer queued during targeted dispatch should be delivered exactly once afterward.")
+        XCTAssertEqual(deliveredTurns.filter { $0["userMessage"] as? String == targetedRowText }.count, 1, "A second targeted row dispatch should be delivered exactly once.")
+        XCTAssertEqual(deliveredTurns.filter { $0["userMessage"] as? String == missedRowOverlapText }.count, 1, "A missed queued-row steer during targeted dispatch should be delivered exactly once afterward.")
+        XCTAssertEqual(deliveredTurns.filter { $0["userMessage"] as? String == immediateSteerText }.count, 1, "A missed no-active-turn steer should be delivered exactly once before its request returns.")
+        let imageFallbackTurn = try XCTUnwrap(deliveredTurns.first { $0["userMessage"] as? String == missedUISteerText })
+        let deliveredImages = try XCTUnwrap(imageFallbackTurn["images"] as? [String])
+        XCTAssertEqual(deliveredImages.count, 1, "The missed composer steer should retain its image through normal queued delivery.")
+        XCTAssertTrue(deliveredImages[0].hasPrefix("data:image/png;base64,"))
         let steerRequests = try XCTUnwrap(fixtureHistory["steerRequests"] as? [[String: Any]])
-        XCTAssertEqual((fixtureHistory["rejectedSteerRequests"] as? [[String: Any]])?.count, 2)
+        XCTAssertEqual((fixtureHistory["rejectedSteerRequests"] as? [[String: Any]])?.count, 3)
         XCTAssertEqual(steerRequests.count, 3)
         let activeTurnID = (fixtureHistory["messages"] as? [[String: Any]])?.first?["turnID"] as? String
         XCTAssertEqual(steerRequests[0]["expectedTurnId"] as? String, activeTurnID)
@@ -3885,7 +4081,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 10))
     }
 
-    // case-contract: test_conversation_sends_image_attachments | The conversation composer accepts images from the picker and paste, previews them before sending, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. Diagnostics record image MIME and encoded size without storing image payloads.
+    // case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. Diagnostics record image MIME and encoded size without storing image payloads.
 
     func test_conversation_sends_image_attachments() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
@@ -3905,6 +4101,24 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(goToSheet.waitForExistence(timeout: 5))
         try chooseFile(in: picker, goToSheet: goToSheet, file: image)
         XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "The chosen image should appear in the composer preview.")
+        let imageTask = try XCTUnwrap(taskRecord(named: "Image conversation"))
+        let imageTaskID = try XCTUnwrap(imageTask["id"] as? String)
+        let freshImageTask = try XCTUnwrap(try runCLI(["task", "get", imageTaskID])["result"] as? [String: Any])
+        let draftImages = try XCTUnwrap(freshImageTask["draftImageDataURLs"] as? [String])
+        XCTAssertEqual(draftImages.count, 1, "The backlog task should persist its unsent image attachment.")
+        XCTAssertTrue(draftImages[0].hasPrefix("data:image/png;base64,"))
+        let excessImageArguments = (0..<9).flatMap { _ in ["--image", image.path] }
+        let rejectedDraft = try runCLI(
+            ["task", "prompt", imageTaskID, "--text", ""] + excessImageArguments,
+            expectedStatus: 2
+        )
+        XCTAssertEqual((rejectedDraft["error"] as? [String: Any])?["code"] as? String, "invalid_argument")
+        let preservedImageTask = try XCTUnwrap(try taskRecord(id: imageTaskID))
+        XCTAssertEqual(preservedImageTask["draftImageDataURLs"] as? [String], draftImages)
+        XCTAssertEqual(freshImageTask["draftImageDataURLs"] as? [String], draftImages)
+        element("back-to-board-button").click()
+        openTask(named: "Image conversation")
+        XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "Reopening a backlog task should restore its image preview.")
         let composer = element("message-composer")
         composer.click()
         composer.typeText("What is shown in this screenshot?")
@@ -4042,7 +4256,163 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
     }
 
-    // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, started and interacted updates coalesce by child thread ID into clear named timeline rows outside the collapsible Codex activity section, with sentence-style names, available path/model/reasoning metadata, and started-working wording; completed and interrupted states, optional metadata, and unknown kinds survive history reload and remain visible after reopening the task conversation. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs.
+    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. The conversation header shows only the newest active call; when it completes, the indicator falls back to the next still-active call. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
+    func test_conversation_shows_mcp_and_dynamic_tool_activity() throws {
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-tool-activity").path
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
+        launchApp(defaultParent: fixture.primary.path)
+        _ = try runCLI(["task", "create", "--title", "Tool activity", "--root", fixture.primary.path])
+        let taskID = try taskID(named: "Tool activity")
+        openTask(named: "Tool activity")
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText("Show tool activity.")
+        element("send-message-button").click()
+
+        let fixture = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable))
+        let toolReady = URL(fileURLWithPath: fixture.path + ".tool-ready")
+        let toolReleaseLatest = URL(fileURLWithPath: fixture.path + ".tool-release-latest")
+        let toolRelease = URL(fileURLWithPath: fixture.path + ".tool-release")
+        defer {
+            try? "Release newest tool after assertion failure.\n".write(to: toolReleaseLatest, atomically: true, encoding: .utf8)
+            try? "Release tool completions after assertion failure.\n".write(to: toolRelease, atomically: true, encoding: .utf8)
+        }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: toolReady.path) }, timeout: 20), "The fixture should pause after the tool start notifications.")
+        let currentActivity = element("current-activity-title")
+        XCTAssertTrue(waitUntil({ currentActivity.label == "Tool · legacySummary" }, timeout: 10), "The header should show the most recently started active call.")
+        XCTAssertTrue(element("current-activity-duration").exists, "The current activity should show its elapsed time outside the disclosure.")
+        element("codex-activity-disclosure").click()
+        let activityDetails = element("codex-activity-details")
+        XCTAssertTrue(activityDetails.waitForExistence(timeout: 5), "Expanded Working for should contain tool activity rows.")
+        func containsPositiveDuration(_ value: String) -> Bool {
+            value.range(of: #"Duration · [1-9][0-9]* ms"#, options: .regularExpression) != nil
+        }
+        func containsPositiveRunningDuration(_ value: String) -> Bool {
+            value.range(of: #"Running · [1-9][0-9]* ms"#, options: .regularExpression) != nil
+        }
+        let mcpRow = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").firstMatch
+        let dynamicRow = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").firstMatch
+        let legacyDynamicRow = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").firstMatch
+        XCTAssertTrue(mcpRow.waitForExistence(timeout: 10), "MCP calls should appear inside expanded Working for while in progress.")
+        XCTAssertTrue(dynamicRow.waitForExistence(timeout: 10), "Dynamic tool calls should appear inside expanded Working for while in progress.")
+        XCTAssertTrue(legacyDynamicRow.waitForExistence(timeout: 10), "Every active call should appear inside expanded Working for.")
+        for identifier in ["item_fixture_mcp_call", "item_fixture_dynamic_call", "item_fixture_dynamic_legacy"] {
+            let liveDuration = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-duration-\(identifier)").firstMatch
+            XCTAssertTrue(liveDuration.exists, "Expanded Working for should show a live duration for \(identifier).")
+            XCTAssertTrue(containsPositiveRunningDuration(liveDuration.value as? String ?? ""), "The live duration for \(identifier) should contain positive elapsed time in milliseconds.")
+        }
+        XCTAssertTrue(mcpRow.label.contains("In progress"))
+        XCTAssertTrue(dynamicRow.label.contains("In progress"))
+        XCTAssertTrue(legacyDynamicRow.label.contains("In progress"))
+        try "Finish the newest call first.\n".write(to: toolReleaseLatest, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ currentActivity.label == "Tool · summarize" }, timeout: 15), "When the newest call finishes, the header should fall back to the next active call.")
+        XCTAssertTrue(waitUntil({ legacyDynamicRow.label.contains("Completed") }, timeout: 10))
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").count, 1)
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").count, 1)
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").count, 1)
+        try "Release tool completions.\n".write(to: toolRelease, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ mcpRow.label.contains("Completed") && dynamicRow.label.contains("Failed") && legacyDynamicRow.label.contains("Completed") }, timeout: 30), "Lifecycle completions should update the existing rows.")
+        XCTAssertTrue(mcpRow.label.contains("MCP · lookup"))
+        XCTAssertTrue((mcpRow.value as? String ?? "").contains("fixture-server"))
+        XCTAssertTrue((mcpRow.value as? String ?? "").contains("Returned 1 result item"))
+        XCTAssertTrue(containsPositiveDuration(mcpRow.value as? String ?? ""), "The completed MCP call should display its positive measured duration in milliseconds.")
+        XCTAssertTrue((dynamicRow.value as? String ?? "").contains("Tool call failed"))
+        XCTAssertTrue((dynamicRow.value as? String ?? "").contains("Duration · 37 ms"))
+        XCTAssertTrue(dynamicRow.label.contains("Tool · summarize"))
+        XCTAssertTrue(legacyDynamicRow.label.contains("Tool · legacySummary"))
+        XCTAssertTrue((legacyDynamicRow.value as? String ?? "").contains("Returned 1 result item"))
+        XCTAssertTrue(containsPositiveDuration(legacyDynamicRow.value as? String ?? ""), "The completed legacy call should display its positive measured duration in milliseconds.")
+        let renderedToolRows = "\(mcpRow.label) \(mcpRow.value ?? "") \(dynamicRow.label) \(dynamicRow.value ?? "") \(legacyDynamicRow.label) \(legacyDynamicRow.value ?? "")"
+        XCTAssertFalse(renderedToolRows.contains("RAW_ARGUMENT_SECRET"))
+        XCTAssertFalse(renderedToolRows.contains("RAW_RESULT_SECRET"))
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").count, 1)
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").count, 1)
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").count, 1)
+
+        let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        let savedActivities = history?["activities"] as? [[String: Any]] ?? []
+        XCTAssertEqual(savedActivities.filter { $0["id"] as? String == "item_fixture_mcp_call" }.count, 1)
+        XCTAssertEqual(savedActivities.filter { $0["id"] as? String == "item_fixture_dynamic_call" }.count, 1)
+        element("back-to-board-button").click()
+        openTask(named: "Tool activity")
+        element("codex-activity-disclosure").click()
+        let reloadedActivityDetails = element("codex-activity-details")
+        XCTAssertTrue(reloadedActivityDetails.waitForExistence(timeout: 5))
+        let reloadedMcpRow = reloadedActivityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").firstMatch
+        XCTAssertTrue(reloadedMcpRow.waitForExistence(timeout: 20), "Completed MCP activity should remain in Working for after history reload.")
+        let reloadedDynamicRow = reloadedActivityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").firstMatch
+        let reloadedLegacyDynamicRow = reloadedActivityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").firstMatch
+        XCTAssertTrue(reloadedDynamicRow.waitForExistence(timeout: 10), "Failed dynamic activity should remain after history reload.")
+        XCTAssertTrue(reloadedLegacyDynamicRow.waitForExistence(timeout: 10), "Legacy dynamic activity should remain after history reload.")
+        XCTAssertTrue(reloadedMcpRow.label.contains("MCP · lookup"))
+        XCTAssertTrue(reloadedMcpRow.label.contains("Completed"))
+        XCTAssertTrue((reloadedMcpRow.value as? String ?? "").contains("fixture-server"))
+        XCTAssertTrue((reloadedMcpRow.value as? String ?? "").contains("Returned 1 result item"))
+        XCTAssertTrue(containsPositiveDuration(reloadedMcpRow.value as? String ?? ""), "The positive MCP duration must survive history reload in milliseconds.")
+        XCTAssertTrue(reloadedDynamicRow.label.contains("Tool · summarize"))
+        XCTAssertTrue(reloadedDynamicRow.label.contains("Failed"))
+        XCTAssertTrue((reloadedDynamicRow.value as? String ?? "").contains("Tool call failed"))
+        XCTAssertTrue((reloadedDynamicRow.value as? String ?? "").contains("Duration · 37 ms"), "Optional duration should survive history reload and render.")
+        XCTAssertTrue(reloadedLegacyDynamicRow.label.contains("Tool · legacySummary"))
+        XCTAssertTrue(reloadedLegacyDynamicRow.label.contains("Completed"))
+        XCTAssertTrue((reloadedLegacyDynamicRow.value as? String ?? "").contains("Returned 1 result item"))
+        XCTAssertTrue(containsPositiveDuration(reloadedLegacyDynamicRow.value as? String ?? ""), "The positive legacy tool duration must survive history reload in milliseconds.")
+        let reloadedToolRows = reloadedMcpRow.label + " " + (reloadedMcpRow.value as? String ?? "")
+            + " " + reloadedDynamicRow.label + " " + (reloadedDynamicRow.value as? String ?? "")
+            + " " + reloadedLegacyDynamicRow.label + " " + (reloadedLegacyDynamicRow.value as? String ?? "")
+        XCTAssertFalse(reloadedToolRows.contains("RAW_ARGUMENT_SECRET"))
+        XCTAssertFalse(reloadedToolRows.contains("RAW_RESULT_SECRET"))
+        XCTAssertTrue(app.staticTexts["A later turn starts."].exists, "The fixture history must include a subsequent turn after these tool calls.")
+    }
+
+    // case-contract: test_conversation_shows_context_compaction | contextCompaction item/started and item/completed coalesce into one concise timeline event; missing summaries ignore malformed opaque payload fields and never render their data, and the event survives thread history reload with correct prompt/response ordering.
+    func test_conversation_shows_context_compaction() throws {
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-context-compaction").path
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
+        launchApp(defaultParent: fixture.primary.path)
+        _ = try runCLI(["task", "create", "--title", "Context compaction", "--root", fixture.primary.path])
+        let taskID = try taskID(named: "Context compaction")
+        openTask(named: "Context compaction")
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText("Compact the context.")
+        element("send-message-button").click()
+
+        let executable = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable))
+        let ready = URL(fileURLWithPath: executable.path + ".compaction-ready")
+        let release = URL(fileURLWithPath: executable.path + ".compaction-release")
+        defer { try? "Release compaction after assertion failure.\n".write(to: release, atomically: true, encoding: .utf8) }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 20))
+        let row = element("context-compaction-row-item_stationai_compaction")
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        XCTAssertTrue(row.label.contains("In progress"))
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "context-compaction-row-item_stationai_compaction").count, 1)
+        XCTAssertFalse((row.label + " " + (row.value as? String ?? "")).contains("COMPACTION_OPAQUE_SENTINEL"))
+        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "COMPACTION_OPAQUE_SENTINEL")).count, 0)
+        try "Release context compaction.\n".write(to: release, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ row.label.contains("Completed") }, timeout: 20))
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "context-compaction-row-item_stationai_compaction").count, 1)
+        XCTAssertFalse((row.label + " " + (row.value as? String ?? "")).contains("COMPACTION_OPAQUE_SENTINEL"))
+        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "COMPACTION_OPAQUE_SENTINEL")).count, 0)
+        let finalMessage = app.staticTexts["Context compaction completed."]
+        XCTAssertTrue(finalMessage.waitForExistence(timeout: 10))
+        XCTAssertLessThan(row.frame.minY, finalMessage.frame.minY)
+        let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        XCTAssertEqual((history?["activities"] as? [[String: Any]] ?? []).filter { $0["isContextCompaction"] as? Bool == true }.count, 1)
+        element("back-to-board-button").click()
+        openTask(named: "Context compaction")
+        let reloaded = element("context-compaction-row-item_stationai_compaction")
+        XCTAssertTrue(reloaded.waitForExistence(timeout: 20))
+        XCTAssertTrue(reloaded.label.contains("Completed"))
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "context-compaction-row-item_stationai_compaction").count, 1)
+        XCTAssertFalse((reloaded.label + " " + (reloaded.value as? String ?? "")).contains("COMPACTION_OPAQUE_SENTINEL"))
+        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "COMPACTION_OPAQUE_SENTINEL")).count, 0)
+        XCTAssertLessThan(reloaded.frame.minY, app.staticTexts["Context compaction completed."].frame.minY)
+    }
+
+    // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs.
     func test_conversation_shows_subagent_delegation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -4054,6 +4424,16 @@ final class StationAIUITests: XCTestCase {
         let fixtureCopy = fixtureRoot.appendingPathComponent("codex-fixture-subagent")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureCopy.path), "The UI runner must prepare the subagent fixture before launch.")
         codexFixtureExecutable = fixtureCopy.path
+        let finalAnswerPause = URL(fileURLWithPath: fixtureCopy.path + ".final-answer-pause")
+        let finalAnswerReady = URL(fileURLWithPath: fixtureCopy.path + ".final-answer-ready")
+        let finalAnswerRelease = URL(fileURLWithPath: fixtureCopy.path + ".final-answer-release")
+        try? FileManager.default.removeItem(at: finalAnswerReady)
+        try? FileManager.default.removeItem(at: finalAnswerRelease)
+        try "Pause final answer until the UI checks the collapsed disclosure.\n".write(to: finalAnswerPause, atomically: true, encoding: .utf8)
+        defer {
+            try? "Release the final answer fixture.\n".write(to: finalAnswerRelease, atomically: true, encoding: .utf8)
+            try? FileManager.default.removeItem(at: finalAnswerPause)
+        }
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["task", "create", "--title", "Subagent delegation", "--root", fixture.primary.path])
         let taskID = try taskID(named: "Subagent delegation")
@@ -4078,6 +4458,9 @@ final class StationAIUITests: XCTestCase {
         let agentIcon = activeChildButton.images.matching(NSPredicate(format: "label == %@", "Sandbox review agent icon")).firstMatch
         XCTAssertTrue(agentIcon.waitForExistence(timeout: 5), "The requested robot icon should render in the child timeline row.")
         assertSubagentIconArtwork(agentIcon)
+        let secondActiveChildButton = element("codex-subagent-row-00000000-0000-0000-0000-000000000003")
+        XCTAssertTrue(secondActiveChildButton.waitForExistence(timeout: 5),
+                      "Every active agent should remain visible outside the collapsed Codex activity section.")
         activityDisclosure.click()
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-subagent-row-00000000-0000-0000-0000-000000000002").count, 1,
                        "The interacted update should update the single timeline row instead of creating a duplicate.")
@@ -4085,14 +4468,12 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(childMetadata.contains("/agents/Sandbox review"))
         XCTAssertTrue(childMetadata.contains("gpt-6-sol"))
         XCTAssertTrue(childMetadata.contains("high"))
-        let secondActiveChildButton = element("codex-subagent-row-00000000-0000-0000-0000-000000000003")
         XCTAssertTrue(secondActiveChildButton.waitForExistence(timeout: 5))
         XCTAssertTrue(secondActiveChildButton.label.contains("Some agent"), "Underscored agent names should render with spaces and sentence capitalization.")
         XCTAssertTrue(secondActiveChildButton.label.contains("started working"))
         let secondChildMetadata = secondActiveChildButton.value as? String ?? ""
         XCTAssertTrue(secondChildMetadata.contains("/agents/some_agent"))
         XCTAssertFalse(secondChildMetadata.contains("gpt-"), "Optional child model metadata may be absent.")
-
         activeChildButton.click()
         XCTAssertTrue(element("subagent-conversation-panel").waitForExistence(timeout: 5))
         try "Release child to finish and answer read-only inspection requests.\n".write(to: subagentRelease, atomically: true, encoding: .utf8)
@@ -4104,6 +4485,20 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(childResult.waitForExistence(timeout: 20), "The child view should render its stored conversation content.")
         element("subagent-back-button").click()
         XCTAssertTrue(waitUntil({ !self.element("subagent-conversation-panel").exists }, timeout: 5), "Back should return to the parent conversation.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: finalAnswerReady.path) }, timeout: 20),
+                      "The fixture should pause after the final answer appears but before the turn completes.")
+        XCTAssertTrue(waitUntil({
+            activityDisclosure.label.contains("Worked for")
+                && activityDisclosure.value as? String == "Collapsed, right chevron"
+                && self.app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "The subagent inspected the project structure")).firstMatch.exists
+        }, timeout: 10), "The final answer should immediately produce a clean collapsed Worked for section.")
+        XCTAssertEqual(element("pause-response-button").label, "Stop response",
+                       "The final-answer transition should be checked while the turn is still responding.")
+        for childID in ["00000000-0000-0000-0000-000000000002", "00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-000000000004"] {
+            XCTAssertFalse(element("codex-subagent-row-\(childID)").exists,
+                           "Agent rows should move inside Worked for as soon as the final answer arrives.")
+        }
+        try "Allow the parent turn to complete.\n".write(to: finalAnswerRelease, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({
             (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response"
         }, timeout: 20), "The visible composer turn should finish and persist the task status.")
@@ -4120,7 +4515,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertGreaterThan(Int(messageSummary["payloadBytes"] as? String ?? "0") ?? 0, 0)
         XCTAssertEqual(messageSummary["flushReason"] as? String, "turn_completed")
         let outputSummary = try XCTUnwrap(deltaSummaries.first { $0["method"] as? String == "item/commandExecution/outputDelta" })
-        XCTAssertGreaterThan(Int(outputSummary["notificationCount"] as? String ?? "0") ?? 0, 0)
+        XCTAssertEqual(Int(outputSummary["notificationCount"] as? String ?? "0") ?? 0, 2)
         XCTAssertGreaterThan(Int(outputSummary["payloadBytes"] as? String ?? "0") ?? 0, 0)
         XCTAssertEqual(outputSummary["flushReason"] as? String, "turn_completed")
         XCTAssertFalse(codexDiagnostics.contains {
@@ -4161,13 +4556,24 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(app.state, .runningForeground, "StationAI must be foreground before inspecting the conversation.")
 
         XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 20), "A delegated task should appear in conversation activity.")
+        XCTAssertTrue(activityDisclosure.label.contains("Worked for"), "The completed turn should use the Worked for disclosure.")
+        XCTAssertEqual(activityDisclosure.value as? String, "Collapsed, right chevron",
+                       "The final answer should arrive with all Codex activity collapsed.")
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "The subagent inspected the project structure")).firstMatch.exists,
+                      "The final answer should remain visible while agent details are collapsed.")
+        for childID in ["00000000-0000-0000-0000-000000000002", "00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-000000000004"] {
+            XCTAssertFalse(element("codex-subagent-row-\(childID)").exists,
+                           "Agent rows should be hidden inside the collapsed Worked for disclosure.")
+        }
+        activityDisclosure.click()
         let activityRow = element("codex-activity-row-item_stationai_subagent")
         XCTAssertTrue(activityRow.waitForExistence(timeout: 10))
         XCTAssertTrue(activityRow.label.contains("Task delegated to subagent"))
         XCTAssertTrue(activityRow.label.contains("Completed"))
+        XCTAssertTrue(app.staticTexts["Agents used"].exists)
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000002").label.contains("finished working"))
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000003").label.contains("was interrupted"))
-        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000004").exists, "An unknown child kind should remain visible.")
+        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000004").exists, "An unknown child kind should remain inspectable.")
         let activityDetail = element("codex-activity-detail-item_stationai_subagent")
         XCTAssertTrue(activityDetail.waitForExistence(timeout: 5))
         let detailDescription = "\(activityDetail.label) \(activityDetail.value as? String ?? "")"
@@ -4186,18 +4592,33 @@ final class StationAIUITests: XCTestCase {
                 && $0["parameter.threadId"] as? String == childThreadID
         }, "Inspecting a child thread must not resume it.")
 
+        let completedChildRow = element("codex-subagent-row-00000000-0000-0000-0000-000000000002")
+        completedChildRow.click()
+        XCTAssertTrue(element("subagent-conversation-panel").waitForExistence(timeout: 5),
+                      "An expanded finished agent row should open its conversation.")
+        XCTAssertTrue(app.staticTexts["Read only"].exists)
+        XCTAssertFalse(element("message-composer").exists)
+        element("subagent-back-button").click()
+        XCTAssertTrue(waitUntil({ !self.element("subagent-conversation-panel").exists }, timeout: 5))
+
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "The task should close before checking its saved conversation history.")
         openTask(named: "Subagent delegation")
         XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 10))
+        XCTAssertTrue(activityDisclosure.label.contains("Worked for"), "The reopened final answer should retain the Worked for disclosure.")
+        XCTAssertEqual(activityDisclosure.value as? String, "Collapsed, right chevron")
+        for childID in ["00000000-0000-0000-0000-000000000002", "00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-000000000004"] {
+            XCTAssertFalse(element("codex-subagent-row-\(childID)").exists,
+                           "Agent rows should remain collapsed inside Worked for after reopening.")
+        }
         activityDisclosure.click()
-        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000002").label.contains("finished working"), "The completed child should remain visible after reopening the task.")
-        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000003").label.contains("was interrupted"), "The interrupted child should remain visible after reopening the task.")
-        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000004").exists, "The unknown child kind should remain visible after reopening the task.")
+        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000002").label.contains("finished working"), "The completed child should remain inspectable after reopening the task.")
+        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000003").label.contains("was interrupted"), "The interrupted child should remain inspectable after reopening the task.")
+        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000004").exists, "The unknown child kind should remain inspectable after reopening the task.")
         attachScreenshot(named: "Conversation shows and opens a subagent")
     }
 
-    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; the first plan delta is visible before completion, and the completed plan item renders automatically as Markdown with visible spacing between distinct paragraphs, including after reopening, while CLI events and bridge history preserve the exact plan text as the latest assistant message. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics.
+    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; the first plan delta is visible before completion, and the completed plan item renders automatically as Markdown with visible spacing between distinct paragraphs and can be selected and copied as one complete text view, including after reopening, while CLI events and bridge history preserve the exact plan text as the latest assistant message. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics.
     func test_plan_mode_renders_markdown_in_conversation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -4271,32 +4692,18 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(reloadedAssistant.waitForExistence(timeout: 10), "The completed plan should appear automatically after reopening.")
         XCTAssertFalse(reloadedAssistant.label.contains("<proposed_plan>"), "The reloaded plan should hide its opening protocol wrapper.")
         XCTAssertFalse(reloadedAssistant.label.contains("</proposed_plan>"), "The reloaded plan should hide its closing protocol wrapper.")
-        let heading = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "assistant-markdown-heading-"))
-            .firstMatch
-        let listItems = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "assistant-markdown-list-item-"))
-        let firstListItem = listItems.element(boundBy: 0)
-        let secondListItem = listItems.element(boundBy: 1)
-        XCTAssertTrue(heading.waitForExistence(timeout: 10), "Plan headings should render as distinct elements after reopening.")
-        XCTAssertTrue(accessibleLabelOrValue(of: heading).contains("Implementation plan"), "The rendered heading should retain the plan title after reopening.")
-        let firstParagraph = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-markdown-paragraph-", "workspace model"))
-            .firstMatch
-        let secondParagraph = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-markdown-paragraph-", "separate paragraph confirms"))
-            .firstMatch
-        XCTAssertTrue(firstParagraph.waitForExistence(timeout: 5), "The first plan paragraph should render after reopening.")
-        XCTAssertTrue(secondParagraph.waitForExistence(timeout: 5), "The separate plan paragraph should render after reopening.")
-        XCTAssertGreaterThanOrEqual(
-            secondParagraph.frame.minY - firstParagraph.frame.maxY,
-            8,
-            "Distinct Markdown paragraphs should have visible vertical separation."
-        )
-        XCTAssertTrue(firstListItem.waitForExistence(timeout: 5), "The first plan list entry should render after reopening.")
-        XCTAssertTrue(accessibleLabelOrValue(of: firstListItem).contains("Implementation detail 01"))
-        XCTAssertTrue(secondListItem.waitForExistence(timeout: 5), "The second plan list entry should render after reopening.")
-        XCTAssertTrue(accessibleLabelOrValue(of: secondListItem).contains("Implementation detail 02"))
+        let markdownContent = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Implementation plan")
+        ).firstMatch
+        XCTAssertTrue(markdownContent.waitForExistence(timeout: 5), "The plan should render as one selectable Markdown text view.")
+        markdownContent.click()
+        markdownContent.typeKey("a", modifierFlags: .command)
+        markdownContent.typeKey("c", modifierFlags: .command)
+        let copiedPlan = NSPasteboard.general.string(forType: .string) ?? ""
+        XCTAssertTrue(copiedPlan.contains("Implementation plan"), "Selecting all should include the plan heading.")
+        XCTAssertTrue(copiedPlan.contains("Implementation detail 01"), "Selecting all should include the first list item.")
+        XCTAssertTrue(copiedPlan.contains("Implementation detail 15"), "Selecting all should include content from the middle of the plan.")
+        XCTAssertTrue(copiedPlan.contains("Final verification: confirm the latest message is visible after reopening"), "Selecting all should include the final plan item.")
         let latestListItem = app.descendants(matching: .any)
             .matching(NSPredicate(format: "label CONTAINS %@", "Final verification: confirm the latest message is visible after reopening"))
             .firstMatch
@@ -4376,7 +4783,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Plan mode is visible in the conversation composer")
     }
 
-    // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | Structured questions raised in Plan mode move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome.
+    // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode use the existing question path, move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome.
     func test_codex_questions_can_be_answered_over_cli_xpc() throws {
         let created = try runCLI(["task", "create", "--title", "Codex questions", "--root", fixture.primary.path])
         XCTAssertEqual(created["ok"] as? Bool, true)
@@ -4869,24 +5276,63 @@ final class StationAIUITests: XCTestCase {
     }
 
     private func makeGitHubStateFixture() throws -> [String: String] {
+        try makeGitHubStateFixture(expectedNumbers: [123, 456])
+    }
+
+    private func makeGitHubStateFixture(expectedNumbers: [Int]) throws -> [String: String] {
         let directory = dataDirectory.appendingPathComponent("gh-fixture", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let stateURL = directory.appendingPathComponent("state")
         let callLogURL = directory.appendingPathComponent("calls")
-        try "123=unmerged\n456=unmerged\n".write(to: stateURL, atomically: true, encoding: .utf8)
+        try expectedNumbers.map { "\($0)=unmerged" }.joined(separator: "\n").appending("\n")
+            .write(to: stateURL, atomically: true, encoding: .utf8)
+        let startedDirectory = directory.appendingPathComponent("started", isDirectory: true)
+        try FileManager.default.createDirectory(at: startedDirectory, withIntermediateDirectories: true)
+        let expectedIDs = expectedNumbers.map(String.init).joined(separator: " ")
         let executable = directory.appendingPathComponent("gh")
         let script = """
         #!/bin/sh
-        if [ "$1" != pr ] || [ "$2" != view ] || { [ "$3" != 123 ] && [ "$3" != 456 ]; } || [ "$4" != --json ] || [ "$5" != mergedAt ]; then
+        if [ "$1" != pr ] || [ "$2" != view ] || { [ "$3" != 123 ] && [ "$3" != 456 ]; } || [ "$4" != --json ]; then
           echo 'Unexpected gh fixture command' >&2
           exit 2
         fi
         printf '%s\\n' "$3" >> "$STATIONAI_E2E_GH_CALL_LOG"
         state=$(awk -F= -v number="$3" '$1 == number { print $2 }' "$STATIONAI_E2E_GH_STATE_PATH")
-        if [ "$state" = merged ]; then
-          printf '{"mergedAt":"2026-10-22T00:00:00Z"}\\n'
+        if [ "$5" = mergedAt ]; then
+          if [ "$state" = merged ]; then
+            printf '{"mergedAt":"2026-10-22T00:00:00Z"}\\n'
+          else
+            printf '{"mergedAt":null}\\n'
+          fi
+        elif [ "$5" = mergedAt,mergeable,headRefOid ]; then
+          touch "$STATIONAI_E2E_GH_STARTED_DIRECTORY/$3"
+          parallel=0
+          for attempt in $(seq 1 100); do
+            parallel=1
+            for expected in $STATIONAI_E2E_GH_EXPECTED_IDS; do
+              if [ ! -f "$STATIONAI_E2E_GH_STARTED_DIRECTORY/$expected" ]; then parallel=0; fi
+            done
+            [ "$parallel" = 1 ] && break
+            sleep 0.02
+          done
+          if [ "$parallel" != 1 ]; then echo 'Review pull request probes did not run in parallel' >&2; exit 3; fi
+          if [ -n "$STATIONAI_E2E_GH_REMOTE_REPOSITORY" ]; then
+            head=$(git --git-dir "$STATIONAI_E2E_GH_REMOTE_REPOSITORY" rev-parse "refs/heads/pr-$3")
+          else
+            head=$(git rev-parse HEAD)
+          fi
+          if [ "$state" = head-mismatch ]; then
+            printf '{"mergedAt":null,"mergeable":"MERGEABLE","headRefOid":"remote-head-not-pushed"}\\n'
+          elif [ "$state" = merged ]; then
+            printf '{"mergedAt":"2026-10-22T00:00:00Z","mergeable":"MERGEABLE","headRefOid":"%s"}\\n' "$head"
+          elif [ "$state" = conflicting ]; then
+            printf '{"mergedAt":null,"mergeable":"CONFLICTING","headRefOid":"%s"}\\n' "$head"
+          else
+            printf '{"mergedAt":null,"mergeable":"MERGEABLE","headRefOid":"%s"}\\n' "$head"
+          fi
         else
-          printf '{"mergedAt":null}\\n'
+          echo 'Unexpected gh fixture field list' >&2
+          exit 2
         fi
         """
         try script.write(to: executable, atomically: true, encoding: .utf8)
@@ -4896,6 +5342,8 @@ final class StationAIUITests: XCTestCase {
             "PATH": "\(directory.path):\(inheritedPath)",
             "STATIONAI_E2E_GH_STATE_PATH": stateURL.path,
             "STATIONAI_E2E_GH_CALL_LOG": callLogURL.path,
+            "STATIONAI_E2E_GH_STARTED_DIRECTORY": startedDirectory.path,
+            "STATIONAI_E2E_GH_EXPECTED_IDS": expectedIDs,
         ]
     }
 

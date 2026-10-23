@@ -222,7 +222,8 @@ enum StationAIStore {
                    t0.ZPROGRESSTYPERAWVALUE, t0.ZPROGRESSLABEL, t0.ZPROGRESSDETAIL,
                    t0.ZCREATEDAT, t0.ZCODEXTHREADID, t0.ZSAVEDPROMPT,
                    t0.ZPENDINGSUBMITTEDPROMPT, t0.ZWORKSPACEROOTPATHSDATA,
-                   t0.ZREPOSITORYWORKTREESDATA, t0.ZCONTEXTFOLDERPATHSDATA
+                   t0.ZREPOSITORYWORKTREESDATA, t0.ZCONTEXTFOLDERPATHSDATA,
+                   t0.ZDRAFTIMAGEDATAURLSDATA
             FROM ZBOARDTASK t0 LIMIT 0
             """
         var statement: OpaquePointer?
@@ -347,7 +348,8 @@ enum StationAIStore {
             let requiredColumns = [
                 "ZPENDINGSUBMITTEDPROMPT",
                 "ZINPROGRESSSTARTEDAT",
-                "ZTOTALINPROGRESSSECONDS"
+                "ZTOTALINPROGRESSSECONDS",
+                "ZDRAFTIMAGEDATAURLSDATA"
             ]
             return requiredColumns.contains { !columns.contains($0) }
         }
@@ -428,7 +430,8 @@ enum StationAIStore {
                 let requiredColumns: [(String, String)] = [
                     ("ZPENDINGSUBMITTEDPROMPT", "VARCHAR"),
                     ("ZINPROGRESSSTARTEDAT", "TIMESTAMP"),
-                    ("ZTOTALINPROGRESSSECONDS", "FLOAT")
+                    ("ZTOTALINPROGRESSSECONDS", "FLOAT"),
+                    ("ZDRAFTIMAGEDATAURLSDATA", "BLOB")
                 ]
                 for (column, declaration) in requiredColumns where !columns.contains(column) {
                     let sql = "ALTER TABLE ZBOARDTASK ADD COLUMN \(column) \(declaration)"
@@ -601,8 +604,9 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let workspaceRoots: [String]
     let repositoryWorktrees: [RepositoryWorktreeRecord]
     let contextFolders: [String]
+    let draftImageDataURLs: [String]?
 
-    init(task: BoardTask) {
+    init(task: BoardTask, includeDraftImages: Bool = true) {
         id = task.id
         title = task.title
         status = task.status.rawValue
@@ -617,6 +621,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         workspaceRoots = task.workspaceRootPaths
         repositoryWorktrees = task.repositoryWorktrees
         contextFolders = task.contextFolderPaths
+        draftImageDataURLs = includeDraftImages ? task.draftImageDataURLs : nil
     }
 }
 
@@ -626,6 +631,7 @@ struct QueuedConversationMessage: Codable, Equatable, Identifiable {
     let taskID: UUID
     let threadID: String
     let text: String
+    var imageDataURLs: [String]? = []
     var state: State
     var enqueuedProcessID: Int32? = nil
     var dispatchingProcessID: Int32? = nil
@@ -640,6 +646,35 @@ enum GitHubPullRequestManager {
 
     private struct PullRequestState: Decodable {
         let mergedAt: String?
+    }
+
+    private struct PullRequestReviewResponse: Decodable {
+        let mergedAt: String?
+        let mergeable: String?
+        let headRefOid: String?
+    }
+
+    static func reviewState(_ record: RepositoryWorktreeRecord, executable: String) throws -> PullRequestReviewState {
+        guard let number = record.pullRequestNumber else {
+            throw BridgeCommandError(code: "invalid_transition", message: "This repository has no linked pull request.")
+        }
+        let result = try run(executable, ["pr", "view", String(number), "--json", "mergedAt,mergeable,headRefOid"], directory: record.worktreePath)
+        let response = try JSONDecoder().decode(PullRequestReviewResponse.self, from: Data(result.utf8))
+        let localHead: String?
+        if response.headRefOid != nil {
+            let git = try StationAIProcessRunner.run(executable: "/usr/bin/git", arguments: ["rev-parse", "HEAD"], directory: record.worktreePath)
+            guard git.status == 0 else {
+                throw BridgeCommandError(code: "operation_failed", message: "Couldn't inspect the local head for pull request #\(number).")
+            }
+            localHead = String(data: git.stdout, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            localHead = nil
+        }
+        return PullRequestReviewState(
+            repositoryPath: record.repositoryPath, number: number,
+            merged: response.mergedAt != nil, mergeable: response.mergeable ?? "UNKNOWN",
+            headRefOid: response.headRefOid, localHeadOid: localHead
+        )
     }
 
     static func resolveExecutable() throws -> String {
@@ -725,6 +760,38 @@ enum GitHubPullRequestManager {
     }
 }
 
+struct PullRequestReviewState: Codable, Sendable {
+    let repositoryPath: String
+    let number: Int
+    let merged: Bool
+    let mergeable: String
+    let headRefOid: String?
+    let localHeadOid: String?
+    let hasConflicts: Bool
+    let isConfirmedResolved: Bool
+
+    var requiresConflictResolution: Bool {
+        hasConflicts || (!merged && mergeable == "MERGEABLE" && headRefOid != nil && headRefOid != localHeadOid)
+    }
+
+    init(repositoryPath: String, number: Int, merged: Bool, mergeable: String, headRefOid: String?, localHeadOid: String?) {
+        self.repositoryPath = repositoryPath
+        self.number = number
+        self.merged = merged
+        self.mergeable = mergeable
+        self.headRefOid = headRefOid
+        self.localHeadOid = localHeadOid
+        hasConflicts = !merged && mergeable == "CONFLICTING"
+        isConfirmedResolved = merged || (mergeable == "MERGEABLE" && headRefOid != nil && headRefOid == localHeadOid)
+    }
+}
+
+enum PullRequestResolutionCheck: String, Codable, Sendable {
+    case resolved
+    case stillConflicted
+    case inconclusive
+}
+
 struct StationAIPullRequestService {
 
     func resolveExecutable() throws -> String {
@@ -751,6 +818,12 @@ struct StationAIPullRequestService {
     func isMerged(_ record: RepositoryWorktreeRecord, executable: String) async throws -> Bool {
         try await StationAIBackgroundOperation.run {
             try GitHubPullRequestManager.isMerged(record, executable: executable)
+        }
+    }
+
+    func reviewState(_ record: RepositoryWorktreeRecord, executable: String) async throws -> PullRequestReviewState {
+        try await StationAIBackgroundOperation.run {
+            try GitHubPullRequestManager.reviewState(record, executable: executable)
         }
     }
 }
@@ -801,9 +874,8 @@ final class BoardTaskManager {
 
     func queuedConversationMessages(taskID: UUID) throws -> [QueuedConversationMessage] {
         try mutateQueuedMessages(taskID: taskID) { items in
-            for index in items.indices where items[index].state == .queued || items[index].state == .dispatching {
-                let processID = items[index].state == .dispatching ? items[index].dispatchingProcessID : items[index].enqueuedProcessID
-                if items[index].state == .queued, processID == nil { continue }
+            for index in items.indices where items[index].state == .dispatching {
+                let processID = items[index].dispatchingProcessID
                 guard let processID, Darwin.kill(processID, 0) == 0 || errno == EPERM else {
                     items[index].state = .needsAction
                     items[index].dispatchingProcessID = nil
@@ -815,16 +887,16 @@ final class BoardTaskManager {
         return try readQueuedMessages()[taskID.uuidString] ?? []
     }
 
-    func enqueueConversationMessage(taskID: UUID, text: String, ownerProcessID: Int32?) throws -> QueuedConversationMessage {
+    func enqueueConversationMessage(taskID: UUID, text: String, imageDataURLs: [String] = []) throws -> QueuedConversationMessage {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { throw StationAIManagerError.invalidMessage }
+        guard !normalized.isEmpty || !imageDataURLs.isEmpty else { throw StationAIManagerError.invalidMessage }
         let task = try taskModel(taskID)
         guard let threadID = task.codexThreadID else {
             throw BridgeCommandError(code: "invalid_transition", message: "A follow-up can only be queued after this conversation has a Codex thread.")
         }
         let item = QueuedConversationMessage(
-            id: UUID(), taskID: taskID, threadID: threadID, text: normalized, state: .queued,
-            enqueuedProcessID: ownerProcessID
+            id: UUID(), taskID: taskID, threadID: threadID, text: normalized, imageDataURLs: imageDataURLs, state: .queued,
+            enqueuedProcessID: nil
         )
         try mutateQueuedMessages(taskID: taskID) { $0.append(item) }
         return item
@@ -864,7 +936,7 @@ final class BoardTaskManager {
                 throw BridgeCommandError(code: "invalid_transition", message: "That queued message is not waiting for an explicit retry.")
             }
             items[index].state = .queued
-            items[index].enqueuedProcessID = Int32(ProcessInfo.processInfo.processIdentifier)
+            items[index].enqueuedProcessID = nil
             items[index].dispatchingProcessID = nil
         }
     }
@@ -897,6 +969,14 @@ final class BoardTaskManager {
                 items[index].state = .needsAction
                 items[index].dispatchingProcessID = nil
             }
+        }
+    }
+
+    func requeueMissedSteer(taskID: UUID, messageID: UUID) throws {
+        try mutateQueuedMessages(taskID: taskID) { items in
+            guard let index = items.firstIndex(where: { $0.id == messageID && $0.state == .dispatching }) else { return }
+            items[index].state = .queued
+            items[index].dispatchingProcessID = nil
         }
     }
 
@@ -1176,7 +1256,7 @@ final class BoardTaskManager {
         let readStartedAt = DispatchTime.now().uptimeNanoseconds
         StationAIDiagnostics.record("persistence.read.started", fields: readFields)
         do {
-            let tasks = try modelContext.fetch(descriptor).map(BoardTaskRecord.init(task:))
+            let tasks = try modelContext.fetch(descriptor).map { BoardTaskRecord(task: $0, includeDraftImages: false) }
             var fields = readFields
             fields["resultCount"] = String(tasks.count)
             fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - readStartedAt) / 1_000_000)
@@ -1512,22 +1592,10 @@ final class BoardTaskManager {
         }
     }
 
-    func createPullRequests(_ id: UUID, client: CodexAppServerClient, conflictAction: String = "ask") async throws -> BoardTaskRecord {
+    func createPullRequests(_ id: UUID, client: CodexAppServerClient) async throws -> BoardTaskRecord {
         let conflicts = try await pullRequestConflictRepositories(id)
         if !conflicts.isEmpty {
-            switch conflictAction {
-            case "ask":
-                throw BridgeCommandError(code: "conflicts_require_confirmation", message: "Pull request conflicts were found. Choose how to resolve them in StationAI.")
-            case "keep":
-                return try get(id)
-            case "resolve-only":
-                _ = try await resolvePullRequestConflicts(id, action: conflictAction, client: client)
-                return try get(id)
-            case "resolve-and-push":
-                _ = try await resolvePullRequestConflicts(id, action: conflictAction, client: client)
-            default:
-                throw BridgeCommandError(code: "invalid_argument", message: "Unknown pull request conflict action '\(conflictAction)'.")
-            }
+            throw BridgeCommandError(code: "conflicts_require_confirmation", message: "Pull request conflicts were found. Resolve conflicts in the task worktree before creating pull requests.")
         }
         let lookup = try await withTaskOperationLock(id) {
             let initialTask = try requireTask(id)
@@ -1640,6 +1708,36 @@ final class BoardTaskManager {
         try await withTaskOperationLock(id) {
             try await pullRequestConflictRepositoriesUnlocked(id)
         }
+    }
+
+    func reviewPullRequests(_ id: UUID) async throws -> [PullRequestReviewState] {
+        let task = try requireTask(id)
+        let records = task.repositoryWorktrees.filter { !$0.isPending && $0.pullRequestNumber != nil }
+        guard !records.isEmpty else { return [] }
+        let executable = try pullRequestService.resolveExecutable()
+        return try await withThrowingTaskGroup(of: PullRequestReviewState.self) { group in
+            for record in records {
+                group.addTask {
+                    try await StationAIPullRequestService().reviewState(record, executable: executable)
+                }
+            }
+            var states: [PullRequestReviewState] = []
+            for try await state in group { states.append(state) }
+            return states.sorted { $0.repositoryPath < $1.repositoryPath }
+        }
+    }
+
+    func verifyPullRequestResolution(_ id: UUID) async throws -> PullRequestResolutionCheck {
+        var latest: [PullRequestReviewState] = []
+        for attempt in 0..<5 {
+            latest = try await reviewPullRequests(id)
+            if !latest.isEmpty && latest.allSatisfy(\.isConfirmedResolved) { return .resolved }
+            if attempt < 4 { try await Task.sleep(for: .seconds(1)) }
+        }
+        guard !latest.isEmpty else { return .inconclusive }
+        return latest.contains(where: {
+            $0.hasConflicts || ($0.headRefOid != nil && $0.headRefOid != $0.localHeadOid)
+        }) ? .stillConflicted : .inconclusive
     }
 
     private func pullRequestConflictRepositoriesUnlocked(_ id: UUID) async throws -> [String] {
@@ -1799,6 +1897,24 @@ final class BoardTaskManager {
         }
     }
 
+    func recordConversationActivityDuration(taskID: UUID, activityID: String, durationMs: Int) async throws {
+        guard !activityID.isEmpty, durationMs >= 0 else { return }
+        try await withTaskOperationLock(taskID) {
+            let task = try self.requireTask(taskID)
+            var durations = (try? task.conversationActivityDurationsData.map {
+                try JSONDecoder().decode([String: Int].self, from: $0)
+            }) ?? [:]
+            durations[activityID] = durationMs
+            task.conversationActivityDurationsData = try? JSONEncoder().encode(durations)
+            try await self.saveTaskContext(taskID: taskID)
+        }
+    }
+
+    func conversationActivityDurations(taskID: UUID) -> [String: Int] {
+        guard let task = try? requireTask(taskID), let data = task.conversationActivityDurationsData else { return [:] }
+        return (try? JSONDecoder().decode([String: Int].self, from: data)) ?? [:]
+    }
+
     @discardableResult
     func clearProgressReport(_ id: UUID) async throws -> BoardTaskRecord {
         return try await withTaskOperationLock(id) {
@@ -1924,7 +2040,7 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func savePrompt(_ id: UUID, prompt: String, status: TaskStatus? = nil, submitted: Bool = false) async throws -> BoardTaskRecord {
+    func savePrompt(_ id: UUID, prompt: String, status: TaskStatus? = nil, submitted: Bool = false, imageDataURLs: [String]? = nil) async throws -> BoardTaskRecord {
         StationAIDiagnostics.record("task.prompt.write.started", fields: [
             "taskID": id.uuidString,
             "promptByteCount": String(prompt.utf8.count),
@@ -1937,9 +2053,13 @@ final class BoardTaskManager {
         if submitted, status != .inProgress {
             throw StationAIManagerError.invalidTransition("A submitted prompt must place the task in Progress.")
         }
+        if let imageDataURLs, imageDataURLs.count > 8 || imageDataURLs.contains(where: { !CodexConversationManager.isValidImageDataURL($0) }) {
+            throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
+        }
         return try await withTaskOperationLock(id) {
             let task = try requireTask(id)
             task.savedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : prompt
+            if let imageDataURLs { task.draftImageDataURLs = imageDataURLs }
             task.pendingSubmittedPrompt = submitted ? prompt : nil
             if let status {
                 task.status = status
@@ -2418,18 +2538,6 @@ final class WorkspaceSettingsManager {
         return appearance
     }
 
-    var pullRequestConflictAction: String {
-        let value = defaults.string(forKey: WorkspaceSettings.pullRequestConflictActionKey) ?? "ask"
-        return ["ask", "resolve-and-push", "resolve-only", "keep"].contains(value) ? value : "ask"
-    }
-
-    func setPullRequestConflictAction(_ value: String) throws {
-        guard ["ask", "resolve-and-push", "resolve-only", "keep"].contains(value) else {
-            throw BridgeCommandError(code: "invalid_argument", message: "Pull request conflict action must be ask, resolve-and-push, resolve-only, or keep.")
-        }
-        defaults.set(value, forKey: WorkspaceSettings.pullRequestConflictActionKey)
-    }
-
     func setAppearance(_ value: String) throws {
         StationAIDiagnostics.record("settings.write.started", fields: ["setting": "appearance", "value": value])
         guard value == "dark" || value == "light" else {
@@ -2658,7 +2766,14 @@ struct ConversationUpdate: Codable {
 final class CodexConversationManager {
     private let tasks: BoardTaskManager
     private let client: CodexAppServerClient
-    private var dispatchingQueuedMessages = false
+    private static var dispatchingQueuedTaskIDs = Set<UUID>()
+    private static var pendingQueuedTaskDispatchIDs = Set<UUID>()
+    private var activeSendTaskIDs = Set<UUID>()
+
+    private func shouldDrainMissedSteerImmediately(taskID: UUID) -> Bool {
+        guard !activeSendTaskIDs.contains(taskID) else { return false }
+        return (try? tasks.hasConversationTurnReservation(taskID)) != true
+    }
 
     init(tasks: BoardTaskManager, client: CodexAppServerClient) {
         self.tasks = tasks
@@ -2691,13 +2806,19 @@ final class CodexConversationManager {
                 developerInstructions: TaskProgressReportInstructions.make(taskID: taskID),
                 onActionRequest: onActionRequest
             )
+            let savedDurations = tasks.conversationActivityDurations(taskID: taskID)
+            let activities = history.activities.map { activity -> CodexActivity in
+                var activity = activity
+                if activity.durationMs == nil { activity.durationMs = savedDurations[activity.id] }
+                return activity
+            }
             StationAIDiagnostics.record("conversation.history.succeeded", fields: client.diagnosticFields([
                 "taskID": taskID.uuidString,
                 "threadID": threadID,
                 "messageCount": String(history.messages.count),
                 "activityCount": String(history.activities.count)
             ]))
-            return history
+            return CodexThreadHistory(messages: history.messages, activities: activities, diff: history.diff)
         } catch {
             var fields = StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
             fields["taskID"] = taskID.uuidString
@@ -2793,7 +2914,11 @@ final class CodexConversationManager {
         if type == "response_item", let itemType = payload["type"] as? String, itemType == "message",
            let role = payload["role"] as? String, role == "user" || role == "assistant",
            let content = payload["content"] as? [[String: Any]] {
-            return content.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
+            let searchableTextTypes: Set<String> = ["text", "input_text", "output_text"]
+            return content.compactMap {
+                guard let contentType = $0["type"] as? String, searchableTextTypes.contains(contentType) else { return nil }
+                return $0["text"] as? String
+            }
         }
         if type == "event_msg", let eventType = payload["type"] as? String,
            eventType == "UserMessage" || eventType == "AgentMessage",
@@ -2850,13 +2975,34 @@ final class CodexConversationManager {
         try tasks.queuedConversationMessages(taskID: taskID)
     }
 
-    func queueMessage(taskID: UUID, text: String) throws -> QueuedConversationMessage {
-        let task = try tasks.taskModel(taskID)
+    func queueMessage(taskID: UUID, text: String, imageDataURLs: [String] = []) throws -> QueuedConversationMessage {
         return try tasks.enqueueConversationMessage(
             taskID: taskID,
-            text: text,
-            ownerProcessID: task.codexThreadID.flatMap { client.activeTurnOwnerProcessID(threadID: $0) }
+            text: text, imageDataURLs: imageDataURLs
         )
+    }
+
+    func queueMissedSteer(
+        taskID: UUID,
+        text: String,
+        imageDataURLs: [String] = [],
+        onUpdate: @escaping (ConversationUpdate) -> Void = { _ in },
+        onUserInput: @escaping (CodexUserInputRequest) async -> Void = { _ in }
+    ) async throws -> QueuedConversationMessage {
+        let item = try queueMessage(taskID: taskID, text: text, imageDataURLs: imageDataURLs)
+        if shouldDrainMissedSteerImmediately(taskID: taskID) {
+            await dispatchQueuedMessages(
+                taskID: taskID,
+                mode: .code,
+                modelID: CodexAppServerClient.modelID,
+                onlyMessageID: item.id,
+                onUpdate: onUpdate,
+                onUserInput: onUserInput
+            )
+        } else if Self.dispatchingQueuedTaskIDs.contains(taskID) {
+            Self.pendingQueuedTaskDispatchIDs.insert(taskID)
+        }
+        return item
     }
 
     func removeQueuedMessage(taskID: UUID, messageID: UUID) throws {
@@ -2870,8 +3016,16 @@ final class CodexConversationManager {
         }
         try tasks.reserveQueuedMessageForSteering(taskID: taskID, messageID: messageID)
         do {
-            let accepted = try await steer(taskID: taskID, text: item.text)
-            try tasks.finishQueuedMessageSteering(taskID: taskID, messageID: messageID, accepted: accepted)
+            let accepted = try await steer(taskID: taskID, text: item.text, imageDataURLs: item.imageDataURLs ?? [])
+            if accepted { try tasks.finishQueuedMessageSteering(taskID: taskID, messageID: messageID, accepted: true) }
+            else {
+                try tasks.requeueMissedSteer(taskID: taskID, messageID: messageID)
+                if shouldDrainMissedSteerImmediately(taskID: taskID) {
+                    await dispatchQueuedMessages(taskID: taskID, mode: .code, modelID: CodexAppServerClient.modelID, onlyMessageID: messageID, onUpdate: { _ in }, onUserInput: { _ in })
+                } else if Self.dispatchingQueuedTaskIDs.contains(taskID) {
+                    Self.pendingQueuedTaskDispatchIDs.insert(taskID)
+                }
+            }
             return (item.text, accepted)
         } catch {
             try? tasks.finishQueuedMessageSteering(taskID: taskID, messageID: messageID, accepted: false)
@@ -2897,10 +3051,13 @@ final class CodexConversationManager {
         mode: CodexConversationMode = .code,
         modelID: String = CodexAppServerClient.modelID,
         userInputAnswers: [String: [String]] = [:],
+        retainQueuedMessagesOnFailure: Bool = true,
         onTurnStarting: (() -> Void)? = nil,
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in },
         onUserInput: @escaping (CodexUserInputRequest) async -> Void = { _ in }
     ) async throws -> CodexThreadHistory {
+        activeSendTaskIDs.insert(taskID)
+        defer { activeSendTaskIDs.remove(taskID) }
         let history: CodexThreadHistory
         do {
             history = try await tasks.withConversationTurnReservation(taskID) {
@@ -2924,13 +3081,13 @@ final class CodexConversationManager {
                 }
             }
         } catch {
-            if let threadID = try? tasks.taskModel(taskID).codexThreadID {
+            if retainQueuedMessagesOnFailure, let threadID = try? tasks.taskModel(taskID).codexThreadID {
                 try? tasks.retainQueuedMessagesForUserAction(taskID: taskID, threadID: threadID)
                 onUpdate(ConversationUpdate(type: "queue_changed"))
             }
             throw error
         }
-        if !dispatchingQueuedMessages {
+        if !Self.dispatchingQueuedTaskIDs.contains(taskID) {
             await dispatchQueuedMessages(taskID: taskID, mode: mode, modelID: modelID, onUpdate: onUpdate, onUserInput: onUserInput)
         }
         return history
@@ -2944,29 +3101,51 @@ final class CodexConversationManager {
         onUpdate: @escaping (ConversationUpdate) -> Void,
         onUserInput: @escaping (CodexUserInputRequest) async -> Void
     ) async {
-        guard !dispatchingQueuedMessages else { return }
         let threadID: String
         do {
             guard let value = try tasks.taskModel(taskID).codexThreadID else { return }
             threadID = value
         } catch { return }
-        dispatchingQueuedMessages = true
-        defer { dispatchingQueuedMessages = false }
+        guard Self.dispatchingQueuedTaskIDs.insert(taskID).inserted else {
+            Self.pendingQueuedTaskDispatchIDs.insert(taskID)
+            return
+        }
+        var dispatchEncounteredFailure = false
+        defer { Self.dispatchingQueuedTaskIDs.remove(taskID) }
+        var messageIDFilter = onlyMessageID
         while true {
-            let item: QueuedConversationMessage?
-            do { item = try tasks.claimNextQueuedMessage(taskID: taskID, threadID: threadID, messageID: onlyMessageID) }
-            catch { break }
-            guard let item else { break }
-            do {
-                _ = try await send(taskID: taskID, text: item.text, mode: mode, modelID: modelID, onUpdate: onUpdate, onUserInput: onUserInput)
-                try tasks.finishQueuedMessage(item, succeeded: true)
-                onUpdate(ConversationUpdate(type: "queue_changed"))
-            } catch {
-                try? tasks.finishQueuedMessage(item, succeeded: false)
-                onUpdate(ConversationUpdate(type: "queue_changed"))
-                onUpdate(ConversationUpdate(type: "action_notice", message: "A queued follow-up needs your review before it can be retried."))
-                break
+            while true {
+                let item: QueuedConversationMessage?
+                do { item = try tasks.claimNextQueuedMessage(taskID: taskID, threadID: threadID, messageID: messageIDFilter) }
+                catch { break }
+                guard let item else { break }
+                do {
+                    _ = try await send(
+                        taskID: taskID,
+                        text: item.text,
+                        imageDataURLs: item.imageDataURLs ?? [],
+                        mode: mode,
+                        modelID: modelID,
+                        retainQueuedMessagesOnFailure: false,
+                        onUpdate: onUpdate,
+                        onUserInput: onUserInput
+                    )
+                    try tasks.finishQueuedMessage(item, succeeded: true)
+                    onUpdate(ConversationUpdate(type: "queue_changed"))
+                } catch {
+                    dispatchEncounteredFailure = true
+                    try? tasks.finishQueuedMessage(item, succeeded: false)
+                    onUpdate(ConversationUpdate(type: "queue_changed"))
+                    onUpdate(ConversationUpdate(type: "action_notice", message: "A queued follow-up needs your review before it can be retried."))
+                    break
+                }
             }
+            guard !dispatchEncounteredFailure else { break }
+            let hadPendingDispatch = Self.pendingQueuedTaskDispatchIDs.remove(taskID) != nil
+            let hasQueuedFollowUp = messageIDFilter != nil &&
+                ((try? tasks.queuedConversationMessages(taskID: taskID).contains { $0.state == .queued }) == true)
+            guard hadPendingDispatch || hasQueuedFollowUp else { break }
+            messageIDFilter = nil
         }
     }
 
@@ -3113,7 +3292,18 @@ final class CodexConversationManager {
                 developerInstructions: TaskProgressReportInstructions.make(taskID: taskID),
                 onDelta: { delta in onUpdate(ConversationUpdate(type: "text_delta", text: delta)) },
                 onFinalMessage: { message in onUpdate(ConversationUpdate(type: "assistant_final", text: message)) },
-                onActivity: { activity in onUpdate(ConversationUpdate(type: "activity", activity: activity)) },
+                onActivity: { activity in
+                    if let durationMs = activity.durationMs {
+                        Task { @MainActor in
+                            try? await self.tasks.recordConversationActivityDuration(
+                                taskID: taskID,
+                                activityID: activity.id,
+                                durationMs: durationMs
+                            )
+                        }
+                    }
+                    onUpdate(ConversationUpdate(type: "activity", activity: activity))
+                },
                 onDiff: { diff in onUpdate(ConversationUpdate(type: "diff", diff: diff.unifiedDiff)) },
                 onHistory: { history in onUpdate(ConversationUpdate(type: "history", history: history)) },
                 onActionRequest: {
@@ -3159,6 +3349,13 @@ final class CodexConversationManager {
                     ))
                 }
             )
+            for (activityID, durationMs) in client.lastTurnActivityDurations {
+                try await tasks.recordConversationActivityDuration(
+                    taskID: taskID,
+                    activityID: activityID,
+                    durationMs: durationMs
+                )
+            }
             phase = "worktree-finalization"
             phase = "review-status-persistence"
             let reportedOutcome = try await tasks.finishConversationTurnOutcome(taskID)
@@ -3166,6 +3363,13 @@ final class CodexConversationManager {
             _ = try await tasks.setLifecycleStatus(taskID, to: finalStatus)
         } catch {
             await titleGeneration?.value
+            for (activityID, durationMs) in client.lastTurnActivityDurations {
+                try? await tasks.recordConversationActivityDuration(
+                    taskID: taskID,
+                    activityID: activityID,
+                    durationMs: durationMs
+                )
+            }
             var fields = StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
             fields["taskID"] = taskID.uuidString
             fields["threadID"] = persistedThreadID ?? ""
@@ -3283,7 +3487,7 @@ final class CodexConversationManager {
         }
     }
 
-    private static func isValidImageDataURL(_ value: String) -> Bool {
+    static func isValidImageDataURL(_ value: String) -> Bool {
         guard let separator = value.firstIndex(of: ",") else { return false }
         let mime = String(value[..<separator])
         guard let data = Data(base64Encoded: String(value[value.index(after: separator)...])), data.count <= 10_000_000 else { return false }
@@ -3392,11 +3596,14 @@ final class StationAIBridgeRuntime {
             case "task.pr.create":
                 result = try Self.value(await taskManager.createPullRequests(
                     request.requiredUUID("taskID"),
-                    client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string),
-                    conflictAction: settings.pullRequestConflictAction
+                    client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
                 ))
             case "task.pr.conflicts":
                 result = .object(["repositories": .array(try await taskManager.pullRequestConflictRepositories(request.requiredUUID("taskID")).map(BridgeValue.string))])
+            case "task.pr.status":
+                result = try Self.value(await taskManager.reviewPullRequests(request.requiredUUID("taskID")))
+            case "task.pr.verify":
+                result = .object(["status": .string(try await taskManager.verifyPullRequestResolution(request.requiredUUID("taskID")).rawValue)])
             case "task.pr.resolve":
                 result = try Self.value(await taskManager.resolvePullRequestConflicts(
                     request.requiredUUID("taskID"), action: request.requiredString("action"),
@@ -3467,7 +3674,8 @@ final class StationAIBridgeRuntime {
                     request.requiredUUID("taskID"),
                     prompt: prompt,
                     status: status,
-                    submitted: submitted
+                    submitted: submitted,
+                    imageDataURLs: request.arguments["images"]?.strings
                 ))
             case "task.delete":
                 try await taskManager.delete(request.requiredUUID("taskID"))
@@ -3497,12 +3705,8 @@ final class StationAIBridgeRuntime {
                     "defaultParentFolder": settings.defaultParentFolderPath.isEmpty ? .null : .string(settings.defaultParentFolderPath),
                     "defaultParentAvailable": .boolean(settings.defaultParentFolderURL != nil),
                     "lastSelectedRepositories": .array(settings.lastSelectedRepositories.map(BridgeValue.string)),
-                    "appearance": .string(settings.appearance),
-                    "pullRequestConflictAction": .string(settings.pullRequestConflictAction)
+                    "appearance": .string(settings.appearance)
                 ])
-            case "settings.set-pr-conflict-action":
-                try settings.setPullRequestConflictAction(request.requiredString("action"))
-                result = .object(["pullRequestConflictAction": .string(settings.pullRequestConflictAction)])
             case "settings.set-appearance":
                 try settings.setAppearance(request.requiredString("appearance"))
                 result = .object(["appearance": .string(settings.appearance)])
@@ -3543,10 +3747,15 @@ final class StationAIBridgeRuntime {
                     result = .object(["removed": .boolean(true)])
                 case "conversation.queue.steer":
                     let steered = try await conversations.steerQueuedMessage(taskID: taskID, messageID: request.requiredUUID("messageID"))
-                    result = .object(["text": .string(steered.message), "accepted": .boolean(steered.accepted)])
+                    result = .object(["text": .string(steered.message), "accepted": .boolean(true), "queued": .boolean(!steered.accepted)])
                 default:
                     let accepted = try await conversations.steer(taskID: taskID, text: request.arguments["message"]?.string ?? "", imageDataURLs: request.arguments["images"]?.strings ?? [])
-                    result = .object(["accepted": .boolean(accepted)])
+                    if accepted {
+                        result = .object(["accepted": .boolean(true), "queued": .boolean(false)])
+                    } else {
+                        _ = try await conversations.queueMissedSteer(taskID: taskID, text: request.arguments["message"]?.string ?? "", imageDataURLs: request.arguments["images"]?.strings ?? [])
+                        result = .object(["accepted": .boolean(true), "queued": .boolean(true)])
+                    }
                 }
             case "conversation.send":
                 let taskID = try request.requiredUUID("taskID")
