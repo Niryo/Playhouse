@@ -170,7 +170,16 @@ struct TaskConversationView: View {
     }
 
     private var hasCompletedAssistantResponse: Bool {
-        messages.contains { $0.role == .assistant && $0.phase == "final_answer" }
+        guard let latestUserIndex = messages.lastIndex(where: { $0.role == .user }) else {
+            return messages.contains { $0.role == .assistant && $0.phase == "final_answer" }
+        }
+        return messages.dropFirst(latestUserIndex + 1).contains {
+            $0.role == .assistant && $0.phase == "final_answer"
+        }
+    }
+
+    private var isDisplayingActiveResponse: Bool {
+        isResponding && !hasCompletedAssistantResponse
     }
 
     private var responseStartedAtDefaultsKey: String {
@@ -1189,8 +1198,10 @@ struct TaskConversationView: View {
                         activityList
                     }
 
-                    ForEach(activities.filter(\.isSubagent)) { activity in
-                        subagentTimelineRow(activity)
+                    if isDisplayingActiveResponse {
+                        ForEach(activeSubagents) { activity in
+                            subagentTimelineRow(activity)
+                        }
                     }
                     ForEach(activities.filter { $0.isContextCompaction && $0.timelineOrder == nil }) { activity in
                         contextCompactionTimelineRow(activity)
@@ -1215,6 +1226,11 @@ struct TaskConversationView: View {
             .onChange(of: messages.map(\.text)) { _, _ in
                 scrollToLatest(using: scrollProxy)
             }
+            .onChange(of: hasCompletedAssistantResponse) { _, hasCompletedResponse in
+                if hasCompletedResponse {
+                    isActivityExpanded = false
+                }
+            }
             .onChange(of: activities) { _, _ in
                 if isResponding { scrollToLatest(using: scrollProxy) }
             }
@@ -1222,6 +1238,10 @@ struct TaskConversationView: View {
                 scrollToLatest(using: scrollProxy)
             }
         }
+    }
+
+    private var activeSubagents: [CodexActivity] {
+        activities.filter { $0.isSubagent && ["inprogress", "running"].contains($0.status.lowercased()) }
     }
 
     private var activityList: some View {
@@ -1265,6 +1285,16 @@ struct TaskConversationView: View {
                     }
                     ForEach(activities.filter { !$0.isSubagent && !$0.isContextCompaction }) { activity in
                         activityRow(activity)
+                    }
+                    let agentActivities = activities.filter(\.isSubagent)
+                    if !isDisplayingActiveResponse && !agentActivities.isEmpty {
+                        Text("Agents used")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 4)
+                        ForEach(agentActivities) { activity in
+                            subagentTimelineRow(activity)
+                        }
                     }
                 }
                 .padding(.top, 6)
@@ -1468,7 +1498,7 @@ struct TaskConversationView: View {
 
     @ViewBuilder
     private var activityDisclosureButtonLabel: some View {
-        if isResponding, let responseStartedAt {
+        if isDisplayingActiveResponse, let responseStartedAt {
             TimelineView(.periodic(from: responseStartedAt, by: 1)) { timeline in
                 activityDisclosureContents(
                     workingFor: Self.durationLabel(Self.elapsedSeconds(since: responseStartedAt, now: timeline.date))

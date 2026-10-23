@@ -4326,7 +4326,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertLessThan(reloaded.frame.minY, app.staticTexts["Context compaction completed."].frame.minY)
     }
 
-    // case-contract: test_conversation_shows_subagent_delegation | Started and interacted updates coalesce by child thread ID into clear named timeline rows outside the collapsible Codex activity section, with sentence-style names, available path/model/reasoning metadata, and started-working wording; completed and interrupted states, optional metadata, and unknown kinds survive history reload and remain visible after reopening the task conversation. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs.
+    // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs.
     func test_conversation_shows_subagent_delegation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -4338,6 +4338,16 @@ final class StationAIUITests: XCTestCase {
         let fixtureCopy = fixtureRoot.appendingPathComponent("codex-fixture-subagent")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureCopy.path), "The UI runner must prepare the subagent fixture before launch.")
         codexFixtureExecutable = fixtureCopy.path
+        let finalAnswerPause = URL(fileURLWithPath: fixtureCopy.path + ".final-answer-pause")
+        let finalAnswerReady = URL(fileURLWithPath: fixtureCopy.path + ".final-answer-ready")
+        let finalAnswerRelease = URL(fileURLWithPath: fixtureCopy.path + ".final-answer-release")
+        try? FileManager.default.removeItem(at: finalAnswerReady)
+        try? FileManager.default.removeItem(at: finalAnswerRelease)
+        try "Pause final answer until the UI checks the collapsed disclosure.\n".write(to: finalAnswerPause, atomically: true, encoding: .utf8)
+        defer {
+            try? "Release the final answer fixture.\n".write(to: finalAnswerRelease, atomically: true, encoding: .utf8)
+            try? FileManager.default.removeItem(at: finalAnswerPause)
+        }
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["task", "create", "--title", "Subagent delegation", "--root", fixture.primary.path])
         let taskID = try taskID(named: "Subagent delegation")
@@ -4362,6 +4372,9 @@ final class StationAIUITests: XCTestCase {
         let agentIcon = activeChildButton.images.matching(NSPredicate(format: "label == %@", "Sandbox review agent icon")).firstMatch
         XCTAssertTrue(agentIcon.waitForExistence(timeout: 5), "The requested robot icon should render in the child timeline row.")
         assertSubagentIconArtwork(agentIcon)
+        let secondActiveChildButton = element("codex-subagent-row-00000000-0000-0000-0000-000000000003")
+        XCTAssertTrue(secondActiveChildButton.waitForExistence(timeout: 5),
+                      "Every active agent should remain visible outside the collapsed Codex activity section.")
         activityDisclosure.click()
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-subagent-row-00000000-0000-0000-0000-000000000002").count, 1,
                        "The interacted update should update the single timeline row instead of creating a duplicate.")
@@ -4369,7 +4382,6 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(childMetadata.contains("/agents/Sandbox review"))
         XCTAssertTrue(childMetadata.contains("gpt-6-sol"))
         XCTAssertTrue(childMetadata.contains("high"))
-        let secondActiveChildButton = element("codex-subagent-row-00000000-0000-0000-0000-000000000003")
         XCTAssertTrue(secondActiveChildButton.waitForExistence(timeout: 5))
         XCTAssertTrue(secondActiveChildButton.label.contains("Some agent"), "Underscored agent names should render with spaces and sentence capitalization.")
         XCTAssertTrue(secondActiveChildButton.label.contains("started working"))
@@ -4387,6 +4399,20 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(childResult.waitForExistence(timeout: 20), "The child view should render its stored conversation content.")
         element("subagent-back-button").click()
         XCTAssertTrue(waitUntil({ !self.element("subagent-conversation-panel").exists }, timeout: 5), "Back should return to the parent conversation.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: finalAnswerReady.path) }, timeout: 20),
+                      "The fixture should pause after the final answer appears but before the turn completes.")
+        XCTAssertTrue(waitUntil({
+            activityDisclosure.label.contains("Worked for")
+                && activityDisclosure.value as? String == "Collapsed, right chevron"
+                && self.app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "The subagent inspected the project structure")).firstMatch.exists
+        }, timeout: 10), "The final answer should immediately produce a clean collapsed Worked for section.")
+        XCTAssertEqual(element("pause-response-button").label, "Stop response",
+                       "The final-answer transition should be checked while the turn is still responding.")
+        for childID in ["00000000-0000-0000-0000-000000000002", "00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-000000000004"] {
+            XCTAssertFalse(element("codex-subagent-row-\(childID)").exists,
+                           "Agent rows should move inside Worked for as soon as the final answer arrives.")
+        }
+        try "Allow the parent turn to complete.\n".write(to: finalAnswerRelease, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({
             (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response"
         }, timeout: 20), "The visible composer turn should finish and persist the task status.")
@@ -4429,13 +4455,24 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(app.state, .runningForeground, "StationAI must be foreground before inspecting the conversation.")
 
         XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 20), "A delegated task should appear in conversation activity.")
+        XCTAssertTrue(activityDisclosure.label.contains("Worked for"), "The completed turn should use the Worked for disclosure.")
+        XCTAssertEqual(activityDisclosure.value as? String, "Collapsed, right chevron",
+                       "The final answer should arrive with all Codex activity collapsed.")
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "The subagent inspected the project structure")).firstMatch.exists,
+                      "The final answer should remain visible while agent details are collapsed.")
+        for childID in ["00000000-0000-0000-0000-000000000002", "00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-000000000004"] {
+            XCTAssertFalse(element("codex-subagent-row-\(childID)").exists,
+                           "Agent rows should be hidden inside the collapsed Worked for disclosure.")
+        }
+        activityDisclosure.click()
         let activityRow = element("codex-activity-row-item_stationai_subagent")
         XCTAssertTrue(activityRow.waitForExistence(timeout: 10))
         XCTAssertTrue(activityRow.label.contains("Task delegated to subagent"))
         XCTAssertTrue(activityRow.label.contains("Completed"))
+        XCTAssertTrue(app.staticTexts["Agents used"].exists)
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000002").label.contains("finished working"))
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000003").label.contains("was interrupted"))
-        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000004").exists, "An unknown child kind should remain visible.")
+        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000004").exists, "An unknown child kind should remain inspectable.")
         let activityDetail = element("codex-activity-detail-item_stationai_subagent")
         XCTAssertTrue(activityDetail.waitForExistence(timeout: 5))
         let detailDescription = "\(activityDetail.label) \(activityDetail.value as? String ?? "")"
@@ -4454,14 +4491,29 @@ final class StationAIUITests: XCTestCase {
                 && $0["parameter.threadId"] as? String == childThreadID
         }, "Inspecting a child thread must not resume it.")
 
+        let completedChildRow = element("codex-subagent-row-00000000-0000-0000-0000-000000000002")
+        completedChildRow.click()
+        XCTAssertTrue(element("subagent-conversation-panel").waitForExistence(timeout: 5),
+                      "An expanded finished agent row should open its conversation.")
+        XCTAssertTrue(app.staticTexts["Read only"].exists)
+        XCTAssertFalse(element("message-composer").exists)
+        element("subagent-back-button").click()
+        XCTAssertTrue(waitUntil({ !self.element("subagent-conversation-panel").exists }, timeout: 5))
+
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "The task should close before checking its saved conversation history.")
         openTask(named: "Subagent delegation")
         XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 10))
+        XCTAssertTrue(activityDisclosure.label.contains("Worked for"), "The reopened final answer should retain the Worked for disclosure.")
+        XCTAssertEqual(activityDisclosure.value as? String, "Collapsed, right chevron")
+        for childID in ["00000000-0000-0000-0000-000000000002", "00000000-0000-0000-0000-000000000003", "00000000-0000-0000-0000-000000000004"] {
+            XCTAssertFalse(element("codex-subagent-row-\(childID)").exists,
+                           "Agent rows should remain collapsed inside Worked for after reopening.")
+        }
         activityDisclosure.click()
-        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000002").label.contains("finished working"), "The completed child should remain visible after reopening the task.")
-        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000003").label.contains("was interrupted"), "The interrupted child should remain visible after reopening the task.")
-        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000004").exists, "The unknown child kind should remain visible after reopening the task.")
+        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000002").label.contains("finished working"), "The completed child should remain inspectable after reopening the task.")
+        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000003").label.contains("was interrupted"), "The interrupted child should remain inspectable after reopening the task.")
+        XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000004").exists, "The unknown child kind should remain inspectable after reopening the task.")
         attachScreenshot(named: "Conversation shows and opens a subagent")
     }
 

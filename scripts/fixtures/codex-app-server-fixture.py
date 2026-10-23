@@ -561,6 +561,19 @@ def main():
                     "turnId": TURN_ID,
                     "item": {**item, "text": text},
                 }})
+                final_answer_pause = Path(str(sys.argv[0]) + ".final-answer-pause")
+                if final_answer_pause.exists():
+                    final_answer_ready = Path(str(sys.argv[0]) + ".final-answer-ready")
+                    final_answer_release = Path(str(sys.argv[0]) + ".final-answer-release")
+                    final_answer_ready.write_text("The final answer is visible before turn completion.\n", encoding="utf-8")
+                    deadline = time.monotonic() + 90
+                    while not final_answer_release.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    was_released = final_answer_release.exists()
+                    final_answer_ready.unlink(missing_ok=True)
+                    final_answer_release.unlink(missing_ok=True)
+                    if not was_released:
+                        return 3
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
