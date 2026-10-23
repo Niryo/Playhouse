@@ -104,6 +104,8 @@ struct TaskConversationView: View {
     @State private var userInputRequest: CodexUserInputRequest?
     @State private var userInputAnswers: [String: [String]] = [:]
     @State private var userInputOther: [String: String] = [:]
+    @State private var asyncQuestionAnswers: [String: String] = [:]
+    @State private var answeredAsyncQuestionIDs: Set<String> = []
     @State private var errorMessage: String?
     @State private var actionNotice: String?
     @State private var isShowingWorkspaceEditor = false
@@ -1661,8 +1663,11 @@ struct TaskConversationView: View {
     private func messageBubble(_ message: CodexChatMessage) -> some View {
         HStack(alignment: .top, spacing: 0) {
             if message.role == .assistant {
-                if Self.displayableAssistantText(message.text).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && isResponding {
+                if message.asyncQuestions == nil &&
+                    Self.displayableAssistantText(message.text).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && isResponding {
                     EmptyView()
+                } else if message.asyncQuestions != nil {
+                    asyncQuestionBubble(message)
                 } else {
                     assistantBubble(message)
                 }
@@ -1673,6 +1678,110 @@ struct TaskConversationView: View {
             }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private func asyncQuestionKey(messageID: String, index: Int) -> String {
+        "\(messageID):\(index)"
+    }
+
+    private func asyncQuestionWasAnswered(_ message: CodexChatMessage) -> Bool {
+        answeredAsyncQuestionIDs.contains(message.id)
+            || queuedMessages.contains { $0.asyncQuestionItemID == message.id }
+    }
+
+    private func asyncQuestionBubble(_ message: CodexChatMessage) -> some View {
+        let questions = message.asyncQuestions ?? []
+        let answered = asyncQuestionWasAnswered(message)
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("Codex · Luna")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            ForEach(Array(questions.enumerated()), id: \.offset) { index, question in
+                let answerKey = asyncQuestionKey(messageID: message.id, index: index)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(question.title)
+                        .font(.system(size: 15, weight: .semibold))
+                    if let options = question.options, !options.isEmpty {
+                        if !answered && !isReadOnly {
+                            ForEach(Array(options.enumerated()), id: \.offset) { optionIndex, option in
+                                Button {
+                                    asyncQuestionAnswers[answerKey] = option
+                                } label: {
+                                    Label(option, systemImage: asyncQuestionAnswers[answerKey] == option ? "largecircle.fill.circle" : "circle")
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .buttonStyle(.plain)
+                                .buttonHoverPointer()
+                                .help("Choose this answer for \(question.title)")
+                                .accessibilityIdentifier("async-question-option-\(message.id)-\(index)-\(optionIndex)")
+                            }
+                            TextField("Other answer", text: Binding(
+                                get: {
+                                    let answer = asyncQuestionAnswers[answerKey] ?? ""
+                                    return options.contains(answer) ? "" : answer
+                                },
+                                set: { asyncQuestionAnswers[answerKey] = $0 }
+                            ))
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityIdentifier("async-question-other-\(message.id)-\(index)")
+                        } else {
+                            ForEach(Array(options.enumerated()), id: \.offset) { _, option in
+                                Text(option).font(.system(size: 13)).foregroundStyle(.secondary)
+                            }
+                        }
+                    } else if !answered && !isReadOnly {
+                        TextField("Your answer", text: Binding(
+                                get: { asyncQuestionAnswers[answerKey] ?? "" },
+                                set: { asyncQuestionAnswers[answerKey] = $0 }
+                            ))
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("async-question-answer-\(message.id)-\(index)")
+                    }
+                }
+            }
+            if answered {
+                Text(answeredAsyncQuestionIDs.contains(message.id) ? "Answered" : "Pending")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            } else if !isReadOnly {
+                Button("Send answers") { submitAsyncQuestions(message) }
+                    .buttonStyle(.borderedProminent)
+                    .buttonHoverPointer()
+                    .help("Send your answers to Codex")
+                    .disabled(isSubmittingLiveMessage || isLoadingHistory || questions.enumerated().contains { index, _ in
+                        let key = asyncQuestionKey(messageID: message.id, index: index)
+                        return (asyncQuestionAnswers[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    })
+                    .accessibilityIdentifier("submit-async-questions-\(message.id)")
+            }
+        }
+        .padding(15)
+        .frame(maxWidth: 620, alignment: .leading)
+        .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 17))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("async-question-\(message.id)")
+    }
+
+    private func submitAsyncQuestions(_ message: CodexChatMessage) {
+        guard let questions = message.asyncQuestions, !questions.isEmpty else { return }
+        let answers = questions.indices.map { asyncQuestionAnswers[asyncQuestionKey(messageID: message.id, index: $0)] ?? "" }
+        isSubmittingLiveMessage = true
+        Task { @MainActor in
+            defer { isSubmittingLiveMessage = false }
+            do {
+                let result = try await conversationManager.answerAsyncQuestion(taskID: task.id, question: message, answers: answers)
+                if !result.queued { answeredAsyncQuestionIDs.insert(message.id) }
+                if let history = result.history {
+                    messages = history.messages
+                    activities = history.activities
+                    answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
+                } else if result.queued {
+                    refreshQueuedMessages()
+                } else {
+                    messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: result.text))
+                }
+                errorMessage = nil
+            } catch { errorMessage = error.localizedDescription }
+        }
     }
 
     private func assistantBubble(_ message: CodexChatMessage) -> some View {
@@ -2260,6 +2369,7 @@ struct TaskConversationView: View {
                 actionNotice = "Codex requested an approval. StationAI denied it because approval prompts are disabled."
             }
             messages = history.messages
+            answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
             activities = history.activities
             activeGoal = try? await conversationManager.goal(taskID: task.id)
             let defaults = WorkspaceSettings.preferencesStore
@@ -2358,13 +2468,14 @@ struct TaskConversationView: View {
 
     private func sendMessage(overrideText: String? = nil) {
         let text = (overrideText ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (!text.isEmpty || !pendingImages.isEmpty), !isResponding, !isLoadingHistory else { return }
+        let usesComposerDraft = overrideText == nil
+        guard (!text.isEmpty || (usesComposerDraft && !pendingImages.isEmpty)), !isResponding, !isLoadingHistory else { return }
         let resolutionAttempt = conflictResolutionAttempt
-        if text == "/plan" {
+        if usesComposerDraft && text == "/plan" {
             activatePlanMode()
             return
         }
-        if isEnteringGoal {
+        if usesComposerDraft && isEnteringGoal {
             isPreparingSubmittedMessage = true
             draft = ""
             isEnteringGoal = false
@@ -2378,11 +2489,12 @@ struct TaskConversationView: View {
             }
             return
         }
-        guard !text.isEmpty || !pendingImages.isEmpty else { return }
+        guard !text.isEmpty || (usesComposerDraft && !pendingImages.isEmpty) else { return }
         let userMessageID = UUID().uuidString
         let assistantMessageID = UUID().uuidString
         let previousResponseDuration = completedResponseDuration
-        messages.append(CodexChatMessage(id: userMessageID, role: .user, text: text, imageDataURLs: pendingImages.map(\.dataURL)))
+        messages.append(CodexChatMessage(id: userMessageID, role: .user, text: text,
+                                         imageDataURLs: usesComposerDraft ? pendingImages.map(\.dataURL) : []))
         messages.append(CodexChatMessage(id: assistantMessageID, role: .assistant, text: ""))
         isResponding = true
         let startedAt = Date()
@@ -2390,9 +2502,9 @@ struct TaskConversationView: View {
         completedResponseDuration = nil
         UserDefaults.standard.set(startedAt, forKey: responseStartedAtDefaultsKey)
         UserDefaults.standard.removeObject(forKey: completedResponseDurationDefaultsKey)
-        draft = ""
-        let imageDataURLs = pendingImages.map(\.dataURL)
-        pendingImages = []
+        if usesComposerDraft { draft = "" }
+        let imageDataURLs = usesComposerDraft ? pendingImages.map(\.dataURL) : []
+        if usesComposerDraft { pendingImages = [] }
         hasPausedResponse = false
         isPausingResponse = false
         errorMessage = nil
@@ -2414,10 +2526,12 @@ struct TaskConversationView: View {
                     onConflictResolutionChecked(false)
                 }
                 messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
-                draft = text
-                pendingImages = imageDataURLs.compactMap { dataURL in
-                    guard let image = Self.image(fromDataURL: dataURL) else { return nil }
-                    return PendingImage(dataURL: dataURL, image: image)
+                if usesComposerDraft {
+                    draft = text
+                    pendingImages = imageDataURLs.compactMap { dataURL in
+                        guard let image = Self.image(fromDataURL: dataURL) else { return nil }
+                        return PendingImage(dataURL: dataURL, image: image)
+                    }
                 }
                 isResponding = false
                 responseStartedAt = nil
@@ -2449,19 +2563,22 @@ struct TaskConversationView: View {
                         if let index = messages.firstIndex(where: { $0.id == itemID }) {
                             messages[index].text = text
                             messages[index].phase = update.phase
+                            messages[index].asyncQuestions = update.asyncQuestions
                         } else if let placeholderIndex = messages.firstIndex(where: { $0.id == assistantMessageID }) {
                             messages.insert(CodexChatMessage(
                                 id: itemID,
                                 role: .assistant,
                                 text: text,
-                                phase: update.phase
+                                phase: update.phase,
+                                asyncQuestions: update.asyncQuestions
                             ), at: placeholderIndex)
                         } else {
                             messages.append(CodexChatMessage(
                                 id: itemID,
                                 role: .assistant,
                                 text: text,
-                                phase: update.phase
+                                phase: update.phase,
+                                asyncQuestions: update.asyncQuestions
                             ))
                         }
                         if let placeholderIndex = messages.firstIndex(where: { $0.id == assistantMessageID }) {
@@ -2479,6 +2596,7 @@ struct TaskConversationView: View {
                     case "history", "completed":
                         guard let history = update.history else { return }
                         messages = history.messages
+                        answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
                         activities = history.activities
                         if update.type == "completed" {
                             if let responseStartedAt {
@@ -2552,10 +2670,12 @@ struct TaskConversationView: View {
                     hasPausedResponse = true
                 } else {
                     messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
-                    draft = text
-                    pendingImages = imageDataURLs.compactMap { dataURL in
-                        guard let image = Self.image(fromDataURL: dataURL) else { return nil }
-                        return PendingImage(dataURL: dataURL, image: image)
+                    if usesComposerDraft {
+                        draft = text
+                        pendingImages = imageDataURLs.compactMap { dataURL in
+                            guard let image = Self.image(fromDataURL: dataURL) else { return nil }
+                            return PendingImage(dataURL: dataURL, image: image)
+                        }
                     }
                     errorMessage = error.localizedDescription
                 }
@@ -2563,6 +2683,11 @@ struct TaskConversationView: View {
             }
 
             isResponding = false
+            if !usesComposerDraft, !draft.isEmpty {
+                do {
+                    _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: draft)
+                } catch { errorMessage = error.localizedDescription }
+            }
         }
     }
 
@@ -2665,6 +2790,7 @@ struct TaskConversationView: View {
 
     private func refreshQueuedMessages() {
         queuedMessages = (try? conversationManager.queuedMessages(taskID: task.id)) ?? []
+        answeredAsyncQuestionIDs = Set((try? conversationManager.answeredAsyncQuestionIDs(taskID: task.id)) ?? [])
     }
 
     private func queueDraftForAfterTurn() {
@@ -2696,6 +2822,7 @@ struct TaskConversationView: View {
                     if let history = try? await conversationManager.history(taskID: task.id) {
                         messages = history.messages
                         activities = history.activities
+                        answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
                     }
                     errorMessage = nil
                     return
@@ -2756,6 +2883,7 @@ struct TaskConversationView: View {
                 let history = try await conversationManager.history(taskID: task.id)
                 messages = history.messages
                 activities = history.activities
+                answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
                 refreshQueuedMessages()
                 errorMessage = nil
             } catch { errorMessage = error.localizedDescription }

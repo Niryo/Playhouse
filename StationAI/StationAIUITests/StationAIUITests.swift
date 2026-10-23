@@ -5183,6 +5183,117 @@ final class StationAIUITests: XCTestCase {
         assertTaskVisible("Non-blocking question", inColumn: "Waiting Response")
     }
 
+    // case-contract: test_codex_async_questions_render_and_reply_as_followup | Async agentMessage questions retain choices and a free-text prompt in live updates and fresh CLI/XPC history, stay separate from later assistant text, and receive validated answers through the shared manager during and after an active turn. The UI shows inline answer cards instead of raw bullet text, blocks incomplete answers, preserves answered cards across reopening, and displays both submitted answers and responses.
+    func test_codex_async_questions_render_and_reply_as_followup() throws {
+        let created = try runCLI(["task", "create", "--title", "Async Codex question", "--root", fixture.primary.path])
+        let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-async-question").path
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Async Codex question")
+        element("message-composer").click()
+        element("message-composer").typeText("Ask an async question.")
+        element("send-message-button").click()
+
+        let card = element("async-question-item_stationai_async_question")
+        XCTAssertTrue(card.waitForExistence(timeout: 10))
+        let yesOption = element("async-question-option-item_stationai_async_question-0-0")
+        let noOption = element("async-question-option-item_stationai_async_question-0-1")
+        XCTAssertEqual(yesOption.label, "Yes, update paired tests and run required verification")
+        XCTAssertEqual(noOption.label, "No, leave tests and verification for later")
+        XCTAssertTrue(element("async-question-answer-item_stationai_async_question-1").exists)
+        XCTAssertFalse(element("assistant-message-item_stationai_async_question").exists,
+                       "Structured choices should appear in an answer card instead of a Markdown bubble.")
+        XCTAssertFalse(element("submit-async-questions-item_stationai_async_question").isEnabled)
+        XCTAssertTrue(app.staticTexts["I can continue while you decide."].waitForExistence(timeout: 10),
+                      "The assistant message after the question must remain separate.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: WorkspaceFixture.root.appendingPathComponent("codex-fixture-async-question.question-ready").path),
+                      "The question fixture must still have an active turn.")
+        yesOption.click()
+        XCTAssertFalse(element("submit-async-questions-item_stationai_async_question").isEnabled,
+                       "Every async question needs an answer before submission.")
+        let detail = element("async-question-answer-item_stationai_async_question-1")
+        detail.click()
+        detail.typeText("Keep the draft intact.")
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText("An unsent draft stays here.")
+        element("submit-async-questions-item_stationai_async_question").click()
+
+        let reply = "Test and verify: Yes, update paired tests and run required verification\nAdditional detail: Keep the draft intact."
+        XCTAssertTrue(app.staticTexts[reply].waitForExistence(timeout: 10), "The full two-answer reply must be sent.")
+        let response = element("assistant-message-item_stationai_async_answer_steered")
+        XCTAssertTrue(response.waitForExistence(timeout: 10))
+        XCTAssertTrue(response.label.contains("Answers received: Test and verify: Yes, update paired tests and run required verification"))
+        XCTAssertTrue(response.label.contains("Additional detail: Keep the draft intact."))
+        XCTAssertTrue(card.exists)
+        XCTAssertTrue(app.staticTexts["Answered"].exists)
+        XCTAssertEqual(composer.value as? String, "An unsent draft stays here.")
+        let laterCard = element("async-question-item_stationai_async_later_question")
+        XCTAssertTrue(laterCard.waitForExistence(timeout: 10))
+        let idleDeadline = Date().addingTimeInterval(10)
+        while !element("send-message-button").isEnabled && Date() < idleDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        XCTAssertTrue(element("send-message-button").isEnabled, "The later answer must be submitted after the first turn completes.")
+        let laterAnswer = element("async-question-answer-item_stationai_async_later_question-0")
+        laterAnswer.click()
+        laterAnswer.typeText("Finish after the turn.")
+        element("submit-async-questions-item_stationai_async_later_question").click()
+        let completedResponse = element("assistant-message-item_stationai_async_answer_2")
+        XCTAssertTrue(completedResponse.waitForExistence(timeout: 10),
+                      "A question answered after its original turn must refresh the visible conversation.")
+        XCTAssertTrue(completedResponse.label.contains("Answers received: One more check: Finish after the turn."))
+        XCTAssertEqual(composer.value as? String, "An unsent draft stays here.")
+        element("back-to-board-button").click()
+        openTask(named: "Async Codex question")
+        XCTAssertTrue(card.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Answered"].exists)
+        XCTAssertTrue(laterCard.exists)
+        XCTAssertTrue(laterCard.staticTexts["Answered"].exists, "The later question must stay answered after reopening.")
+        XCTAssertEqual(element("message-composer").value as? String, "An unsent draft stays here.")
+    }
+
+    // case-contract: test_codex_async_question_queued_answer_retries | An async question answered after its turn ends stays Pending when the first follow-up fails, rejects duplicate answers across fresh CLI/XPC connections, and becomes Answered only after an explicit queued retry succeeds. The paired UI keeps the card and queue action visible across reopening and then displays the delivered response.
+    func test_codex_async_question_queued_answer_retries() throws {
+        let created = try runCLI(["task", "create", "--title", "Queued async question", "--root", fixture.primary.path])
+        let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
+        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-async-question-queued")
+        codexFixtureExecutable = executable.path
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Queued async question")
+        element("message-composer").click()
+        element("message-composer").typeText("Ask a queued async question.")
+        element("send-message-button").click()
+        let card = element("async-question-item_stationai_async_question")
+        XCTAssertTrue(card.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({
+            ((try? self.taskRecord(id: taskID))?["status"] as? String) == "Waiting Response"
+        }, timeout: 10), "The first turn must finish before queueing the answer.")
+        _ = FileManager.default.createFile(atPath: executable.path + ".fail-next-turn-start", contents: Data())
+        element("async-question-option-item_stationai_async_question-0-0").click()
+        element("async-question-answer-item_stationai_async_question-1").click()
+        element("async-question-answer-item_stationai_async_question-1").typeText("Retry this answer.")
+        element("submit-async-questions-item_stationai_async_question").click()
+        XCTAssertTrue(card.staticTexts["Pending"].waitForExistence(timeout: 10))
+        let queueResult = try runCLI(["conversation", "queue-list", taskID])
+        let queued = try XCTUnwrap((queueResult["result"] as? [[String: Any]])?.first)
+        XCTAssertEqual(queued["asyncQuestionItemID"] as? String, "item_stationai_async_question")
+        let queuedID = try XCTUnwrap(queued["id"] as? String)
+        XCTAssertEqual(queued["state"] as? String, "needsAction")
+        element("back-to-board-button").click()
+        openTask(named: "Queued async question")
+        XCTAssertTrue(card.waitForExistence(timeout: 5))
+        XCTAssertTrue(card.staticTexts["Pending"].exists)
+        let retry = element("retry-queued-message-\(queuedID.uppercased())")
+        XCTAssertTrue(retry.waitForExistence(timeout: 5))
+        retry.click()
+        let response = element("assistant-message-item_stationai_async_answer_2")
+        XCTAssertTrue(response.waitForExistence(timeout: 10))
+        XCTAssertTrue(response.label.contains("Answers received: Test and verify: Yes, update paired tests and run required verification"))
+        XCTAssertTrue(response.label.contains("Additional detail: Retry this answer."))
+        XCTAssertTrue(card.staticTexts["Answered"].exists)
+    }
+
     // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; clean and unexpected relaunch preserve the prompt and conversation and allow a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
     func test_codex_interrupted_turn_blocks_with_reason_and_can_retry() throws {
         _ = try runCLI(["task", "create", "--title", "Interrupted turn", "--root", fixture.primary.path])
