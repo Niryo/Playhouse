@@ -238,6 +238,9 @@ struct TaskConversationView: View {
             }
         }
         .onChange(of: codexClient.isTurnActive) { _, isTurnActive in
+            if !isTurnActive, !isReadOnly {
+                refreshQueuedMessages()
+            }
             let submittedTurnIsPending = task.pendingSubmittedPrompt != nil
                 && (task.status == .inProgress || task.status == .waitingResponse)
             guard let taskThreadID = task.codexThreadID else {
