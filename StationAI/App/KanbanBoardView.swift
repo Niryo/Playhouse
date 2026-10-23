@@ -417,20 +417,11 @@ struct KanbanBoardView: View {
     private var boardHeader: some View {
         HStack(alignment: .center, spacing: 24) {
             HStack(spacing: 14) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [WorkspaceTheme.accent, Color(red: 0.22, green: 0.58, blue: 0.94)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                    Image(systemName: "square.stack.3d.up.fill")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(.white)
-                }
-                .frame(width: 42, height: 42)
+                Image("StationAILogo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 42, height: 42)
+                    .accessibilityLabel("StationAI logo")
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text("StationAI")

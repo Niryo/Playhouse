@@ -465,10 +465,24 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         return response
 
-    # case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label and the bridge reports API version 1.
+    # case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label, displays the StationAILogo asset, and the bridge reports API version 1.
     def test_service_reports_bridge_version(self):
         response, _ = self.call_cli("status")
         self.assertEqual(self.assert_success(response), {"bridgeVersion": 1, "service": "StationAI"})
+        app_bundle = self.cli.parent.parent.parent
+        assets_catalog = app_bundle / "Contents" / "Resources" / "Assets.car"
+        catalog = subprocess.run(
+            ["/usr/bin/assetutil", "--info", str(assets_catalog)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(catalog.returncode, 0, f"Could not inspect the app asset catalog: {catalog.stderr}")
+        assets = json.loads(catalog.stdout)
+        self.assertTrue(
+            any(asset.get("Name") == "StationAILogo" for asset in assets),
+            "The app bundle should contain the StationAILogo asset.",
+        )
 
     # case-contract: test_app_override_rejects_incompatible_bundles | Explicit app overrides reject obsolete compatibility metadata, foreign worktree or bridge identities, test IDs that do not match the current worktree, and nonisolated test data before launching; the current app preserves a saved draft across restart.
     def test_app_override_rejects_incompatible_bundles(self):

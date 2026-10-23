@@ -329,11 +329,15 @@ final class StationAIUITests: XCTestCase {
         try FileManager.default.removeItem(at: runDirectory)
     }
 
-    // case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label and the bridge reports API version 1.
+    // case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label, displays the StationAILogo asset, and the bridge reports API version 1.
     func test_service_reports_bridge_version() throws {
         launchApp(defaultParent: fixture.parent.path)
         XCTAssertEqual(app.windows.count, 1, "StationAI should open one board window on launch.")
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 15), "The StationAI window did not open.")
+        let logo = app.images["StationAI logo"]
+        XCTAssertTrue(logo.waitForExistence(timeout: 5), "The board header should display the transparent StationAI logo.")
+        let window = app.windows.firstMatch
+        assertStationAILogoArtwork(logo, in: window)
         XCTAssertEqual(app.windows.firstMatch.title, "StationAI — StationAI UI Test Worktree")
         relaunchApp()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 15), "The board should reopen after relaunch.")
@@ -5853,6 +5857,51 @@ final class StationAIUITests: XCTestCase {
             }
         }
         XCTAssertGreaterThan(redPixels, 3, "The missing-folder warning should render red foreground pixels.", file: file, line: line)
+    }
+
+    private func assertStationAILogoArtwork(_ element: XCUIElement, in window: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        let logoImage = element.screenshot().image
+        guard let cgImage = logoImage.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let windowCGImage = window.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            XCTFail("Could not read the StationAI logo screenshot.", file: file, line: line)
+            return
+        }
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        assertPixel(logoImage, normalizedX: 0.2, normalizedY: 0.5, rgb: (61, 125, 214), accuracy: 55, file: file, line: line)
+        assertPixel(logoImage, normalizedX: 0.5, normalizedY: 0.65, rgb: (115, 86, 184), accuracy: 55, file: file, line: line)
+        assertPixel(logoImage, normalizedX: 0.82, normalizedY: 0.55, rgb: (38, 161, 108), accuracy: 55, file: file, line: line)
+        assertPixel(logoImage, normalizedX: 0.77, normalizedY: 0.78, rgb: (254, 158, 71), accuracy: 55, file: file, line: line)
+
+        let windowBitmap = NSBitmapImageRep(cgImage: windowCGImage)
+        let logoFrame = element.frame
+        let windowFrame = window.frame
+        let corners: [(logo: CGPoint, background: CGPoint)] = [
+            (CGPoint(x: 0.02, y: 0.02), CGPoint(x: logoFrame.minX - 2, y: logoFrame.minY + 2)),
+            (CGPoint(x: 0.98, y: 0.02), CGPoint(x: logoFrame.maxX + 2, y: logoFrame.minY + 2)),
+            (CGPoint(x: 0.02, y: 0.98), CGPoint(x: logoFrame.minX - 2, y: logoFrame.maxY - 2)),
+            (CGPoint(x: 0.98, y: 0.98), CGPoint(x: logoFrame.maxX + 2, y: logoFrame.maxY - 2)),
+            (CGPoint(x: 0.30, y: 0.50), CGPoint(x: logoFrame.minX - 2, y: logoFrame.minY + logoFrame.height * 0.50))
+        ]
+        for corner in corners {
+            let headerPoint = CGPoint(
+                x: (corner.background.x - windowFrame.minX) / windowFrame.width,
+                y: (corner.background.y - windowFrame.minY) / windowFrame.height
+            )
+            guard let logoColor = color(in: bitmap, normalizedPoint: corner.logo),
+                  let backgroundColor = color(in: windowBitmap, normalizedPoint: headerPoint) else {
+                XCTFail("Could not sample the logo's transparent corners and adjacent window background.", file: file, line: line)
+                return
+            }
+            XCTAssertEqual(logoColor.redComponent, backgroundColor.redComponent, accuracy: 0.04, "The logo's transparent corner should reveal the adjacent window background.", file: file, line: line)
+            XCTAssertEqual(logoColor.greenComponent, backgroundColor.greenComponent, accuracy: 0.04, "The logo's transparent corner should reveal the adjacent window background.", file: file, line: line)
+            XCTAssertEqual(logoColor.blueComponent, backgroundColor.blueComponent, accuracy: 0.04, "The logo's transparent corner should reveal the adjacent window background.", file: file, line: line)
+        }
+    }
+
+    private func color(in bitmap: NSBitmapImageRep, normalizedPoint: CGPoint) -> NSColor? {
+        let x = min(bitmap.pixelsWide - 1, max(0, Int(CGFloat(bitmap.pixelsWide) * normalizedPoint.x)))
+        let y = min(bitmap.pixelsHigh - 1, max(0, Int(CGFloat(bitmap.pixelsHigh) * normalizedPoint.y)))
+        return bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB)
     }
 
     private func assertSubagentIconArtwork(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
