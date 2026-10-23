@@ -91,6 +91,19 @@ enum CodexConversationMode: String, CaseIterable, Hashable {
     }
 }
 
+struct CodexThreadGoal: Codable, Equatable {
+    let threadID: String
+    let objective: String
+    let status: String
+    let tokenBudget: Int?
+    let tokensUsed: Int?
+    let timeUsedSeconds: Double?
+
+    private enum CodingKeys: String, CodingKey {
+        case threadID = "threadId", objective, status, tokenBudget, tokensUsed, timeUsedSeconds
+    }
+}
+
 struct CodexModelOption: Codable, Identifiable, Hashable {
     let id: String
     let name: String
@@ -107,6 +120,13 @@ final class CodexAppServerClient: ObservableObject {
     @Published private(set) var isTurnActive = false
     @Published private(set) var activeThreadID: String?
     @Published private(set) var pendingUserInputRequest: CodexUserInputRequest?
+    @Published private(set) var goalStateThreadID: String?
+    @Published private(set) var goalStateRevision = 0
+    @Published private(set) var goalTurnRevision = 0
+    @Published private(set) var goalTurnCompletedRevision = 0
+    @Published private(set) var goalTurnCompletedTurnID: String?
+    @Published private(set) var goalTurnStartedThreadID: String?
+    let goalRuntimeEnabled: Bool
     private var activeConversationMode: CodexConversationMode = .code
 
     private enum ClientError: LocalizedError {
@@ -164,6 +184,8 @@ final class CodexAppServerClient: ObservableObject {
     private var activeActivityHandler: ((CodexActivity) -> Void)?
     private var activeDiffHandler: ((CodexTurnDiff) -> Void)?
     private var activeActivities: [String: CodexActivity] = [:]
+    private var goalObservationThreadID: String?
+    private var goalTurnStartRevision = 0
     private var activityStartedAtUptime: [String: UInt64] = [:]
     private var activityStartedAtDate: [String: Date] = [:]
     private(set) var lastTurnActivityDurations: [String: Int] = [:]
@@ -173,13 +195,18 @@ final class CodexAppServerClient: ObservableObject {
     private var pendingUserInputThreadID: String?
     private var pendingUserInputQuestions: [String: CodexUserQuestion] = [:]
     private let codexExecutableOverride: String?
+    private let codexHomeOverride: String?
+    private let goalFeatureEnabled: Bool
     var executableOverrideForTitleGeneration: String? { codexExecutableOverride }
     private var turnWaiters: [String: CheckedContinuation<Void, Error>] = [:]
     private var completedTurns: [String: Result<Void, Error>] = [:]
     private var rejectedTurnKeys = Set<String>()
 
-    init(codexExecutableOverride: String? = nil) {
+    init(codexExecutableOverride: String? = nil, codexHomeOverride: String? = nil, goalFeatureEnabled: Bool = false, goalRuntimeEnabled: Bool = false) {
         self.codexExecutableOverride = Self.ownedTestFixtureExecutable(codexExecutableOverride)
+        self.codexHomeOverride = codexHomeOverride
+        self.goalFeatureEnabled = goalFeatureEnabled
+        self.goalRuntimeEnabled = goalRuntimeEnabled
     }
 
     func diagnosticFields(_ additionalFields: [String: String] = [:]) -> [String: String] {
@@ -200,6 +227,15 @@ final class CodexAppServerClient: ObservableObject {
         onActionRequest: @escaping () -> Void
     ) async throws -> CodexThreadHistory {
         actionRequestHandler = onActionRequest
+        if goalRuntimeEnabled {
+            if activeThreadID != threadID {
+                activeTurnID = nil
+                isTurnActive = false
+            }
+            activeThreadID = threadID
+            goalObservationThreadID = threadID
+            Self.activeClientsByThreadID[threadID] = self
+        }
         try await resumeThreadIfNeeded(id: threadID, workspace: workspace, developerInstructions: developerInstructions)
         return try await readMessages(threadID: threadID)
     }
@@ -271,6 +307,57 @@ final class CodexAppServerClient: ObservableObject {
             wasLastTurnInterrupted = false
             throw error
         }
+    }
+
+    func getGoal(threadID: String, workspace: CodexWorkspaceContext) async throws -> CodexThreadGoal? {
+        try await resumeThreadIfNeeded(id: threadID, workspace: workspace)
+        let response = try await request(method: "thread/goal/get", params: ["threadId": threadID])
+        guard let value = response["goal"] as? [String: Any] else { return nil }
+        return Self.decodeGoal(value)
+    }
+
+    func setGoal(threadID: String, objective: String? = nil, status: String? = nil, workspace: CodexWorkspaceContext, observeRuntime: Bool = false) async throws -> CodexThreadGoal? {
+        let startRevision = goalTurnStartRevision
+        if observeRuntime && goalRuntimeEnabled {
+            activeThreadID = threadID
+            activeTurnID = nil
+            activeConversationMode = .code
+            goalObservationThreadID = threadID
+            goalTurnStartedThreadID = nil
+            isTurnActive = false
+            Self.activeClientsByThreadID[threadID] = self
+        }
+        try await resumeThreadIfNeeded(id: threadID, workspace: workspace)
+        var params: [String: Any] = ["threadId": threadID]
+        if let objective { params["objective"] = objective }
+        if let status { params["status"] = status }
+        let response = try await request(method: "thread/goal/set", params: params)
+        guard let value = response["goal"] as? [String: Any] else { return nil }
+        if observeRuntime && goalRuntimeEnabled {
+            try await waitForGoalTurnStart(threadID: threadID, after: startRevision)
+            goalTurnRevision += 1
+        }
+        return Self.decodeGoal(value)
+    }
+
+    func clearGoal(threadID: String, workspace: CodexWorkspaceContext) async throws {
+        try await resumeThreadIfNeeded(id: threadID, workspace: workspace)
+        _ = try await request(method: "thread/goal/clear", params: ["threadId": threadID])
+    }
+
+    func shutdown() {
+        guard let process, process.isRunning else { return }
+        process.terminate()
+        process.waitUntilExit()
+    }
+
+    private static func decodeGoal(_ value: [String: Any]) -> CodexThreadGoal? {
+        guard let threadID = value["threadId"] as? String,
+              let objective = value["objective"] as? String,
+              let status = value["status"] as? String else { return nil }
+        return CodexThreadGoal(threadID: threadID, objective: objective, status: status,
+            tokenBudget: value["tokenBudget"] as? Int, tokensUsed: value["tokensUsed"] as? Int,
+            timeUsedSeconds: value["timeUsedSeconds"] as? Double)
     }
 
     func steerActiveTurn(threadID expectedThreadID: String, text: String, imageDataURLs: [String] = []) async throws -> Bool {
@@ -439,6 +526,7 @@ final class CodexAppServerClient: ObservableObject {
             modelID: modelID,
             developerInstructions: developerInstructions
         )
+        goalObservationThreadID = nil
         activeThreadID = threadID
         Self.activeClientsByThreadID[threadID] = self
         activeTurnID = nil
@@ -629,6 +717,10 @@ final class CodexAppServerClient: ObservableObject {
             || pendingUserInputThreadID == threadID
     }
 
+    func isObservingGoal(threadID: String) -> Bool {
+        goalObservationThreadID == threadID
+    }
+
     func activeTurnOwnerProcessID(threadID: String) -> Int32? {
         if let target = Self.activeClientsByThreadID[threadID],
            target.isTurnActive(threadID: threadID) {
@@ -703,7 +795,7 @@ final class CodexAppServerClient: ObservableObject {
         let stderr = Pipe()
 
         child.executableURL = URL(fileURLWithPath: executablePath)
-        child.arguments = [
+        var arguments = [
             "app-server",
             "--listen", "stdio://",
             "--disable", "apps",
@@ -711,6 +803,10 @@ final class CodexAppServerClient: ObservableObject {
             "--disable", "hooks",
             "-c", "mcp_servers={}"
         ]
+        if goalFeatureEnabled || goalRuntimeEnabled {
+            arguments += ["-c", "features.goals=true"]
+        }
+        child.arguments = arguments
         child.currentDirectoryURL = workspaceURL
         child.standardInput = stdin
         child.standardOutput = stdout
@@ -718,6 +814,7 @@ final class CodexAppServerClient: ObservableObject {
 
         var environment = ProcessInfo.processInfo.environment
         environment["PATH"] = Self.expandedSearchPath(environment["PATH"])
+        if let codexHomeOverride { environment["CODEX_HOME"] = codexHomeOverride }
         child.environment = environment
 
         process = child
@@ -1108,6 +1205,10 @@ final class CodexAppServerClient: ObservableObject {
 
     private func handleNotification(method: String, params: [String: Any]) {
         switch method {
+        case "thread/goal/updated", "thread/goal/cleared":
+            guard let threadID = params["threadId"] as? String else { return }
+            goalStateThreadID = threadID
+            goalStateRevision += 1
         case "turn/started":
             // Server notifications use params {threadId, turn:{id,status,...}}.
             guard let threadID = params["threadId"] as? String,
@@ -1117,6 +1218,11 @@ final class CodexAppServerClient: ObservableObject {
             activeTurnID = turnID
             isTurnActive = true
             Self.processActiveThreadIDs.insert(threadID)
+            if goalObservationThreadID == threadID {
+                goalTurnStartRevision += 1
+                goalTurnRevision += 1
+                goalTurnStartedThreadID = threadID
+            }
         case "item/agentMessage/delta", "item/plan/delta":
             guard params["threadId"] as? String == activeThreadID,
                   let delta = params["delta"] as? String else { return }
@@ -1124,6 +1230,7 @@ final class CodexAppServerClient: ObservableObject {
         case "item/started", "item/completed":
             guard params["threadId"] as? String == activeThreadID,
                   let item = params["item"] as? [String: Any] else { return }
+            if goalObservationThreadID == activeThreadID { goalTurnRevision += 1 }
             if method == "item/completed",
                let itemType = item["type"] as? String,
                itemType == "agentMessage" || itemType == "plan",
@@ -1193,6 +1300,17 @@ final class CodexAppServerClient: ObservableObject {
                 "turnID": turnID,
                 "turnStatus": turn["status"] as? String ?? "unknown",
             ]))
+
+            if goalObservationThreadID == threadID, activeTurnID == turnID {
+                activeTurnID = nil
+                isTurnActive = false
+                goalTurnCompletedTurnID = turnID
+                Self.processActiveThreadIDs.remove(threadID)
+                clearActiveTurnForMailbox(threadID: threadID)
+                goalTurnRevision += 1
+                goalTurnCompletedRevision += 1
+                return
+            }
 
             let key = Self.turnKey(threadID: threadID, turnID: turnID)
             if rejectedTurnKeys.remove(key) != nil { return }
@@ -1309,6 +1427,18 @@ final class CodexAppServerClient: ObservableObject {
         try await withCheckedThrowingContinuation { continuation in
             turnWaiters[key] = continuation
         }
+    }
+
+    private func waitForGoalTurnStart(threadID: String, after revision: Int) async throws {
+        let deadline = Date().addingTimeInterval(30)
+        while Date() < deadline {
+            if goalObservationThreadID != threadID {
+                throw ClientError.protocolFailure("Goal turn observation ended before Codex started work.")
+            }
+            if goalTurnStartRevision > revision { return }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        throw ClientError.protocolFailure("Codex accepted the Goal but did not start a work turn within 30 seconds.")
     }
 
     private func processDidTerminate(_ terminatedProcess: Process) {

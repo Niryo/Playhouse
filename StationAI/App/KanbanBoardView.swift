@@ -1266,6 +1266,7 @@ private struct TaskCardView: View {
                                         .resizable()
                                         .scaledToFit()
                                         .frame(width: 30, height: 12)
+                                        .accessibilityIdentifier("task-resolve-pr-conflicts-icon-\(task.id.uuidString)")
                                 }
                                 .buttonHoverPointer()
                                 .actionButtonHoverEmphasis(padding: 10)

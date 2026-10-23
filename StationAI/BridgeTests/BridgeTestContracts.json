@@ -188,6 +188,10 @@
     "expectation": "The composer shows a Codex-reported model, while unsupported modes and malformed model IDs are rejected before creating history."
   },
   {
+    "id": "test_thread_goal_lifecycle_persists_through_cli_xpc",
+    "expectation": "CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime."
+  },
+  {
     "id": "test_codex_questions_can_be_answered_over_cli_xpc",
     "expectation": "MCP tool/requestUserInput structured questions raised in Plan mode use the existing question path, move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome."
   },
@@ -221,7 +225,7 @@
   },
   {
     "id": "test_review_pr_conflicts_probe_and_verify",
-    "expectation": "Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 10 seconds. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action beside its PR link; the conflict action and PR link have hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head."
+    "expectation": "Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 10 seconds. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action with its indicator artwork beside its PR link; the UI renders the artwork inside the action, keeps it beside the PR link, and gives both controls hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head."
   },
   {
     "id": "test_done_archive_displays_existing_pull_request_link",

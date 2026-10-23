@@ -32,6 +32,14 @@ struct TaskConversationView: View {
         var id: String { repository }
     }
 
+    private struct GoalAchievementTimelineEntry: Codable, Identifiable, Equatable {
+        let id: String
+        let summary: String
+        let afterMessageID: String
+
+        static let beforeFirstMessageID = "__before_first_message__"
+    }
+
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var codexClient: CodexAppServerClient
     @Environment(\.colorScheme) private var colorScheme
@@ -52,6 +60,14 @@ struct TaskConversationView: View {
     @State private var isShowingImagePicker = false
     @State private var isGeneratingTitle = false
     @State private var conversationMode: CodexConversationMode = .code
+    @State private var isEnteringGoal = false
+    @State private var activeGoal: CodexThreadGoal?
+    @State private var goalAchievementTimelineEntries: [GoalAchievementTimelineEntry] = []
+    @State private var currentGoalGenerationID: String?
+    @State private var currentGoalObjective: String?
+    @State private var currentGoalTimeBaselineSeconds: Double?
+    @State private var isGoalExpanded = false
+    @State private var goalStatusUpdatedAt = Date.now
     @State private var modelOptions = [CodexModelOption(id: CodexAppServerClient.modelID, name: "GPT-6 Luna", isDefault: true)]
     @State private var selectedModelID = CodexAppServerClient.modelID
     @State private var messages: [CodexChatMessage] = []
@@ -108,7 +124,7 @@ struct TaskConversationView: View {
     @FocusState private var isRepositorySearchFocused: Bool
 
     private var isSendDisabled: Bool {
-        (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty) || workspaceRootURLs.isEmpty || isResponding || isLoadingHistory
+        (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !isEnteringGoal) || workspaceRootURLs.isEmpty || isResponding || isLoadingHistory
     }
 
     private var canPauseResponse: Bool {
@@ -146,6 +162,14 @@ struct TaskConversationView: View {
     private var conversationMessages: [CodexChatMessage] {
         let completedProgressIDs = progressMessageIDs
         return messages.filter { !completedProgressIDs.contains($0.id) }
+    }
+
+    private func goalAchievementAnchorMessageID(for entry: GoalAchievementTimelineEntry) -> String? {
+        if entry.afterMessageID == GoalAchievementTimelineEntry.beforeFirstMessageID { return nil }
+        if conversationMessages.contains(where: { $0.id == entry.afterMessageID }) {
+            return entry.afterMessageID
+        }
+        return conversationMessages.last?.id
     }
 
     private var activityDisclosureAnchorID: String? {
@@ -188,6 +212,22 @@ struct TaskConversationView: View {
 
     private var completedResponseDurationDefaultsKey: String {
         "stationai.codex.completed-response-duration.\(task.id.uuidString)"
+    }
+
+    private var goalAchievementTimelineDefaultsKey: String {
+        "stationai.codex.goal-achievement-timeline.\(task.id.uuidString)"
+    }
+
+    private var goalGenerationDefaultsKey: String {
+        CodexGoalGenerationStore.generationIDKey(taskID: task.id)
+    }
+
+    private var goalGenerationObjectiveDefaultsKey: String {
+        CodexGoalGenerationStore.objectiveKey(taskID: task.id)
+    }
+
+    private var goalGenerationTimeBaselineDefaultsKey: String {
+        CodexGoalGenerationStore.timeBaselineKey(taskID: task.id)
     }
 
     var body: some View {
@@ -245,6 +285,41 @@ struct TaskConversationView: View {
                 return
             }
             isResponding = submittedTurnIsPending || (isTurnActive && codexClient.isTurnActive(threadID: taskThreadID))
+        }
+        .onChange(of: codexClient.goalStateRevision) { _, _ in
+            guard codexClient.goalStateThreadID == task.codexThreadID else { return }
+            Task { @MainActor in
+                activeGoal = try? await conversationManager.goal(taskID: task.id)
+                if let activeGoal { reconcileGoalGeneration(with: activeGoal) }
+                goalStatusUpdatedAt = .now
+            }
+        }
+        .onChange(of: codexClient.goalTurnRevision) { _, _ in
+            guard let threadID = task.codexThreadID, codexClient.isObservingGoal(threadID: threadID) else { return }
+            Task { @MainActor in await refreshGoalConversation() }
+        }
+        .onChange(of: codexClient.goalTurnCompletedRevision) { _, _ in
+            guard let threadID = task.codexThreadID, codexClient.isObservingGoal(threadID: threadID) else { return }
+            let completedTurnID = codexClient.goalTurnCompletedTurnID
+            Task { @MainActor in
+                activeGoal = try? await conversationManager.goal(taskID: task.id)
+                goalStatusUpdatedAt = .now
+                await refreshGoalConversation()
+                guard let activeGoal, activeGoal.status == "complete" else { return }
+                reconcileGoalGeneration(with: activeGoal)
+                guard let generationID = currentGoalGenerationID,
+                      !goalAchievementTimelineEntries.contains(where: { $0.id == generationID }) else { return }
+                let completionMessage = completedTurnID.flatMap { turnID in
+                    conversationMessages.last(where: { $0.turnID == turnID })
+                } ?? conversationMessages.last
+                let anchorID = completionMessage?.id ?? GoalAchievementTimelineEntry.beforeFirstMessageID
+                goalAchievementTimelineEntries.append(GoalAchievementTimelineEntry(
+                    id: generationID,
+                    summary: goalAchievementSummary(activeGoal),
+                    afterMessageID: anchorID
+                ))
+                persistGoalAchievementTimeline()
+            }
         }
         .task(id: task.workspaceRootPaths) {
             let watchPaths = await WorkspaceChangeWatcher.watchPaths(workspaceRoots: task.workspaceRootPaths)
@@ -1154,7 +1229,7 @@ struct TaskConversationView: View {
         ScrollViewReader { scrollProxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if messages.isEmpty && !isLoadingHistory {
+                    if messages.isEmpty && activeGoal?.status != "complete" && !isLoadingHistory {
                         VStack(spacing: 12) {
                             Image(systemName: "bubble.left.and.bubble.right")
                                 .font(.system(size: 25, weight: .regular))
@@ -1170,12 +1245,24 @@ struct TaskConversationView: View {
                         .accessibilityIdentifier("empty-conversation")
                     } else if !messages.isEmpty {
                         LazyVStack(alignment: .leading, spacing: 16) {
+                            ForEach(goalAchievementTimelineEntries.filter {
+                                goalAchievementAnchorMessageID(for: $0) == nil
+                            }) { entry in
+                                goalAchievementTimelineRow(entry)
+                                    .id(entry.id)
+                            }
                             ForEach(conversationMessages) { message in
                                 if shouldShowActivityDisclosure, message.id == activityDisclosureAnchorID {
                                     activityList
                                 }
                                 messageBubble(message)
                                     .id(message.id)
+                                ForEach(goalAchievementTimelineEntries.filter {
+                                    goalAchievementAnchorMessageID(for: $0) == message.id
+                                }) { entry in
+                                    goalAchievementTimelineRow(entry)
+                                        .id(entry.id)
+                                }
                                 let nextOrder = conversationMessages.first(where: {
                                     guard let current = message.timelineOrder, let candidate = $0.timelineOrder else { return false }
                                     return candidate > current
@@ -1196,6 +1283,14 @@ struct TaskConversationView: View {
 
                     if messages.isEmpty && shouldShowActivityDisclosure {
                         activityList
+                    }
+                    if messages.isEmpty {
+                        ForEach(goalAchievementTimelineEntries.filter {
+                            goalAchievementAnchorMessageID(for: $0) == nil
+                        }) { entry in
+                            goalAchievementTimelineRow(entry)
+                                .id(entry.id)
+                        }
                     }
 
                     if isDisplayingActiveResponse {
@@ -1235,6 +1330,12 @@ struct TaskConversationView: View {
                 if isResponding { scrollToLatest(using: scrollProxy) }
             }
             .onChange(of: isResponding) { _, _ in
+                scrollToLatest(using: scrollProxy)
+            }
+            .onChange(of: activeGoal?.status) { _, status in
+                if status == "complete" { scrollToLatest(using: scrollProxy) }
+            }
+            .onChange(of: goalAchievementTimelineEntries.count) { _, _ in
                 scrollToLatest(using: scrollProxy)
             }
         }
@@ -1302,6 +1403,23 @@ struct TaskConversationView: View {
                 .accessibilityIdentifier("codex-activity-details")
             }
         }
+    }
+
+    private func goalAchievementTimelineRow(_ entry: GoalAchievementTimelineEntry) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "checkmark.circle")
+                .font(.system(size: 18, weight: .regular))
+                .foregroundStyle(.secondary)
+            Text(entry.summary)
+                .font(.system(size: 15))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("goal-achieved-banner")
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("goal-achievement-timeline-row")
     }
 
     private func subagentTimelineRow(_ activity: CodexActivity) -> some View {
@@ -1808,6 +1926,46 @@ struct TaskConversationView: View {
             }
 
             VStack(alignment: .leading, spacing: 10) {
+                if let activeGoal, activeGoal.status != "complete", !isReadOnly {
+                    HStack(spacing: 10) {
+                        Image(systemName: "scope").font(.system(size: 17, weight: .medium)).foregroundStyle(.secondary)
+                        Text("\(activeGoal.status == "paused" ? "Paused goal" : "Pursuing goal") \(activeGoal.objective)")
+                            .lineLimit(1).truncationMode(.tail).font(.system(size: 15))
+                            .accessibilityIdentifier("active-goal-title")
+                        Spacer(minLength: 4)
+                        if let seconds = activeGoal.timeUsedSeconds {
+                            TimelineView(.periodic(from: .now, by: 1)) { context in
+                                Text(Self.goalDuration(goalElapsedTime(for: activeGoal, reportedSeconds: seconds)
+                                    + (activeGoal.status == "active" ? context.date.timeIntervalSince(goalStatusUpdatedAt) : 0)))
+                                    .foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("goal-elapsed-time")
+                            }
+                        }
+                        Button(role: .destructive) { Task { await mutateGoal("clear") } } label: { Image(systemName: "trash") }
+                            .buttonHoverPointer().buttonStyle(.plain).help("Clear goal")
+                            .accessibilityLabel("Clear goal").accessibilityIdentifier("goal-clear-button")
+                        Button { Task { await mutateGoal(activeGoal.status == "paused" ? "resume" : "pause") } } label: {
+                            Image(systemName: activeGoal.status == "paused" ? "play.fill" : "pause")
+                        }
+                            .buttonHoverPointer().buttonStyle(.plain).help(activeGoal.status == "paused" ? "Resume goal" : "Pause goal")
+                            .accessibilityLabel(activeGoal.status == "paused" ? "Resume goal" : "Pause goal")
+                            .accessibilityIdentifier("goal-pause-resume-button")
+                        Button { isGoalExpanded.toggle() } label: { Image(systemName: isGoalExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.and.arrow.down.left") }
+                            .buttonHoverPointer().buttonStyle(.plain).help(isGoalExpanded ? "Collapse goal" : "Expand goal")
+                            .accessibilityLabel(isGoalExpanded ? "Collapse goal" : "Expand goal").accessibilityIdentifier("goal-expand-button")
+                    }
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .background(Color.primary.opacity(0.10), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1) }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityValue(codexClient.goalTurnStartedThreadID == task.codexThreadID ? "Work started" : (codexClient.isTurnActive(threadID: task.codexThreadID ?? "") ? "Working" : "Waiting"))
+                    .accessibilityIdentifier("active-goal-progress-row")
+                    if isGoalExpanded {
+                        Text(activeGoal.objective).font(.system(size: 13)).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14)
+                            .accessibilityIdentifier("active-goal-details")
+                    }
+                }
                 NativeChatEditor(
                     text: $draft,
                     height: $composerHeight,
@@ -1839,7 +1997,7 @@ struct TaskConversationView: View {
                     .frame(height: composerHeight)
                     .overlay(alignment: .topLeading) {
                         if draft.isEmpty {
-                            Text(isResponding ? "Ask for follow-up changes" : "Message…")
+                            Text(isEnteringGoal ? "Set a goal to keep pursuing" : (isResponding || activeGoal != nil ? "Ask for follow-up changes" : "Message…"))
                                 .font(.system(size: 15))
                                 .foregroundStyle(.tertiary)
                                 .padding(.horizontal, 5)
@@ -1851,6 +2009,10 @@ struct TaskConversationView: View {
                     .onChange(of: draft) { _, newValue in
                         if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/plan" {
                             activatePlanMode()
+                        } else if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/goal" {
+                            isEnteringGoal = true
+                            conversationMode = .code
+                            draft = ""
                         }
                         if !isReadOnly, !isResponding, !isLoadingHistory {
                             draftNeedsAutosave = true
@@ -1867,8 +2029,19 @@ struct TaskConversationView: View {
                         .buttonStyle(.plain).accessibilityLabel("Attach image")
                         .accessibilityIdentifier("attach-chat-image-button")
                     Menu {
+                        Button {
+                            isEnteringGoal = true
+                            conversationMode = .code
+                            draft = ""
+                        } label: {
+                            Label("Goal", systemImage: "scope")
+                        }
+                        .buttonHoverPointer()
+                        .help("Set a goal to keep pursuing")
+                        .accessibilityIdentifier("conversation-mode-goal")
                         ForEach(CodexConversationMode.allCases, id: \.self) { mode in
                             Button {
+                                isEnteringGoal = false
                                 conversationMode = mode
                             } label: {
                                 if conversationMode == mode {
@@ -1885,19 +2058,23 @@ struct TaskConversationView: View {
                         HStack(spacing: 5) {
                             Image(systemName: "plus")
                                 .font(.system(size: 14, weight: .semibold))
-                            if conversationMode == .plan {
+                            if isEnteringGoal {
+                                Image(systemName: "scope")
+                                Text("Goal")
+                                    .font(.system(size: 11, weight: .semibold))
+                            } else if conversationMode == .plan {
                                 Text("Plan")
                                     .font(.system(size: 11, weight: .semibold))
                             }
                         }
-                        .foregroundStyle(conversationMode == .plan ? Color.accentColor : Color.secondary)
+                        .foregroundStyle(isEnteringGoal || conversationMode == .plan ? Color.accentColor : Color.secondary)
                         .frame(minWidth: 30, minHeight: 31)
                         .contentShape(Rectangle())
                     }
                     .buttonHoverPointer()
                     .menuStyle(.borderlessButton)
                     .help("Change conversation mode or add context")
-                    .accessibilityLabel("Conversation mode: \(conversationMode.title)")
+                    .accessibilityLabel(isEnteringGoal ? "Goal" : "Conversation mode: \(conversationMode.title)")
                     .accessibilityIdentifier("conversation-mode-menu")
 
                     Spacer(minLength: 0)
@@ -2081,6 +2258,30 @@ struct TaskConversationView: View {
             }
             messages = history.messages
             activities = history.activities
+            activeGoal = try? await conversationManager.goal(taskID: task.id)
+            let defaults = WorkspaceSettings.preferencesStore
+            if let data = defaults.data(forKey: goalAchievementTimelineDefaultsKey),
+               let entries = try? JSONDecoder().decode([GoalAchievementTimelineEntry].self, from: data) {
+                goalAchievementTimelineEntries = entries
+            }
+            currentGoalGenerationID = defaults.string(forKey: goalGenerationDefaultsKey)
+            currentGoalObjective = defaults.string(forKey: goalGenerationObjectiveDefaultsKey)
+            currentGoalTimeBaselineSeconds = defaults.object(forKey: goalGenerationTimeBaselineDefaultsKey) as? Double
+            if let activeGoal {
+                reconcileGoalGeneration(with: activeGoal)
+                if activeGoal.status == "complete",
+                   let generationID = currentGoalGenerationID,
+                   !goalAchievementTimelineEntries.contains(where: { $0.id == generationID }) {
+                    let anchorID = fallbackGoalCompletionAnchorID(in: history.messages, objective: activeGoal.objective)
+                    goalAchievementTimelineEntries.append(GoalAchievementTimelineEntry(
+                        id: generationID,
+                        summary: goalAchievementSummary(activeGoal),
+                        afterMessageID: anchorID
+                    ))
+                    persistGoalAchievementTimeline()
+                }
+            }
+            goalStatusUpdatedAt = .now
             let promptWasSent = task.savedPrompt.map { prompt in
                 history.messages.contains { $0.role == .user && $0.text == prompt }
             } ?? false
@@ -2105,7 +2306,6 @@ struct TaskConversationView: View {
             if let threadID = task.codexThreadID {
                 isResponding = isResponding || codexClient.isTurnActive(threadID: threadID)
             }
-            let defaults = UserDefaults.standard
             if isResponding {
                 responseStartedAt = defaults.object(forKey: responseStartedAtDefaultsKey) as? Date ?? Date()
                 defaults.set(responseStartedAt, forKey: responseStartedAtDefaultsKey)
@@ -2161,6 +2361,21 @@ struct TaskConversationView: View {
             activatePlanMode()
             return
         }
+        if isEnteringGoal {
+            isPreparingSubmittedMessage = true
+            draft = ""
+            isEnteringGoal = false
+            isResponding = true
+            errorMessage = nil
+            Task { @MainActor in
+                let started = await mutateGoal("set", objective: text, observeRuntime: true)
+                isPreparingSubmittedMessage = false
+                isResponding = started && codexClient.isTurnActive(threadID: task.codexThreadID ?? "")
+                isComposerFocused = true
+            }
+            return
+        }
+        guard !text.isEmpty || !pendingImages.isEmpty else { return }
         let userMessageID = UUID().uuidString
         let assistantMessageID = UUID().uuidString
         let previousResponseDuration = completedResponseDuration
@@ -2346,6 +2561,94 @@ struct TaskConversationView: View {
 
             isResponding = false
         }
+    }
+
+    private func mutateGoal(_ action: String, objective: String? = nil, observeRuntime: Bool = false) async -> Bool {
+        do {
+            activeGoal = try await conversationManager.goal(taskID: task.id, objective: objective, action: action, observeRuntime: observeRuntime)
+            if action == "set", let activeGoal { reconcileGoalGeneration(with: activeGoal) }
+            goalStatusUpdatedAt = .now
+            if action == "clear" { isGoalExpanded = false }
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            if action == "set" {
+                draft = objective ?? ""
+                isEnteringGoal = true
+                activeGoal = try? await conversationManager.goal(taskID: task.id)
+            }
+            return false
+        }
+    }
+
+    private func reconcileGoalGeneration(with goal: CodexThreadGoal) {
+        let defaults = WorkspaceSettings.preferencesStore
+        let savedID = defaults.string(forKey: goalGenerationDefaultsKey) ?? currentGoalGenerationID
+        let savedObjective = defaults.string(forKey: goalGenerationObjectiveDefaultsKey) ?? currentGoalObjective
+        let savedTimeBaseline = defaults.object(forKey: goalGenerationTimeBaselineDefaultsKey) as? Double
+            ?? currentGoalTimeBaselineSeconds
+        let priorGenerationCompleted = savedID.map { id in
+            goalAchievementTimelineEntries.contains { $0.id == id }
+        } ?? false
+        if savedID == nil || savedObjective != goal.objective || (goal.status == "active" && priorGenerationCompleted) {
+            let generationID = UUID().uuidString
+            let hasPreviousGoalGeneration = savedID != nil || !goalAchievementTimelineEntries.isEmpty
+            let timeBaseline = hasPreviousGoalGeneration ? Double(goal.timeUsedSeconds ?? 0) : 0
+            currentGoalGenerationID = generationID
+            currentGoalObjective = goal.objective
+            currentGoalTimeBaselineSeconds = timeBaseline
+            defaults.set(generationID, forKey: goalGenerationDefaultsKey)
+            defaults.set(goal.objective, forKey: goalGenerationObjectiveDefaultsKey)
+            defaults.set(timeBaseline, forKey: goalGenerationTimeBaselineDefaultsKey)
+        } else {
+            currentGoalGenerationID = savedID
+            currentGoalObjective = goal.objective
+            let timeBaseline = savedTimeBaseline ?? 0
+            currentGoalTimeBaselineSeconds = timeBaseline
+            defaults.set(timeBaseline, forKey: goalGenerationTimeBaselineDefaultsKey)
+        }
+    }
+
+    private func goalElapsedTime(for goal: CodexThreadGoal, reportedSeconds: Double? = nil) -> Double {
+        let seconds = reportedSeconds ?? Double(goal.timeUsedSeconds ?? 0)
+        return max(0, seconds - (currentGoalTimeBaselineSeconds ?? 0))
+    }
+
+    private func persistGoalAchievementTimeline() {
+        guard let data = try? JSONEncoder().encode(goalAchievementTimelineEntries) else { return }
+        WorkspaceSettings.preferencesStore.set(data, forKey: goalAchievementTimelineDefaultsKey)
+    }
+
+    private func fallbackGoalCompletionAnchorID(in historyMessages: [CodexChatMessage], objective: String) -> String {
+        if let goalMessage = historyMessages.last(where: { $0.role == .user && $0.text == objective }),
+           let turnID = goalMessage.turnID,
+           let finalMessage = historyMessages.last(where: { $0.turnID == turnID }) {
+            return finalMessage.id
+        }
+        return historyMessages.last?.id ?? GoalAchievementTimelineEntry.beforeFirstMessageID
+    }
+
+    private func refreshGoalConversation() async {
+        do {
+            let history = try await conversationManager.history(taskID: task.id) {
+                actionNotice = "Codex requested an approval. StationAI denied it because approval prompts are disabled."
+            }
+            messages = history.messages
+            activities = history.activities
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private static func goalDuration(_ seconds: Double) -> String {
+        if seconds < 60 { return "\(Int(seconds))s" }
+        let minutes = Int(seconds / 60)
+        return minutes < 60 ? "\(minutes)m" : "\(minutes / 60)h \(minutes % 60)m"
+    }
+
+    private func goalAchievementSummary(_ goal: CodexThreadGoal) -> String {
+        guard goal.timeUsedSeconds != nil else { return "Goal achieved" }
+        return "Goal achieved in \(Self.goalDuration(goalElapsedTime(for: goal)))"
     }
 
     private static func durationLabel(_ seconds: Int) -> String {
@@ -2703,6 +3006,7 @@ struct TaskConversationView: View {
     }
 
     private func activatePlanMode() {
+        isEnteringGoal = false
         conversationMode = .plan
         draft = ""
     }
@@ -2809,7 +3113,7 @@ struct TaskConversationView: View {
     }
 
     private func scrollToLatest(using proxy: ScrollViewProxy) {
-        guard !messages.isEmpty || !activities.isEmpty else { return }
+        guard !messages.isEmpty || !activities.isEmpty || activeGoal?.status == "complete" else { return }
         // Defer until the state-driven content update has had a layout pass.
         // Scrolling synchronously from onChange can run before LazyVStack has
         // created its final row, which intermittently leaves reopened chats at top.
