@@ -115,6 +115,7 @@ final class CodexAppServerClient: ObservableObject {
         case processExited(String)
         case protocolFailure(String)
         case server(String)
+        case staleTurn(String)
         case authentication(String)
         case modelMismatch(String, String)
         case turnFailed(String)
@@ -130,6 +131,8 @@ final class CodexAppServerClient: ObservableObject {
             case .protocolFailure(let detail):
                 "StationAI couldn't communicate with Codex: \(detail)"
             case .server(let detail):
+                detail
+            case .staleTurn(let detail):
                 detail
             case .authentication(let detail):
                 "Codex CLI needs a valid sign-in. Run `codex login` in Terminal, then try again. \(detail)"
@@ -288,13 +291,21 @@ final class CodexAppServerClient: ObservableObject {
     private func sendSteerRequest(threadID: String, turnID: String, text: String, imageDataURLs: [String] = []) async throws -> Bool {
         // Verified against `codex-cli 0.162.1` app-server schemas: params require
         // threadId/input/expectedTurnId and the response requires turnId.
-        let response = try await request(method: "turn/steer", params: [
-            "threadId": threadID,
-            "input": (text.isEmpty ? [] : [["type": "text", "text": text]]) + imageDataURLs.map { ["type": "image", "url": $0] },
-            "expectedTurnId": turnID
-        ])
+        let response: [String: Any]
+        do {
+            response = try await request(method: "turn/steer", params: [
+                "threadId": threadID,
+                "input": (text.isEmpty ? [] : [["type": "text", "text": text]]) + imageDataURLs.map { ["type": "image", "url": $0] },
+                "expectedTurnId": turnID
+            ])
+        } catch {
+            if case ClientError.staleTurn = error {
+                return false
+            }
+            throw error
+        }
         guard response["turnId"] as? String == turnID else {
-            throw ClientError.protocolFailure("Codex acknowledged steering for an unexpected turn.")
+            return false
         }
         return true
     }
@@ -325,7 +336,9 @@ final class CodexAppServerClient: ObservableObject {
         while Date() < deadline {
             if FileManager.default.fileExists(atPath: responseURL.path) {
                 let response = try JSONDecoder().decode(ConversationSteerMailboxResponse.self, from: Data(contentsOf: responseURL))
-                if let error = response.error { throw ClientError.server(error) }
+                if let error = response.error {
+                    throw ClientError.server(error)
+                }
                 return response.accepted
             }
             if !FileManager.default.fileExists(atPath: activeURL.path) { return false }
@@ -346,15 +359,23 @@ final class CodexAppServerClient: ObservableObject {
             let responseURL = directory.appendingPathComponent("\(request.id).response.json")
             let response: ConversationSteerMailboxResponse
             if request.expectedTurnID != turnID {
-                response = ConversationSteerMailboxResponse(accepted: false, error: "The active turn changed before the steering message could be sent.")
+                response = ConversationSteerMailboxResponse(accepted: false, error: nil)
             } else {
                 do {
                     let images = request.imageDataURLs ?? []
-                    _ = try await sendSteerRequest(threadID: threadID, turnID: turnID, text: request.text, imageDataURLs: images)
-                    activeSteerMessageHandler?(request.text, images)
-                    response = ConversationSteerMailboxResponse(accepted: true, error: nil)
+                    let accepted = try await sendSteerRequest(threadID: threadID, turnID: turnID, text: request.text, imageDataURLs: images)
+                    if accepted {
+                        activeSteerMessageHandler?(request.text, images)
+                        response = ConversationSteerMailboxResponse(accepted: true, error: nil)
+                    } else {
+                        response = ConversationSteerMailboxResponse(accepted: false, error: nil)
+                    }
                 } catch {
-                    response = ConversationSteerMailboxResponse(accepted: false, error: error.localizedDescription)
+                    if case ClientError.staleTurn = error {
+                        response = ConversationSteerMailboxResponse(accepted: false, error: nil)
+                    } else {
+                        response = ConversationSteerMailboxResponse(accepted: false, error: error.localizedDescription)
+                    }
                 }
             }
             if let data = try? JSONEncoder().encode(response) {
@@ -1027,7 +1048,10 @@ final class CodexAppServerClient: ObservableObject {
                 "errorCode": String(describing: serverError["code"] ?? "unknown"),
                 "errorDescription": "Codex returned an RPC error."
             ]) { _, new in new })
-            continuation.resume(throwing: Self.error(forServerMessage: detail))
+            continuation.resume(throwing: Self.error(
+                forServerMessage: detail,
+                method: requestDiagnostics?.method
+            ))
         } else if let result = message["result"] as? [String: Any] {
             StationAIDiagnostics.record("codex.rpc.response.succeeded", fields: responseFields.merging([
                 "resultFieldNames": result.keys.sorted().joined(separator: ",")
@@ -1388,8 +1412,16 @@ final class CodexAppServerClient: ObservableObject {
         return message
     }
 
-    private static func error(forServerMessage message: String) -> Error {
+    private static func error(forServerMessage message: String, method: String? = nil) -> Error {
         let normalized = message.lowercased()
+        let isMissedSteerTurn = method == "turn/steer" && (
+            normalized == "no active turn to steer" ||
+                (normalized.contains("expected active turn id") && normalized.contains("but found")) ||
+                (normalized.contains("expected turn id") && normalized.contains("stale"))
+        )
+        if isMissedSteerTurn {
+            return ClientError.staleTurn(message)
+        }
         if normalized.contains("unauthorized") || normalized.contains("authentication") ||
             normalized.contains("not logged in") || normalized.contains("sign in") ||
             normalized.contains("401") {

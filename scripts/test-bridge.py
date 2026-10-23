@@ -2811,13 +2811,8 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(steer_params["threadId"], thread_id)
         self.assertEqual(steer_params["input"], [{"type": "text", "text": steer_message}])
         self.assertTrue(steer_params["expectedTurnId"], "Steering must identify the matching active turn.")
-        stale_steer, _ = self.call_cli(
-            "conversation", "steer", task_id, "--message", "This turn is already over.",
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
-        )
-        self.assertFalse(self.assert_success(stale_steer)["accepted"], "A completed turn must not be steered.")
 
-    # case-contract: test_conversation_steers_and_queues_active_turn | While a Codex turn is active, stale CLI/XPC steering reports an error and preserves the composer draft; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview. Plain Return queues a follow-up; its row Steer uses the active turn ID, appears in the transcript, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and rejected steering remains available as needsAction. A distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
+    # case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; with no active turn, a missed queued-row steer dispatches synchronously as its own turn and leaves the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up; its row Steer uses the active turn ID, appears in the transcript, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
     def test_conversation_steers_and_queues_active_turn(self):
         task = self.create_repo_task("Active turn message controls", [self.primary])
         task_id = task["id"]
@@ -2828,7 +2823,7 @@ class StationAIBridgeTests(unittest.TestCase):
         (self.data_directory / ".stationai-codex-fixture-owner").write_text(
             "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
-        Path(str(executable) + ".reject-next-steer").write_text("reject one stale steer\n", encoding="utf-8")
+        Path(str(executable) + ".reject-next-steer").write_text("The expected turn ID is stale.\n", encoding="utf-8")
         first_prompt = "Start the active turn before steering and queueing."
         steering_text = "Keep the current approach and simplify the final change."
         queued_text = "After the current work, verify the saved follow-up."
@@ -2853,14 +2848,19 @@ class StationAIBridgeTests(unittest.TestCase):
                 extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
             )
             self.assertEqual(invalid_steer["error"]["code"], "invalid_argument")
-            rejected_steer, _ = self.call_cli(
-                "conversation", "steer", task_id, "--message", steering_text,
-                expected_status=1,
-                extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
-            )
-            self.assert_failure(rejected_steer, "operation_failed")
             steer_image = self.data_directory / "steer.png"
             steer_image.write_bytes(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"))
+            missed_steer, _ = self.call_cli(
+                "conversation", "steer", task_id, "--message", steering_text, "--image", str(steer_image),
+                extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            )
+            missed_result = self.assert_success(missed_steer)
+            self.assertTrue(missed_result["accepted"])
+            self.assertTrue(missed_result["queued"])
+            missed_queue, _ = self.call_cli("conversation", "queue-list", task_id)
+            missed_item = next(item for item in self.assert_success(missed_queue) if item["text"] == steering_text)
+            self.assertEqual(missed_item["state"], "queued", "A stale steer should become an ordinary durable follow-up.")
+            self.assertTrue(missed_item["imageDataURLs"][0].startswith("data:image/png;base64,"), "A queued CLI steer should retain its image.")
             steered, _ = self.call_cli(
                 "conversation", "steer", task_id, "--message", steering_text, "--image", str(steer_image),
                 extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
@@ -2869,41 +2869,40 @@ class StationAIBridgeTests(unittest.TestCase):
             queued, _ = self.call_cli("conversation", "queue", task_id, "--message", queued_text)
             queued_record = self.assert_success(queued)
             persisted, _ = self.call_cli("conversation", "queue-list", task_id)
-            self.assertEqual(self.assert_success(persisted)[0]["id"], queued_record["id"])
+            persisted_ids = {item["id"] for item in self.assert_success(persisted)}
+            self.assertEqual(persisted_ids, {queued_record["id"], missed_item["id"]}, "Fresh XPC reads should preserve both the ordinary follow-up and missed steer.")
             removable, _ = self.call_cli("conversation", "queue", task_id, "--message", "Remove this queued follow-up.")
             removable_record = self.assert_success(removable)
             removed, _ = self.call_cli("conversation", "queue-remove", task_id, removable_record["id"])
             self.assertTrue(self.assert_success(removed)["removed"])
             persisted, _ = self.call_cli("conversation", "queue-list", task_id)
-            self.assertEqual([item["id"] for item in self.assert_success(persisted)], [queued_record["id"]])
+            self.assertEqual({item["id"] for item in self.assert_success(persisted)}, {queued_record["id"], missed_item["id"]})
             steerable, _ = self.call_cli("conversation", "queue", task_id, "--message", "Steer this queued follow-up now.")
             steerable_record = self.assert_success(steerable)
             queued_steer, _ = self.call_cli("conversation", "queue-steer", task_id, steerable_record["id"])
             self.assertTrue(self.assert_success(queued_steer)["accepted"])
             persisted, _ = self.call_cli("conversation", "queue-list", task_id)
-            self.assertEqual([item["id"] for item in self.assert_success(persisted)], [queued_record["id"]])
-            rejected_queue_item, _ = self.call_cli("conversation", "queue", task_id, "--message", "Keep this after a rejected steer.")
-            rejected_queue_record = self.assert_success(rejected_queue_item)
-            Path(str(executable) + ".reject-next-steer").write_text("reject queued steer\n", encoding="utf-8")
-            rejected_queue_steer, _ = self.call_cli(
-                "conversation", "queue-steer", task_id, rejected_queue_record["id"], expected_status=1
-            )
-            self.assert_failure(rejected_queue_steer, "operation_failed")
+            self.assertEqual({item["id"] for item in self.assert_success(persisted)}, {queued_record["id"], missed_item["id"]})
+            missed_row_item, _ = self.call_cli("conversation", "queue", task_id, "--message", "Keep this after a missed row steer.")
+            missed_row_record = self.assert_success(missed_row_item)
+            Path(str(executable) + ".reject-next-steer").write_text("expected active turn id stale-turn but found fixture-turn\n", encoding="utf-8")
+            missed_queue_steer, _ = self.call_cli("conversation", "queue-steer", task_id, missed_row_record["id"])
+            self.assertTrue(self.assert_success(missed_queue_steer)["accepted"])
+            self.assertTrue(self.assert_success(missed_queue_steer)["queued"])
             persisted, _ = self.call_cli("conversation", "queue-list", task_id)
             persisted_messages = self.assert_success(persisted)
-            self.assertEqual(persisted_messages[0]["state"], "queued")
-            self.assertEqual(persisted_messages[1]["state"], "needsAction")
-            removed, _ = self.call_cli("conversation", "queue-remove", task_id, rejected_queue_record["id"])
-            self.assertTrue(self.assert_success(removed)["removed"])
+            persisted_by_id = {item["id"]: item for item in persisted_messages}
+            self.assertEqual(set(persisted_by_id), {queued_record["id"], missed_item["id"], missed_row_record["id"]})
+            self.assertEqual(persisted_by_id[missed_row_record["id"]]["state"], "queued", "A missed row steer should return to ordinary queue delivery.")
             missing_remove, _ = self.call_cli(
                 "conversation", "queue-remove", task_id, "00000000-0000-0000-0000-000000000000", expected_status=1
             )
             self.assert_failure(missing_remove, "invalid_transition")
             persisted, _ = self.call_cli("conversation", "queue-list", task_id)
             self.assertEqual(
-                [item["id"] for item in self.assert_success(persisted)],
-                [queued_record["id"]],
-                "An unknown queue removal must leave the existing queue unchanged.",
+                {item["id"] for item in self.assert_success(persisted)},
+                {queued_record["id"], missed_item["id"], missed_row_record["id"]},
+                "An unknown queue removal must leave all existing queued messages unchanged.",
             )
         finally:
             release.write_text("Release the active turn.\n", encoding="utf-8")
@@ -2915,8 +2914,11 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         history = self.assert_success(history_response)
         self.assertEqual([message["text"] for message in history["messages"] if message["role"] == "user"].count(queued_text), 1)
+        self.assertEqual([message["text"] for message in history["messages"] if message["role"] == "user"].count("Keep this after a missed row steer."), 1)
         protocol_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
-        self.assertEqual(len(protocol_history["rejectedSteerRequests"]), 2, "A server rejection must not be reported as an accepted steer.")
+        self.assertEqual(len(protocol_history["rejectedSteerRequests"]), 2, "Both missed-turn steer requests should be rejected by Codex and delivered later from the queue.")
+        missed_delivery = next(turn for turn in protocol_history["messages"] if turn["userMessage"] == steering_text)
+        self.assertTrue(missed_delivery["images"][0].startswith("data:image/png;base64,"), "The missed CLI steer image should reach Codex on its own turn.")
         self.assertEqual(len(protocol_history["steerRequests"]), 2)
         steer = protocol_history["steerRequests"][0]
         self.assertEqual(steer["threadId"], protocol_history["threadID"])
@@ -2928,6 +2930,122 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(protocol_history["steerRequests"][1]["expectedTurnId"], protocol_history["messages"][0]["turnID"])
         queue_after_completion, _ = self.call_cli("conversation", "queue-list", task_id)
         self.assertEqual(self.assert_success(queue_after_completion), [], "Successful dispatch must be durable and nonduplicating across reload.")
+
+        targeted_text = "Retry this row as its own turn."
+        targeted_row, _ = self.call_cli("conversation", "queue", task_id, "--message", targeted_text)
+        targeted_record = self.assert_success(targeted_row)
+        Path(str(executable) + ".hold-next-queued-turn").write_text("hold targeted delivery\n", encoding="utf-8")
+        targeted_command = ["conversation", "queue-steer", task_id, targeted_record["id"]]
+        targeted_process = self.start_cli(
+            *targeted_command,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        targeted_ready = Path(str(executable) + ".queued-turn-ready")
+        targeted_release = Path(str(executable) + ".queued-turn-release")
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not targeted_ready.exists():
+            time.sleep(0.02)
+        self.assertTrue(targeted_ready.exists(), "A missed queued-row steer should begin its own targeted turn.")
+        overlap_text = "Queue this steer behind the targeted turn."
+        Path(str(executable) + ".reject-next-steer").write_text("no active turn to steer\n", encoding="utf-8")
+        overlap_steer, _ = self.call_cli(
+            "conversation", "steer", task_id, "--message", overlap_text,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        self.assertTrue(self.assert_success(overlap_steer)["queued"], "A second missed steer should queue while targeted delivery is active.")
+        overlap_queue, _ = self.call_cli("conversation", "queue-list", task_id)
+        overlap_item = next(item for item in self.assert_success(overlap_queue) if item["text"] == overlap_text)
+        self.assertEqual(overlap_item["state"], "queued")
+        targeted_release.write_text("Release targeted delivery.\n", encoding="utf-8")
+        targeted_result, _ = self.finish_cli(targeted_process, targeted_command)
+        self.assertTrue(self.assert_success(targeted_result)["accepted"])
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            current_queue, _ = self.call_cli("conversation", "queue-list", task_id)
+            if self.assert_success(current_queue) == []:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.assert_success(current_queue), [], "A pending full drain should deliver the overlapping steer after targeted dispatch.")
+        overlap_history, _ = self.call_cli(
+            "conversation", "history", task_id,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        delivered_texts = [message["text"] for message in self.assert_success(overlap_history)["messages"] if message["role"] == "user"]
+        self.assertEqual(delivered_texts.count(targeted_text), 1)
+        self.assertEqual(delivered_texts.count(overlap_text), 1)
+
+        targeted_row_text = "Retry another row as its own turn."
+        targeted_row, _ = self.call_cli("conversation", "queue", task_id, "--message", targeted_row_text)
+        targeted_row_record = self.assert_success(targeted_row)
+        Path(str(executable) + ".hold-next-queued-turn").write_text("hold targeted row delivery\n", encoding="utf-8")
+        targeted_row_command = ["conversation", "queue-steer", task_id, targeted_row_record["id"]]
+        targeted_row_process = self.start_cli(
+            *targeted_row_command,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not targeted_ready.exists():
+            time.sleep(0.02)
+        self.assertTrue(targeted_ready.exists(), "A second targeted row delivery should become active before the overlapping row steer.")
+        missed_row_text = "Queue this missed row steer behind targeted dispatch."
+        missed_row, _ = self.call_cli("conversation", "queue", task_id, "--message", missed_row_text)
+        missed_row_record = self.assert_success(missed_row)
+        Path(str(executable) + ".reject-next-steer").write_text("expected active turn id stale-turn but found fixture-turn\n", encoding="utf-8")
+        overlapping_row_steer, _ = self.call_cli("conversation", "queue-steer", task_id, missed_row_record["id"])
+        overlapping_row_result = self.assert_success(overlapping_row_steer)
+        self.assertTrue(overlapping_row_result["accepted"])
+        self.assertTrue(overlapping_row_result["queued"], "A missed queued-row steer should stay queued while targeted dispatch is active.")
+        targeted_release.write_text("Release targeted row delivery.\n", encoding="utf-8")
+        self.finish_cli(targeted_row_process, targeted_row_command)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            current_queue, _ = self.call_cli("conversation", "queue-list", task_id)
+            if self.assert_success(current_queue) == []:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.assert_success(current_queue), [], "A missed queued-row steer should drain after the targeted row turn.")
+        final_history, _ = self.call_cli(
+            "conversation", "history", task_id,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        final_delivered = [message["text"] for message in self.assert_success(final_history)["messages"] if message["role"] == "user"]
+        self.assertEqual(final_delivered.count(targeted_row_text), 1)
+        self.assertEqual(final_delivered.count(missed_row_text), 1)
+
+        immediate_text = "Deliver this missed row immediately as its own turn."
+        immediate_row, _ = self.call_cli("conversation", "queue", task_id, "--message", immediate_text)
+        immediate_record = self.assert_success(immediate_row)
+        immediate_steer, _ = self.call_cli(
+            "conversation", "queue-steer", task_id, immediate_record["id"],
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        immediate_result = self.assert_success(immediate_steer)
+        self.assertTrue(immediate_result["accepted"])
+        self.assertTrue(immediate_result["queued"], "A missed no-active-turn steer should fall back through the ordinary queue.")
+        immediate_queue, _ = self.call_cli("conversation", "queue-list", task_id)
+        self.assertEqual(self.assert_success(immediate_queue), [], "The synchronous own-turn drain should finish before the request returns.")
+        immediate_history, _ = self.call_cli(
+            "conversation", "history", task_id,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        immediate_messages = [message["text"] for message in self.assert_success(immediate_history)["messages"] if message["role"] == "user"]
+        self.assertEqual(immediate_messages.count(immediate_text), 1)
+
+        failed_target_text = "This targeted queued turn should need action."
+        later_text = "Keep this later message queued after a failure."
+        failed_target, _ = self.call_cli("conversation", "queue", task_id, "--message", failed_target_text)
+        failed_target_record = self.assert_success(failed_target)
+        later_item, _ = self.call_cli("conversation", "queue", task_id, "--message", later_text)
+        later_record = self.assert_success(later_item)
+        Path(str(executable) + ".fail-next-turn-start").write_text("fail targeted turn start\n", encoding="utf-8")
+        failed_steer, _ = self.call_cli("conversation", "queue-steer", task_id, failed_target_record["id"])
+        failed_steer_result = self.assert_success(failed_steer)
+        self.assertTrue(failed_steer_result["accepted"])
+        self.assertTrue(failed_steer_result["queued"])
+        failure_queue, _ = self.call_cli("conversation", "queue-list", task_id)
+        failure_items = {item["id"]: item for item in self.assert_success(failure_queue)}
+        self.assertEqual(failure_items[failed_target_record["id"]]["state"], "needsAction")
+        self.assertEqual(failure_items[later_record["id"]]["state"], "queued", "A failed targeted send must not drain later queued messages.")
 
     # case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. Diagnostics record image MIME and encoded size without storing image payloads.
     def test_conversation_sends_image_attachments(self):

@@ -166,7 +166,7 @@ def main():
                 if history.get("threadID") is not None:
                     write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32001, "message": "This fixture thread already exists; resume it instead of starting another."}})
                     continue
-                THREAD_ID = f"stationai-serial-{uuid.uuid4()}"
+                THREAD_ID = str(uuid.uuid4())
                 history["threadID"] = THREAD_ID
                 history["threadStartDeveloperInstructions"] = thread_start_instructions
                 history["events"].append({"method": "thread/start", "threadID": THREAD_ID})
@@ -224,6 +224,11 @@ def main():
             turn_thread_id = message.get("params", {}).get("threadId")
             if serial_mode and turn_thread_id != THREAD_ID:
                 write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32003, "message": "The turn must use the active fixture thread."}})
+                continue
+            fail_marker = Path(str(sys.argv[0]) + ".fail-next-turn-start")
+            if serial_mode and fail_marker.exists():
+                fail_marker.unlink(missing_ok=True)
+                write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32099, "message": "Fixture rejected the targeted queued turn."}})
                 continue
             if is_title_request:
                 if mode.endswith("-title-failure"):
@@ -337,12 +342,14 @@ def main():
                             params = steer_request.get("params", {})
                             reject_marker = Path(str(sys.argv[0]) + ".reject-next-steer")
                             if reject_marker.exists():
+                                rejection = reject_marker.read_text(encoding="utf-8").strip()
                                 reject_marker.unlink()
                                 rejected_steer_requests.append(params)
-                                write({"jsonrpc": "2.0", "id": steer_request["id"], "error": {"code": -32010, "message": "The expected turn ID is stale."}})
+                                error_code = -32010 if rejection == "The expected turn ID is stale." else -32000
+                                write({"jsonrpc": "2.0", "id": steer_request["id"], "error": {"code": error_code, "message": rejection}})
                             elif params.get("threadId") != THREAD_ID or params.get("expectedTurnId") != TURN_ID:
                                 rejected_steer_requests.append(params)
-                                write({"jsonrpc": "2.0", "id": steer_request["id"], "error": {"code": -32010, "message": "The expected turn ID is stale."}})
+                                write({"jsonrpc": "2.0", "id": steer_request["id"], "error": {"code": -32000, "message": f"expected active turn id {params.get('expectedTurnId')} but found {TURN_ID}"}})
                             else:
                                 steer_requests.append(params)
                                 write({"jsonrpc": "2.0", "id": steer_request["id"], "result": {"turnId": TURN_ID}})
@@ -357,6 +364,52 @@ def main():
                     saved_history["steerRequests"] = saved_history.get("steerRequests", []) + steer_requests
                     saved_history["rejectedSteerRequests"] = saved_history.get("rejectedSteerRequests", []) + rejected_steer_requests
                     history_path.write_text(json.dumps(saved_history), encoding="utf-8")
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": THREAD_ID,
+                    "turn": {"id": TURN_ID, "status": "completed"},
+                }})
+            elif serial_mode and Path(str(sys.argv[0]) + ".hold-next-queued-turn").exists():
+                hold_marker = Path(str(sys.argv[0]) + ".hold-next-queued-turn")
+                hold_marker.unlink(missing_ok=True)
+                ready = Path(str(sys.argv[0]) + ".queued-turn-ready")
+                release = Path(str(sys.argv[0]) + ".queued-turn-release")
+                ready.write_text("A targeted queued turn is active.\n", encoding="utf-8")
+                deadline = time.monotonic() + 30
+                steer_requests = []
+                rejected_steer_requests = []
+                while not release.exists() and time.monotonic() < deadline:
+                    readable, _, _ = select.select([sys.stdin], [], [], 0.02)
+                    if not readable:
+                        continue
+                    try:
+                        queued_request = json.loads(sys.stdin.readline())
+                    except json.JSONDecodeError:
+                        continue
+                    if queued_request.get("method") == "thread/items/list":
+                        write({"jsonrpc": "2.0", "id": queued_request.get("id"), "result": {"data": [], "nextCursor": None}})
+                    elif queued_request.get("method") == "turn/steer":
+                        rejection = Path(str(sys.argv[0]) + ".reject-next-steer")
+                        if rejection.exists():
+                            message_text = rejection.read_text(encoding="utf-8").strip()
+                            rejection.unlink(missing_ok=True)
+                            rejected_steer_requests.append(queued_request.get("params", {}))
+                            error_code = -32010 if message_text == "The expected turn ID is stale." else -32000
+                            write({"jsonrpc": "2.0", "id": queued_request["id"], "error": {"code": error_code, "message": message_text}})
+                        else:
+                            params = queued_request.get("params", {})
+                            steer_requests.append(params)
+                            write({"jsonrpc": "2.0", "id": queued_request["id"], "result": {"turnId": TURN_ID}})
+                    else:
+                        write({"jsonrpc": "2.0", "id": queued_request.get("id"), "error": {"code": -32601, "message": "Unsupported fixture request."}})
+                ready.unlink(missing_ok=True)
+                released = release.exists()
+                release.unlink(missing_ok=True)
+                if not released:
+                    return 3
+                saved_history = serial_history()
+                saved_history["steerRequests"] = saved_history.get("steerRequests", []) + steer_requests
+                saved_history["rejectedSteerRequests"] = saved_history.get("rejectedSteerRequests", []) + rejected_steer_requests
+                history_path.write_text(json.dumps(saved_history), encoding="utf-8")
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
