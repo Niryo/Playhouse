@@ -35,10 +35,11 @@ extension View {
 
 private struct ActionButtonHoverEmphasis: ViewModifier {
     @State private var isHovering = false
+    var padding: CGFloat = 4
 
     func body(content: Content) -> some View {
         content
-            .padding(4)
+            .padding(padding)
             .background {
                 Capsule()
                     .fill(Color.accentColor.opacity(isHovering ? 0.14 : 0))
@@ -50,8 +51,8 @@ private struct ActionButtonHoverEmphasis: ViewModifier {
 }
 
 extension View {
-    func actionButtonHoverEmphasis() -> some View {
-        modifier(ActionButtonHoverEmphasis())
+    func actionButtonHoverEmphasis(padding: CGFloat = 4) -> some View {
+        modifier(ActionButtonHoverEmphasis(padding: padding))
     }
 }
 

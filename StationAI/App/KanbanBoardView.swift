@@ -1289,7 +1289,7 @@ private struct TaskCardView: View {
                             }
                         }
                         .buttonHoverPointer()
-                        .actionButtonHoverEmphasis()
+                        .actionButtonHoverEmphasis(padding: 10)
                         .help("Create a pull request for each repository linked to this task")
                         .disabled(isCreatingPullRequests)
                         .accessibilityIdentifier("task-create-pr-\(task.id.uuidString)")
@@ -1301,7 +1301,7 @@ private struct TaskCardView: View {
                                     .foregroundStyle(.green)
                             }
                             .buttonHoverPointer()
-                            .actionButtonHoverEmphasis()
+                            .actionButtonHoverEmphasis(padding: 10)
                             .help("Complete task: all linked pull requests have merged")
                             .accessibilityLabel("Green checkmark. Complete task, all linked pull requests merged")
                             .accessibilityIdentifier("task-complete-merged-pr-\(task.id.uuidString)")
@@ -1314,7 +1314,7 @@ private struct TaskCardView: View {
                                         .frame(width: 30, height: 12)
                                 }
                                 .buttonHoverPointer()
-                                .actionButtonHoverEmphasis()
+                                .actionButtonHoverEmphasis(padding: 10)
                                 .help("Resolve pull request conflicts with Codex")
                                 .accessibilityLabel("Resolve pull request conflicts")
                                 .accessibilityIdentifier("task-resolve-pr-conflicts-\(task.id.uuidString)")
@@ -1324,7 +1324,7 @@ private struct TaskCardView: View {
                                     Link("#\(number)", destination: url)
                                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
                                         .buttonHoverPointer()
-                                        .actionButtonHoverEmphasis()
+                                        .actionButtonHoverEmphasis(padding: 10)
                                         .help("Open pull request #\(number) in your browser")
                                         .accessibilityIdentifier("task-pr-link-\(task.id.uuidString)-\(number)")
                                 }
