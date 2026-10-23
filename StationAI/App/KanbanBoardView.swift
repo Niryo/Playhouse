@@ -30,9 +30,8 @@ struct KanbanBoardView: View {
     @State private var conflictResolutionTaskID: UUID?
     @State private var checkingMergedPullRequests = false
     @State private var mergedPullRequestCheckPending = false
+    @State private var lastMergedPullRequestCheckAt: Date?
     @State private var taskAwaitingUnmergedConfirmation: UUID?
-    @State private var taskAwaitingPRConflictChoice: BoardTask?
-    @State private var rememberPRConflictAction = false
     @State private var pullRequestError: String?
     @State private var doneMoveError: String?
     @State private var isShowingBoardSearch = false
@@ -139,39 +138,6 @@ struct KanbanBoardView: View {
             .help("Dismiss pull request error")
         } message: {
             Text(pullRequestError ?? "Please try again.")
-        }
-        .sheet(isPresented: Binding(
-            get: { taskAwaitingPRConflictChoice != nil },
-            set: { if !$0 { taskAwaitingPRConflictChoice = nil; rememberPRConflictAction = false } }
-        )) {
-            if let task = taskAwaitingPRConflictChoice {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("Pull request conflicts found").font(.headline)
-                    Text("Choose how StationAI should resolve conflicts with the configured merge target.")
-                        .foregroundStyle(.secondary)
-                    Toggle("Remember this choice", isOn: $rememberPRConflictAction)
-                        .accessibilityIdentifier("pr-conflict-remember-choice")
-                    HStack {
-                        Button("Keep PR as is") { choosePRConflictAction("keep", task: task) }
-                            .buttonHoverPointer()
-                            .help("Keep the existing pull request unchanged")
-                            .accessibilityIdentifier("pr-conflict-keep-button")
-                        Spacer()
-                        Button("Resolve without pushing") { choosePRConflictAction("resolve-only", task: task) }
-                            .buttonHoverPointer()
-                            .help("Resolve conflicts and leave the branch unpublished")
-                            .accessibilityIdentifier("pr-conflict-resolve-only-button")
-                        Button("Resolve and push") { choosePRConflictAction("resolve-and-push", task: task) }
-                            .keyboardShortcut(.defaultAction)
-                            .buttonHoverPointer()
-                            .help("Resolve conflicts and publish the updated branch")
-                            .accessibilityIdentifier("pr-conflict-resolve-push-button")
-                    }
-                }
-                .padding(24)
-                .frame(width: 560)
-                .accessibilityIdentifier("pr-conflict-confirmation")
-            }
         }
         .alert("Couldn't check pull request status", isPresented: Binding(
             get: { doneMoveError != nil },
@@ -731,10 +697,15 @@ struct KanbanBoardView: View {
     }
 
     private func checkReviewPullRequests() {
-        guard !checkingMergedPullRequests else {
-            mergedPullRequestCheckPending = true
+        let now = Date()
+        if checkingMergedPullRequests {
+            if lastMergedPullRequestCheckAt.map({ now.timeIntervalSince($0) >= 10 }) ?? false {
+                mergedPullRequestCheckPending = true
+            }
             return
         }
+        guard lastMergedPullRequestCheckAt.map({ now.timeIntervalSince($0) >= 10 }) ?? true else { return }
+        lastMergedPullRequestCheckAt = now
         checkingMergedPullRequests = true
         Task { @MainActor in
             defer {
@@ -778,7 +749,7 @@ struct KanbanBoardView: View {
         }
     }
 
-    private func createPullRequests(for task: BoardTask, conflictAction: String? = nil) {
+    private func createPullRequests(for task: BoardTask) {
         guard taskCreatingPullRequests.insert(task.id).inserted else { return }
         Task { @MainActor in
             defer { taskCreatingPullRequests.remove(task.id) }
@@ -786,30 +757,13 @@ struct KanbanBoardView: View {
                 let manager = BoardTaskManager(modelContext: modelContext)
                 let conflictRepositories = try await manager.pullRequestConflictRepositories(task.id)
                 if !conflictRepositories.isEmpty {
-                    let action = conflictAction ?? WorkspaceSettingsManager().pullRequestConflictAction
-                    if action == "ask" {
-                        taskAwaitingPRConflictChoice = task
-                        return
-                    }
+                    throw BridgeCommandError(code: "conflicts_require_confirmation", message: "Resolve conflicts in the task worktree before creating pull requests.")
                 }
-                _ = try await manager.createPullRequests(
-                    task.id, client: codexClient,
-                    conflictAction: conflictAction ?? WorkspaceSettingsManager().pullRequestConflictAction
-                )
+                _ = try await manager.createPullRequests(task.id, client: codexClient)
             } catch {
                 pullRequestError = error.localizedDescription
             }
         }
-    }
-
-    private func choosePRConflictAction(_ action: String, task: BoardTask) {
-        taskAwaitingPRConflictChoice = nil
-        if rememberPRConflictAction {
-            do { try WorkspaceSettingsManager().setPullRequestConflictAction(action) }
-            catch { pullRequestError = error.localizedDescription; return }
-        }
-        rememberPRConflictAction = false
-        createPullRequests(for: task, conflictAction: action)
     }
 
 }

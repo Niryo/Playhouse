@@ -281,9 +281,6 @@ enum StationAICLI {
             case "set-appearance":
                 guard rest.count == 2 else { throw CLIError.usage("Use: stationai settings set-appearance <dark|light>") }
                 return BridgeRequest(command: "settings.set-appearance", arguments: ["appearance": .string(rest[1])])
-            case "set-pr-conflict-action":
-                guard rest.count == 2 else { throw CLIError.usage("Use: stationai settings set-pr-conflict-action <ask|resolve-and-push|resolve-only|keep>") }
-                return BridgeRequest(command: "settings.set-pr-conflict-action", arguments: ["action": .string(rest[1])])
             case "set-parent":
                 guard rest.count == 2 else { throw CLIError.usage("Use: stationai settings set-parent <path>") }
                 return BridgeRequest(command: "settings.set-parent", arguments: ["path": .string(rest[1])])
