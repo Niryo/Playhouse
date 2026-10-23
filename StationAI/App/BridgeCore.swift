@@ -1901,6 +1901,24 @@ final class BoardTaskManager {
         }
     }
 
+    func recordConversationActivityDuration(taskID: UUID, activityID: String, durationMs: Int) async throws {
+        guard !activityID.isEmpty, durationMs >= 0 else { return }
+        try await withTaskOperationLock(taskID) {
+            let task = try self.requireTask(taskID)
+            var durations = (try? task.conversationActivityDurationsData.map {
+                try JSONDecoder().decode([String: Int].self, from: $0)
+            }) ?? [:]
+            durations[activityID] = durationMs
+            task.conversationActivityDurationsData = try? JSONEncoder().encode(durations)
+            try await self.saveTaskContext(taskID: taskID)
+        }
+    }
+
+    func conversationActivityDurations(taskID: UUID) -> [String: Int] {
+        guard let task = try? requireTask(taskID), let data = task.conversationActivityDurationsData else { return [:] }
+        return (try? JSONDecoder().decode([String: Int].self, from: data)) ?? [:]
+    }
+
     @discardableResult
     func clearProgressReport(_ id: UUID) async throws -> BoardTaskRecord {
         return try await withTaskOperationLock(id) {
@@ -2797,13 +2815,19 @@ final class CodexConversationManager {
                 developerInstructions: TaskProgressReportInstructions.make(taskID: taskID),
                 onActionRequest: onActionRequest
             )
+            let savedDurations = tasks.conversationActivityDurations(taskID: taskID)
+            let activities = history.activities.map { activity -> CodexActivity in
+                var activity = activity
+                if activity.durationMs == nil { activity.durationMs = savedDurations[activity.id] }
+                return activity
+            }
             StationAIDiagnostics.record("conversation.history.succeeded", fields: client.diagnosticFields([
                 "taskID": taskID.uuidString,
                 "threadID": threadID,
                 "messageCount": String(history.messages.count),
                 "activityCount": String(history.activities.count)
             ]))
-            return history
+            return CodexThreadHistory(messages: history.messages, activities: activities, diff: history.diff)
         } catch {
             var fields = StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
             fields["taskID"] = taskID.uuidString
@@ -3223,7 +3247,18 @@ final class CodexConversationManager {
                 developerInstructions: TaskProgressReportInstructions.make(taskID: taskID),
                 onDelta: { delta in onUpdate(ConversationUpdate(type: "text_delta", text: delta)) },
                 onFinalMessage: { message in onUpdate(ConversationUpdate(type: "assistant_final", text: message)) },
-                onActivity: { activity in onUpdate(ConversationUpdate(type: "activity", activity: activity)) },
+                onActivity: { activity in
+                    if let durationMs = activity.durationMs {
+                        Task { @MainActor in
+                            try? await self.tasks.recordConversationActivityDuration(
+                                taskID: taskID,
+                                activityID: activity.id,
+                                durationMs: durationMs
+                            )
+                        }
+                    }
+                    onUpdate(ConversationUpdate(type: "activity", activity: activity))
+                },
                 onDiff: { diff in onUpdate(ConversationUpdate(type: "diff", diff: diff.unifiedDiff)) },
                 onHistory: { history in onUpdate(ConversationUpdate(type: "history", history: history)) },
                 onActionRequest: {
@@ -3269,6 +3304,13 @@ final class CodexConversationManager {
                     ))
                 }
             )
+            for (activityID, durationMs) in client.lastTurnActivityDurations {
+                try await tasks.recordConversationActivityDuration(
+                    taskID: taskID,
+                    activityID: activityID,
+                    durationMs: durationMs
+                )
+            }
             phase = "worktree-finalization"
             phase = "review-status-persistence"
             let reportedOutcome = try await tasks.finishConversationTurnOutcome(taskID)
@@ -3276,6 +3318,13 @@ final class CodexConversationManager {
             _ = try await tasks.setLifecycleStatus(taskID, to: finalStatus)
         } catch {
             await titleGeneration?.value
+            for (activityID, durationMs) in client.lastTurnActivityDurations {
+                try? await tasks.recordConversationActivityDuration(
+                    taskID: taskID,
+                    activityID: activityID,
+                    durationMs: durationMs
+                )
+            }
             var fields = StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
             fields["taskID"] = taskID.uuidString
             fields["threadID"] = persistedThreadID ?? ""

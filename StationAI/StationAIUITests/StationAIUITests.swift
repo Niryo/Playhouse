@@ -1991,7 +1991,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ lowestTask.exists && lowestTask.isHittable }, timeout: 10), "Vertical board scrolling should make lower backlog tasks reachable.")
     }
 
-    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Only an explicit completed outcome reaches Review.
+    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review.
     func test_task_progress_reports_publish_persist_and_clear() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Progress reports", roots: [fixture.primary.path])
@@ -2127,9 +2127,10 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(instructions.contains(cliURL.path))
         XCTAssertTrue(instructions.contains("task progress publish"))
         XCTAssertTrue(instructions.contains("hidden from the conversation"))
-        XCTAssertTrue(instructions.contains("periodically during substantial work"))
-        XCTAssertTrue(instructions.contains("active test and position"))
-        XCTAssertTrue(instructions.contains("Test 3/8"))
+        XCTAssertTrue(instructions.contains("at least every 30 seconds"))
+        XCTAssertTrue(instructions.contains("starting or finishing a substantial tool call"))
+        XCTAssertTrue(instructions.contains("active suite/case and position"))
+        XCTAssertTrue(instructions.contains("CLI/XPC 3/8"))
         XCTAssertTrue(instructions.contains("under 80 characters"))
         XCTAssertTrue(instructions.contains("task outcome"))
         XCTAssertTrue(instructions.contains("waiting-response"))
@@ -4169,7 +4170,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
     }
 
-    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; in-progress, completed, and failed statuses, server/tool identity, and optional duration render and survive history reload without duplicate rows, even when later-turn items follow the calls in history. Missing optional duration remains absent. Arguments and raw result text are never exposed; only safe result summaries are shown.
+    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. The conversation header shows only the newest active call; when it completes, the indicator falls back to the next still-active call. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
     func test_conversation_shows_mcp_and_dynamic_tool_activity() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-tool-activity").path
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
@@ -4185,18 +4186,42 @@ final class StationAIUITests: XCTestCase {
 
         let fixture = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable))
         let toolReady = URL(fileURLWithPath: fixture.path + ".tool-ready")
+        let toolReleaseLatest = URL(fileURLWithPath: fixture.path + ".tool-release-latest")
         let toolRelease = URL(fileURLWithPath: fixture.path + ".tool-release")
-        defer { try? "Release tool completions after assertion failure.\n".write(to: toolRelease, atomically: true, encoding: .utf8) }
+        defer {
+            try? "Release newest tool after assertion failure.\n".write(to: toolReleaseLatest, atomically: true, encoding: .utf8)
+            try? "Release tool completions after assertion failure.\n".write(to: toolRelease, atomically: true, encoding: .utf8)
+        }
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: toolReady.path) }, timeout: 20), "The fixture should pause after the tool start notifications.")
-        let mcpRow = element("codex-activity-row-item_fixture_mcp_call")
-        let dynamicRow = element("codex-activity-row-item_fixture_dynamic_call")
-        let legacyDynamicRow = element("codex-activity-row-item_fixture_dynamic_legacy")
-        XCTAssertTrue(mcpRow.waitForExistence(timeout: 10), "MCP calls should appear while they are in progress.")
-        XCTAssertTrue(dynamicRow.waitForExistence(timeout: 10), "Dynamic tool calls should appear while they are in progress.")
-        XCTAssertTrue(legacyDynamicRow.waitForExistence(timeout: 10), "Older dynamic tool calls may omit optional duration metadata.")
+        let currentActivity = element("current-activity-title")
+        XCTAssertTrue(waitUntil({ currentActivity.label == "Tool · legacySummary" }, timeout: 10), "The header should show the most recently started active call.")
+        XCTAssertTrue(element("current-activity-duration").exists, "The current activity should show its elapsed time outside the disclosure.")
+        element("codex-activity-disclosure").click()
+        let activityDetails = element("codex-activity-details")
+        XCTAssertTrue(activityDetails.waitForExistence(timeout: 5), "Expanded Working for should contain tool activity rows.")
+        func containsPositiveDuration(_ value: String) -> Bool {
+            value.range(of: #"Duration · [1-9][0-9]* ms"#, options: .regularExpression) != nil
+        }
+        func containsPositiveRunningDuration(_ value: String) -> Bool {
+            value.range(of: #"Running · [1-9][0-9]* ms"#, options: .regularExpression) != nil
+        }
+        let mcpRow = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").firstMatch
+        let dynamicRow = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").firstMatch
+        let legacyDynamicRow = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").firstMatch
+        XCTAssertTrue(mcpRow.waitForExistence(timeout: 10), "MCP calls should appear inside expanded Working for while in progress.")
+        XCTAssertTrue(dynamicRow.waitForExistence(timeout: 10), "Dynamic tool calls should appear inside expanded Working for while in progress.")
+        XCTAssertTrue(legacyDynamicRow.waitForExistence(timeout: 10), "Every active call should appear inside expanded Working for.")
+        for identifier in ["item_fixture_mcp_call", "item_fixture_dynamic_call", "item_fixture_dynamic_legacy"] {
+            let liveDuration = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-duration-\(identifier)").firstMatch
+            XCTAssertTrue(liveDuration.exists, "Expanded Working for should show a live duration for \(identifier).")
+            XCTAssertTrue(containsPositiveRunningDuration(liveDuration.value as? String ?? ""), "The live duration for \(identifier) should contain positive elapsed time in milliseconds.")
+        }
         XCTAssertTrue(mcpRow.label.contains("In progress"))
         XCTAssertTrue(dynamicRow.label.contains("In progress"))
         XCTAssertTrue(legacyDynamicRow.label.contains("In progress"))
+        try "Finish the newest call first.\n".write(to: toolReleaseLatest, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ currentActivity.label == "Tool · summarize" }, timeout: 15), "When the newest call finishes, the header should fall back to the next active call.")
+        XCTAssertTrue(waitUntil({ legacyDynamicRow.label.contains("Completed") }, timeout: 10))
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").count, 1)
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").count, 1)
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").count, 1)
@@ -4205,12 +4230,13 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(mcpRow.label.contains("MCP · lookup"))
         XCTAssertTrue((mcpRow.value as? String ?? "").contains("fixture-server"))
         XCTAssertTrue((mcpRow.value as? String ?? "").contains("Returned 1 result item"))
+        XCTAssertTrue(containsPositiveDuration(mcpRow.value as? String ?? ""), "The completed MCP call should display its positive measured duration in milliseconds.")
         XCTAssertTrue((dynamicRow.value as? String ?? "").contains("Tool call failed"))
         XCTAssertTrue((dynamicRow.value as? String ?? "").contains("Duration · 37 ms"))
         XCTAssertTrue(dynamicRow.label.contains("Tool · summarize"))
         XCTAssertTrue(legacyDynamicRow.label.contains("Tool · legacySummary"))
         XCTAssertTrue((legacyDynamicRow.value as? String ?? "").contains("Returned 1 result item"))
-        XCTAssertFalse((legacyDynamicRow.value as? String ?? "").contains("Duration"))
+        XCTAssertTrue(containsPositiveDuration(legacyDynamicRow.value as? String ?? ""), "The completed legacy call should display its positive measured duration in milliseconds.")
         let renderedToolRows = "\(mcpRow.label) \(mcpRow.value ?? "") \(dynamicRow.label) \(dynamicRow.value ?? "") \(legacyDynamicRow.label) \(legacyDynamicRow.value ?? "")"
         XCTAssertFalse(renderedToolRows.contains("RAW_ARGUMENT_SECRET"))
         XCTAssertFalse(renderedToolRows.contains("RAW_RESULT_SECRET"))
@@ -4224,16 +4250,20 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(savedActivities.filter { $0["id"] as? String == "item_fixture_dynamic_call" }.count, 1)
         element("back-to-board-button").click()
         openTask(named: "Tool activity")
-        let reloadedMcpRow = element("codex-activity-row-item_fixture_mcp_call")
-        XCTAssertTrue(reloadedMcpRow.waitForExistence(timeout: 20), "Completed MCP activity should remain after history reload.")
-        let reloadedDynamicRow = element("codex-activity-row-item_fixture_dynamic_call")
-        let reloadedLegacyDynamicRow = element("codex-activity-row-item_fixture_dynamic_legacy")
+        element("codex-activity-disclosure").click()
+        let reloadedActivityDetails = element("codex-activity-details")
+        XCTAssertTrue(reloadedActivityDetails.waitForExistence(timeout: 5))
+        let reloadedMcpRow = reloadedActivityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").firstMatch
+        XCTAssertTrue(reloadedMcpRow.waitForExistence(timeout: 20), "Completed MCP activity should remain in Working for after history reload.")
+        let reloadedDynamicRow = reloadedActivityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").firstMatch
+        let reloadedLegacyDynamicRow = reloadedActivityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").firstMatch
         XCTAssertTrue(reloadedDynamicRow.waitForExistence(timeout: 10), "Failed dynamic activity should remain after history reload.")
         XCTAssertTrue(reloadedLegacyDynamicRow.waitForExistence(timeout: 10), "Legacy dynamic activity should remain after history reload.")
         XCTAssertTrue(reloadedMcpRow.label.contains("MCP · lookup"))
         XCTAssertTrue(reloadedMcpRow.label.contains("Completed"))
         XCTAssertTrue((reloadedMcpRow.value as? String ?? "").contains("fixture-server"))
         XCTAssertTrue((reloadedMcpRow.value as? String ?? "").contains("Returned 1 result item"))
+        XCTAssertTrue(containsPositiveDuration(reloadedMcpRow.value as? String ?? ""), "The positive MCP duration must survive history reload in milliseconds.")
         XCTAssertTrue(reloadedDynamicRow.label.contains("Tool · summarize"))
         XCTAssertTrue(reloadedDynamicRow.label.contains("Failed"))
         XCTAssertTrue((reloadedDynamicRow.value as? String ?? "").contains("Tool call failed"))
@@ -4241,7 +4271,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(reloadedLegacyDynamicRow.label.contains("Tool · legacySummary"))
         XCTAssertTrue(reloadedLegacyDynamicRow.label.contains("Completed"))
         XCTAssertTrue((reloadedLegacyDynamicRow.value as? String ?? "").contains("Returned 1 result item"))
-        XCTAssertFalse((reloadedLegacyDynamicRow.value as? String ?? "").contains("Duration"), "Missing optional duration must remain absent.")
+        XCTAssertTrue(containsPositiveDuration(reloadedLegacyDynamicRow.value as? String ?? ""), "The positive legacy tool duration must survive history reload in milliseconds.")
         let reloadedToolRows = reloadedMcpRow.label + " " + (reloadedMcpRow.value as? String ?? "")
             + " " + reloadedDynamicRow.label + " " + (reloadedDynamicRow.value as? String ?? "")
             + " " + reloadedLegacyDynamicRow.label + " " + (reloadedLegacyDynamicRow.value as? String ?? "")

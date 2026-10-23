@@ -1524,7 +1524,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(waiting["status"], "Waiting Response")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", blocked_id)[0])["status"], "Blocked")
 
-    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Only an explicit completed outcome reaches Review.
+    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review.
     def test_task_progress_reports_publish_persist_and_clear(self):
         task_id = self.create_task("Progress reports", roots=[self.primary])["id"]
         response, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "building", expected_status=1)
@@ -1648,9 +1648,9 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assertIn(str(self.cli), instructions)
             self.assertIn("task progress publish", instructions)
             self.assertIn("hidden from the conversation", instructions)
-            self.assertIn("periodically during substantial work", instructions)
-            self.assertIn("active test and position", instructions)
-            self.assertIn("Test 3/8", instructions)
+            self.assertIn("at least every 30 seconds", instructions)
+            self.assertIn("active suite/case and position", instructions)
+            self.assertIn("CLI/XPC 3/8", instructions)
             self.assertIn("under 80 characters", instructions)
             self.assertIn("task outcome", instructions)
             self.assertIn("waiting-response", instructions)
@@ -3027,7 +3027,7 @@ class StationAIBridgeTests(unittest.TestCase):
         history, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(history)["messages"], [])
 
-    # case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; in-progress, completed, and failed statuses, server/tool identity, and optional duration render and survive history reload without duplicate rows, even when later-turn items follow the calls in history. Missing optional duration remains absent. Arguments and raw result text are never exposed; only safe result summaries are shown.
+    # case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. The conversation header shows only the newest active call; when it completes, the indicator falls back to the next still-active call. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
     def test_conversation_shows_mcp_and_dynamic_tool_activity(self):
         task_id = self.create_task(title="Tool activity")['id']
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -3044,10 +3044,12 @@ class StationAIBridgeTests(unittest.TestCase):
         send_command = ("conversation", "send", task_id, "--message", "Show tool activity.")
         process = self.start_cli(*send_command, extra_environment=env, binary_output=True)
         ready = Path(str(executable) + ".tool-ready")
+        release_latest = Path(str(executable) + ".tool-release-latest")
         release = Path(str(executable) + ".tool-release")
         captured_lines = []
         stream_buffer = bytearray()
         active_rows = {}
+        completed_rows = {}
         expected_tool_ids = {"item_fixture_mcp_call", "item_fixture_dynamic_call", "item_fixture_dynamic_legacy"}
         try:
             deadline = time.monotonic() + 20
@@ -3067,11 +3069,35 @@ class StationAIBridgeTests(unittest.TestCase):
                             activity = event.get("payload", {}).get("activity", {})
                             if event.get("type") == "activity" and activity.get("status") == "inProgress":
                                 active_rows[activity.get("id")] = activity
+                            elif event.get("type") == "activity" and activity.get("status") in {"completed", "failed"}:
+                                completed_rows[activity.get("id")] = activity
             self.assertTrue(ready.exists(), "The fixture should hold both tool calls after their start notifications.")
             self.assertTrue(expected_tool_ids.issubset(active_rows), "All expected tool calls should publish their started state.")
             self.assertEqual(active_rows["item_fixture_mcp_call"]["toolKind"], "mcp")
             self.assertEqual(active_rows["item_fixture_dynamic_call"]["toolKind"], "dynamic")
             self.assertEqual(active_rows["item_fixture_dynamic_legacy"]["toolKind"], "dynamic")
+            self.assertTrue(all(row.get("startedAt") for row in active_rows.values()), "Every active call should report its start time.")
+            release_latest.write_text("Finish the newest call first.\n", encoding="utf-8")
+            latest_deadline = time.monotonic() + 20
+            while "item_fixture_dynamic_legacy" not in completed_rows and time.monotonic() < latest_deadline:
+                if process.stdout is not None:
+                    readable, _, _ = select.select([process.stdout], [], [], 0.02)
+                    if readable:
+                        chunk = os.read(process.stdout.fileno(), 65536)
+                        stream_buffer.extend(chunk)
+                        while b"\n" in stream_buffer:
+                            line, _, remainder = stream_buffer.partition(b"\n")
+                            stream_buffer = bytearray(remainder)
+                            if not line.strip():
+                                continue
+                            captured_lines.append(line.decode("utf-8"))
+                            event = json.loads(line)
+                            activity = event.get("payload", {}).get("activity", {})
+                            if event.get("type") == "activity" and activity.get("status") in {"completed", "failed"}:
+                                completed_rows[activity.get("id")] = activity
+            self.assertIn("item_fixture_dynamic_legacy", completed_rows, "The newest call should finish before older active calls.")
+            self.assertGreater(completed_rows["item_fixture_dynamic_legacy"].get("durationMs", 0), 0)
+            self.assertNotIn("item_fixture_dynamic_call", completed_rows, "Finishing the newest call must leave older calls active.")
             release.write_text("Release tool completions.\n", encoding="utf-8")
             remaining_stdout, remaining_stderr = process.communicate(timeout=60)
             self.assertEqual(process.returncode, 0, f"CLI exit mismatch for {send_command}: {remaining_stderr!r}")
@@ -3082,6 +3108,7 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assertTrue(sent.get("ok"), sent.get("error"))
         finally:
             if process.poll() is None:
+                release_latest.write_text("Release newest call after assertion failure.\n", encoding="utf-8")
                 release.write_text("Release tool completions after assertion failure.\n", encoding="utf-8")
                 process.communicate(timeout=30)
         result = self.assert_success(sent)
@@ -3099,7 +3126,8 @@ class StationAIBridgeTests(unittest.TestCase):
         legacy_rows = [row for row in activities if row["id"] == "item_fixture_dynamic_legacy"]
         self.assertEqual(len(legacy_rows), 1)
         self.assertEqual(legacy_rows[0]["status"], "completed")
-        self.assertNotIn("durationMs", legacy_rows[0])
+        self.assertGreater(legacy_rows[0].get("durationMs", 0), 0)
+        self.assertGreater(mcp_rows[0].get("durationMs", 0), 0)
         self.assertIn("Returned 1 result item", legacy_rows[0]["detail"])
         serialized = json.dumps(activities)
         self.assertNotIn("RAW_ARGUMENT_SECRET", serialized)
@@ -3115,7 +3143,8 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(reloaded_mcp[0]["tool"], "lookup")
         self.assertEqual(reloaded_dynamic[0]["tool"], "summarize")
         self.assertEqual(reloaded_dynamic[0]["durationMs"], 37)
-        self.assertNotIn("durationMs", reloaded_legacy[0])
+        self.assertGreater(reloaded_legacy[0].get("durationMs", 0), 0)
+        self.assertGreater(reloaded_mcp[0].get("durationMs", 0), 0)
         reloaded_serialized = json.dumps(reloaded_rows)
         self.assertNotIn("RAW_ARGUMENT_SECRET", reloaded_serialized)
         self.assertNotIn("RAW_RESULT_SECRET", reloaded_serialized)
