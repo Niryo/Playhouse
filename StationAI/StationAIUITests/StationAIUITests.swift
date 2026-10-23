@@ -4636,7 +4636,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Conversation shows and opens a subagent")
     }
 
-    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; the first plan delta is visible before completion, and the completed plan item renders automatically as Markdown with visible spacing between distinct paragraphs and can be selected and copied as one complete text view, including after reopening, while CLI events and bridge history preserve the exact plan text as the latest assistant message. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics.
+    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics.
     func test_plan_mode_renders_markdown_in_conversation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -4664,11 +4664,61 @@ final class StationAIUITests: XCTestCase {
         planMode.click()
         XCTAssertTrue(modeMenu.label.contains("Plan mode"))
 
+        let taskID = try taskID(named: "Plan mode Markdown")
+        let emptyConversation = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        XCTAssertEqual((emptyConversation?["messages"] as? [[String: Any]])?.count ?? 0, 0, "The handoff availability check should start with an empty conversation.")
+        XCTAssertEqual(element("message-composer").value as? String ?? "", "")
+        let startImplementingInEmptyConversation = element("start-implementing-button")
+        XCTAssertTrue(startImplementingInEmptyConversation.waitForExistence(timeout: 5), "Plan mode should offer Start Implementing before any chat messages exist.")
+        XCTAssertTrue(startImplementingInEmptyConversation.isEnabled, "Start Implementing should be clickable with an empty conversation.")
+
+        modeMenu.click()
+        let goalComposerMode = app.menuItems["conversation-mode-goal"]
+        XCTAssertTrue(goalComposerMode.waitForExistence(timeout: 5))
+        goalComposerMode.click()
+        XCTAssertTrue(modeMenu.label.contains("Goal"), "The composer should enter Goal mode.")
+        XCTAssertTrue(startImplementingInEmptyConversation.exists, "Entering Goal mode should preserve the selected Plan mode and its handoff.")
+        XCTAssertTrue(startImplementingInEmptyConversation.isEnabled)
+        startImplementingInEmptyConversation.click()
+        XCTAssertTrue(waitUntil({ modeMenu.label.contains("Code mode") }, timeout: 5), "The empty-chat handoff should leave Goal composer mode and switch to Code.")
+        XCTAssertTrue(waitUntil({
+            let history = (try? runCLI(
+                ["conversation", "history", taskID],
+                extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": fixtureCopy.path]
+            )["result"] as? [String: Any])?["messages"] as? [[String: Any]] ?? []
+            return history.contains { $0["role"] as? String == "user" && $0["text"] as? String == "Start implementing the plan." }
+                && history.contains { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
+        }, timeout: 30), "Start Implementing should create a Code turn from an empty conversation.")
+        let initialFixtureData = try Data(contentsOf: URL(fileURLWithPath: fixtureCopy.path + ".history"))
+        let initialFixtureHistory = try XCTUnwrap(JSONSerialization.jsonObject(with: initialFixtureData) as? [String: Any])
+        let codeTurnsBeforeFollowup = (initialFixtureHistory["turns"] as? [[String: Any]] ?? []).count
         let composer = element("message-composer")
+        composer.click()
+        composer.typeText("Continue the implementation.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            let history = (try? runCLI(
+                ["conversation", "history", taskID],
+                extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": fixtureCopy.path]
+            )["result"] as? [String: Any])?["messages"] as? [[String: Any]] ?? []
+            let userIndex = history.lastIndex { $0["role"] as? String == "user" && $0["text"] as? String == "Continue the implementation." }
+            let finalIndex = history.lastIndex { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
+            let fixtureData = try? Data(contentsOf: URL(fileURLWithPath: fixtureCopy.path + ".history"))
+            let fixtureHistory = fixtureData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            let turns = fixtureHistory?["turns"] as? [[String: Any]] ?? []
+            return userIndex != nil && finalIndex != nil && finalIndex! > userIndex!
+                && turns.count > codeTurnsBeforeFollowup
+                && turns.last?["conversationMode"] as? String == "default"
+        }, timeout: 30), "A regular composer message after handoff should start a Code turn, even when Goal was selected first.")
+        modeMenu.click()
+        let planModeAfterGoal = app.menuItems["Plan mode"]
+        XCTAssertTrue(planModeAfterGoal.waitForExistence(timeout: 5))
+        planModeAfterGoal.click()
+        XCTAssertTrue(modeMenu.label.contains("Plan mode"), "Plan mode should be selectable again after the Code handoff.")
+
         composer.click()
         composer.typeText("Plan the task.")
         element("send-message-button").click()
-        let taskID = try taskID(named: "Plan mode Markdown")
         let markdownReply = "## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening"
         let assistantMarkdown = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", "Implementation plan"))
@@ -4680,11 +4730,32 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(assistantMarkdown.label.contains("Final verification"), "The rest of the plan should wait for the fixture release.")
         try Data().write(to: deltaRelease)
         XCTAssertTrue(waitUntil({ assistantMarkdown.label.contains("Final verification") }, timeout: 30), "The completed plan should replace the partial plan.")
+        try FileManager.default.removeItem(at: deltaHold)
+        XCTAssertTrue(modeMenu.label.contains("Plan mode"), "Plan mode should stay selected after a planning response completes.")
         XCTAssertFalse(assistantMarkdown.label.contains("<proposed_plan>"), "The plan should be shown automatically without its protocol wrapper.")
         XCTAssertFalse(assistantMarkdown.label.contains("</proposed_plan>"), "The closing protocol wrapper should not be visible.")
 
+        composer.click()
+        composer.typeText("Revise the plan to clarify the persistence step.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            let history = (try? runCLI(
+                ["conversation", "history", taskID],
+                extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": fixtureCopy.path]
+            )["result"] as? [String: Any])?["messages"] as? [[String: Any]] ?? []
+            let userIndex = history.firstIndex { $0["role"] as? String == "user" && $0["text"] as? String == "Revise the plan to clarify the persistence step." }
+            let finalIndex = history.lastIndex { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
+            let fixtureData = try? Data(contentsOf: URL(fileURLWithPath: fixtureCopy.path + ".history"))
+            let fixtureHistory = fixtureData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            let turns = fixtureHistory?["turns"] as? [[String: Any]] ?? []
+            return userIndex != nil && finalIndex != nil && finalIndex! > userIndex!
+                && turns.last?["conversationMode"] as? String == "plan"
+        }, timeout: 30), "A follow-up instruction should complete another plan turn.")
+        XCTAssertTrue(modeMenu.label.contains("Plan mode"), "A follow-up plan should leave Plan mode enabled.")
+
         element("back-to-board-button").click()
         openTask(named: "Plan mode Markdown")
+        XCTAssertTrue(element("conversation-mode-menu").label.contains("Plan mode"), "Reopening the task should preserve its planning mode.")
         let reloadedHistory = try runCLI(
             ["conversation", "history", taskID],
             extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": fixtureCopy.path]
@@ -4732,7 +4803,26 @@ final class StationAIUITests: XCTestCase {
             latestListItem.frame.maxY <= conversationScrollView.frame.maxY + 2
                 && latestListItem.frame.maxY > conversationScrollView.frame.minY
         }, timeout: 5), "Reopening a long conversation should position its final message in the visible viewport.")
-        attachScreenshot(named: "Plan mode response renders a structured Markdown plan")
+        let startImplementing = element("start-implementing-button")
+        XCTAssertTrue(startImplementing.waitForExistence(timeout: 5), "Plan mode should offer a dedicated implementation handoff.")
+        XCTAssertEqual(element("message-composer").value as? String ?? "", "", "The handoff should be available while the composer is empty.")
+        XCTAssertTrue(startImplementing.isEnabled, "Start Implementing should not require draft text.")
+        startImplementing.click()
+        XCTAssertTrue(waitUntil({ element("conversation-mode-menu").label.contains("Code mode") }, timeout: 5), "Starting implementation should switch the composer to Code mode.")
+        XCTAssertTrue(waitUntil({
+            let history = (try? runCLI(
+                ["conversation", "history", taskID],
+                extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": fixtureCopy.path]
+            )["result"] as? [String: Any])?["messages"] as? [[String: Any]] ?? []
+            let userIndex = history.firstIndex { $0["role"] as? String == "user" && $0["text"] as? String == "Start implementing the plan." }
+            let finalIndex = history.lastIndex { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
+            let fixtureData = try? Data(contentsOf: URL(fileURLWithPath: fixtureCopy.path + ".history"))
+            let fixtureHistory = fixtureData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            let turns = fixtureHistory?["turns"] as? [[String: Any]] ?? []
+            return userIndex != nil && finalIndex != nil && finalIndex! > userIndex!
+                && turns.last?["conversationMode"] as? String == "default"
+        }, timeout: 30), "The handoff should start an implementation turn with the plan context.")
+        attachScreenshot(named: "Plan mode stays active until implementation starts")
     }
 
     // case-contract: test_thread_goal_lifecycle_persists_through_cli_xpc | CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime.

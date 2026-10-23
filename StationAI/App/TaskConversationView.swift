@@ -245,6 +245,11 @@ struct TaskConversationView: View {
         }
         .background(WorkspaceTheme.windowBackground)
         .onAppear {
+            if !isReadOnly,
+               let savedMode = UserDefaults.standard.string(forKey: conversationModeDefaultsKey),
+               let mode = CodexConversationMode(rawValue: savedMode) {
+                conversationMode = mode
+            }
             guard isNewTask else { return }
             isShowingRepositoryPicker = true
             lastSelectedRepositoryPaths = WorkspaceSettingsManager().lastSelectedRepositories
@@ -2123,7 +2128,6 @@ struct TaskConversationView: View {
                             activatePlanMode()
                         } else if newValue.trimmingCharacters(in: .whitespacesAndNewlines) == "/goal" {
                             isEnteringGoal = true
-                            conversationMode = .code
                             draft = ""
                         }
                         if !isReadOnly, !isResponding, !isLoadingHistory {
@@ -2143,7 +2147,6 @@ struct TaskConversationView: View {
                     Menu {
                         Button {
                             isEnteringGoal = true
-                            conversationMode = .code
                             draft = ""
                         } label: {
                             Label("Goal", systemImage: "scope")
@@ -2154,7 +2157,7 @@ struct TaskConversationView: View {
                         ForEach(CodexConversationMode.allCases, id: \.self) { mode in
                             Button {
                                 isEnteringGoal = false
-                                conversationMode = mode
+                                setConversationMode(mode)
                             } label: {
                                 if conversationMode == mode {
                                     Label(mode.title, systemImage: "checkmark")
@@ -2188,6 +2191,22 @@ struct TaskConversationView: View {
                     .help("Change conversation mode or add context")
                     .accessibilityLabel(isEnteringGoal ? "Goal" : "Conversation mode: \(conversationMode.title)")
                     .accessibilityIdentifier("conversation-mode-menu")
+
+                    if conversationMode == .plan && !isResponding && !isReadOnly {
+                        Button(action: startImplementingPlan) {
+                            Text("Start Implementing")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 11)
+                                .frame(height: 31)
+                                .background(Color.accentColor, in: Capsule())
+                        }
+                        .buttonHoverPointer()
+                        .buttonStyle(.plain)
+                        .disabled(workspaceRootURLs.isEmpty || isLoadingHistory || isPreparingSubmittedMessage)
+                        .help("Switch to Code mode and start implementing this plan")
+                        .accessibilityIdentifier("start-implementing-button")
+                    }
 
                     Spacer(minLength: 0)
 
@@ -3138,8 +3157,23 @@ struct TaskConversationView: View {
 
     private func activatePlanMode() {
         isEnteringGoal = false
-        conversationMode = .plan
+        setConversationMode(.plan)
         draft = ""
+    }
+
+    private var conversationModeDefaultsKey: String {
+        "conversationMode.\(task.id.uuidString)"
+    }
+
+    private func setConversationMode(_ mode: CodexConversationMode) {
+        conversationMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: conversationModeDefaultsKey)
+    }
+
+    private func startImplementingPlan() {
+        isEnteringGoal = false
+        setConversationMode(.code)
+        sendMessage(overrideText: "Start implementing the plan.")
     }
 
     private var workspaceRootURLs: [URL] {

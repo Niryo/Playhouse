@@ -311,6 +311,7 @@ def main():
                 "turnID": TURN_ID,
                 "images": [item.get("url") for item in image_inputs],
                 "imageInputs": image_inputs,
+                "conversationMode": message.get("params", {}).get("collaborationMode", {}).get("mode"),
                 "developerInstructions": message.get("params", {}).get("collaborationMode", {}).get("settings", {}).get("developerInstructions"),
             }
             if serial_mode:
@@ -320,7 +321,7 @@ def main():
                 messages.append(turn_history)
                 saved_history["messages"] = messages
                 saved_history.update(turn_history)
-                saved_history["events"].append({"method": "turn/start", "threadID": THREAD_ID, "turnID": TURN_ID, "userMessage": turn_message})
+                saved_history["events"].append({"method": "turn/start", "threadID": THREAD_ID, "turnID": TURN_ID, "userMessage": turn_message, "conversationMode": turn_history["conversationMode"]})
                 history_path.write_text(json.dumps(saved_history), encoding="utf-8")
             else:
                 saved_history = serial_history()

@@ -3491,7 +3491,7 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assertTrue(any("subagent inspected" in message["text"].lower() for message in history["messages"]))
 
-    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; the first plan delta is visible before completion, and the completed plan item renders automatically as Markdown with visible spacing between distinct paragraphs and can be selected and copied as one complete text view, including after reopening, while CLI events and bridge history preserve the exact plan text as the latest assistant message. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics.
+    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics.
     def test_plan_mode_renders_markdown_in_conversation(self):
         task_id = self.create_task(title="Plan mode Markdown", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -3521,6 +3521,26 @@ class StationAIBridgeTests(unittest.TestCase):
         messages = self.assert_success(sent)["messages"]
         self.assertTrue(any(message["role"] == "assistant" and message["text"] == markdown_reply
                             and message["phase"] == "final_answer" for message in messages))
+        followup, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Revise the plan to clarify the persistence step.", "--mode", "plan",
+            extra_environment=env,
+        )
+        self.assert_success(followup)
+        implementation, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Start implementing the plan.", "--mode", "default",
+            extra_environment=env,
+        )
+        implementation_messages = self.assert_success(implementation)["messages"]
+        self.assertEqual(implementation_messages[-2]["text"], "Start implementing the plan.")
+        continued, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Continue the implementation.", "--mode", "default",
+            extra_environment=env,
+        )
+        continued_messages = self.assert_success(continued)["messages"]
+        self.assertEqual(continued_messages[-2]["text"], "Continue the implementation.")
+        fixture_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        turn_modes = [turn["conversationMode"] for turn in fixture_history["turns"]]
+        self.assertEqual(turn_modes, ["plan", "plan", "default", "default"], "Follow-up planning remains in Plan mode until implementation starts, and later implementation turns remain in Code mode.")
         history, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         reloaded_messages = self.assert_success(history)["messages"]
         self.assertTrue(any(message["role"] == "assistant" and message["text"] == markdown_reply
