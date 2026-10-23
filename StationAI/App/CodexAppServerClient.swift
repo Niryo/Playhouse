@@ -15,8 +15,9 @@ struct CodexChatMessage: Codable, Identifiable, Equatable {
     var phase: String?
     var turnID: String?
     var timelineOrder: Int?
+    var asyncQuestions: [CodexAsyncUserQuestion]?
 
-    init(id: String, role: CodexChatRole, text: String, imageDataURLs: [String] = [], phase: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil) {
+    init(id: String, role: CodexChatRole, text: String, imageDataURLs: [String] = [], phase: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil, asyncQuestions: [CodexAsyncUserQuestion]? = nil) {
         self.id = id
         self.role = role
         self.text = text
@@ -24,9 +25,10 @@ struct CodexChatMessage: Codable, Identifiable, Equatable {
         self.phase = phase
         self.turnID = turnID
         self.timelineOrder = timelineOrder
+        self.asyncQuestions = asyncQuestions
     }
 
-    private enum CodingKeys: String, CodingKey { case id, role, text, imageDataURLs, phase, turnID, timelineOrder }
+    private enum CodingKeys: String, CodingKey { case id, role, text, imageDataURLs, phase, turnID, timelineOrder, asyncQuestions }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
@@ -36,7 +38,13 @@ struct CodexChatMessage: Codable, Identifiable, Equatable {
         phase = try container.decodeIfPresent(String.self, forKey: .phase)
         turnID = try container.decodeIfPresent(String.self, forKey: .turnID)
         timelineOrder = try container.decodeIfPresent(Int.self, forKey: .timelineOrder)
+        asyncQuestions = try container.decodeIfPresent([CodexAsyncUserQuestion].self, forKey: .asyncQuestions)
     }
+}
+
+struct CodexAsyncUserQuestion: Codable, Equatable {
+    let title: String
+    let options: [String]?
 }
 
 struct CodexUserQuestion: Identifiable, Codable, Equatable {
@@ -981,11 +989,13 @@ final class CodexAppServerClient: ObservableObject {
                 if var message = Self.chatMessage(from: entry) {
                     message.timelineOrder = historyItemOrder
                     if message.role == .assistant,
+                       message.asyncQuestions == nil,
                        let turnID = entry["turnId"] as? String,
                        turnID == lastAssistantTurnID,
                        message.phase == lastAssistantPhase,
                        let lastIndex = messages.indices.last,
-                       messages[lastIndex].role == .assistant {
+                       messages[lastIndex].role == .assistant,
+                       messages[lastIndex].asyncQuestions == nil {
                         messages[lastIndex].text += "\n\n" + message.text
                     } else {
                         messages.append(message)
@@ -1284,10 +1294,22 @@ final class CodexAppServerClient: ObservableObject {
             if goalObservationThreadID == activeThreadID { goalTurnRevision += 1 }
             if method == "item/completed",
                let itemType = item["type"] as? String,
-               itemType == "agentMessage" || itemType == "plan",
-               let text = item["text"] as? String,
-               !text.isEmpty {
-                if itemType == "agentMessage", item["phase"] as? String == "commentary" {
+               itemType == "agentMessage" || itemType == "plan" {
+                let text = item["text"] as? String ?? ""
+                let questions = itemType == "agentMessage" && item["delivery"] as? String == "async"
+                    ? Self.asyncQuestions(from: item) : nil
+                guard !text.isEmpty || questions != nil else { return }
+                if itemType == "agentMessage", item["delivery"] as? String == "async",
+                   let questions {
+                    activeProgressMessageHandler?(CodexChatMessage(
+                        id: item["id"] as? String ?? UUID().uuidString,
+                        role: .assistant,
+                        text: text,
+                        phase: item["phase"] as? String,
+                        turnID: params["turnId"] as? String,
+                        asyncQuestions: questions
+                    ))
+                } else if itemType == "agentMessage", item["phase"] as? String == "commentary" {
                     activeProgressMessageHandler?(CodexChatMessage(
                         id: item["id"] as? String ?? UUID().uuidString,
                         role: .assistant,
@@ -1560,13 +1582,27 @@ final class CodexAppServerClient: ObservableObject {
             guard !text.isEmpty || !images.isEmpty else { return nil }
             return CodexChatMessage(id: itemID, role: .user, text: text, imageDataURLs: images, turnID: entry["turnId"] as? String)
         case "agentMessage", "plan":
-            guard let text = item["text"] as? String, !text.isEmpty else { return nil }
+            let text = item["text"] as? String ?? ""
+            let questions = type == "agentMessage" && item["delivery"] as? String == "async"
+                ? asyncQuestions(from: item) : nil
+            guard !text.isEmpty || questions != nil else { return nil }
             return CodexChatMessage(id: itemID, role: .assistant, text: text,
                                     phase: type == "plan" ? "final_answer" : item["phase"] as? String,
-                                    turnID: entry["turnId"] as? String)
+                                    turnID: entry["turnId"] as? String,
+                                    asyncQuestions: questions)
         default:
             return nil
         }
+    }
+
+    private static func asyncQuestions(from item: [String: Any]) -> [CodexAsyncUserQuestion]? {
+        guard let rawQuestions = item["questions"] as? [[String: Any]] else { return nil }
+        let questions = rawQuestions.compactMap { raw -> CodexAsyncUserQuestion? in
+            guard let title = raw["title"] as? String,
+                  !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return CodexAsyncUserQuestion(title: title, options: raw["options"] as? [String])
+        }
+        return questions.isEmpty ? nil : questions
     }
 
     private static func turnKey(threadID: String, turnID: String) -> String {

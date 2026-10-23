@@ -329,6 +329,13 @@ enum StationAICLI {
                     return .string("data:\(mime);base64,\(data.base64EncodedString())")
                 }
                 return BridgeRequest(command: "conversation.steer", arguments: ["taskID": .string(id), "message": .string(flags["--message"]?.first ?? ""), "images": .array(images)])
+            case "answer-async":
+                guard tail.count >= 2 else { throw CLIError.usage("Use: stationai conversation answer-async <task-id> <item-id> --answer <text> [--answer <text>]...") }
+                let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--answer"])
+                return BridgeRequest(command: "conversation.answer_async", arguments: [
+                    "taskID": .string(id), "itemID": .string(tail[1]),
+                    "answers": .array((flags["--answer"] ?? []).map(BridgeValue.string))
+                ])
             case "send":
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode", "--model", "--answer", "--image"])
                 var answers: [String: [String]] = [:]
@@ -463,6 +470,7 @@ enum StationAICLI {
       stationai conversation queue-remove <task-id> <message-id>
       stationai conversation queue-steer <task-id> <message-id>
       stationai conversation steer <task-id> --message <text> [--image <path>]...
+      stationai conversation answer-async <task-id> <item-id> --answer <text> [--answer <text>]...
       stationai conversation models <task-id>
       stationai conversation goal <task-id> <get|set|pause|resume|clear> [--text <objective>]
       stationai conversation send <task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...]

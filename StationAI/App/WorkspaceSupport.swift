@@ -473,6 +473,7 @@ struct CodexThreadHistory: Codable, Equatable {
     let messages: [CodexChatMessage]
     let activities: [CodexActivity]
     let diff: CodexTurnDiff?
+    var answeredAsyncQuestionIDs: [String] = []
 }
 
 enum RepositoryScanner {

@@ -104,6 +104,34 @@ CHILD_MESSAGES = [
 ]
 
 
+def async_question_item():
+    return {
+        "id": "item_stationai_async_question",
+        "type": "agentMessage",
+        "phase": "final_answer",
+        "delivery": "async",
+        "text": "Test and verify\n- Yes, update paired tests and run required verification\n- No, leave tests and verification for later",
+        "questions": [
+            {
+                "title": "Test and verify",
+                "options": [
+                    "Yes, update paired tests and run required verification",
+                    "No, leave tests and verification for later",
+                ],
+            },
+            {"title": "Additional detail", "options": None},
+        ],
+    }
+
+
+def later_async_question_item():
+    return {
+        "id": "item_stationai_async_later_question",
+        "type": "agentMessage", "phase": "final_answer", "delivery": "async",
+        "text": "One more check", "questions": [{"title": "One more check", "options": None}],
+    }
+
+
 def diagnostic_action_items(cwd):
     return [
         {
@@ -135,7 +163,8 @@ def main():
     if "-goal" in mode:
         Path(str(sys.argv[0]) + ".launch-args").write_text(json.dumps(sys.argv[1:]), encoding="utf-8")
     goal_path = Path(str(sys.argv[0]) + ".goal")
-    serial_mode = mode.endswith("-serial-success-wait") or mode.endswith("-serial-success")
+    async_mode = mode.endswith("-async-question") or mode.endswith("-async-question-queued")
+    serial_mode = mode.endswith("-serial-success-wait") or mode.endswith("-serial-success") or async_mode
     if serial_mode:
         saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
         THREAD_ID = saved_history.get("threadID")
@@ -336,6 +365,62 @@ def main():
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
+                }})
+            elif async_mode:
+                first_turn = len(serial_history().get("messages", [])) == 1
+                if first_turn:
+                    items = [async_question_item(), {
+                        "id": "item_stationai_async_followup",
+                        "type": "agentMessage", "phase": "final_answer",
+                        "text": "I can continue while you decide.",
+                    }]
+                else:
+                    items = [{
+                        "id": "item_stationai_async_answer",
+                        "type": "agentMessage", "phase": "final_answer",
+                        "text": f"Answers received: {turn_message}",
+                    }]
+                for item in items:
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                        "threadId": THREAD_ID, "turnId": TURN_ID, "item": item,
+                    }})
+                if first_turn and not mode.endswith("-async-question-queued"):
+                    ready = Path(str(sys.argv[0]) + ".question-ready")
+                    ready.write_text("The async question is waiting during an active turn.\n", encoding="utf-8")
+                    deadline = time.monotonic() + 120
+                    steered_answer = None
+                    while steered_answer is None and time.monotonic() < deadline:
+                        readable, _, _ = select.select([sys.stdin], [], [], 0.02)
+                        if not readable:
+                            continue
+                        incoming = json.loads(sys.stdin.readline())
+                        if incoming.get("method") == "thread/items/list":
+                            write({"jsonrpc": "2.0", "id": incoming["id"], "result": {"data": [], "nextCursor": None}})
+                        elif incoming.get("method") == "turn/steer":
+                            params = incoming.get("params", {})
+                            if params.get("threadId") != THREAD_ID or params.get("expectedTurnId") != TURN_ID:
+                                write({"jsonrpc": "2.0", "id": incoming["id"], "error": {"code": -32000, "message": "No matching active turn."}})
+                                continue
+                            steered_answer = "\n".join(item.get("text", "") for item in params.get("input", []) if item.get("type") == "text")
+                            write({"jsonrpc": "2.0", "id": incoming["id"], "result": {"turnId": TURN_ID}})
+                    if steered_answer is None:
+                        return 3
+                    ready.unlink(missing_ok=True)
+                    saved_history = serial_history()
+                    saved_history["messages"][0]["steeredAnswer"] = steered_answer
+                    saved_history["steerRequests"] = saved_history.get("steerRequests", []) + [params]
+                    history_path.write_text(json.dumps(saved_history), encoding="utf-8")
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                        "threadId": THREAD_ID, "turnId": TURN_ID, "item": {
+                            "id": "item_stationai_async_answer_steered", "type": "agentMessage", "phase": "final_answer",
+                            "text": f"Answers received: {steered_answer}",
+                        },
+                    }})
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                        "threadId": THREAD_ID, "turnId": TURN_ID, "item": later_async_question_item(),
+                    }})
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"},
                 }})
             elif serial_mode and serial_first_turn and mode.endswith("-serial-success-wait"):
                 ready = Path(str(sys.argv[0]) + ".resolve-ready")
@@ -781,6 +866,46 @@ def main():
             saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
             if serial_mode and message.get("params", {}).get("threadId") != saved_history.get("threadID"):
                 write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32004, "message": "History can only be read from the persisted fixture thread."}})
+                continue
+            if async_mode:
+                entries = []
+                for index, saved_turn in enumerate(saved_history.get("messages", []), start=1):
+                    turn_id = saved_turn["turnID"]
+                    entries.append({"turnId": turn_id, "item": {
+                        "id": f"item_stationai_async_user_{index}",
+                        "type": "userMessage",
+                        "content": [{"type": "text", "text": saved_turn["userMessage"]}],
+                    }})
+                    if index == 1:
+                        entries.extend([
+                            {"turnId": turn_id, "item": async_question_item()},
+                            {"turnId": turn_id, "item": {
+                                "id": "item_stationai_async_followup",
+                                "type": "agentMessage", "phase": "final_answer",
+                                "text": "I can continue while you decide.",
+                            }},
+                        ])
+                        if saved_turn.get("steeredAnswer"):
+                            entries.extend([
+                                {"turnId": turn_id, "item": {
+                                    "id": "item_stationai_async_steered_user", "type": "userMessage",
+                                    "content": [{"type": "text", "text": saved_turn["steeredAnswer"]}],
+                                }},
+                                {"turnId": turn_id, "item": {
+                                    "id": "item_stationai_async_answer_steered", "type": "agentMessage", "phase": "final_answer",
+                                    "text": f"Answers received: {saved_turn['steeredAnswer']}",
+                                }},
+                                {"turnId": turn_id, "item": later_async_question_item()},
+                            ])
+                    else:
+                        entries.append({"turnId": turn_id, "item": {
+                            "id": f"item_stationai_async_answer_{index}",
+                            "type": "agentMessage", "phase": "final_answer",
+                            "text": f"Answers received: {saved_turn['userMessage']}",
+                        }})
+                write({"jsonrpc": "2.0", "id": message["id"], "result": {
+                    "data": entries, "nextCursor": None,
+                }})
                 continue
             if serial_mode and saved_history.get("messages"):
                 contents = []

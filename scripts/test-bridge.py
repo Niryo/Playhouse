@@ -3767,6 +3767,110 @@ class StationAIBridgeTests(unittest.TestCase):
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Waiting Response")
 
+    # case-contract: test_codex_async_questions_render_and_reply_as_followup | Async agentMessage questions retain choices and a free-text prompt in live updates and fresh CLI/XPC history, stay separate from later assistant text, and receive validated answers through the shared manager during and after an active turn. The UI shows inline answer cards instead of raw bullet text, blocks incomplete answers, preserves answered cards across reopening, and displays both submitted answers and responses.
+    def test_codex_async_questions_render_and_reply_as_followup(self):
+        task_id = self.create_task("Async Codex question", roots=[self.primary])["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-async-question"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        process = self.start_cli("conversation", "send", task_id, "--message", "Ask an async question.", extra_environment=env)
+        ready = Path(str(executable) + ".question-ready")
+        deadline = time.monotonic() + 20
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(ready.exists(), "The fixture must hold the first turn open for a real steer.")
+        reloaded, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        live_history = self.assert_success(reloaded)
+        question = next(message for message in live_history["messages"] if message["id"] == "item_stationai_async_question")
+        invalid, _ = self.call_cli("conversation", "answer-async", task_id, question["id"], "--answer", "Yes, update paired tests and run required verification", expected_status=2, extra_environment=env)
+        self.assertEqual(invalid["error"]["code"], "invalid_argument")
+        reply = "Test and verify: Yes, update paired tests and run required verification\nAdditional detail: Keep the draft intact."
+        answer, _ = self.call_cli("conversation", "answer-async", task_id, question["id"], "--answer", "Yes, update paired tests and run required verification", "--answer", "Keep the draft intact.", extra_environment=env)
+        self.assertEqual(self.assert_success(answer), {"text": reply, "queued": False})
+        first, events = self.finish_cli(process, "conversation send")
+        history = self.assert_success(first)
+        question = next(message for message in history["messages"] if message["id"] == question["id"])
+        self.assertEqual(question["asyncQuestions"], [
+            {"title": "Test and verify", "options": [
+                "Yes, update paired tests and run required verification",
+                "No, leave tests and verification for later",
+            ]},
+            {"title": "Additional detail"},
+        ])
+        self.assertEqual(question["phase"], "final_answer")
+        self.assertEqual(next(message for message in history["messages"] if message["id"] == "item_stationai_async_followup")["text"],
+                         "I can continue while you decide.")
+        live_questions = [event.get("payload", {}).get("asyncQuestions") for event in events
+                          if event.get("type") == "assistant_progress" and event.get("payload", {}).get("itemID") == question["id"]]
+        self.assertEqual(live_questions, [question["asyncQuestions"]], "The live bridge update must retain structured choices.")
+
+        reloaded, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        reloaded_history = self.assert_success(reloaded)
+        reloaded_question = next(message for message in reloaded_history["messages"] if message["id"] == question["id"])
+        self.assertEqual(reloaded_question["asyncQuestions"], question["asyncQuestions"])
+        self.assertEqual(reloaded_question["text"], question["text"])
+        self.assertEqual(reloaded_history["answeredAsyncQuestionIDs"], [question["id"]])
+        self.assertTrue(any(message["role"] == "user" and message["text"] == reply for message in reloaded_history["messages"]))
+        self.assertTrue(any("Answers received: " + reply in message["text"] for message in reloaded_history["messages"]))
+        saved_fixture = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        self.assertEqual(saved_fixture["messages"][0]["steeredAnswer"], reply)
+        duplicate, _ = self.call_cli("conversation", "answer-async", task_id, question["id"],
+                                     "--answer", "No, leave tests and verification for later",
+                                     "--answer", "Try to answer again.", expected_status=1, extra_environment=env)
+        self.assert_failure(duplicate, "invalid_transition")
+        later, _ = self.call_cli("conversation", "answer-async", task_id, "item_stationai_async_later_question",
+                                 "--answer", "Finish after the turn.", extra_environment=env)
+        self.assertEqual(self.assert_success(later)["text"], "One more check: Finish after the turn.")
+        completed, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        completed_history = self.assert_success(completed)
+        self.assertEqual(set(completed_history["answeredAsyncQuestionIDs"]),
+                         {question["id"], "item_stationai_async_later_question"})
+        self.assertTrue(any("Answers received: One more check: Finish after the turn." in message["text"]
+                            for message in completed_history["messages"]))
+
+    # case-contract: test_codex_async_question_queued_answer_retries | An async question answered after its turn ends stays Pending when the first follow-up fails, rejects duplicate answers across fresh CLI/XPC connections, and becomes Answered only after an explicit queued retry succeeds. The paired UI keeps the card and queue action visible across reopening and then displays the delivered response.
+    def test_codex_async_question_queued_answer_retries(self):
+        task_id = self.create_task("Queued async question", roots=[self.primary])["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-async-question-queued"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        first, _ = self.call_cli("conversation", "send", task_id, "--message", "Ask a queued async question.", extra_environment=env)
+        question = next(message for message in self.assert_success(first)["messages"] if message["id"] == "item_stationai_async_question")
+        Path(str(executable) + ".fail-next-turn-start").touch()
+        answer, _ = self.call_cli("conversation", "answer-async", task_id, question["id"],
+                                  "--answer", "Yes, update paired tests and run required verification",
+                                  "--answer", "Retry this answer.", extra_environment=env)
+        self.assertTrue(self.assert_success(answer)["queued"])
+        queued, _ = self.call_cli("conversation", "queue-list", task_id, extra_environment=env)
+        queued_item = self.assert_success(queued)[0]
+        self.assertEqual(queued_item["state"], "needsAction")
+        self.assertEqual(queued_item["asyncQuestionItemID"], question["id"])
+        pending, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        self.assertEqual(self.assert_success(pending)["answeredAsyncQuestionIDs"], [])
+        duplicate, _ = self.call_cli("conversation", "answer-async", task_id, question["id"],
+                                     "--answer", "No, leave tests and verification for later",
+                                     "--answer", "Duplicate.", expected_status=1, extra_environment=env)
+        self.assert_failure(duplicate, "invalid_transition")
+        retried, _ = self.call_cli("conversation", "queue-retry", task_id, queued_item["id"], extra_environment=env)
+        self.assertTrue(self.assert_success(retried)["retried"])
+        delivered, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        delivered_history = self.assert_success(delivered)
+        self.assertEqual(delivered_history["answeredAsyncQuestionIDs"], [question["id"]])
+        expected_reply = ("Test and verify: Yes, update paired tests and run required verification\n"
+                          "Additional detail: Retry this answer.")
+        self.assertTrue(any(message["text"] == "Answers received: " + expected_reply
+                            for message in delivered_history["messages"]))
+
     # case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes persist Blocked across connections, and diagnostics identify the failed turn phase and store path; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
     def test_codex_interrupted_turn_blocks_with_reason_and_can_retry(self):
         task_id = self.create_task("Interrupted turn", roots=[self.primary])["id"]

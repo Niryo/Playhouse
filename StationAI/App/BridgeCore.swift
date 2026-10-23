@@ -677,6 +677,7 @@ struct QueuedConversationMessage: Codable, Equatable, Identifiable {
     var state: State
     var enqueuedProcessID: Int32? = nil
     var dispatchingProcessID: Int32? = nil
+    var asyncQuestionItemID: String? = nil
 }
 
 enum GitHubPullRequestManager {
@@ -929,7 +930,7 @@ final class BoardTaskManager {
         return try readQueuedMessages()[taskID.uuidString] ?? []
     }
 
-    func enqueueConversationMessage(taskID: UUID, text: String, imageDataURLs: [String] = []) throws -> QueuedConversationMessage {
+    func enqueueConversationMessage(taskID: UUID, text: String, imageDataURLs: [String] = [], asyncQuestionItemID: String? = nil) throws -> QueuedConversationMessage {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty || !imageDataURLs.isEmpty else { throw StationAIManagerError.invalidMessage }
         let task = try taskModel(taskID)
@@ -938,7 +939,7 @@ final class BoardTaskManager {
         }
         let item = QueuedConversationMessage(
             id: UUID(), taskID: taskID, threadID: threadID, text: normalized, imageDataURLs: imageDataURLs, state: .queued,
-            enqueuedProcessID: nil
+            enqueuedProcessID: nil, asyncQuestionItemID: asyncQuestionItemID
         )
         try mutateQueuedMessages(taskID: taskID) { $0.append(item) }
         return item
@@ -1957,6 +1958,20 @@ final class BoardTaskManager {
         return (try? JSONDecoder().decode([String: Int].self, from: data)) ?? [:]
     }
 
+    func answeredAsyncQuestionIDs(taskID: UUID) throws -> [String] {
+        try requireTask(taskID).answeredAsyncQuestionIDs
+    }
+
+    func recordAnsweredAsyncQuestion(taskID: UUID, itemID: String) async throws {
+        try await withTaskOperationLock(taskID) {
+            let task = try self.requireTask(taskID)
+            if !task.answeredAsyncQuestionIDs.contains(itemID) {
+                task.answeredAsyncQuestionIDs.append(itemID)
+                try await self.saveTaskContext(taskID: taskID)
+            }
+        }
+    }
+
     @discardableResult
     func clearProgressReport(_ id: UUID) async throws -> BoardTaskRecord {
         return try await withTaskOperationLock(id) {
@@ -2795,6 +2810,7 @@ struct ConversationUpdate: Codable {
     var text: String?
     var itemID: String?
     var phase: String?
+    var asyncQuestions: [CodexAsyncUserQuestion]?
     var activity: CodexActivity?
     var diff: String?
     var history: CodexThreadHistory?
@@ -2862,7 +2878,8 @@ final class CodexConversationManager {
                 "messageCount": String(history.messages.count),
                 "activityCount": String(history.activities.count)
             ]))
-            return CodexThreadHistory(messages: history.messages, activities: activities, diff: history.diff)
+            return CodexThreadHistory(messages: history.messages, activities: activities, diff: history.diff,
+                                      answeredAsyncQuestionIDs: try tasks.answeredAsyncQuestionIDs(taskID: taskID))
         } catch {
             var fields = StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
             fields["taskID"] = taskID.uuidString
@@ -3065,14 +3082,44 @@ final class CodexConversationManager {
         return try await client.steerActiveTurn(threadID: threadID, text: normalizedText, imageDataURLs: imageDataURLs)
     }
 
+    func answerAsyncQuestion(taskID: UUID, question: CodexChatMessage, answers: [String]) async throws -> (text: String, queued: Bool, history: CodexThreadHistory?) {
+        guard let questions = question.asyncQuestions, !questions.isEmpty, questions.count == answers.count else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Supply one answer for every question in the Codex item.")
+        }
+        guard !(try tasks.answeredAsyncQuestionIDs(taskID: taskID)).contains(question.id) else {
+            throw BridgeCommandError(code: "invalid_transition", message: "This Codex question has already been answered.")
+        }
+        guard try !queuedMessages(taskID: taskID).contains(where: { $0.asyncQuestionItemID == question.id }) else {
+            throw BridgeCommandError(code: "invalid_transition", message: "An answer to this Codex question is already pending.")
+        }
+        let normalized = answers.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard normalized.allSatisfy({ !$0.isEmpty }) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Question answers can't be blank.")
+        }
+        let reply = zip(questions, normalized).map { pair in "\(pair.0.title): \(pair.1)" }.joined(separator: "\n")
+        let steered = try await steer(taskID: taskID, text: reply)
+        if steered {
+            try await tasks.recordAnsweredAsyncQuestion(taskID: taskID, itemID: question.id)
+            return (reply, false, nil)
+        }
+        let item = try await queueMissedSteer(taskID: taskID, text: reply, asyncQuestionItemID: question.id)
+        let stillQueued = try queuedMessages(taskID: taskID).contains { $0.id == item.id }
+        if !stillQueued { try await tasks.recordAnsweredAsyncQuestion(taskID: taskID, itemID: question.id) }
+        return (reply, stillQueued, stillQueued ? nil : try await history(taskID: taskID))
+    }
+
     func queuedMessages(taskID: UUID) throws -> [QueuedConversationMessage] {
         try tasks.queuedConversationMessages(taskID: taskID)
     }
 
-    func queueMessage(taskID: UUID, text: String, imageDataURLs: [String] = []) throws -> QueuedConversationMessage {
+    func answeredAsyncQuestionIDs(taskID: UUID) throws -> [String] {
+        try tasks.answeredAsyncQuestionIDs(taskID: taskID)
+    }
+
+    func queueMessage(taskID: UUID, text: String, imageDataURLs: [String] = [], asyncQuestionItemID: String? = nil) throws -> QueuedConversationMessage {
         return try tasks.enqueueConversationMessage(
             taskID: taskID,
-            text: text, imageDataURLs: imageDataURLs
+            text: text, imageDataURLs: imageDataURLs, asyncQuestionItemID: asyncQuestionItemID
         )
     }
 
@@ -3080,10 +3127,11 @@ final class CodexConversationManager {
         taskID: UUID,
         text: String,
         imageDataURLs: [String] = [],
+        asyncQuestionItemID: String? = nil,
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in },
         onUserInput: @escaping (CodexUserInputRequest) async -> Void = { _ in }
     ) async throws -> QueuedConversationMessage {
-        let item = try queueMessage(taskID: taskID, text: text, imageDataURLs: imageDataURLs)
+        let item = try queueMessage(taskID: taskID, text: text, imageDataURLs: imageDataURLs, asyncQuestionItemID: asyncQuestionItemID)
         if shouldDrainMissedSteerImmediately(taskID: taskID) {
             await dispatchQueuedMessages(
                 taskID: taskID,
@@ -3111,7 +3159,12 @@ final class CodexConversationManager {
         try tasks.reserveQueuedMessageForSteering(taskID: taskID, messageID: messageID)
         do {
             let accepted = try await steer(taskID: taskID, text: item.text, imageDataURLs: item.imageDataURLs ?? [])
-            if accepted { try tasks.finishQueuedMessageSteering(taskID: taskID, messageID: messageID, accepted: true) }
+            if accepted {
+                if let itemID = item.asyncQuestionItemID {
+                    try await tasks.recordAnsweredAsyncQuestion(taskID: taskID, itemID: itemID)
+                }
+                try tasks.finishQueuedMessageSteering(taskID: taskID, messageID: messageID, accepted: true)
+            }
             else {
                 try tasks.requeueMissedSteer(taskID: taskID, messageID: messageID)
                 if shouldDrainMissedSteerImmediately(taskID: taskID) {
@@ -3224,6 +3277,9 @@ final class CodexConversationManager {
                         onUpdate: onUpdate,
                         onUserInput: onUserInput
                     )
+                    if let itemID = item.asyncQuestionItemID {
+                        try await tasks.recordAnsweredAsyncQuestion(taskID: taskID, itemID: itemID)
+                    }
                     try tasks.finishQueuedMessage(item, succeeded: true)
                     onUpdate(ConversationUpdate(type: "queue_changed"))
                 } catch {
@@ -3399,7 +3455,11 @@ final class CodexConversationManager {
                     onUpdate(ConversationUpdate(type: "activity", activity: activity))
                 },
                 onDiff: { diff in onUpdate(ConversationUpdate(type: "diff", diff: diff.unifiedDiff)) },
-                onHistory: { history in onUpdate(ConversationUpdate(type: "history", history: history)) },
+                onHistory: { history in
+                    var history = history
+                    history.answeredAsyncQuestionIDs = (try? self.tasks.answeredAsyncQuestionIDs(taskID: taskID)) ?? []
+                    onUpdate(ConversationUpdate(type: "history", history: history))
+                },
                 onActionRequest: {
                     let message = "Codex requested an approval. StationAI denied it because approval prompts are disabled."
                     onUpdate(ConversationUpdate(type: "action_notice", message: message))
@@ -3439,7 +3499,8 @@ final class CodexConversationManager {
                         type: "assistant_progress",
                         text: message.text,
                         itemID: message.id,
-                        phase: message.phase
+                        phase: message.phase,
+                        asyncQuestions: message.asyncQuestions
                     ))
                 }
             )
@@ -3861,6 +3922,20 @@ final class StationAIBridgeRuntime {
                         result = .object(["accepted": .boolean(true), "queued": .boolean(true)])
                     }
                 }
+            case "conversation.answer_async":
+                let taskID = try request.requiredUUID("taskID")
+                let itemID = try request.requiredString("itemID")
+                let answers = request.arguments["answers"]?.strings ?? []
+                let conversations = CodexConversationManager(
+                    tasks: taskManager,
+                    client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
+                )
+                let history = try await conversations.history(taskID: taskID)
+                guard let question = history.messages.first(where: { $0.id == itemID && $0.asyncQuestions != nil }) else {
+                    throw BridgeCommandError(code: "not_found", message: "That Codex question is not in this conversation.")
+                }
+                let answer = try await conversations.answerAsyncQuestion(taskID: taskID, question: question, answers: answers)
+                result = .object(["text": .string(answer.text), "queued": .boolean(answer.queued)])
             case "conversation.send":
                 let taskID = try request.requiredUUID("taskID")
                 let message = request.arguments["message"]?.string ?? ""
