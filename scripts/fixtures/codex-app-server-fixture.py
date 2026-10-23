@@ -132,6 +132,9 @@ def main():
     saw_turn = False
     turn_message = None
     history_path = Path(str(sys.argv[0]) + ".history")
+    if "-goal" in mode:
+        Path(str(sys.argv[0]) + ".launch-args").write_text(json.dumps(sys.argv[1:]), encoding="utf-8")
+    goal_path = Path(str(sys.argv[0]) + ".goal")
     serial_mode = mode.endswith("-serial-success-wait") or mode.endswith("-serial-success")
     if serial_mode:
         saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
@@ -159,6 +162,21 @@ def main():
                 {"id": "gpt-6-luna", "displayName": "GPT-6 Luna", "isDefault": True},
                 {"id": "gpt-6-sol", "displayName": "GPT-6 Sol", "isDefault": False},
             ]}})
+        elif "-goal" in mode and message.get("method") == "thread/goal/get":
+            goal = json.loads(goal_path.read_text(encoding="utf-8")) if goal_path.is_file() else None
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {"goal": goal}})
+        elif "-goal" in mode and message.get("method") == "thread/goal/set":
+            params = message.get("params", {})
+            goal = json.loads(goal_path.read_text(encoding="utf-8")) if goal_path.is_file() else {
+                "threadId": params.get("threadId"), "objective": "", "status": "active",
+                "tokenBudget": None, "tokensUsed": None, "timeUsedSeconds": 0,
+            }
+            goal.update({key: value for key, value in params.items() if key in {"objective", "status"}})
+            goal_path.write_text(json.dumps(goal), encoding="utf-8")
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {"goal": goal}})
+        elif "-goal" in mode and message.get("method") == "thread/goal/clear":
+            goal_path.unlink(missing_ok=True)
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {}})
         elif message.get("method") == "thread/start":
             thread_start_instructions = message.get("params", {}).get("developerInstructions")
             if serial_mode:

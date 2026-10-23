@@ -216,6 +216,7 @@ class StationAIBridgeTests(unittest.TestCase):
         environment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = str(self.worktree_directory)
         environment["STATIONAI_E2E_DEFAULTS_SUITE"] = self.defaults_suite
         environment["STATIONAI_BRIDGE_SERVICE_NAME"] = arguments.service_name
+        environment["CODEX_HOME"] = str(self.data_directory / "codex-home")
         environment.update(extra_environment or {})
         completed = subprocess.run(
             [str(self.cli), *map(str, command)],
@@ -246,6 +247,7 @@ class StationAIBridgeTests(unittest.TestCase):
         environment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = str(self.worktree_directory)
         environment["STATIONAI_E2E_DEFAULTS_SUITE"] = self.defaults_suite
         environment["STATIONAI_BRIDGE_SERVICE_NAME"] = arguments.service_name
+        environment["CODEX_HOME"] = str(self.data_directory / "codex-home")
         environment.update(extra_environment or {})
         return subprocess.Popen(
             [str(self.cli), *map(str, command)],
@@ -1271,7 +1273,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIsNone(record.get("pullRequestURL"))
         self.assertEqual(current["status"], "Done")
 
-    # case-contract: test_review_pr_conflicts_probe_and_verify | Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 10 seconds. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action beside its PR link; the conflict action and PR link have hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head.
+    # case-contract: test_review_pr_conflicts_probe_and_verify | Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 10 seconds. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action with its indicator artwork beside its PR link; the UI renders the artwork inside the action, keeps it beside the PR link, and gives both controls hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head.
     def test_review_pr_conflicts_probe_and_verify(self):
         task = self.create_repo_task("Review PR conflict probe", [self.primary, self.secondary], materialize=True)
         self.assertEqual(task["status"], "Review")
@@ -3514,6 +3516,74 @@ class StationAIBridgeTests(unittest.TestCase):
         history, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(history)["messages"], [])
         self.assertEqual(self.assert_success(history)["activities"], [])
+
+    # case-contract: test_thread_goal_lifecycle_persists_through_cli_xpc | CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime.
+    def test_thread_goal_lifecycle_persists_through_cli_xpc(self):
+        task_id = self.create_task(title="Durable goal", roots=[self.primary])["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-goal"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {
+            "CODEX_HOME": str(self.data_directory / "codex-home"),
+            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
+        }
+        (self.data_directory / "codex-home").mkdir()
+        goal_text = "Migrate the project and keep the full test suite green."
+        result, _ = self.call_cli("conversation", "goal", task_id, "set", "--text", goal_text, extra_environment=env)
+        self.assertEqual(self.assert_success(result)["objective"], goal_text)
+        launch_arguments = json.loads(Path(str(executable) + ".launch-args").read_text(encoding="utf-8"))
+        self.assertIn("features.goals=true", launch_arguments, "CLI/XPC Goal commands must enable Codex's Goals app-server feature.")
+        task, _ = self.call_cli("task", "get", task_id)
+        self.assertEqual(self.assert_success(task)["status"], "In Progress")
+        for action, expected in (("get", "active"), ("pause", "paused"), ("resume", "active")):
+            response, _ = self.call_cli("conversation", "goal", task_id, action, extra_environment=env)
+            self.assertEqual(self.assert_success(response)["status"], expected)
+            reread, _ = self.call_cli("conversation", "goal", task_id, "get", extra_environment=env)
+            self.assertEqual(self.assert_success(reread)["objective"], goal_text)
+        generation_key = f"stationai.codex.goal-generation.{task_id.upper()}"
+        generation_before, _ = self.read_default(generation_key)
+        same_goal, _ = self.call_cli("conversation", "goal", task_id, "set", "--text", goal_text, extra_environment=env)
+        self.assertEqual(self.assert_success(same_goal)["objective"], goal_text)
+        generation_after, _ = self.read_default(generation_key)
+        self.assertEqual(generation_after, generation_before, "Setting the same active objective should preserve its timer generation.")
+        invalid, _ = self.call_cli("conversation", "goal", task_id, "set", "--text", "   ", expected_status=2, extra_environment=env)
+        self.assert_failure(invalid, "invalid_argument")
+        current, _ = self.call_cli("conversation", "goal", task_id, "get", extra_environment=env)
+        active_goal = self.assert_success(current)
+        self.assertEqual(active_goal["objective"], goal_text)
+        prior_reported_seconds = float(active_goal.get("timeUsedSeconds") or 0)
+        cleared, _ = self.call_cli("conversation", "goal", task_id, "clear", extra_environment=env)
+        self.assert_success(cleared)
+        current, _ = self.call_cli("conversation", "goal", task_id, "get", extra_environment=env)
+        self.assertIsNone(self.assert_success(current))
+        cleared_generation = generation_after
+        replacement_text = "Build the next feature and keep its timer independent."
+        replacement, _ = self.call_cli(
+            "conversation", "goal", task_id, "set", "--text", replacement_text, extra_environment=env
+        )
+        replacement_goal = self.assert_success(replacement)
+        self.assertEqual(replacement_goal["objective"], replacement_text)
+        replacement_generation, _ = self.read_default(generation_key)
+        self.assertNotEqual(replacement_generation, cleared_generation, "A Goal set after clear must receive a fresh timer generation.")
+        baseline_key = f"stationai.codex.goal-generation-time-baseline.{task_id.upper()}"
+        replacement_baseline, _ = self.read_default(baseline_key)
+        replacement_reported_seconds = float(replacement_goal.get("timeUsedSeconds") or 0)
+        expected_baseline = prior_reported_seconds if replacement_reported_seconds >= prior_reported_seconds else 0
+        self.assertAlmostEqual(float(replacement_baseline), expected_baseline, places=3, msg="A new Goal must use only the prior total when Codex reports cumulative time.")
+
+    def read_default(self, key):
+        completed = subprocess.run(
+            ["/usr/bin/defaults", "read", self.defaults_suite, key],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, f"Could not read isolated preference {key}: {completed.stderr}")
+        return completed.stdout.strip(), completed.stderr
 
     # case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode use the existing question path, move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome.
     def test_codex_questions_can_be_answered_over_cli_xpc(self):

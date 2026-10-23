@@ -3,6 +3,48 @@ import SwiftData
 import Darwin
 import SQLite3
 
+enum CodexGoalGenerationStore {
+    static func generationIDKey(taskID: UUID) -> String {
+        "stationai.codex.goal-generation.\(taskID.uuidString)"
+    }
+
+    static func objectiveKey(taskID: UUID) -> String {
+        "stationai.codex.goal-generation-objective.\(taskID.uuidString)"
+    }
+
+    static func timeBaselineKey(taskID: UUID) -> String {
+        "stationai.codex.goal-generation-time-baseline.\(taskID.uuidString)"
+    }
+
+    private static func clearedTimeCarryoverKey(taskID: UUID) -> String {
+        "stationai.codex.goal-cleared-time-carryover.\(taskID.uuidString)"
+    }
+
+    static func recordClear(taskID: UUID, goal: CodexThreadGoal?, defaults: UserDefaults = WorkspaceSettings.preferencesStore) {
+        guard let goal else { return }
+        defaults.set(Double(goal.timeUsedSeconds ?? 0), forKey: clearedTimeCarryoverKey(taskID: taskID))
+    }
+
+    static func recordSet(taskID: UUID, objective: String, previousGoal: CodexThreadGoal?, goal: CodexThreadGoal, defaults: UserDefaults = WorkspaceSettings.preferencesStore) {
+        let startsNewGeneration = previousGoal == nil
+            || previousGoal?.status == "complete"
+            || previousGoal?.objective != objective
+        guard startsNewGeneration else { return }
+        let previousTimeTotal: Double?
+        if let previousGoal {
+            previousTimeTotal = Double(previousGoal.timeUsedSeconds ?? 0)
+        } else {
+            previousTimeTotal = defaults.object(forKey: clearedTimeCarryoverKey(taskID: taskID)) as? Double
+        }
+        let reportedSeconds = Double(goal.timeUsedSeconds ?? 0)
+        let timeBaseline = previousTimeTotal.map { reportedSeconds >= $0 ? $0 : 0 } ?? 0
+        defaults.set(UUID().uuidString, forKey: generationIDKey(taskID: taskID))
+        defaults.set(goal.objective, forKey: objectiveKey(taskID: taskID))
+        defaults.set(timeBaseline, forKey: timeBaselineKey(taskID: taskID))
+        defaults.removeObject(forKey: clearedTimeCarryoverKey(taskID: taskID))
+    }
+}
+
 @MainActor
 struct CodexTaskTitleGenerator {
     let client: CodexAppServerClient
@@ -2766,6 +2808,7 @@ struct ConversationUpdate: Codable {
 final class CodexConversationManager {
     private let tasks: BoardTaskManager
     private let client: CodexAppServerClient
+    private let preferences: UserDefaults
     private static var dispatchingQueuedTaskIDs = Set<UUID>()
     private static var pendingQueuedTaskDispatchIDs = Set<UUID>()
     private var activeSendTaskIDs = Set<UUID>()
@@ -2775,9 +2818,10 @@ final class CodexConversationManager {
         return (try? tasks.hasConversationTurnReservation(taskID)) != true
     }
 
-    init(tasks: BoardTaskManager, client: CodexAppServerClient) {
+    init(tasks: BoardTaskManager, client: CodexAppServerClient, preferences: UserDefaults = WorkspaceSettings.preferencesStore) {
         self.tasks = tasks
         self.client = client
+        self.preferences = preferences
         if let directory = try? tasks.conversationSteerMailboxDirectory() {
             CodexAppServerClient.configureSteerMailbox(directory: directory)
         }
@@ -2939,6 +2983,56 @@ final class CodexConversationManager {
             "modelIDs": models.map(\.id).joined(separator: ",")
         ])
         return models
+    }
+
+    func goal(taskID: UUID, objective: String? = nil, action: String = "get", observeRuntime: Bool = false) async throws -> CodexThreadGoal? {
+        var task = try tasks.taskModel(taskID)
+        guard ["get", "set", "pause", "resume", "clear"].contains(action) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Goal action must be get, set, pause, resume, or clear.")
+        }
+        guard action == "get" || task.status != .done else {
+            throw StationAIManagerError.invalidTransition("Done tasks are closed. Create a new task to change its goal.")
+        }
+        if action == "set" {
+            guard let objective else { throw StationAIManagerError.invalidMessage }
+            let value = objective.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty, value.count <= 4000 else {
+                throw BridgeCommandError(code: "invalid_argument", message: "Goal text must contain 1 to 4,000 characters.")
+            }
+        }
+        if task.codexThreadID == nil {
+            guard action == "set" else { return nil }
+            let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            let workspace = try CodexWorkspaceContext(roots: roots)
+            let id = try await client.startThread(workspace: workspace, developerInstructions: TaskProgressReportInstructions.make(taskID: taskID))
+            _ = try await tasks.persistCodexThreadID(taskID, threadID: id)
+            task = try tasks.taskModel(taskID)
+        }
+        guard let threadID = task.codexThreadID else { return nil }
+        let rootPaths = task.workspaceRootPaths.isEmpty && task.status == .done
+            ? task.repositoryWorktrees.map(\.repositoryPath)
+            : task.workspaceRootPaths
+        let workspace = try CodexWorkspaceContext(roots: rootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) })
+        switch action {
+        case "get": return try await client.getGoal(threadID: threadID, workspace: workspace)
+        case "set":
+            let normalizedObjective = objective?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let previousGoal = try await client.getGoal(threadID: threadID, workspace: workspace)
+            let goal = try await client.setGoal(threadID: threadID, objective: normalizedObjective, status: "active", workspace: workspace, observeRuntime: observeRuntime)
+            if let goal, let normalizedObjective {
+                CodexGoalGenerationStore.recordSet(taskID: taskID, objective: normalizedObjective, previousGoal: previousGoal, goal: goal, defaults: preferences)
+            }
+            _ = try await tasks.setLifecycleStatus(taskID, to: .inProgress)
+            return goal
+        case "pause": return try await client.setGoal(threadID: threadID, status: "paused", workspace: workspace)
+        case "resume": return try await client.setGoal(threadID: threadID, status: "active", workspace: workspace)
+        case "clear":
+            let previousGoal = try await client.getGoal(threadID: threadID, workspace: workspace)
+            try await client.clearGoal(threadID: threadID, workspace: workspace)
+            CodexGoalGenerationStore.recordClear(taskID: taskID, goal: previousGoal, defaults: preferences)
+            return nil
+        default: throw BridgeCommandError(code: "invalid_argument", message: "Goal action must be get, set, pause, resume, or clear.")
+        }
     }
 
     func interrupt(taskID: UUID) async throws -> Bool {
@@ -3733,6 +3827,16 @@ final class StationAIBridgeRuntime {
                 let codexClient = CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
                 let conversations = CodexConversationManager(tasks: taskManager, client: codexClient)
                 result = .object(["models": .array(try await conversations.models(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })])
+            case "conversation.goal":
+                let client = CodexAppServerClient(
+                    codexExecutableOverride: request.arguments["__codexExecutable"]?.string,
+                    codexHomeOverride: request.arguments["__codexHome"]?.string,
+                    goalFeatureEnabled: true
+                )
+                defer { client.shutdown() }
+                let conversations = CodexConversationManager(tasks: taskManager, client: client, preferences: preferences)
+                let goal = try await conversations.goal(taskID: request.requiredUUID("taskID"), objective: request.arguments["objective"]?.string, action: request.arguments["action"]?.string ?? "get")
+                if let goal { result = try Self.value(goal) } else { result = .null }
             case "conversation.queue", "conversation.queue.list", "conversation.queue.retry", "conversation.queue.remove", "conversation.queue.steer", "conversation.steer":
                 let taskID = try request.requiredUUID("taskID")
                 let conversations = CodexConversationManager(tasks: taskManager, client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string))
