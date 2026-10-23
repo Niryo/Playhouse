@@ -3949,11 +3949,17 @@ final class StationAIUITests: XCTestCase {
         composer.click()
         composer.typeText(queuedText)
         composer.typeKey(.return, modifierFlags: [])
+        let afterTurnRow = try XCTUnwrap((try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.first(where: { $0["text"] as? String == queuedText }))
+        let afterTurnRowID = try XCTUnwrap(afterTurnRow["id"] as? String)
+        let afterTurnRowText = element("queued-message-text-\(afterTurnRowID)")
+        XCTAssertTrue(afterTurnRowText.waitForExistence(timeout: 10), "The after-turn follow-up should appear as a visible queue row before delivery.")
 
         try "Release the active turn.\n".write(to: release, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({
             ((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).isEmpty
         }, timeout: 20), "The queued message should dispatch once after the matching completed notification.")
+        XCTAssertTrue(waitUntil({ !afterTurnRowText.exists }, timeout: 10), "The accepted after-turn follow-up should disappear from the visible queue.")
+        XCTAssertTrue(app.staticTexts[queuedText].waitForExistence(timeout: 10), "The accepted after-turn follow-up should appear in the conversation transcript.")
         let targetedText = "Retry this row as its own turn."
         composer.click()
         composer.typeText(targetedText)
