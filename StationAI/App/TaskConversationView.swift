@@ -2357,7 +2357,12 @@ struct TaskConversationView: View {
                 let outcome = try await conversationManager.steerQueuedMessage(taskID: task.id, messageID: message.id)
                 refreshQueuedMessages()
                 guard outcome.accepted else {
-                    throw BridgeCommandError(code: "invalid_transition", message: "The active turn changed before the steering message could be sent.")
+                    if let history = try? await conversationManager.history(taskID: task.id) {
+                        messages = history.messages
+                        activities = history.activities
+                    }
+                    errorMessage = nil
+                    return
                 }
                 messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: outcome.message))
                 refreshQueuedMessages()
@@ -2377,8 +2382,18 @@ struct TaskConversationView: View {
         Task { @MainActor in
             defer { isSubmittingLiveMessage = false }
             do {
-                guard try await conversationManager.steer(taskID: task.id, text: text, imageDataURLs: imageDataURLs) else {
-                    throw BridgeCommandError(code: "invalid_transition", message: "The active turn changed before the steering message could be sent. Try again after the current turn is active.")
+                let accepted = try await conversationManager.steer(taskID: task.id, text: text, imageDataURLs: imageDataURLs)
+                guard accepted else {
+                    _ = try await conversationManager.queueMissedSteer(taskID: task.id, text: text, imageDataURLs: imageDataURLs)
+                    draft = ""
+                    pendingImages.removeAll()
+                    refreshQueuedMessages()
+                    if let history = try? await conversationManager.history(taskID: task.id) {
+                        messages = history.messages
+                        activities = history.activities
+                    }
+                    errorMessage = nil
+                    return
                 }
                 messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: text, imageDataURLs: imageDataURLs))
                 draft = ""
