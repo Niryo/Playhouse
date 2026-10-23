@@ -190,7 +190,10 @@ final class CodexAppServerClient: ObservableObject {
     private var initialized = false
     private var resumedThreadIDs = Set<String>()
     private var activeTurnID: String?
+    private var conversationOperationsInFlight = 0
+    private var applicationShutdownInterruptResult: String?
     private(set) var wasLastTurnInterrupted = false
+    private(set) var isPreparingForApplicationTermination = false
     private var activeDeltaHandler: ((String) -> Void)?
     private var activeFinalMessageHandler: ((String) -> Void)?
     private var activeProgressMessageHandler: ((CodexChatMessage) -> Void)?
@@ -360,9 +363,92 @@ final class CodexAppServerClient: ObservableObject {
     }
 
     func shutdown() {
-        guard let process, process.isRunning else { return }
+        guard let process else {
+            StationAIDiagnostics.record("codex.app_server.shutdown.skipped", fields: ["reason": "no_process"])
+            return
+        }
+        guard process.isRunning else {
+            StationAIDiagnostics.record("codex.app_server.shutdown.skipped", fields: [
+                "reason": "already_stopped",
+                "processID": String(process.processIdentifier),
+                "terminationStatus": String(process.terminationStatus)
+            ])
+            return
+        }
+        let processID = process.processIdentifier
         process.terminate()
-        process.waitUntilExit()
+        let gracefulDeadline = Date().addingTimeInterval(0.5)
+        while process.isRunning, Date() < gracefulDeadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        if process.isRunning {
+            _ = kill(processID, SIGKILL)
+            let forcedDeadline = Date().addingTimeInterval(0.5)
+            while process.isRunning, Date() < forcedDeadline {
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+        }
+        StationAIDiagnostics.record("codex.app_server.shutdown.finished", fields: [
+            "processID": String(processID),
+            "terminationStatus": process.isRunning ? "still_running" : String(process.terminationStatus)
+        ])
+    }
+
+    func prepareForApplicationTermination() async {
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        let deadline = ContinuousClock.now + .seconds(4)
+        isPreparingForApplicationTermination = true
+        applicationShutdownInterruptResult = nil
+        let threadID = activeThreadID
+        var interruptAttempted = false
+        var interruptResult = "not_attempted"
+        StationAIDiagnostics.record("application.shutdown.started", fields: [
+            "hasActiveTurn": String(isTurnActive),
+            "conversationOperationsInFlight": String(conversationOperationsInFlight),
+            "hasActiveThread": String(threadID != nil)
+        ])
+        if let threadID, isTurnActive {
+            interruptAttempted = true
+            interruptResult = "pending"
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    let accepted = try await self.interruptActiveTurn(threadID: threadID)
+                    self.applicationShutdownInterruptResult = accepted ? "accepted" : "not_accepted"
+                } catch {
+                    let failure = error as NSError
+                    self.applicationShutdownInterruptResult = "failed"
+                    StationAIDiagnostics.record("application.shutdown.interrupt_failed", fields: [
+                        "errorDomain": failure.domain,
+                        "errorCode": String(failure.code)
+                    ])
+                }
+            }
+        }
+        while conversationOperationsInFlight > 0, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        if let result = applicationShutdownInterruptResult { interruptResult = result }
+        StationAIDiagnostics.record("application.shutdown.turn_drained", fields: [
+            "turnStillActive": String(isTurnActive),
+            "conversationOperationsInFlight": String(conversationOperationsInFlight),
+            "interruptAttempted": String(interruptAttempted),
+            "interruptAccepted": interruptResult,
+            "drainTimedOut": String(conversationOperationsInFlight > 0),
+            "elapsedMilliseconds": String((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
+        ])
+        shutdown()
+        StationAIDiagnostics.record("application.shutdown.finished", fields: [
+            "elapsedMilliseconds": String((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
+        ])
+    }
+
+    func beginConversationOperation() {
+        conversationOperationsInFlight += 1
+    }
+
+    func finishConversationOperation() {
+        conversationOperationsInFlight = max(0, conversationOperationsInFlight - 1)
     }
 
     private static func decodeGoal(_ value: [String: Any]) -> CodexThreadGoal? {

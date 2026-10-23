@@ -775,7 +775,17 @@ def main():
                     "turn": {"id": "turn_stationai_fixture", "status": "completed"},
                 }})
             elif mode.endswith("-hold"):
-                time.sleep(30)
+                hold_used = Path(str(sys.argv[0]) + ".hold-used")
+                if hold_used.exists():
+                    question_request(901)
+                else:
+                    hold_used.write_text("The first fixture turn is held for restart recovery.\n", encoding="utf-8")
+                    release = Path(str(sys.argv[0]) + ".turn-release")
+                    deadline = time.monotonic() + 90
+                    while not release.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    if release.exists():
+                        release.unlink(missing_ok=True)
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
