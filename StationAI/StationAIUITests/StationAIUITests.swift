@@ -329,11 +329,15 @@ final class StationAIUITests: XCTestCase {
         try FileManager.default.removeItem(at: runDirectory)
     }
 
-    // case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label and the bridge reports API version 1.
+    // case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label, displays the StationAILogo asset, and the bridge reports API version 1.
     func test_service_reports_bridge_version() throws {
         launchApp(defaultParent: fixture.parent.path)
         XCTAssertEqual(app.windows.count, 1, "StationAI should open one board window on launch.")
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 15), "The StationAI window did not open.")
+        let logo = app.images["StationAI logo"]
+        XCTAssertTrue(logo.waitForExistence(timeout: 5), "The board header should display the transparent StationAI logo.")
+        let window = app.windows.firstMatch
+        assertStationAILogoArtwork(logo, in: window)
         XCTAssertEqual(app.windows.firstMatch.title, "StationAI — StationAI UI Test Worktree")
         relaunchApp()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 15), "The board should reopen after relaunch.")
@@ -1454,7 +1458,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Completed task opens from the searchable read-only archive")
     }
 
-    // case-contract: test_review_pr_conflicts_probe_and_verify | Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 10 seconds. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action beside its PR link; the conflict action and PR link have hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head.
+    // case-contract: test_review_pr_conflicts_probe_and_verify | Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 10 seconds. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action with its indicator artwork beside its PR link; the UI renders the artwork inside the action, keeps it beside the PR link, and gives both controls hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head.
     func test_review_pr_conflicts_probe_and_verify() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         var ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [123, 456])
@@ -1503,6 +1507,7 @@ final class StationAIUITests: XCTestCase {
 
         let link = element("task-pr-link-\(taskID)-123")
         let resolveButton = element("task-resolve-pr-conflicts-\(taskID)")
+        let resolveIcon = app.images["task-resolve-pr-conflicts-icon-\(taskID)"]
         XCTAssertTrue(link.waitForExistence(timeout: 10))
         let secondLink = element("task-pr-link-\(secondTaskID)-456")
         XCTAssertTrue(secondLink.waitForExistence(timeout: 10))
@@ -1522,6 +1527,9 @@ final class StationAIUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(resolveButton.frame.height, 30, "The conflict action should have a comfortable vertical hit target.")
         XCTAssertGreaterThanOrEqual(link.frame.width, 30, "A PR link should have a comfortable horizontal hit target.")
         XCTAssertGreaterThanOrEqual(link.frame.height, 30, "A PR link should have a comfortable vertical hit target.")
+        XCTAssertTrue(resolveIcon.waitForExistence(timeout: 5), "The imported conflict indicator artwork should render inside the action.")
+        XCTAssertTrue(resolveButton.frame.contains(resolveIcon.frame), "The conflict indicator artwork should be inside the action button.")
+        XCTAssertLessThanOrEqual(resolveButton.frame.maxX, link.frame.minX + 1, "The conflict action should sit beside its PR link.")
         XCTAssertTrue(FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("123").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("456").path), "Focus refresh should probe separate Review cards concurrently.")
 
@@ -1715,7 +1723,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertNil(finalRecord["pullRequestNumber"])
     }
 
-    // case-contract: test_done_archive_displays_existing_pull_request_link | A Done task's real SwiftData record retains a linked PR number and URL across fresh CLI/XPC reads so the archive renders the PR link with distinct hover emphasis and useful help; an active repository-backed task card renders a saved PR link with the same hover indication.
+    // case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC fresh reads confirm saved PR data; the UI shows active and archived PR links and an active task's Create PR button. Hovering the outer padded edge of each control triggers its hover feedback.
     func test_done_archive_displays_existing_pull_request_link() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -1735,6 +1743,9 @@ final class StationAIUITests: XCTestCase {
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Active linked PR UI")
         element("back-to-board-button").click()
         XCTAssertEqual(try taskRecord(id: activeTaskID)?["status"] as? String, "Review")
+        let createPRButton = element("task-create-pr-\(activeTaskID)")
+        XCTAssertTrue(createPRButton.waitForExistence(timeout: 5), "An active repository task should expose its Create PR button.")
+        assertHoverEmphasis(for: createPRButton)
 
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 10), "The app must close its SwiftData container before seeding the isolated store.")
@@ -1986,6 +1997,7 @@ final class StationAIUITests: XCTestCase {
         process.arguments = ["conversation", "send", taskID, "--message", "Work on this task."]
         var environment = ProcessInfo.processInfo.environment
         environment["STATIONAI_DATA_DIRECTORY"] = dataDirectory.path
+        environment["CODEX_HOME"] = dataDirectory.appendingPathComponent("codex-home").path
         environment["STATIONAI_WORKTREE_LABEL"] = "StationAI UI Test Worktree"
         environment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         environment["STATIONAI_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
@@ -3941,11 +3953,17 @@ final class StationAIUITests: XCTestCase {
         composer.click()
         composer.typeText(queuedText)
         composer.typeKey(.return, modifierFlags: [])
+        let afterTurnRow = try XCTUnwrap((try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])?.first(where: { $0["text"] as? String == queuedText }))
+        let afterTurnRowID = try XCTUnwrap(afterTurnRow["id"] as? String)
+        let afterTurnRowText = element("queued-message-text-\(afterTurnRowID)")
+        XCTAssertTrue(afterTurnRowText.waitForExistence(timeout: 10), "The after-turn follow-up should appear as a visible queue row before delivery.")
 
         try "Release the active turn.\n".write(to: release, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({
             ((try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]) ?? []).isEmpty
         }, timeout: 20), "The queued message should dispatch once after the matching completed notification.")
+        XCTAssertTrue(waitUntil({ !afterTurnRowText.exists }, timeout: 10), "The accepted after-turn follow-up should disappear from the visible queue.")
+        XCTAssertTrue(app.staticTexts[queuedText].waitForExistence(timeout: 10), "The accepted after-turn follow-up should appear in the conversation transcript.")
         let targetedText = "Retry this row as its own turn."
         composer.click()
         composer.typeText(targetedText)
@@ -4412,7 +4430,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertLessThan(reloaded.frame.minY, app.staticTexts["Context compaction completed."].frame.minY)
     }
 
-    // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs.
+    // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs.
     func test_conversation_shows_subagent_delegation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -4508,6 +4526,20 @@ final class StationAIUITests: XCTestCase {
             }) == true
         }, timeout: 5), "Codex diagnostics should be flushed before checking turn and notification details.")
         let codexDiagnostics = try diagnosticEvents()
+        let deltaSummaries = codexDiagnostics.filter { $0["event"] as? String == "codex.notification.summary" }
+        XCTAssertFalse(deltaSummaries.isEmpty, "Streamed Codex deltas should be summarized rather than logged individually.")
+        let messageSummary = try XCTUnwrap(deltaSummaries.first { $0["method"] as? String == "item/agentMessage/delta" })
+        XCTAssertGreaterThanOrEqual(Int(messageSummary["notificationCount"] as? String ?? "0") ?? 0, 2)
+        XCTAssertGreaterThan(Int(messageSummary["payloadBytes"] as? String ?? "0") ?? 0, 0)
+        XCTAssertEqual(messageSummary["flushReason"] as? String, "turn_completed")
+        let outputSummary = try XCTUnwrap(deltaSummaries.first { $0["method"] as? String == "item/commandExecution/outputDelta" })
+        XCTAssertEqual(Int(outputSummary["notificationCount"] as? String ?? "0") ?? 0, 2)
+        XCTAssertGreaterThan(Int(outputSummary["payloadBytes"] as? String ?? "0") ?? 0, 0)
+        XCTAssertEqual(outputSummary["flushReason"] as? String, "turn_completed")
+        XCTAssertFalse(codexDiagnostics.contains {
+            $0["event"] as? String == "codex.notification"
+                && ["item/agentMessage/delta", "item/plan/delta", "item/commandExecution/outputDelta"].contains($0["method"] as? String ?? "")
+        }, "High-volume delta notifications should not each occupy a diagnostics record.")
         XCTAssertTrue(codexDiagnostics.contains {
             $0["event"] as? String == "codex.rpc.request.started" && $0["method"] as? String == "turn/start"
         })
@@ -4535,6 +4567,7 @@ final class StationAIUITests: XCTestCase {
         let serializedCodexDiagnostics = String(data: try JSONSerialization.data(withJSONObject: codexDiagnostics), encoding: .utf8) ?? ""
         XCTAssertFalse(serializedCodexDiagnostics.contains("CODEX_OUTPUT_NOT_LOGGED"))
         XCTAssertFalse(serializedCodexDiagnostics.contains("CODEX_DIFF_NOT_LOGGED"))
+        XCTAssertFalse(serializedCodexDiagnostics.contains("CODEX_STREAMED_OUTPUT_NOT_LOGGED"))
         XCTAssertFalse(serializedCodexDiagnostics.contains(prompt), "Diagnostics must not store the conversation text.")
 
         app.activate()
@@ -4603,7 +4636,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Conversation shows and opens a subagent")
     }
 
-    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty composer, switches to Code mode, and starts an implementation turn. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff.
+    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics.
     func test_plan_mode_renders_markdown_in_conversation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -4639,7 +4672,50 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(startImplementingInEmptyConversation.waitForExistence(timeout: 5), "Plan mode should offer Start Implementing before any chat messages exist.")
         XCTAssertTrue(startImplementingInEmptyConversation.isEnabled, "Start Implementing should be clickable with an empty conversation.")
 
+        modeMenu.click()
+        let goalComposerMode = app.menuItems["conversation-mode-goal"]
+        XCTAssertTrue(goalComposerMode.waitForExistence(timeout: 5))
+        goalComposerMode.click()
+        XCTAssertTrue(modeMenu.label.contains("Goal"), "The composer should enter Goal mode.")
+        XCTAssertTrue(startImplementingInEmptyConversation.exists, "Entering Goal mode should preserve the selected Plan mode and its handoff.")
+        XCTAssertTrue(startImplementingInEmptyConversation.isEnabled)
+        startImplementingInEmptyConversation.click()
+        XCTAssertTrue(waitUntil({ modeMenu.label.contains("Code mode") }, timeout: 5), "The empty-chat handoff should leave Goal composer mode and switch to Code.")
+        XCTAssertTrue(waitUntil({
+            let history = (try? runCLI(
+                ["conversation", "history", taskID],
+                extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": fixtureCopy.path]
+            )["result"] as? [String: Any])?["messages"] as? [[String: Any]] ?? []
+            return history.contains { $0["role"] as? String == "user" && $0["text"] as? String == "Start implementing the plan." }
+                && history.contains { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
+        }, timeout: 30), "Start Implementing should create a Code turn from an empty conversation.")
+        let initialFixtureData = try Data(contentsOf: URL(fileURLWithPath: fixtureCopy.path + ".history"))
+        let initialFixtureHistory = try XCTUnwrap(JSONSerialization.jsonObject(with: initialFixtureData) as? [String: Any])
+        let codeTurnsBeforeFollowup = (initialFixtureHistory["turns"] as? [[String: Any]] ?? []).count
         let composer = element("message-composer")
+        composer.click()
+        composer.typeText("Continue the implementation.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            let history = (try? runCLI(
+                ["conversation", "history", taskID],
+                extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": fixtureCopy.path]
+            )["result"] as? [String: Any])?["messages"] as? [[String: Any]] ?? []
+            let userIndex = history.lastIndex { $0["role"] as? String == "user" && $0["text"] as? String == "Continue the implementation." }
+            let finalIndex = history.lastIndex { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
+            let fixtureData = try? Data(contentsOf: URL(fileURLWithPath: fixtureCopy.path + ".history"))
+            let fixtureHistory = fixtureData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            let turns = fixtureHistory?["turns"] as? [[String: Any]] ?? []
+            return userIndex != nil && finalIndex != nil && finalIndex! > userIndex!
+                && turns.count > codeTurnsBeforeFollowup
+                && turns.last?["conversationMode"] as? String == "default"
+        }, timeout: 30), "A regular composer message after handoff should start a Code turn, even when Goal was selected first.")
+        modeMenu.click()
+        let planModeAfterGoal = app.menuItems["Plan mode"]
+        XCTAssertTrue(planModeAfterGoal.waitForExistence(timeout: 5))
+        planModeAfterGoal.click()
+        XCTAssertTrue(modeMenu.label.contains("Plan mode"), "Plan mode should be selectable again after the Code handoff.")
+
         composer.click()
         composer.typeText("Plan the task.")
         element("send-message-button").click()
@@ -4650,6 +4726,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: deltaReady.path) }, timeout: 10), "The fixture should pause after the first plan delta.")
         XCTAssertTrue(assistantMarkdown.waitForExistence(timeout: 10), "The first plan delta should appear before the turn completes.")
         XCTAssertTrue(assistantMarkdown.label.contains("workspace model"), "The partial plan should show its streamed content.")
+        XCTAssertTrue(assistantMarkdown.label.contains("\n\n"), "Distinct Markdown paragraphs should retain visible spacing.")
         XCTAssertFalse(assistantMarkdown.label.contains("Final verification"), "The rest of the plan should wait for the fixture release.")
         try Data().write(to: deltaRelease)
         XCTAssertTrue(waitUntil({ assistantMarkdown.label.contains("Final verification") }, timeout: 30), "The completed plan should replace the partial plan.")
@@ -4686,10 +4763,24 @@ final class StationAIUITests: XCTestCase {
         let reloadedMessages = reloadedHistory?["messages"] as? [[String: Any]] ?? []
         XCTAssertTrue(reloadedMessages.contains { $0["role"] as? String == "assistant" && $0["text"] as? String == markdownReply }, "The exact Markdown source should persist after reopening the plan conversation.")
         XCTAssertEqual(reloadedMessages.last?["role"] as? String, "assistant", "The bridge history should keep the latest response last.")
+        let planDiagnostics = try diagnosticEvents()
+        let planSummary = try XCTUnwrap(planDiagnostics.first {
+            $0["event"] as? String == "codex.notification.summary"
+                && $0["method"] as? String == "item/plan/delta"
+        })
+        XCTAssertGreaterThanOrEqual(Int(planSummary["notificationCount"] as? String ?? "0") ?? 0, 2)
+        XCTAssertGreaterThan(Int(planSummary["payloadBytes"] as? String ?? "0") ?? 0, 0)
+        XCTAssertEqual(planSummary["flushReason"] as? String, "turn_completed")
+        XCTAssertFalse(planDiagnostics.contains {
+            $0["event"] as? String == "codex.notification" && $0["method"] as? String == "item/plan/delta"
+        })
+        let serializedPlanDiagnostics = String(data: try JSONSerialization.data(withJSONObject: planDiagnostics), encoding: .utf8) ?? ""
+        XCTAssertFalse(serializedPlanDiagnostics.contains(markdownReply), "Plan text must not be persisted in diagnostics.")
         let reloadedAssistant = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", "Implementation plan"))
             .firstMatch
         XCTAssertTrue(reloadedAssistant.waitForExistence(timeout: 10), "The completed plan should appear automatically after reopening.")
+        XCTAssertTrue(reloadedAssistant.label.contains("\n\n"), "Paragraph spacing should remain visible after reopening.")
         XCTAssertFalse(reloadedAssistant.label.contains("<proposed_plan>"), "The reloaded plan should hide its opening protocol wrapper.")
         XCTAssertFalse(reloadedAssistant.label.contains("</proposed_plan>"), "The reloaded plan should hide its closing protocol wrapper.")
         let markdownContent = app.staticTexts.matching(
@@ -4732,6 +4823,253 @@ final class StationAIUITests: XCTestCase {
                 && turns.last?["conversationMode"] as? String == "default"
         }, timeout: 30), "The handoff should start an implementation turn with the plan context.")
         attachScreenshot(named: "Plan mode stays active until implementation starts")
+    }
+
+    // case-contract: test_thread_goal_lifecycle_persists_through_cli_xpc | CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime.
+    func test_thread_goal_lifecycle_persists_through_cli_xpc() throws {
+        codexFixtureExecutable = nil
+        try FileManager.default.createDirectory(at: dataDirectory.appendingPathComponent("codex-home"), withIntermediateDirectories: true)
+        let usesLiveCodex = isLiveCodexIntegration
+        if usesLiveCodex {
+            let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"] ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex").path
+            XCTAssertTrue(FileManager.default.fileExists(atPath: URL(fileURLWithPath: codexHome).appendingPathComponent("auth.json").path), "Opt-in Goal verification requires an authenticated guest Codex home.")
+        }
+        launchApp(defaultParent: self.fixture.parent.path)
+        try createTaskFixture(title: "Durable goal", roots: [self.fixture.primary.path])
+        let taskID = try taskID(named: "Durable goal")
+        let objective = "Write a short two-line song about a dog, mark this Goal complete, and finish the task with no follow-up needed."
+        if !usesLiveCodex {
+            _ = try runCLI(["conversation", "goal", taskID, "set", "--text", objective])
+            _ = try runCLI(["conversation", "goal", taskID, "pause"])
+        }
+        openTask(named: "Durable goal")
+
+        if !usesLiveCodex {
+            let row = element("active-goal-progress-row")
+            XCTAssertTrue(row.waitForExistence(timeout: 10))
+            let goalTitle = accessibleLabelOrValue(of: element("active-goal-title"))
+            XCTAssertTrue(goalTitle.contains("Paused goal"), "Unexpected Goal title: \(goalTitle)")
+            XCTAssertTrue(goalTitle.contains(objective), "Unexpected Goal objective: \(goalTitle)")
+            let expandButton = element("goal-expand-button")
+            expandButton.click()
+            XCTAssertTrue(accessibleLabelOrValue(of: element("active-goal-details")).contains(objective))
+            expandButton.click()
+
+            let modeMenu = element("conversation-mode-menu")
+            modeMenu.click()
+            let goalMenuItem = app.menuItems["conversation-mode-goal"]
+            goalMenuItem.click()
+            XCTAssertTrue(modeMenu.label.contains("Goal"))
+            element("send-message-button").click()
+            XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 5))
+            XCTAssertTrue(element("codex-chat-error").label.contains("4,000 characters"))
+            XCTAssertTrue(accessibleLabelOrValue(of: element("active-goal-title")).contains(objective))
+            XCTAssertTrue(accessibleLabelOrValue(of: element("active-goal-title")).contains("Paused goal"))
+
+            let clearButton = element("goal-clear-button")
+            clearButton.click()
+            XCTAssertTrue(waitUntil({ !self.element("active-goal-progress-row").exists }, timeout: 5))
+            app.terminate()
+            let replacementObjective = "Write a short rhyme about a cat."
+            _ = try runCLI(["conversation", "goal", taskID, "set", "--text", replacementObjective])
+            _ = try runCLI(["conversation", "goal", taskID, "pause"])
+            launchApp(defaultParent: fixture.parent.path)
+            openTask(named: "Durable goal")
+            let replacementRow = element("active-goal-progress-row")
+            XCTAssertTrue(replacementRow.waitForExistence(timeout: 10), "A replacement Goal should be restored after a CLI/XPC set.")
+            XCTAssertTrue(accessibleLabelOrValue(of: element("active-goal-title")).contains(replacementObjective))
+            let replacementTimer = element("goal-elapsed-time")
+            XCTAssertTrue(replacementTimer.waitForExistence(timeout: 10))
+            let replacementTimerText = accessibleLabelOrValue(of: replacementTimer)
+            let replacementSeconds = Int(replacementTimerText.replacingOccurrences(of: "s", with: ""))
+            XCTAssertNotNil(replacementSeconds, "Expected a replacement Goal timer in seconds, got: \(replacementTimerText)")
+            XCTAssertLessThanOrEqual(replacementSeconds ?? Int.max, 5, "A Goal created after clearing should not inherit the cleared Goal's time.")
+            element("goal-clear-button").click()
+            XCTAssertTrue(waitUntil({ !self.element("active-goal-progress-row").exists }, timeout: 5))
+            app.terminate()
+            launchApp(defaultParent: fixture.parent.path)
+            openTask(named: "Durable goal")
+            XCTAssertTrue(waitUntil({ !self.element("active-goal-progress-row").exists }, timeout: 10), "A cleared Goal must stay cleared after reopening the task.")
+            return
+        }
+
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText("/goal")
+        let modeMenu = element("conversation-mode-menu")
+        XCTAssertTrue(modeMenu.waitForExistence(timeout: 5))
+        XCTAssertTrue(modeMenu.label.contains("Goal"))
+        element("send-message-button").click()
+        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 5), "Blank Goal text should show a validation error.")
+        XCTAssertTrue(element("codex-chat-error").label.contains("4,000 characters"))
+        XCTAssertTrue((try runCLI(["conversation", "goal", taskID, "get"])["result"] as? NSNull) != nil, "Blank Goal submission must not create an objective.")
+
+        modeMenu.click()
+        let goalMenuItem = app.menuItems["conversation-mode-goal"]
+        goalMenuItem.click()
+        XCTAssertTrue(modeMenu.label.contains("Goal"), "The composer menu should provide Goal mode.")
+        composer.click()
+        composer.typeText(objective)
+        element("send-message-button").click()
+        let row = element("active-goal-progress-row")
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({
+            self.element("goal-achieved-banner").exists
+                || row.value as? String == "Work started"
+                || row.value as? String == "Working"
+        }, timeout: 30), "Submitting a Goal should start a Codex work turn, not only save the objective.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+        let conversationScrollView = element("conversation-scroll-view")
+        let achievedBanner = conversationScrollView.descendants(matching: .any)
+            .matching(identifier: "goal-achieved-banner").firstMatch
+        XCTAssertTrue(achievedBanner.waitForExistence(timeout: 180), "Codex should replace the active Goal row with an achieved summary after completing the objective.")
+        let firstAchievementText = accessibleLabelOrValue(of: achievedBanner)
+        XCTAssertTrue(firstAchievementText.contains("Goal achieved in"))
+        XCTAssertNotEqual(firstAchievementText, "Goal achieved in 0s", "A first Goal without prior usage should retain its reported elapsed duration.")
+        XCTAssertTrue(element("goal-achievement-timeline-row").exists, "The achieved summary should be a conversation timeline event.")
+        let assistantMessages = conversationScrollView.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "assistant-message-"))
+        XCTAssertTrue(waitUntil({
+            assistantMessages.count > 0
+                && achievedBanner.frame.minY > assistantMessages.element(boundBy: assistantMessages.count - 1).frame.maxY
+        }, timeout: 10), "The achievement event should follow the assistant response that completed its Goal.")
+        let isolatedPreferences = try XCTUnwrap(UserDefaults(suiteName: preferencesSuiteName))
+        [
+            "stationai.codex.goal-achievement-timeline.\(taskID)",
+            "stationai.codex.goal-generation.\(taskID)",
+            "stationai.codex.goal-generation-objective.\(taskID)",
+            "stationai.codex.goal-generation-time-baseline.\(taskID)",
+        ].forEach { isolatedPreferences.removeObject(forKey: $0) }
+        app.terminate()
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Durable goal")
+        let migratedConversation = element("conversation-scroll-view")
+        let migratedBanner = migratedConversation.descendants(matching: .any)
+            .matching(identifier: "goal-achieved-banner").firstMatch
+        XCTAssertTrue(migratedBanner.waitForExistence(timeout: 10), "A completed Goal created before timing metadata existed should be reconstructed from Codex history.")
+        XCTAssertNotEqual(
+            accessibleLabelOrValue(of: migratedBanner),
+            "Goal achieved in 0s",
+            "Restoring an older completed Goal without generation metadata must retain its reported elapsed time."
+        )
+        XCTAssertFalse(row.exists, "Completed Goal state should not remain in the composer status row.")
+        XCTAssertFalse(element("active-goal-title").exists)
+        XCTAssertFalse(element("active-goal-details").exists)
+        XCTAssertFalse(element("goal-expand-button").exists)
+        XCTAssertFalse(element("goal-pause-resume-button").exists)
+        XCTAssertFalse(element("goal-clear-button").exists)
+
+        let followupPrompt = "Which two lines did you write? Please answer directly; after that, this task is complete and no follow-up is needed."
+        composer.click()
+        composer.typeText(followupPrompt)
+        element("send-message-button").click()
+        let followupMessage = conversationScrollView.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", followupPrompt)).firstMatch
+        XCTAssertTrue(followupMessage.waitForExistence(timeout: 10), "The follow-up question should appear in the conversation.")
+        let achievementRow = conversationScrollView.descendants(matching: .any)
+            .matching(identifier: "goal-achievement-timeline-row").firstMatch
+        XCTAssertTrue(waitUntil({
+            achievementRow.frame.maxY < followupMessage.frame.minY
+        }, timeout: 10), "A follow-up message should scroll after the Goal achieved timeline item.")
+
+        XCTAssertTrue(waitUntil({
+            do {
+                return try self.taskRecord(id: taskID)?["status"] as? String == "Review"
+            } catch {
+                return false
+            }
+        }, timeout: 180), "Codex should report the follow-up turn complete before the task enters the Done archive.")
+        XCTAssertLessThan(
+            achievementRow.frame.maxY,
+            followupMessage.frame.minY,
+            "The Goal achievement should stay before the follow-up after Codex finishes that turn."
+        )
+
+        let secondObjective = "Write a one-line rhyme about a cat, mark this Goal complete, and finish the task with no follow-up needed."
+        composer.click()
+        composer.typeText("/goal")
+        modeMenu.click()
+        app.menuItems["conversation-mode-goal"].click()
+        composer.click()
+        composer.typeText(secondObjective)
+        element("send-message-button").click()
+        let secondGoalTimer = element("goal-elapsed-time")
+        XCTAssertTrue(secondGoalTimer.waitForExistence(timeout: 10), "A new Goal should show its own elapsed timer.")
+        let secondGoalTimerText = accessibleLabelOrValue(of: secondGoalTimer)
+        let secondGoalSeconds = Int(secondGoalTimerText.replacingOccurrences(of: "s", with: ""))
+        XCTAssertNotNil(secondGoalSeconds, "Expected a fresh seconds timer, got: \(secondGoalTimerText)")
+        XCTAssertLessThanOrEqual(secondGoalSeconds ?? Int.max, 5, "A new Goal timer must start near zero instead of carrying the previous Goal's duration.")
+        let achievementRows = conversationScrollView.descendants(matching: .any)
+            .matching(identifier: "goal-achievement-timeline-row")
+        XCTAssertTrue(waitUntil({ achievementRows.count == 2 }, timeout: 180), "A second completed Goal should create its own timeline item.")
+        let secondAchievementRow = achievementRows.element(boundBy: 1)
+        XCTAssertTrue(waitUntil({
+            followupMessage.frame.maxY < secondAchievementRow.frame.minY
+        }, timeout: 10), "The second Goal achievement should be anchored after the intervening follow-up question.")
+        XCTAssertTrue(waitUntil({
+            assistantMessages.count > 0
+                && secondAchievementRow.frame.minY > assistantMessages.element(boundBy: assistantMessages.count - 1).frame.maxY
+        }, timeout: 10), "The second achievement event should follow the assistant response that completed its Goal.")
+        XCTAssertTrue(waitUntil({
+            do {
+                return try self.taskRecord(id: taskID)?["status"] as? String == "Review"
+            } catch {
+                return false
+            }
+        }, timeout: 180), "Codex should report the second Goal complete before the task enters the Done archive.")
+        let movedToDone = try runCLI(["task", "move", taskID, "Done"])["result"] as? [String: Any]
+        XCTAssertEqual(movedToDone?["status"] as? String, "Done", "The Done transition should be accepted after Codex reports the task complete.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
+        element("back-to-board-button").click()
+        let archiveButton = element("done-archive-button")
+        XCTAssertTrue(archiveButton.waitForExistence(timeout: 10))
+        archiveButton.click()
+        let archivedGoal = element("done-archive-task-\(taskID)")
+        XCTAssertTrue(archivedGoal.waitForExistence(timeout: 10), "The completed Goal task should be available in the Done archive.")
+        archivedGoal.click()
+        XCTAssertTrue(element("archived-conversation-read-only").waitForExistence(timeout: 10))
+        let reopenedConversation = element("conversation-scroll-view")
+        let restoredBanner = reopenedConversation.descendants(matching: .any)
+            .matching(identifier: "goal-achieved-banner").firstMatch
+        XCTAssertTrue(restoredBanner.waitForExistence(timeout: 10), "A completed Goal should remain visible in the read-only conversation after archiving its task.")
+        XCTAssertTrue(accessibleLabelOrValue(of: restoredBanner).contains("Goal achieved in"))
+        let restoredAchievementRows = reopenedConversation.descendants(matching: .any)
+            .matching(identifier: "goal-achievement-timeline-row")
+        XCTAssertEqual(restoredAchievementRows.count, 2, "Both completed Goal events should remain in the archived conversation.")
+        XCTAssertTrue(reopenedConversation.scrollBars.firstMatch.waitForExistence(timeout: 5), "The archived Goal transcript should expose scrolling when its conversation overflows.")
+        let secondAchievementYBeforeScroll = restoredAchievementRows.element(boundBy: 1).frame.minY
+        reopenedConversation.swipeDown()
+        XCTAssertTrue(waitUntil({
+            abs(restoredAchievementRows.element(boundBy: 1).frame.minY - secondAchievementYBeforeScroll) > 8
+        }, timeout: 5), "Scrolling the conversation should move the Goal achievement with the transcript.")
+        let restoredFollowup = reopenedConversation.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", followupPrompt)).firstMatch
+        let restoredSecondAchievement = restoredAchievementRows.element(boundBy: 1)
+        let restoredFirstAchievement = restoredAchievementRows.element(boundBy: 0)
+        XCTAssertTrue(restoredFollowup.waitForExistence(timeout: 10))
+        for _ in 0..<8 where !waitUntil({
+            restoredFirstAchievement.frame.maxY < restoredFollowup.frame.minY
+        }, timeout: 1) {
+            reopenedConversation.swipeDown()
+        }
+        XCTAssertTrue(waitUntil({
+            restoredFirstAchievement.frame.maxY < restoredFollowup.frame.minY
+        }, timeout: 10), "The first Goal achievement should remain before the follow-up in the archived conversation.")
+        for _ in 0..<8 where !waitUntil({
+            restoredFollowup.frame.maxY < restoredSecondAchievement.frame.minY
+        }, timeout: 1) {
+            reopenedConversation.swipeUp()
+        }
+        XCTAssertTrue(waitUntil({
+            restoredFollowup.frame.maxY < restoredSecondAchievement.frame.minY
+        }, timeout: 10), "The archived follow-up question should stay before the second Goal achievement.")
+        XCTAssertFalse(element("active-goal-progress-row").exists)
+        XCTAssertFalse(element("message-composer").exists)
+        XCTAssertFalse(element("active-goal-title").exists)
+        XCTAssertFalse(element("active-goal-details").exists)
+        XCTAssertFalse(element("goal-expand-button").exists)
+        XCTAssertFalse(element("goal-pause-resume-button").exists)
+        XCTAssertFalse(element("goal-clear-button").exists)
     }
 
     // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer shows a Codex-reported model, while unsupported modes and malformed model IDs are rejected before creating history.
@@ -4933,6 +5271,117 @@ final class StationAIUITests: XCTestCase {
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
         assertTaskVisible("Non-blocking question", inColumn: "Waiting Response")
+    }
+
+    // case-contract: test_codex_async_questions_render_and_reply_as_followup | Async agentMessage questions retain choices and a free-text prompt in live updates and fresh CLI/XPC history, stay separate from later assistant text, and receive validated answers through the shared manager during and after an active turn. The UI shows inline answer cards instead of raw bullet text, blocks incomplete answers, preserves answered cards across reopening, and displays both submitted answers and responses.
+    func test_codex_async_questions_render_and_reply_as_followup() throws {
+        let created = try runCLI(["task", "create", "--title", "Async Codex question", "--root", fixture.primary.path])
+        let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-async-question").path
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Async Codex question")
+        element("message-composer").click()
+        element("message-composer").typeText("Ask an async question.")
+        element("send-message-button").click()
+
+        let card = element("async-question-item_stationai_async_question")
+        XCTAssertTrue(card.waitForExistence(timeout: 10))
+        let yesOption = element("async-question-option-item_stationai_async_question-0-0")
+        let noOption = element("async-question-option-item_stationai_async_question-0-1")
+        XCTAssertEqual(yesOption.label, "Yes, update paired tests and run required verification")
+        XCTAssertEqual(noOption.label, "No, leave tests and verification for later")
+        XCTAssertTrue(element("async-question-answer-item_stationai_async_question-1").exists)
+        XCTAssertFalse(element("assistant-message-item_stationai_async_question").exists,
+                       "Structured choices should appear in an answer card instead of a Markdown bubble.")
+        XCTAssertFalse(element("submit-async-questions-item_stationai_async_question").isEnabled)
+        XCTAssertTrue(app.staticTexts["I can continue while you decide."].waitForExistence(timeout: 10),
+                      "The assistant message after the question must remain separate.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: WorkspaceFixture.root.appendingPathComponent("codex-fixture-async-question.question-ready").path),
+                      "The question fixture must still have an active turn.")
+        yesOption.click()
+        XCTAssertFalse(element("submit-async-questions-item_stationai_async_question").isEnabled,
+                       "Every async question needs an answer before submission.")
+        let detail = element("async-question-answer-item_stationai_async_question-1")
+        detail.click()
+        detail.typeText("Keep the draft intact.")
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText("An unsent draft stays here.")
+        element("submit-async-questions-item_stationai_async_question").click()
+
+        let reply = "Test and verify: Yes, update paired tests and run required verification\nAdditional detail: Keep the draft intact."
+        XCTAssertTrue(app.staticTexts[reply].waitForExistence(timeout: 10), "The full two-answer reply must be sent.")
+        let response = element("assistant-message-item_stationai_async_answer_steered")
+        XCTAssertTrue(response.waitForExistence(timeout: 10))
+        XCTAssertTrue(response.label.contains("Answers received: Test and verify: Yes, update paired tests and run required verification"))
+        XCTAssertTrue(response.label.contains("Additional detail: Keep the draft intact."))
+        XCTAssertTrue(card.exists)
+        XCTAssertTrue(app.staticTexts["Answered"].exists)
+        XCTAssertEqual(composer.value as? String, "An unsent draft stays here.")
+        let laterCard = element("async-question-item_stationai_async_later_question")
+        XCTAssertTrue(laterCard.waitForExistence(timeout: 10))
+        let idleDeadline = Date().addingTimeInterval(10)
+        while !element("send-message-button").isEnabled && Date() < idleDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        XCTAssertTrue(element("send-message-button").isEnabled, "The later answer must be submitted after the first turn completes.")
+        let laterAnswer = element("async-question-answer-item_stationai_async_later_question-0")
+        laterAnswer.click()
+        laterAnswer.typeText("Finish after the turn.")
+        element("submit-async-questions-item_stationai_async_later_question").click()
+        let completedResponse = element("assistant-message-item_stationai_async_answer_2")
+        XCTAssertTrue(completedResponse.waitForExistence(timeout: 10),
+                      "A question answered after its original turn must refresh the visible conversation.")
+        XCTAssertTrue(completedResponse.label.contains("Answers received: One more check: Finish after the turn."))
+        XCTAssertEqual(composer.value as? String, "An unsent draft stays here.")
+        element("back-to-board-button").click()
+        openTask(named: "Async Codex question")
+        XCTAssertTrue(card.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Answered"].exists)
+        XCTAssertTrue(laterCard.exists)
+        XCTAssertTrue(laterCard.staticTexts["Answered"].exists, "The later question must stay answered after reopening.")
+        XCTAssertEqual(element("message-composer").value as? String, "An unsent draft stays here.")
+    }
+
+    // case-contract: test_codex_async_question_queued_answer_retries | An async question answered after its turn ends stays Pending when the first follow-up fails, rejects duplicate answers across fresh CLI/XPC connections, and becomes Answered only after an explicit queued retry succeeds. The paired UI keeps the card and queue action visible across reopening and then displays the delivered response.
+    func test_codex_async_question_queued_answer_retries() throws {
+        let created = try runCLI(["task", "create", "--title", "Queued async question", "--root", fixture.primary.path])
+        let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
+        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-async-question-queued")
+        codexFixtureExecutable = executable.path
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Queued async question")
+        element("message-composer").click()
+        element("message-composer").typeText("Ask a queued async question.")
+        element("send-message-button").click()
+        let card = element("async-question-item_stationai_async_question")
+        XCTAssertTrue(card.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({
+            ((try? self.taskRecord(id: taskID))?["status"] as? String) == "Waiting Response"
+        }, timeout: 10), "The first turn must finish before queueing the answer.")
+        _ = FileManager.default.createFile(atPath: executable.path + ".fail-next-turn-start", contents: Data())
+        element("async-question-option-item_stationai_async_question-0-0").click()
+        element("async-question-answer-item_stationai_async_question-1").click()
+        element("async-question-answer-item_stationai_async_question-1").typeText("Retry this answer.")
+        element("submit-async-questions-item_stationai_async_question").click()
+        XCTAssertTrue(card.staticTexts["Pending"].waitForExistence(timeout: 10))
+        let queueResult = try runCLI(["conversation", "queue-list", taskID])
+        let queued = try XCTUnwrap((queueResult["result"] as? [[String: Any]])?.first)
+        XCTAssertEqual(queued["asyncQuestionItemID"] as? String, "item_stationai_async_question")
+        let queuedID = try XCTUnwrap(queued["id"] as? String)
+        XCTAssertEqual(queued["state"] as? String, "needsAction")
+        element("back-to-board-button").click()
+        openTask(named: "Queued async question")
+        XCTAssertTrue(card.waitForExistence(timeout: 5))
+        XCTAssertTrue(card.staticTexts["Pending"].exists)
+        let retry = element("retry-queued-message-\(queuedID.uppercased())")
+        XCTAssertTrue(retry.waitForExistence(timeout: 5))
+        retry.click()
+        let response = element("assistant-message-item_stationai_async_answer_2")
+        XCTAssertTrue(response.waitForExistence(timeout: 10))
+        XCTAssertTrue(response.label.contains("Answers received: Test and verify: Yes, update paired tests and run required verification"))
+        XCTAssertTrue(response.label.contains("Additional detail: Retry this answer."))
+        XCTAssertTrue(card.staticTexts["Answered"].exists)
     }
 
     // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes persist Blocked across connections, and diagnostics identify the failed turn phase and store path; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
@@ -5146,13 +5595,20 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "External Git commit clears the open changes sidebar")
     }
 
+    private var isLiveCodexIntegration: Bool {
+        ProcessInfo.processInfo.environment["STATIONAI_RUN_CODEX_INTEGRATION"] == "1"
+            || FileManager.default.fileExists(atPath: "/tmp/stationai-codex-live-ui-integration")
+    }
+
     private func launchApp(defaultParent: String?, environmentOverrides: [String: String] = [:]) {
         clearSavedWindowFrames()
         launchDefaultParent = defaultParent
         let bundleIdentifier = Bundle(url: appBundle)?.bundleIdentifier ?? "com.stationai.app.e2e"
         app = XCUIApplication(bundleIdentifier: bundleIdentifier)
         app.launchEnvironment["STATIONAI_DATA_DIRECTORY"] = dataDirectory.path
-        app.launchEnvironment["CODEX_HOME"] = dataDirectory.appendingPathComponent("codex-home").path
+        let usesLiveCodex = isLiveCodexIntegration
+        let liveCodexHome = ProcessInfo.processInfo.environment["CODEX_HOME"] ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex").path
+        app.launchEnvironment["CODEX_HOME"] = usesLiveCodex ? liveCodexHome : dataDirectory.appendingPathComponent("codex-home").path
         app.launchEnvironment["STATIONAI_WORKTREE_LABEL"] = "StationAI UI Test Worktree"
         app.launchEnvironment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         app.launchEnvironment["STATIONAI_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
@@ -5187,7 +5643,10 @@ final class StationAIUITests: XCTestCase {
         let targetBundleIdentifier = bundleIdentifier ?? Bundle(url: appBundle)?.bundleIdentifier ?? "com.stationai.app.e2e"
         var environment = ProcessInfo.processInfo.environment
         environment["STATIONAI_DATA_DIRECTORY"] = dataDirectory.path
-        environment["CODEX_HOME"] = dataDirectory.appendingPathComponent("codex-home").path
+        let usesLiveCodex = isLiveCodexIntegration
+        let liveCodexHome = ProcessInfo.processInfo.environment["CODEX_HOME"] ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex").path
+        let codexHome = usesLiveCodex ? liveCodexHome : dataDirectory.appendingPathComponent("codex-home").path
+        environment["CODEX_HOME"] = codexHome
         environment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         environment["STATIONAI_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         environment["STATIONAI_E2E_DEFAULT_PARENT_FOLDER"] = launchDefaultParent ?? "__unset__"
@@ -5205,11 +5664,15 @@ final class StationAIUITests: XCTestCase {
         opener.arguments = [
             "-n",
             "--env", "STATIONAI_DATA_DIRECTORY=\(dataDirectory.path)",
+            "--env", "CODEX_HOME=\(codexHome)",
             "--env", "STATIONAI_WORKTREE_LABEL=StationAI UI Test Worktree",
             "--env", "STATIONAI_E2E_WORKTREE_DIRECTORY=\(dataDirectory.appendingPathComponent("worktrees").path)",
             "--env", "STATIONAI_E2E_DEFAULTS_SUITE=\(preferencesSuiteName!)",
             "--env", "STATIONAI_E2E_DEFAULT_PARENT_FOLDER=\(launchDefaultParent ?? "__unset__")"
         ]
+        if usesLiveCodex {
+            opener.arguments?.append(contentsOf: ["--env", "STATIONAI_RUN_CODEX_INTEGRATION=1"])
+        }
         if let launchWindowTitle {
             opener.arguments?.append(contentsOf: ["--env", "STATIONAI_WINDOW_TITLE=\(launchWindowTitle)"])
         }
@@ -5597,6 +6060,51 @@ final class StationAIUITests: XCTestCase {
         XCTAssertGreaterThan(redPixels, 3, "The missing-folder warning should render red foreground pixels.", file: file, line: line)
     }
 
+    private func assertStationAILogoArtwork(_ element: XCUIElement, in window: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        let logoImage = element.screenshot().image
+        guard let cgImage = logoImage.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let windowCGImage = window.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            XCTFail("Could not read the StationAI logo screenshot.", file: file, line: line)
+            return
+        }
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        assertPixel(logoImage, normalizedX: 0.2, normalizedY: 0.5, rgb: (61, 125, 214), accuracy: 55, file: file, line: line)
+        assertPixel(logoImage, normalizedX: 0.5, normalizedY: 0.65, rgb: (115, 86, 184), accuracy: 55, file: file, line: line)
+        assertPixel(logoImage, normalizedX: 0.82, normalizedY: 0.55, rgb: (38, 161, 108), accuracy: 55, file: file, line: line)
+        assertPixel(logoImage, normalizedX: 0.77, normalizedY: 0.78, rgb: (254, 158, 71), accuracy: 55, file: file, line: line)
+
+        let windowBitmap = NSBitmapImageRep(cgImage: windowCGImage)
+        let logoFrame = element.frame
+        let windowFrame = window.frame
+        let corners: [(logo: CGPoint, background: CGPoint)] = [
+            (CGPoint(x: 0.02, y: 0.02), CGPoint(x: logoFrame.minX - 2, y: logoFrame.minY + 2)),
+            (CGPoint(x: 0.98, y: 0.02), CGPoint(x: logoFrame.maxX + 2, y: logoFrame.minY + 2)),
+            (CGPoint(x: 0.02, y: 0.98), CGPoint(x: logoFrame.minX - 2, y: logoFrame.maxY - 2)),
+            (CGPoint(x: 0.98, y: 0.98), CGPoint(x: logoFrame.maxX + 2, y: logoFrame.maxY - 2)),
+            (CGPoint(x: 0.30, y: 0.50), CGPoint(x: logoFrame.minX - 2, y: logoFrame.minY + logoFrame.height * 0.50))
+        ]
+        for corner in corners {
+            let headerPoint = CGPoint(
+                x: (corner.background.x - windowFrame.minX) / windowFrame.width,
+                y: (corner.background.y - windowFrame.minY) / windowFrame.height
+            )
+            guard let logoColor = color(in: bitmap, normalizedPoint: corner.logo),
+                  let backgroundColor = color(in: windowBitmap, normalizedPoint: headerPoint) else {
+                XCTFail("Could not sample the logo's transparent corners and adjacent window background.", file: file, line: line)
+                return
+            }
+            XCTAssertEqual(logoColor.redComponent, backgroundColor.redComponent, accuracy: 0.04, "The logo's transparent corner should reveal the adjacent window background.", file: file, line: line)
+            XCTAssertEqual(logoColor.greenComponent, backgroundColor.greenComponent, accuracy: 0.04, "The logo's transparent corner should reveal the adjacent window background.", file: file, line: line)
+            XCTAssertEqual(logoColor.blueComponent, backgroundColor.blueComponent, accuracy: 0.04, "The logo's transparent corner should reveal the adjacent window background.", file: file, line: line)
+        }
+    }
+
+    private func color(in bitmap: NSBitmapImageRep, normalizedPoint: CGPoint) -> NSColor? {
+        let x = min(bitmap.pixelsWide - 1, max(0, Int(CGFloat(bitmap.pixelsWide) * normalizedPoint.x)))
+        let y = min(bitmap.pixelsHigh - 1, max(0, Int(CGFloat(bitmap.pixelsHigh) * normalizedPoint.y)))
+        return bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB)
+    }
+
     private func assertSubagentIconArtwork(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
         guard let cgImage = element.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             XCTFail("Could not read the subagent icon screenshot.", file: file, line: line)
@@ -5830,6 +6338,9 @@ final class StationAIUITests: XCTestCase {
         process.arguments = arguments
         var environment = ProcessInfo.processInfo.environment
         environment["STATIONAI_DATA_DIRECTORY"] = dataDirectory.path
+        let usesLiveCodex = isLiveCodexIntegration
+        let liveCodexHome = ProcessInfo.processInfo.environment["CODEX_HOME"] ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex").path
+        environment["CODEX_HOME"] = usesLiveCodex ? liveCodexHome : dataDirectory.appendingPathComponent("codex-home").path
         environment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         environment["STATIONAI_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         environment["STATIONAI_BRIDGE_SERVICE_NAME"] = serviceName
@@ -5982,7 +6493,8 @@ final class StationAIUITests: XCTestCase {
 
     private func assertHoverEmphasis(for element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
         let before = element.screenshot().image
-        element.hover()
+        // XCTest cannot read NSCursor.current from the app process; hover inside the padded edge to verify that region receives hover events.
+        element.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).hover()
         Thread.sleep(forTimeInterval: 0.2)
         let after = element.screenshot().image
         guard let beforeCG = before.cgImage(forProposedRect: nil, context: nil, hints: nil),

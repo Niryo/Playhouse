@@ -1,7 +1,7 @@
 [
   {
     "id": "test_service_reports_bridge_version",
-    "expectation": "StationAI opens one main board window titled with its worktree label and the bridge reports API version 1."
+    "expectation": "StationAI opens one main board window titled with its worktree label, displays the StationAILogo asset, and the bridge reports API version 1."
   },
   {
     "id": "test_worktree_app_profiles_isolate_identity_and_store",
@@ -177,15 +177,19 @@
   },
   {
     "id": "test_conversation_shows_subagent_delegation",
-    "expectation": "During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs."
+    "expectation": "During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs."
   },
   {
     "id": "test_plan_mode_renders_markdown_in_conversation",
-    "expectation": "Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty composer, switches to Code mode, and starts an implementation turn. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff."
+    "expectation": "Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics."
   },
   {
     "id": "test_conversation_mode_rejects_unknown_mode_without_starting_a_turn",
     "expectation": "The composer shows a Codex-reported model, while unsupported modes and malformed model IDs are rejected before creating history."
+  },
+  {
+    "id": "test_thread_goal_lifecycle_persists_through_cli_xpc",
+    "expectation": "CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime."
   },
   {
     "id": "test_codex_questions_can_be_answered_over_cli_xpc",
@@ -194,6 +198,14 @@
   {
     "id": "test_codex_nonblocking_question_keeps_task_in_progress",
     "expectation": "Non-blocking structured questions remain visible without moving the task out of In Progress, then the answered turn returns to Waiting Response without an explicit completed outcome."
+  },
+  {
+    "id": "test_codex_async_questions_render_and_reply_as_followup",
+    "expectation": "Async agentMessage questions retain choices and a free-text prompt in live updates and fresh CLI/XPC history, stay separate from later assistant text, and receive validated answers through the shared manager during and after an active turn. The UI shows inline answer cards instead of raw bullet text, blocks incomplete answers, preserves answered cards across reopening, and displays both submitted answers and responses."
+  },
+  {
+    "id": "test_codex_async_question_queued_answer_retries",
+    "expectation": "An async question answered after its turn ends stays Pending when the first follow-up fails, rejects duplicate answers across fresh CLI/XPC connections, and becomes Answered only after an explicit queued retry succeeds. The paired UI keeps the card and queue action visible across reopening and then displays the delivered response."
   },
   {
     "id": "test_codex_interrupted_turn_blocks_with_reason_and_can_retry",
@@ -221,11 +233,11 @@
   },
   {
     "id": "test_review_pr_conflicts_probe_and_verify",
-    "expectation": "Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 10 seconds. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action beside its PR link; the conflict action and PR link have hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head."
+    "expectation": "Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 10 seconds. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action with its indicator artwork beside its PR link; the UI renders the artwork inside the action, keeps it beside the PR link, and gives both controls hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head."
   },
   {
     "id": "test_done_archive_displays_existing_pull_request_link",
-    "expectation": "A Done task's real SwiftData record retains a linked PR number and URL across fresh CLI/XPC reads so the archive renders the PR link with distinct hover emphasis and useful help; an active repository-backed task card renders a saved PR link with the same hover indication."
+    "expectation": "CLI/XPC fresh reads confirm saved PR data; the UI shows active and archived PR links and an active task's Create PR button. Hovering the outer padded edge of each control triggers its hover feedback."
   },
   {
     "id": "test_app_override_rejects_incompatible_bundles",

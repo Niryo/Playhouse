@@ -78,6 +78,15 @@ final class BoardTask {
     var contextFolderPathsData: Data?
     var draftImageDataURLsData: Data?
     var conversationActivityDurationsData: Data?
+    var answeredAsyncQuestionIDsData: Data?
+
+    var answeredAsyncQuestionIDs: [String] {
+        get {
+            guard let answeredAsyncQuestionIDsData else { return [] }
+            return (try? JSONDecoder().decode([String].self, from: answeredAsyncQuestionIDsData)) ?? []
+        }
+        set { answeredAsyncQuestionIDsData = try? JSONEncoder().encode(newValue) }
+    }
 
     var workspaceRootPaths: [String] {
         get {
@@ -141,6 +150,7 @@ final class BoardTask {
         contextFolderPathsData = nil
         draftImageDataURLsData = nil
         conversationActivityDurationsData = nil
+        answeredAsyncQuestionIDsData = nil
     }
 }
 

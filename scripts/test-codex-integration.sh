@@ -40,5 +40,6 @@ bash -c '
   python3 "${repository_root}/scripts/prepare-e2e-fixture.py" --fixture-root "${fixture_root}"
   python3 "${repository_root}/scripts/test-codex-integration.py"
   STATIONAI_UI_TESTS_CONFIRMED=1 "${repository_root}/scripts/test-ui.sh" --case test_conversation_composer_rejects_blank_and_supports_live_turn_controls
+  STATIONAI_UI_TESTS_CONFIRMED=1 "${repository_root}/scripts/test-ui.sh" --case test_thread_goal_lifecycle_persists_through_cli_xpc
   STATIONAI_UI_TESTS_CONFIRMED=1 "${repository_root}/scripts/test-ui.sh" --case test_task_worktree_preparation_serializes_auto_branch_claims
 ' -- "${repository_root}"

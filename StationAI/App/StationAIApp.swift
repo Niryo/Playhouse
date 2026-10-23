@@ -19,7 +19,8 @@ struct StationAIApp: App {
     init() {
         let environment = ProcessInfo.processInfo.environment
         _codexClient = StateObject(wrappedValue: CodexAppServerClient(
-            codexExecutableOverride: environment["STATIONAI_E2E_CODEX_EXECUTABLE"]
+            codexExecutableOverride: environment["STATIONAI_E2E_CODEX_EXECUTABLE"],
+            goalRuntimeEnabled: true
         ))
         #if DEBUG
         if let suiteName = environment["STATIONAI_E2E_DEFAULTS_SUITE"],
