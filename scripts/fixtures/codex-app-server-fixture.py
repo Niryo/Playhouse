@@ -23,6 +23,28 @@ def write(value):
     sys.stdout.flush()
 
 
+def answer_text(user_message):
+    if isinstance(user_message, str) and user_message.startswith("Long response fixture input."):
+        return "A long fixture response gives the conversation enough content to test comment hint truncation. " * 8
+    if isinstance(user_message, str) and ("<response-comments>" in user_message or "<response-annotations>" in user_message):
+        try:
+            tag = "response-comments" if "<response-comments>" in user_message else "response-annotations"
+            payload = user_message.split(f"<{tag}>", 1)[1].split(f"</{tag}>", 1)[0]
+            annotations = json.loads(payload)
+            if isinstance(annotations, list) and annotations:
+                return "\n".join(
+                    (f":codex-annotation{{index=\"{index}\"}} For ‘{item['text']}’: "
+                     f"{item.get('comment', item.get('annotation', ''))}"
+                     if tag == "response-comments" else
+                     f"For ‘{item['text']}’: {item.get('comment', item.get('annotation', ''))} "
+                     f":codex-annotation{{index=\"{index}\"}}")
+                    for index, item in enumerate(annotations)
+                )
+        except (KeyError, TypeError, ValueError):
+            pass
+    return "Answers received: Blue / fixture-secret."
+
+
 def question_request(request_id):
     mode = os.path.basename(sys.argv[0])
     questions = [] if mode.endswith("-empty") else [
@@ -601,7 +623,7 @@ def main():
                     if user_content:
                         contents.extend([
                             {"id": f"item_user_fixture_{index}", "type": "userMessage", "content": user_content},
-                            {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."},
+                            {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": answer_text(user_message)},
                         ])
             elif saved_history.get("turns"):
                 contents = []
@@ -614,7 +636,7 @@ def main():
                     if user_content:
                         contents.extend([
                             {"id": f"item_user_fixture_{index}", "type": "userMessage", "content": user_content},
-                            {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."},
+                            {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": answer_text(user_message)},
                         ])
             else:
                 user_message = saved_history.get("userMessage") or (turn_message if answers else None)
@@ -624,7 +646,7 @@ def main():
                 ]
                 contents = ([
                     {"id": "item_user_fixture", "type": "userMessage", "content": user_content},
-                    {"id": "item_assistant_fixture", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."},
+                    {"id": "item_assistant_fixture", "type": "agentMessage", "text": answer_text(user_message)},
                 ] if user_content and not mode.endswith("-empty") else [])
             if mode.endswith("-subagent") or mode.endswith("-subagent-wait"):
                 contents = [

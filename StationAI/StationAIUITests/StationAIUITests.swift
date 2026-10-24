@@ -596,7 +596,7 @@ final class StationAIUITests: XCTestCase {
 
     // case-contract: test_task_creation_reuses_existing_branch_worktree | A selected existing branch remains pending until task start, then reuses its exact existing worktree path.
     func test_task_creation_reuses_existing_branch_worktree() throws {
-        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success").path
         launchApp(defaultParent: fixture.parent.path)
         openNewTaskConversation()
         chooseRepositorySuggestion("primary")
@@ -3588,6 +3588,502 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Blank composer leaves send disabled")
     }
 
+    // case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. The agent is instructed to start each comment response line with its indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy response-annotations payloads and annotation fields still restore their reply details.
+    func test_conversation_adds_ordered_text_annotations() throws {
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success").path
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Comment source", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Comment source")
+        let sourceText = "Long response fixture input. A user message with selectable words. Literal # Response comments: stays visible. "
+            + String(repeating: "Additional context spans across multiple visual lines. ", count: 5)
+        _ = try runCLI([
+            "conversation", "send", taskID, "--message", sourceText,
+        ])
+        let legacyComment = "A detail from older saved history"
+        let legacyPayload = try JSONSerialization.data(withJSONObject: [[
+            "text": "legacy highlighted words", "annotation": legacyComment,
+            "source": ["messageId": "legacy-source", "blockID": 0, "startOffset": 0, "endOffset": 24],
+        ]])
+        let legacyPayloadText = try XCTUnwrap(String(data: legacyPayload, encoding: .utf8))
+        let legacyPrompt = "# Response annotations:\nThe following JSON contains comments on selected conversation text, in array order.\n"
+            + "<response-annotations>\(legacyPayloadText)</response-annotations>"
+        _ = try runCLI([
+            "conversation", "send", taskID, "--message", legacyPrompt,
+        ])
+        let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        let messages = try XCTUnwrap(history?["messages"] as? [[String: Any]])
+        let sourceMessage = try XCTUnwrap(messages.first { $0["role"] as? String == "user" })
+        let sourceID = try XCTUnwrap(sourceMessage["id"] as? String)
+        let assistantMessage = try XCTUnwrap(messages.first { $0["role"] as? String == "assistant" })
+        let assistantID = try XCTUnwrap(assistantMessage["id"] as? String)
+        XCTAssertFalse(try XCTUnwrap(assistantMessage["text"] as? String).isEmpty)
+        let userSelection = String(sourceText.prefix(10))
+        var assistantSelection = ""
+        openTask(named: "Comment source")
+        let seededHistory = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        let seededMessages = try XCTUnwrap(seededHistory?["messages"] as? [[String: Any]])
+        let seededLegacyMessage = try XCTUnwrap(seededMessages.first {
+            ($0["role"] as? String) == "assistant" && (($0["text"] as? String)?.contains("legacy highlighted words") ?? false)
+        })
+        let seededLegacyID = try XCTUnwrap(seededLegacyMessage["id"] as? String)
+        let seededLegacyResponse = element("assistant-message-\(seededLegacyID)")
+        let seededLegacyLink = seededLegacyResponse.descendants(matching: .textView).matching(
+            NSPredicate(format: "value CONTAINS %@", "Comment 1")
+        ).firstMatch
+        XCTAssertTrue(seededLegacyLink.waitForExistence(timeout: 5))
+        // Calculate the marker's actual visual center within the one-line response
+        // so the pointer lands on the link glyph, not an approximate text-view point.
+        let seededLegacyValue = seededLegacyLink.value as? String ?? ""
+        let seededLegacyNSString = seededLegacyValue as NSString
+        let seededMarkerRange = seededLegacyNSString.range(of: "Comment 1")
+        XCTAssertNotEqual(seededMarkerRange.location, NSNotFound)
+        let seededMarkerPrefix = seededLegacyNSString.substring(to: seededMarkerRange.location)
+        let seededMarkerText = seededLegacyNSString.substring(with: seededMarkerRange)
+        let seededMarkerFont = NSFont.systemFont(ofSize: 16)
+        let seededMarkerCenterX = (
+            seededMarkerPrefix.size(withAttributes: [.font: seededMarkerFont]).width
+                + seededMarkerText.size(withAttributes: [.font: seededMarkerFont]).width / 2
+        ) / max(1, seededLegacyLink.frame.width)
+        let seededMarkerPointX = min(0.99, max(0.01, seededMarkerCenterX))
+        // The accessibility text-view frame extends above the visible glyph line.
+        // The VM recording places this point on the marker rather than its padding.
+        let seededMarkerCenter = seededLegacyLink.coordinate(withNormalizedOffset: CGVector(dx: seededMarkerPointX, dy: 0.8))
+        let seededCommentHint = element("response-comment-hover-card")
+        let markerScreenPoint = seededMarkerCenter.screenPoint
+        let offCommentCoordinate = seededLegacyLink.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5))
+        let offCommentPoint = offCommentCoordinate.screenPoint
+        let markerImage = try XCTUnwrap(seededLegacyLink.screenshot().image.cgImage(
+            forProposedRect: nil, context: nil, hints: nil
+        ))
+        let markerBitmap = NSBitmapImageRep(cgImage: markerImage)
+        var blueMinX = markerBitmap.pixelsWide
+        var blueMaxX = -1
+        var blueMinY = markerBitmap.pixelsHigh
+        var blueMaxY = -1
+        for x in 0..<markerBitmap.pixelsWide {
+            for y in 0..<markerBitmap.pixelsHigh {
+                guard let color = markerBitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                if color.blueComponent > 0.6 && color.blueComponent > color.redComponent + 0.25
+                    && color.blueComponent > color.greenComponent + 0.08 {
+                    blueMinX = min(blueMinX, x)
+                    blueMaxX = max(blueMaxX, x)
+                    blueMinY = min(blueMinY, y)
+                    blueMaxY = max(blueMaxY, y)
+                }
+            }
+        }
+        XCTAssertGreaterThan(blueMaxY - blueMinY, 3, "The screenshot should locate the rendered blue comment glyphs.")
+        let markerPixelsPerPointY = CGFloat(markerBitmap.pixelsHigh) / seededLegacyLink.frame.height
+        let markerPixelsPerPointX = CGFloat(markerBitmap.pixelsWide) / seededLegacyLink.frame.width
+        let visibleMarkerMidX = seededLegacyLink.frame.minX + CGFloat(blueMinX + blueMaxX) / 2 / markerPixelsPerPointX
+        let visibleMarkerTopY = seededLegacyLink.frame.minY + CGFloat(blueMinY) / markerPixelsPerPointY
+        let visibleMarkerBottomY = seededLegacyLink.frame.minY + CGFloat(blueMaxY + 1) / markerPixelsPerPointY
+        func pointerIsNear(_ point: CGPoint) -> Bool {
+            guard let currentPoint = CGEvent(source: nil)?.location else { return false }
+            return hypot(currentPoint.x - point.x, currentPoint.y - point.y) <= 4
+        }
+        func waitForPointer(at point: CGPoint, timeout: TimeInterval) -> Date? {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if pointerIsNear(point) { return Date() }
+                Thread.sleep(forTimeInterval: 0.002)
+            }
+            return nil
+        }
+        let targetBundleIdentifier = try XCTUnwrap(Bundle(url: appBundle)?.bundleIdentifier)
+        let targetProcessID = try XCTUnwrap(
+            NSRunningApplication.runningApplications(withBundleIdentifier: targetBundleIdentifier).first?.processIdentifier
+        )
+        func visibleAppWindowIDs() -> Set<Int> {
+            let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                as? [[String: Any]] ?? []
+            return Set(windows.compactMap { window in
+                guard (window[kCGWindowOwnerPID as String] as? Int) == Int(targetProcessID) else { return nil }
+                return window[kCGWindowNumber as String] as? Int
+            })
+        }
+        offCommentCoordinate.hover()
+        XCTAssertTrue(pointerIsNear(offCommentPoint), "The timing probe must start with the pointer outside the link.")
+        XCTAssertFalse(pointerIsNear(markerScreenPoint))
+        let windowsBeforeHover = visibleAppWindowIDs()
+        let timingProbeFinished = DispatchSemaphore(value: 0)
+        var hoverStartedAt: Date?
+        var hintAppearedAt: Date?
+        DispatchQueue.global(qos: .userInitiated).async {
+            hoverStartedAt = waitForPointer(at: markerScreenPoint, timeout: 5)
+            if let hoverStartedAt {
+                let deadline = hoverStartedAt.addingTimeInterval(1)
+                while Date() < deadline {
+                    if !visibleAppWindowIDs().subtracting(windowsBeforeHover).isEmpty {
+                        hintAppearedAt = Date()
+                        break
+                    }
+                    Thread.sleep(forTimeInterval: 0.002)
+                }
+            }
+            timingProbeFinished.signal()
+        }
+        seededMarkerCenter.hover()
+        XCTAssertEqual(timingProbeFinished.wait(timeout: .now() + 5), .success)
+        let confirmedHoverStart = try XCTUnwrap(hoverStartedAt, "Native hover must reach the comment glyphs.")
+        let confirmedHintAppearance = try XCTUnwrap(hintAppearedAt, "The timing probe must observe the hint window.")
+        XCTAssertGreaterThanOrEqual(confirmedHintAppearance.timeIntervalSince(confirmedHoverStart), 0.19,
+                                    "The hint should wait about 200 ms after pointer entry.")
+        XCTAssertTrue(seededCommentHint.waitForExistence(timeout: 5),
+                      "A native pointer hover on the comment glyphs should open their hint.")
+        XCTAssertFalse(visibleAppWindowIDs().subtracting(windowsBeforeHover).isEmpty,
+                       "The visible hint should create a window detectable by the timing probe.")
+        attachScreenshot(named: "Focused seeded response comment hover popover")
+        XCTAssertTrue(seededCommentHint.label.contains("legacy highlighted words"))
+        XCTAssertTrue(seededCommentHint.label.contains(legacyComment))
+        let seededMarkerScreenCenterX = seededLegacyLink.frame.minX + seededLegacyLink.frame.width * seededMarkerPointX
+        XCTAssertLessThanOrEqual(seededCommentHint.frame.maxY, seededLegacyLink.frame.minY + 4,
+                                 "The comment hint should open above its anchor text.")
+        XCTAssertLessThanOrEqual(abs(seededCommentHint.frame.midX - seededMarkerScreenCenterX), 16,
+                                 "The comment hint should be horizontally aligned to the hovered comment label.")
+        offCommentCoordinate.hover()
+        XCTAssertTrue(waitUntil({ !seededCommentHint.exists }, timeout: 0.2), "The comment hint should close as soon as the pointer leaves its link.")
+        XCTAssertTrue(pointerIsNear(offCommentPoint), "The cancellation probe must start outside the link.")
+        XCTAssertFalse(pointerIsNear(markerScreenPoint))
+        let windowsBeforeBriefHover = visibleAppWindowIDs()
+        let cancellationProbeFinished = DispatchSemaphore(value: 0)
+        var cancelHoverStartedAt: Date?
+        var pointerLeftAt: Date?
+        var pointerWarpResult: CGError?
+        var hintWindowAfterExit = false
+        var pointerStayedOutside = false
+        DispatchQueue.global(qos: .userInitiated).async {
+            cancelHoverStartedAt = waitForPointer(at: markerScreenPoint, timeout: 5)
+            if cancelHoverStartedAt != nil {
+                Thread.sleep(forTimeInterval: 0.04)
+                pointerWarpResult = CGWarpMouseCursorPosition(offCommentPoint)
+                pointerLeftAt = Date()
+                Thread.sleep(forTimeInterval: 0.25)
+                pointerStayedOutside = pointerIsNear(offCommentPoint)
+                hintWindowAfterExit = !visibleAppWindowIDs().subtracting(windowsBeforeBriefHover).isEmpty
+            }
+            cancellationProbeFinished.signal()
+        }
+        seededMarkerCenter.hover()
+        XCTAssertEqual(cancellationProbeFinished.wait(timeout: .now() + 5), .success)
+        let confirmedBriefHoverStart = try XCTUnwrap(cancelHoverStartedAt, "Brief hover must reach the comment glyphs.")
+        let confirmedPointerExit = try XCTUnwrap(pointerLeftAt, "The pointer must leave the comment link.")
+        XCTAssertLessThan(confirmedPointerExit.timeIntervalSince(confirmedBriefHoverStart), 0.2,
+                          "The pointer must leave before the hover delay expires.")
+        XCTAssertEqual(pointerWarpResult, .success)
+        XCTAssertTrue(pointerStayedOutside, "The pointer should remain outside the comment after exit.")
+        XCTAssertFalse(hintWindowAfterExit, "A brief hover should not create a late hint window.")
+        XCTAssertFalse(seededCommentHint.exists, "A brief hover should not show a late hint after exit.")
+        let paddedHoverProbeYs = [seededLegacyLink.frame.minY + 2, seededLegacyLink.frame.maxY - 4]
+        XCTAssertLessThan(paddedHoverProbeYs[0], visibleMarkerTopY,
+                          "The upper probe should be in the transparent inset above blue text.")
+        XCTAssertGreaterThan(paddedHoverProbeYs[1], visibleMarkerBottomY,
+                             "The lower probe should be in the transparent inset below blue text.")
+        for edgeY in paddedHoverProbeYs {
+            XCTAssertTrue(seededLegacyLink.frame.minY < edgeY && edgeY < seededLegacyLink.frame.maxY,
+                          "The padded hover probe should remain inside the text view.")
+            seededMarkerCenter.withOffset(CGVector(dx: visibleMarkerMidX - markerScreenPoint.x,
+                                                   dy: edgeY - markerScreenPoint.y)).hover()
+            XCTAssertTrue(waitUntil({ seededCommentHint.exists }, timeout: 5),
+                          "The transparent text-view inset should trigger the comment hint.")
+            offCommentCoordinate.hover()
+            XCTAssertTrue(waitUntil({ !seededCommentHint.exists }, timeout: 0.2),
+                          "The comment hint should close after leaving its label.")
+        }
+
+        attachScreenshot(named: "Comment test conversation before hover")
+        let conversationHierarchy = XCTAttachment(string: app.debugDescription)
+        conversationHierarchy.name = "Comment test conversation accessibility hierarchy"
+        conversationHierarchy.lifetime = .keepAlways
+        add(conversationHierarchy)
+        let userView = element("user-message-\(sourceID)")
+        XCTAssertTrue(userView.waitForExistence(timeout: 10))
+        let transcriptScrollView = element("conversation-scroll-view")
+        for _ in 0..<4 where userView.frame.midY < transcriptScrollView.frame.minY + 20 {
+            transcriptScrollView.swipeDown()
+        }
+        XCTAssertTrue(userView.frame.midY > transcriptScrollView.frame.minY + 20,
+                      "The earlier user message should be visible before selecting its text.")
+        func selectPrefix(_ view: XCUIElement) {
+            view.click()
+            view.typeKey("a", modifierFlags: .command)
+            view.typeKey(.leftArrow, modifierFlags: [])
+            for _ in 0..<10 { view.typeKey(.rightArrow, modifierFlags: .shift) }
+        }
+        func selectAllText(_ view: XCUIElement) {
+            view.click()
+            view.typeKey("a", modifierFlags: .command)
+        }
+        let addComment = app.buttons.matching(NSPredicate(format: "label == %@", "Add comment")).firstMatch
+        selectAllText(userView)
+        XCTAssertTrue(addComment.waitForExistence(timeout: 5), "Selecting transcript text should expose Add comment.")
+        XCTAssertGreaterThan(userView.frame.height, 40, "The selected text should wrap across multiple lines.")
+        // Keep this diagnostic run focused on the response comment hover below.
+        XCTAssertLessThan(abs(addComment.frame.midX - userView.frame.midX), 70,
+                          "For a multiline selection, the floating hint should center over the selected lines.")
+        addComment.click()
+        let initialCommentField = element("comment-input-field")
+        XCTAssertTrue(initialCommentField.waitForExistence(timeout: 5))
+        XCTAssertLessThan(initialCommentField.frame.height, 40, "The comment entry should be a compact single-line field.")
+        XCTAssertLessThan(abs(initialCommentField.frame.midX - addComment.frame.midX), 250,
+                          "The compact comment field should stay beside the floating hint horizontally.")
+        XCTAssertLessThan(abs(initialCommentField.frame.midY - addComment.frame.midY), 200,
+                          "The compact comment field should stay beside the floating hint vertically.")
+        initialCommentField.typeText("Discard this comment")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertFalse(element("send-message-button").isEnabled, "Cancelling should leave no pending comment to submit.")
+
+        for (sourceView, comment, selectAll) in [
+            (userView, "Explain this phrase", false),
+            (element("assistant-message-\(assistantID)").descendants(matching: .textView).firstMatch,
+             String(repeating: "Please clarify this response in detail, including how each part connects to the question. ", count: 8), true),
+        ] {
+            XCTAssertTrue(sourceView.waitForExistence(timeout: 5))
+            let orangePixelsBefore = orangePixelCount(in: sourceView.screenshot())
+            if selectAll {
+                assistantSelection = (sourceView.value as? String ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                XCTAssertFalse(assistantSelection.isEmpty, "The assistant paragraph should expose its selectable text.")
+                selectAllText(sourceView)
+            } else {
+                selectPrefix(sourceView)
+            }
+            XCTAssertTrue(addComment.waitForExistence(timeout: 5))
+            addComment.click()
+            let field = element("comment-input-field")
+            XCTAssertTrue(field.waitForExistence(timeout: 5))
+            XCTAssertLessThan(field.frame.height, 40, "The comment input should stay compact.")
+            let submitComment = element("add-comment-button")
+            XCTAssertTrue(submitComment.exists, "The compact input should include its submit arrow.")
+            XCTAssertGreaterThan(darkPixelCount(in: submitComment), 3,
+                                 "The submit arrow should be dark and visible on its light circular control.")
+            XCTAssertGreaterThan(lightPixelCount(in: submitComment), 20,
+                                 "The submit control should retain a light circular background behind the arrow.")
+            field.typeText(comment)
+            if comment == "Explain this phrase" {
+                field.typeKey(.return, modifierFlags: [])
+                XCTAssertFalse(field.waitForExistence(timeout: 1), "Enter should add the comment and close the modal.")
+            } else {
+                element("add-comment-button").click()
+            }
+            XCTAssertTrue(element("send-message-button").isEnabled, "A comment without freeform text should enable sending.")
+            let expectedCountLabel = comment == "Explain this phrase" ? "1 comment" : "2 comments"
+            XCTAssertTrue(waitUntil({
+                self.accessibleLabelOrValue(of: self.element("pending-comment-count")).contains(expectedCountLabel)
+            }, timeout: 5), "The composer should indicate the number of pending comments.")
+            let orangePixelsAfter = orangePixelCount(in: sourceView.screenshot())
+            XCTAssertGreaterThan(orangePixelsAfter, orangePixelsBefore + 5, "The selected range should visibly render in orange.")
+            XCTAssertLessThan(orangePixelFillRatio(in: sourceView.screenshot()), 0.55,
+                              "Orange should cover the glyphs, not form a selection background marker.")
+        }
+        XCTAssertGreaterThan(orangePixelCount(in: userView.screenshot()), 5,
+                             "Adding a second comment should preserve the first orange comment highlight.")
+        let composer = app.textViews["message-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        composer.click()
+        composer.typeText("Keep this freeform follow-up.")
+        XCTAssertTrue((composer.value as? String ?? "").contains("Keep this freeform follow-up."),
+                      "The freeform follow-up should be present in the editable composer before sending.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            ((try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) ?? "").contains("Keep this freeform follow-up.")
+        }, timeout: 10))
+        let savedPrompt = try XCTUnwrap(taskRecord(id: taskID)?["savedPrompt"] as? String)
+        let firstComment = try XCTUnwrap(savedPrompt.range(of: "Explain this phrase"))
+        let secondComment = try XCTUnwrap(savedPrompt.range(of: "Please clarify this response in detail"))
+        XCTAssertLessThan(firstComment.lowerBound, secondComment.lowerBound, "Comments should be sent in the order they were added.")
+        XCTAssertTrue(savedPrompt.contains("\"messageId\":\"\(sourceID)\""))
+        XCTAssertTrue(savedPrompt.contains("\"messageId\":\"\(assistantID)\""))
+        XCTAssertTrue(savedPrompt.contains("\"startOffset\":0"))
+        XCTAssertTrue(savedPrompt.contains("\"endOffset\":10"))
+        XCTAssertTrue(savedPrompt.contains("\"text\":\"\(userSelection)\""))
+        XCTAssertTrue(savedPrompt.contains("\"text\":\"\(assistantSelection)\""))
+        XCTAssertTrue(savedPrompt.contains("\"comment\":\"Explain this phrase\""))
+        XCTAssertTrue(savedPrompt.contains("start a separate response line with :codex-annotation{index=\"N\"}"))
+        XCTAssertTrue(savedPrompt.contains("Do not combine comment responses on one line"))
+        XCTAssertTrue(waitUntil({
+            guard (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" else { return false }
+            guard let history = try? self.runCLI(["conversation", "history", taskID])["result"] as? [String: Any],
+                  let messages = history["messages"] as? [[String: Any]],
+                  let finalReply = messages.last(where: { ($0["role"] as? String) == "assistant" }) else { return false }
+            return (finalReply["text"] as? String ?? "").contains(":codex-annotation{index=\"1\"}")
+        }, timeout: 60), "The fixture turn should finish before reopening to verify persisted comments.")
+        app.terminate()
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Comment source")
+        let reloadedHistory = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        let reloadedMessages = try XCTUnwrap(reloadedHistory?["messages"] as? [[String: Any]])
+        let annotatedUserMessage = try XCTUnwrap(reloadedMessages.last { $0["role"] as? String == "user" })
+        let annotatedUserID = try XCTUnwrap(annotatedUserMessage["id"] as? String)
+        let annotatedAssistantMessage = try XCTUnwrap(reloadedMessages.last { $0["role"] as? String == "assistant" })
+        let annotatedAssistantID = try XCTUnwrap(annotatedAssistantMessage["id"] as? String)
+        let restoredLegacyAssistant = try XCTUnwrap(reloadedMessages.first {
+            ($0["role"] as? String) == "assistant" && (($0["text"] as? String)?.contains("legacy highlighted words") ?? false)
+        })
+        let restoredLegacyAssistantID = try XCTUnwrap(restoredLegacyAssistant["id"] as? String)
+        let restoredUserView = element("user-message-\(sourceID)")
+        let restoredAssistantView = element("assistant-message-\(assistantID)").descendants(matching: .textView).firstMatch
+        let renderedAnnotatedUserView = element("user-message-\(annotatedUserID)")
+        let renderedCommentResponse = element("assistant-message-\(annotatedAssistantID)")
+        let reloadedTranscript = element("conversation-scroll-view")
+        XCTAssertTrue(renderedCommentResponse.waitForExistence(timeout: 10),
+                      "The reloaded conversation should finish loading before scrolling through history.")
+        for _ in 0..<6 {
+            reloadedTranscript.swipeDown()
+        }
+        XCTAssertTrue(restoredUserView.waitForExistence(timeout: 10))
+        XCTAssertGreaterThanOrEqual(restoredUserView.frame.minY, reloadedTranscript.frame.minY + 8)
+        XCTAssertLessThan(restoredUserView.frame.minY, reloadedTranscript.frame.maxY - 40)
+        XCTAssertTrue((restoredUserView.value as? String ?? "").contains("Literal # Response comments: stays visible."),
+                      "Ordinary user text that resembles the comment heading should remain visible.")
+        XCTAssertGreaterThan(orangePixelCount(in: restoredUserView.screenshot()), 5, "Reloading history should restore the user's orange range.")
+        XCTAssertTrue(restoredAssistantView.waitForExistence(timeout: 10))
+        XCTAssertGreaterThanOrEqual(restoredAssistantView.frame.minY, reloadedTranscript.frame.minY + 8)
+        XCTAssertLessThan(restoredAssistantView.frame.minY, reloadedTranscript.frame.maxY - 40)
+        XCTAssertGreaterThan(orangePixelCount(in: restoredAssistantView.screenshot()), 5, "Reloading history should restore the assistant's orange range.")
+        let legacyResponse = element("assistant-message-\(restoredLegacyAssistantID)")
+        let legacyCommentLink = legacyResponse.descendants(matching: .textView).matching(
+            NSPredicate(format: "value CONTAINS %@", "Comment 1")
+        ).firstMatch
+        XCTAssertTrue(legacyCommentLink.waitForExistence(timeout: 5))
+        for _ in 0..<10 where legacyCommentLink.frame.maxY > reloadedTranscript.frame.maxY - 8 {
+            reloadedTranscript.scroll(byDeltaX: 0, deltaY: -80)
+        }
+        XCTAssertGreaterThanOrEqual(legacyCommentLink.frame.minY, reloadedTranscript.frame.minY + 8)
+        XCTAssertLessThanOrEqual(legacyCommentLink.frame.maxY, reloadedTranscript.frame.maxY - 8)
+        legacyCommentLink.coordinate(withNormalizedOffset: CGVector(dx: seededMarkerPointX, dy: 0.8)).hover()
+        XCTAssertTrue(element("response-comment-hover-card").waitForExistence(timeout: 5),
+                      "Older saved comment payloads should still restore reply details.")
+        XCTAssertTrue(element("response-comment-hover-card").label.contains("legacy highlighted words"))
+        XCTAssertTrue(element("response-comment-hover-card").label.contains(legacyComment))
+        XCTAssertTrue(renderedAnnotatedUserView.waitForExistence(timeout: 10))
+        XCTAssertTrue(renderedCommentResponse.waitForExistence(timeout: 10), "The comment reply should render after history reload.")
+        for _ in 0..<25 where renderedAnnotatedUserView.frame.maxY > reloadedTranscript.frame.maxY - 8 {
+            reloadedTranscript.scroll(byDeltaX: 0, deltaY: -100)
+        }
+        XCTAssertGreaterThanOrEqual(renderedAnnotatedUserView.frame.minY, reloadedTranscript.frame.minY + 8)
+        XCTAssertLessThanOrEqual(renderedAnnotatedUserView.frame.maxY, reloadedTranscript.frame.maxY - 8)
+        let renderedCommentText = (renderedAnnotatedUserView.value as? String) ?? ""
+        XCTAssertTrue(renderedCommentText.contains("Keep this freeform follow-up."), "Ordinary composer text should remain visible.")
+        XCTAssertFalse(renderedCommentText.contains("Response comments"), "Comment guidance should be hidden in the transcript.")
+        XCTAssertFalse(renderedCommentText.contains("<response-comments>"), "The comment payload should be hidden in the transcript.")
+        XCTAssertFalse(renderedCommentText.contains("Explain this phrase"), "Comment details should be hidden in the transcript.")
+        func revealReplyMarker(_ line: XCUIElement, verticalOffset: CGFloat) {
+            func markerY() -> CGFloat {
+                line.frame.minY + line.frame.height * verticalOffset
+            }
+            for _ in 0..<25 {
+                let viewport = reloadedTranscript.frame
+                let targetY = markerY()
+                if targetY < viewport.minY + 24 {
+                    reloadedTranscript.scroll(byDeltaX: 0, deltaY: min(80, viewport.minY + 24 - targetY))
+                } else if targetY > viewport.maxY - 24 {
+                    reloadedTranscript.scroll(byDeltaX: 0, deltaY: -min(80, targetY - viewport.maxY + 24))
+                } else {
+                    break
+                }
+            }
+            XCTAssertGreaterThanOrEqual(markerY(), reloadedTranscript.frame.minY + 16)
+            XCTAssertLessThanOrEqual(markerY(), reloadedTranscript.frame.maxY - 16)
+        }
+        let assistantResponseLines = renderedCommentResponse.descendants(matching: .textView).allElementsBoundByIndex
+            .compactMap { $0.value as? String }
+        XCTAssertEqual(assistantResponseLines.count, 2, "Each comment response should render on its own line.")
+        XCTAssertTrue(assistantResponseLines[0].hasPrefix("1. "), "The first response should begin with its numbered comment link.")
+        XCTAssertTrue(assistantResponseLines[1].hasPrefix("2. "), "The second response should begin with its numbered comment link.")
+        XCTAssertFalse(assistantResponseLines.joined(separator: "\n").contains(":codex-annotation"),
+                       "Protocol markers should be replaced by visible comment labels.")
+        let firstMarkerCenterX = "1.".size(withAttributes: [.font: NSFont.systemFont(ofSize: 16)]).width / 2
+        let firstResponseLine = renderedCommentResponse.descendants(matching: .textView).matching(
+            NSPredicate(format: "value BEGINSWITH %@", "1. ")
+        ).firstMatch
+        revealReplyMarker(firstResponseLine, verticalOffset: 0.5)
+        let markerPoint = firstResponseLine.coordinate(withNormalizedOffset: CGVector(
+            dx: max(0.01, firstMarkerCenterX / max(1, firstResponseLine.frame.width)), dy: 0.5
+        ))
+        markerPoint.hover()
+        let commentHint = element("response-comment-hover-card")
+        XCTAssertTrue(commentHint.waitForExistence(timeout: 5), "Hovering the first comment number should open its details hint.")
+        attachScreenshot(named: "First response comment hover popover")
+        XCTAssertGreaterThanOrEqual(commentHint.frame.width, 300, "The details hint should be wide enough to read both fields.")
+        XCTAssertLessThanOrEqual(commentHint.frame.width, 360, "The details hint should stay medium-sized.")
+        XCTAssertTrue(commentHint.label.contains(userSelection),
+                      "The hint should identify the highlighted text.")
+        XCTAssertTrue(commentHint.label.contains("Explain this phrase"),
+                         "The hint should show the user's comment.")
+        let firstOffComment = firstResponseLine.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5))
+        for _ in 0..<2 {
+            firstOffComment.hover()
+            XCTAssertTrue(waitUntil({ !commentHint.exists }, timeout: 1))
+            markerPoint.hover()
+            XCTAssertTrue(waitUntil({ commentHint.exists && commentHint.label.contains("Explain this phrase") }, timeout: 5),
+                          "The first comment link should reliably reopen after pointer reentry.")
+        }
+        let secondResponseLine = renderedCommentResponse.descendants(matching: .textView).matching(
+            NSPredicate(format: "value BEGINSWITH %@", "2. ")
+        ).firstMatch
+        XCTAssertGreaterThan(secondResponseLine.frame.height, 40,
+                             "The second response should wrap while its numbered link stays at the start.")
+        revealReplyMarker(secondResponseLine, verticalOffset: 0.03)
+        let screenFrame = try XCTUnwrap(NSScreen.main?.frame)
+        let screenImage = try XCTUnwrap(XCUIScreen.main.screenshot().image.cgImage(
+            forProposedRect: nil, context: nil, hints: nil
+        ))
+        let screenBitmap = NSBitmapImageRep(cgImage: screenImage)
+        let pixelsPerPointX = CGFloat(screenBitmap.pixelsWide) / screenFrame.width
+        let pixelsPerPointY = CGFloat(screenBitmap.pixelsHigh) / screenFrame.height
+        let visibleLine = secondResponseLine.frame.intersection(reloadedTranscript.frame)
+        XCTAssertFalse(visibleLine.isNull)
+        let pixelMinX = max(0, Int(visibleLine.minX * pixelsPerPointX))
+        let pixelMaxX = min(screenBitmap.pixelsWide - 1, Int(visibleLine.maxX * pixelsPerPointX))
+        let pixelMinY = max(0, Int(visibleLine.minY * pixelsPerPointY))
+        let pixelMaxY = min(screenBitmap.pixelsHigh - 1, Int(visibleLine.maxY * pixelsPerPointY))
+        var secondBlueMinX = screenBitmap.pixelsWide
+        var secondBlueMaxX = -1
+        var secondBlueMinY = screenBitmap.pixelsHigh
+        var secondBlueMaxY = -1
+        for x in pixelMinX...pixelMaxX {
+            for y in pixelMinY...pixelMaxY {
+                guard let color = screenBitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                if color.blueComponent > 0.6 && color.blueComponent > color.redComponent + 0.25
+                    && color.blueComponent > color.greenComponent + 0.08 {
+                    secondBlueMinX = min(secondBlueMinX, x)
+                    secondBlueMaxX = max(secondBlueMaxX, x)
+                    secondBlueMinY = min(secondBlueMinY, y)
+                    secondBlueMaxY = max(secondBlueMaxY, y)
+                }
+            }
+        }
+        XCTAssertGreaterThan(secondBlueMaxX, secondBlueMinX, "The visible wrapped reply should contain blue 2. glyphs.")
+        let secondMarkerX = CGFloat(secondBlueMinX + secondBlueMaxX) / 2 / pixelsPerPointX
+        let secondMarkerY = CGFloat(secondBlueMinY + secondBlueMaxY) / 2 / pixelsPerPointY
+        let secondMarkerOffset = CGVector(
+            dx: (secondMarkerX - secondResponseLine.frame.minX) / secondResponseLine.frame.width,
+            dy: (secondMarkerY - secondResponseLine.frame.minY) / secondResponseLine.frame.height
+        )
+        let secondMarkerPoint = secondResponseLine.coordinate(withNormalizedOffset: secondMarkerOffset)
+        secondMarkerPoint.hover()
+        XCTAssertTrue(waitUntil({ commentHint.exists && commentHint.label.contains("Please clarify this response") }, timeout: 5),
+                      "Hovering the second comment number should open its own details hint.")
+        attachScreenshot(named: "Second response comment hover popover")
+        XCTAssertLessThanOrEqual(commentHint.frame.height, 240, "Long comment details should remain within a medium-sized hint.")
+        XCTAssertTrue(commentHint.label.contains(String(assistantSelection.prefix(30))),
+                      "Long highlighted text should remain identifiable in the hint.")
+        XCTAssertTrue(commentHint.label.contains("Please clarify this response"),
+                      "Long comment details should remain identifiable when truncated.")
+        let offComment = secondResponseLine.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: secondMarkerOffset.dy))
+        for _ in 0..<2 {
+            offComment.hover()
+            XCTAssertTrue(waitUntil({ !commentHint.exists }, timeout: 1),
+                          "The hint should close before hovering another comment.")
+            secondMarkerPoint.hover()
+            XCTAssertTrue(waitUntil({ commentHint.exists && commentHint.label.contains("Please clarify this response") }, timeout: 5),
+                          "The second comment link should reliably reopen after pointer reentry.")
+        }
+        offComment.hover()
+        XCTAssertTrue(waitUntil({ !commentHint.exists }, timeout: 1))
+    }
+
     // case-contract: test_conversation_serializes_concurrent_sends | Two concurrent sends for the same task are serialized across the app and CLI/XPC paths against the local Codex app-server fixture; the second waits for the first, both complete on the persisted thread, the task remains In Progress while a send is active, and successful turns without outcome calls finish in Waiting Response.
     func test_conversation_serializes_concurrent_sends() throws {
         let sharedFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-concurrent-serial-success-wait")
@@ -5474,6 +5970,78 @@ final class StationAIUITests: XCTestCase {
         let helpTag = app.descendants(matching: .helpTag)
             .matching(NSPredicate(format: "label == %@", expected)).firstMatch
         XCTAssertTrue(helpTag.waitForExistence(timeout: 8), "Expected the hovered control to show the help tag ‘\(expected)’." )
+    }
+
+    private func orangePixelCount(in screenshot: XCUIScreenshot) -> Int {
+        guard let image = screenshot.image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return 0 }
+        let bitmap = NSBitmapImageRep(cgImage: image)
+        var count = 0
+        for x in 0..<bitmap.pixelsWide {
+            for y in 0..<bitmap.pixelsHigh {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                let red = color.redComponent
+                let green = color.greenComponent
+                let blue = color.blueComponent
+                if red > 0.45 && red > green + 0.08 && green > blue + 0.08 { count += 1 }
+            }
+        }
+        return count
+    }
+
+    private func darkPixelCount(in element: XCUIElement) -> Int {
+        guard let image = element.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return 0 }
+        let bitmap = NSBitmapImageRep(cgImage: image)
+        var count = 0
+        for x in 0..<bitmap.pixelsWide {
+            for y in 0..<bitmap.pixelsHigh {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                if color.redComponent < 0.3 && color.greenComponent < 0.3 && color.blueComponent < 0.3 {
+                    count += 1
+                }
+            }
+        }
+        return count
+    }
+
+    private func lightPixelCount(in element: XCUIElement) -> Int {
+        guard let image = element.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return 0 }
+        let bitmap = NSBitmapImageRep(cgImage: image)
+        var count = 0
+        for x in 0..<bitmap.pixelsWide {
+            for y in 0..<bitmap.pixelsHigh {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                if color.redComponent > 0.68 && color.greenComponent > 0.68 && color.blueComponent > 0.68 {
+                    count += 1
+                }
+            }
+        }
+        return count
+    }
+
+    private func orangePixelFillRatio(in screenshot: XCUIScreenshot) -> Double {
+        guard let image = screenshot.image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return 0 }
+        let bitmap = NSBitmapImageRep(cgImage: image)
+        var count = 0
+        var minX = bitmap.pixelsWide
+        var maxX = 0
+        var minY = bitmap.pixelsHigh
+        var maxY = 0
+        for x in 0..<bitmap.pixelsWide {
+            for y in 0..<bitmap.pixelsHigh {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                let red = color.redComponent
+                let green = color.greenComponent
+                let blue = color.blueComponent
+                if red > 0.45 && red > green + 0.08 && green > blue + 0.08 {
+                    count += 1
+                    minX = min(minX, x); maxX = max(maxX, x)
+                    minY = min(minY, y); maxY = max(maxY, y)
+                }
+            }
+        }
+        guard count > 0 else { return 0 }
+        let area = max(1, (maxX - minX + 1) * (maxY - minY + 1))
+        return Double(count) / Double(area)
     }
 
     private func assertHoverEmphasis(for element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
