@@ -13,6 +13,106 @@ private struct AssistantMarkdownBlock: Identifiable {
     let id: Int
     let kind: Kind
     let text: String
+
+    var font: NSFont {
+        switch kind {
+        case .heading(let level): NSFont.systemFont(ofSize: level == 1 ? 19 : level == 2 ? 17 : 15, weight: .semibold)
+        case .listItem, .paragraph: NSFont.systemFont(ofSize: 16)
+        }
+    }
+}
+
+private struct ConversationAnnotation: Identifiable, Codable {
+    let id: UUID
+    let messageID: String
+    let blockID: Int
+    let startOffset: Int
+    let endOffset: Int
+    let text: String
+    let comment: String
+    var pending = true
+}
+
+private struct ResponseAnnotationReference {
+    let text: String
+    let comment: String
+}
+
+private struct ResponseCommentHoverCard: View {
+    let selectedText: String
+    let comment: String
+    @State private var isVisible = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Highlighted text")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text(selectedText)
+                    .font(.system(size: 12))
+                    .lineLimit(3)
+                    .truncationMode(.tail)
+                    .accessibilityIdentifier("response-comment-highlighted-text")
+                    .accessibilityLabel(selectedText)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Comment")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text(comment)
+                    .font(.system(size: 12))
+                    .lineLimit(3)
+                    .truncationMode(.tail)
+                    .accessibilityIdentifier("response-comment-content")
+                    .accessibilityLabel(comment)
+            }
+        }
+        .padding(12)
+        .frame(width: 320, alignment: .leading)
+        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .opacity(isVisible ? 1 : 0)
+        .onAppear {
+            withAnimation(.easeIn(duration: 0.12)) {
+                isVisible = true
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("response-comment-hover-card")
+        .accessibilityLabel("Highlighted text: \(selectedText). Comment: \(comment)")
+    }
+}
+
+private final class CommentTrackingTextView: NSTextView {
+    var hoverTrackingOwner: AnyObject?
+    private var hoverTrackingArea: NSTrackingArea?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.acceptsMouseMovedEvents = true
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        guard hoverTrackingArea == nil, let hoverTrackingOwner else { return }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect],
+            owner: hoverTrackingOwner,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        hoverTrackingArea = area
+    }
+}
+
+private struct AnnotationSelection: Identifiable {
+    let id = UUID()
+    let messageID: String
+    let blockID: Int
+    let range: NSRange
+    let text: String
+    let bounds: CGRect
 }
 
 struct TaskConversationView: View {
@@ -75,6 +175,10 @@ struct TaskConversationView: View {
     @State private var isSwitchingProvider = false
     @State private var providerNotice: String?
     @State private var messages: [ConversationMessage] = []
+    @State private var annotations: [ConversationAnnotation] = []
+    @State private var annotationSelection: AnnotationSelection?
+    @State private var currentTextSelection: AnnotationSelection?
+    @State private var annotationComment = ""
     @State private var activities: [ConversationActivity] = []
     @State private var isActivityExpanded = false
     @State private var responseStartedAt: Date?
@@ -98,6 +202,7 @@ struct TaskConversationView: View {
     @State private var monacoError: String?
     @State private var diffChangeCount: Int?
     @State private var isLoadingHistory = false
+    @State private var isApplyingSavedRepositories = false
     @State private var isResponding = false
     @State private var isPreparingSubmittedMessage = false
     @State private var conflictResolutionAttempt = 0
@@ -130,7 +235,11 @@ struct TaskConversationView: View {
     @FocusState private var isRepositorySearchFocused: Bool
 
     private var isSendDisabled: Bool {
-        (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !isEnteringGoal) || workspaceRootURLs.isEmpty || isResponding || isLoadingHistory
+        !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isResponding || isLoadingHistory
+    }
+
+    private var isRepositoryRootConfigured: Bool {
+        WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) != nil
     }
 
     private var canPauseResponse: Bool {
@@ -289,9 +398,14 @@ struct TaskConversationView: View {
                 conversationMode = mode
             }
             guard isNewTask else { return }
-            isShowingRepositoryPicker = true
+            isShowingRepositoryPicker = false
             lastSelectedRepositoryPaths = WorkspaceSettingsManager().lastSelectedRepositories
+            isComposerFocused = true
             loadSuggestedRepositories()
+            let savedRepositories = validLastSelectedRepositoryURLs
+            if !savedRepositories.isEmpty {
+                selectRepositories(savedRepositories, reopenPickerOnError: false, isApplyingDefault: true)
+            }
         }
         .sheet(isPresented: $isShowingWorkspaceEditor) {
             WorkspaceRootsEditor(
@@ -300,6 +414,12 @@ struct TaskConversationView: View {
                 repositoryWorktrees: task.repositoryWorktrees,
                 onSave: updateWorkspaceRoots
             )
+        }
+        .sheet(item: $userInputRequest) { request in
+            userInputForm(request)
+                .frame(minWidth: 420, idealWidth: 560, maxWidth: 720, minHeight: 260)
+                .padding(12)
+                .accessibilityIdentifier("ai-question-confirmation-sheet")
         }
         .fileImporter(isPresented: $isShowingImagePicker, allowedContentTypes: [.image], allowsMultipleSelection: true) { result in
             do {
@@ -603,8 +723,6 @@ struct TaskConversationView: View {
                 safetyNotice
 
                 conversation
-
-                if !isReadOnly, let userInputRequest { userInputForm(userInputRequest) }
 
                 Rectangle()
                     .fill(Color.primary.opacity(0.07))
@@ -1057,7 +1175,7 @@ struct TaskConversationView: View {
                         .truncationMode(.middle)
                         .help(parentFolderURL.path)
                     Spacer(minLength: 0)
-                    Button("Change…", action: chooseRepositoryParentFolder)
+                    Button("Change…") { chooseRepositoryParentFolder() }
                         .buttonHoverPointer()
                         .help("Choose a different repository suggestion folder")
                         .disabled(isChoosingRepositoryParent)
@@ -1069,7 +1187,7 @@ struct TaskConversationView: View {
                 Text("Choose a parent folder to find Git repositories.")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
-                Button("Choose suggestion folder…", action: chooseRepositoryParentFolder)
+                Button("Choose suggestion folder…") { chooseRepositoryParentFolder() }
                     .buttonHoverPointer()
                     .help("Choose a folder to find repository suggestions")
                     .disabled(isChoosingRepositoryParent)
@@ -1177,10 +1295,18 @@ struct TaskConversationView: View {
         selectRepositories([repository])
     }
 
-    private func selectRepositories(_ repositories: [URL]) {
+    private func selectRepositories(
+        _ repositories: [URL],
+        reopenPickerOnError: Bool = true,
+        isApplyingDefault: Bool = false
+    ) {
         isShowingRepositoryPicker = false
         repositorySearch = ""
+        if isApplyingDefault { isApplyingSavedRepositories = true }
         Task { @MainActor in
+            defer {
+                if isApplyingDefault { isApplyingSavedRepositories = false }
+            }
             do {
                 var selectedPaths = task.repositoryWorktrees.map { $0.repositoryPath }
                 var repositoriesToAdd: [String] = []
@@ -1201,7 +1327,7 @@ struct TaskConversationView: View {
                 await refreshWorkspaceChanges()
             } catch {
                 errorMessage = "Couldn't add repository: \(error.localizedDescription)"
-                isShowingRepositoryPicker = true
+                isShowingRepositoryPicker = reopenPickerOnError
             }
         }
     }
@@ -1215,12 +1341,12 @@ struct TaskConversationView: View {
         }
     }
 
-    private func chooseRepositoryParentFolder() {
+    private func chooseRepositoryParentFolder(showRepositoryPickerWhenFinished: Bool = true) {
         guard !isChoosingRepositoryParent else { return }
         isShowingRepositoryPicker = false
         let panel = NSOpenPanel()
-        panel.title = "Choose default parent folder"
-        panel.message = "StationAI will suggest Git repositories found under this folder."
+        panel.title = "Choose repository root folder"
+        panel.message = "StationAI will search below this folder for repositories. A root folder is required before sending conversations."
         panel.prompt = "Use This Folder"
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -1231,7 +1357,7 @@ struct TaskConversationView: View {
             DispatchQueue.main.async {
                 isChoosingRepositoryParent = false
                 guard response == .OK, let selected = panel.url else {
-                    isShowingRepositoryPicker = true
+                    isShowingRepositoryPicker = showRepositoryPickerWhenFinished
                     return
                 }
                 let path = selected.standardizedFileURL.path
@@ -1239,24 +1365,26 @@ struct TaskConversationView: View {
                     try WorkspaceSettingsManager().setDefaultParentFolder(path)
                     defaultParentFolderPath = path
                     loadSuggestedRepositories()
-                    isShowingRepositoryPicker = true
+                    isShowingRepositoryPicker = showRepositoryPickerWhenFinished
                 } catch {
                     errorMessage = "Couldn't set the repository suggestion folder: \(error.localizedDescription)"
-                    isShowingRepositoryPicker = true
+                    isShowingRepositoryPicker = showRepositoryPickerWhenFinished
                 }
             }
         }
     }
 
     private var safetyNotice: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            if !workspaceRootURLs.isEmpty {
-                let folderLabels = workspaceRootURLs.map { url in
-                    task.repositoryWorktrees.first(where: { URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == url.path })
-                        .map { "\(URL(fileURLWithPath: $0.repositoryPath).lastPathComponent) · \($0.branch)" } ?? url.lastPathComponent
-                }
+        let additionalFolders = workspaceRootURLs.filter { url in
+            !task.repositoryWorktrees.contains {
+                URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == url.path
+            }
+        }
+        return Group {
+            if !additionalFolders.isEmpty {
+                let folderLabels = additionalFolders.map(\.lastPathComponent)
                 let folderSummary = "Working in: " + folderLabels.joined(separator: " · ")
-                let fullFolderSummary = "Working in: " + workspaceRootURLs.map(\.path).joined(separator: " · ")
+                let fullFolderSummary = "Working in: " + additionalFolders.map(\.path).joined(separator: " · ")
                 Text(folderSummary)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
@@ -1265,12 +1393,12 @@ struct TaskConversationView: View {
                     .accessibilityLabel(folderSummary)
                     .accessibilityValue(fullFolderSummary)
                     .accessibilityIdentifier("working-folders-summary")
+                    .frame(maxWidth: 820, alignment: .leading)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 28)
+                    .padding(.top, 12)
             }
         }
-        .frame(maxWidth: 820, alignment: .leading)
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, 28)
-        .padding(.top, 12)
     }
 
     private var conversation: some View {
@@ -1278,18 +1406,27 @@ struct TaskConversationView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     if messages.isEmpty && activeGoal?.status != "complete" && !isLoadingHistory {
-                        VStack(spacing: 12) {
-                            Image(systemName: "bubble.left.and.bubble.right")
-                                .font(.system(size: 25, weight: .regular))
-                                .foregroundStyle(Color.accentColor.opacity(0.8))
-                            Text("Start a conversation")
-                                .font(.system(size: 17, weight: .semibold))
-                            Text("Send a message to \(provider.assistantLabel).")
-                                .font(.system(size: 13))
-                                .foregroundStyle(.secondary)
+                        VStack(spacing: 0) {
+                            Text(emptyConversationRepositoryTitle)
+                                .font(.system(size: 30, weight: .bold))
+                                .foregroundStyle(emptyConversationRepositoryTitleColor)
+                                .multilineTextAlignment(.center)
+                                .lineLimit(2)
+                            Spacer(minLength: 58)
+                            VStack(spacing: 14) {
+                                Image(systemName: "bubble.left.and.bubble.right")
+                                    .font(.system(size: 29, weight: .regular))
+                                    .foregroundStyle(Color.accentColor.opacity(0.8))
+                                    .accessibilityLabel("Conversation")
+                                Text("Send a message to \(provider.assistantLabel).")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 28)
                         }
-                        .frame(maxWidth: .infinity, minHeight: 210)
-                        .padding(30)
+                        .frame(maxWidth: .infinity, minHeight: 280)
+                        .padding(.horizontal, 30)
+                        .padding(.vertical, 38)
                         .accessibilityIdentifier("empty-conversation")
                     } else if !messages.isEmpty {
                         LazyVStack(alignment: .leading, spacing: 16) {
@@ -1398,6 +1535,19 @@ struct TaskConversationView: View {
                 scrollToLatest(using: scrollProxy)
             }
         }
+    }
+
+    private var emptyConversationRepositoryTitle: String {
+        let repositoryNames = task.repositoryWorktrees.map {
+            URL(fileURLWithPath: $0.repositoryPath).lastPathComponent
+        }
+        return repositoryNames.isEmpty ? "No repository selected" : repositoryNames.joined(separator: " · ")
+    }
+
+    private var emptyConversationRepositoryTitleColor: Color {
+        colorScheme == .dark
+            ? .orange
+            : Color(red: 0.18, green: 0.31, blue: 0.68)
     }
 
     private var activeSubagents: [ConversationActivity] {
@@ -1862,13 +2012,14 @@ struct TaskConversationView: View {
 
     private func assistantBubble(_ message: ConversationMessage) -> some View {
         let displayText = Self.displayableAssistantText(message.text)
+        let responseAnnotations = responseAnnotationReferences(for: message)
         return VStack(alignment: .leading, spacing: 6) {
             Text((message.provider ?? provider).assistantLabel)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("assistant-provider-\(message.id)")
 
-            assistantMarkdownContent(displayText)
+            assistantMarkdownContent(displayText, messageID: message.id, responseAnnotations: responseAnnotations)
             .font(.system(size: 16, weight: .regular))
             .foregroundStyle(WorkspaceTheme.conversationText)
             .padding(.horizontal, 15)
@@ -1893,10 +2044,20 @@ struct TaskConversationView: View {
                         .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
                 }
             }
-            if !message.text.isEmpty {
-                Text(message.text)
-                    .font(.system(size: 16, weight: .regular)).foregroundStyle(.white)
-                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            let visibleText = Self.displayableUserText(message.text)
+            if !visibleText.isEmpty {
+                SelectableAnnotationText(
+                    text: visibleText,
+                    annotations: annotations.filter { $0.messageID == message.id && $0.blockID == 0 },
+                    textColor: .white,
+                    onSelection: { range, selectedText, bounds in
+                        currentTextSelection = selectedText.isEmpty ? nil : AnnotationSelection(
+                            messageID: message.id, blockID: 0, range: range, text: selectedText, bounds: bounds
+                        )
+                    }
+                )
+                    .overlay(alignment: .topLeading) { selectionHint(messageID: message.id, blockID: 0) }
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 16).padding(.vertical, 11)
                     .background(WorkspaceTheme.accent, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
             }
@@ -1917,29 +2078,189 @@ struct TaskConversationView: View {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func assistantMarkdownContent(_ markdown: String) -> some View {
-        let blocks = Self.markdownBlocks(markdown)
-        var content = AttributedString()
-        for (index, block) in blocks.enumerated() {
-            if index > 0 {
-                content.append(AttributedString("\n\n"))
-            }
-            if case .listItem = block.kind {
-                content.append(AttributedString("•  "))
-            }
-            var text = Self.markdownAttributedText(block.text)
-            switch block.kind {
-            case .heading(let level):
-                text.font = .system(size: level == 1 ? 19 : level == 2 ? 17 : 15, weight: .semibold)
-            case .listItem, .paragraph:
-                break
-            }
-            content.append(text)
+    private static func displayableUserText(_ text: String) -> String {
+        let commentEnvelopeStart = text.range(of: "<stationai-comment-context>")
+            ?? text.range(of: "<stationai-annotation-context>")
+        let commentEnvelopeEnd = commentEnvelopeStart.flatMap { envelope in
+            text.range(of: "</stationai-comment-context>", range: envelope.upperBound..<text.endIndex)
+                ?? text.range(of: "</stationai-annotation-context>", range: envelope.upperBound..<text.endIndex)
         }
-        return Text(content)
-            .lineSpacing(4)
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
+        if let envelope = commentEnvelopeStart, commentEnvelopeEnd != nil,
+           Self.containsSerializedAnnotations(text) {
+            return String(text[..<envelope.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let legacyHeader = "# Response annotations:\nThe following JSON contains comments on selected conversation text, in array order."
+        if let header = text.range(of: legacyHeader), Self.containsSerializedAnnotations(text) {
+            return String(text[..<header.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let commentHeader = "# Response comments:\nThe following JSON contains comments on selected conversation text, in array order."
+        if let header = text.range(of: commentHeader), Self.containsSerializedAnnotations(text) {
+            return String(text[..<header.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return text
+    }
+
+    private static func containsSerializedAnnotations(_ text: String) -> Bool {
+        let start = text.range(of: "<response-comments>") ?? text.range(of: "<response-annotations>")
+        guard let start,
+              let end = text.range(of: "</response-comments>", range: start.upperBound..<text.endIndex)
+                ?? text.range(of: "</response-annotations>", range: start.upperBound..<text.endIndex),
+              let data = String(text[start.upperBound..<end.lowerBound]).data(using: .utf8),
+              let items = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+              !items.isEmpty else { return false }
+        return items.allSatisfy { item in
+            guard item["text"] is String, (item["comment"] is String || item["annotation"] is String),
+                  let source = item["source"] as? [String: Any] else { return false }
+            return source["messageId"] is String && source["blockID"] is Int
+                && source["startOffset"] is Int && source["endOffset"] is Int
+        }
+    }
+
+    private func selectionHint(messageID: String, blockID: Int) -> some View {
+        Group {
+            if let selection = currentTextSelection,
+               selection.messageID == messageID, selection.blockID == blockID {
+                GeometryReader { geometry in
+                    Button {
+                        annotationSelection = selection
+                        annotationComment = ""
+                    } label: {
+                        Text("Add comment")
+                            .font(.system(size: 13, weight: .medium))
+                            .padding(.horizontal, 12).padding(.vertical, 7)
+                            .background(.regularMaterial, in: Capsule())
+                            .overlay(Capsule().strokeBorder(Color.white.opacity(0.12)))
+                            .shadow(color: .black.opacity(0.25), radius: 5, y: 2)
+                    }
+                    .buttonStyle(.plain)
+                    .buttonHoverPointer()
+                    .help("Add comment to selected text")
+                    .accessibilityIdentifier("add-comment-to-selection-button")
+                    .frame(width: 112, height: 30)
+                    .position(
+                        x: min(max(selection.bounds.midX, 56), max(56, geometry.size.width - 56)),
+                        y: selection.bounds.minY - 22
+                    )
+                    .zIndex(20)
+                    .popover(isPresented: Binding(
+                        get: { annotationSelection?.id == selection.id },
+                        set: { isPresented in
+                            if !isPresented, annotationSelection?.id == selection.id {
+                                annotationSelection = nil
+                                annotationComment = ""
+                            }
+                        }
+                    ), arrowEdge: .top) {
+                        HStack(spacing: 10) {
+                            TextField("Add an optional comment…", text: $annotationComment)
+                                .textFieldStyle(.plain)
+                                .onSubmit { addAnnotation(selection) }
+                                .accessibilityIdentifier("comment-input-field")
+                            Button { addAnnotation(selection) } label: {
+                                Image(systemName: "arrow.up")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(Color.black)
+                                    .frame(width: 32, height: 32)
+                                    .background(Color.white.opacity(0.78), in: Circle())
+                            }
+                            .buttonHoverPointer()
+                            .buttonStyle(.plain)
+                            .help("Add comment")
+                            .accessibilityLabel("Add comment")
+                            .accessibilityIdentifier("add-comment-button")
+                        }
+                        .padding(.leading, 15)
+                        .padding(.trailing, 7)
+                        .padding(.vertical, 7)
+                        .frame(width: 355)
+                        .background(Color(nsColor: .controlBackgroundColor), in: Capsule())
+                        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
+                        .padding(5)
+                    }
+                }
+            }
+        }
+    }
+
+    private func assistantMarkdownContent(
+        _ markdown: String,
+        messageID: String? = nil,
+        responseAnnotations: [ResponseAnnotationReference] = []
+    ) -> some View {
+        let blocks = Self.markdownBlocks(markdown)
+        return VStack(alignment: .leading, spacing: 7) {
+            ForEach(blocks) { block in
+                switch block.kind {
+                case .heading(let level):
+                    selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations)
+                        .font(.system(size: level == 1 ? 19 : level == 2 ? 17 : 15, weight: .semibold))
+                        .accessibilityIdentifier("assistant-markdown-heading-\(block.id)")
+                case .listItem:
+                    HStack(alignment: .firstTextBaseline, spacing: 7) {
+                        Text("•").foregroundStyle(.secondary)
+                        selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations)
+                            .accessibilityIdentifier("assistant-markdown-list-content-\(block.id)")
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("assistant-markdown-list-item-\(block.id)")
+                case .paragraph:
+                    selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations)
+                        .accessibilityIdentifier("assistant-markdown-paragraph-\(block.id)")
+                        .padding(.bottom, 5)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func selectableAnnotationText(
+        _ block: AssistantMarkdownBlock,
+        messageID: String?,
+        responseAnnotations: [ResponseAnnotationReference] = []
+    ) -> some View {
+        if let messageID {
+            SelectableAnnotationText(
+                text: String(Self.markdownAttributedText(block.text).characters),
+                annotations: annotations.filter { $0.messageID == messageID && $0.blockID == block.id },
+                responseAnnotations: responseAnnotations,
+                responseCommentSourcePrefix: "\(messageID):\(block.id)",
+                onSelection: { range, text, bounds in
+                    currentTextSelection = text.isEmpty ? nil : AnnotationSelection(messageID: messageID, blockID: block.id, range: range, text: text, bounds: bounds)
+                },
+                formattedText: NSAttributedString(Self.markdownAttributedText(block.text)),
+                font: block.font
+            )
+                .overlay(alignment: .topLeading) { selectionHint(messageID: messageID, blockID: block.id) }
+        } else {
+            Text(Self.markdownAttributedText(block.text))
+        }
+    }
+
+    private func addAnnotation(_ selection: AnnotationSelection) {
+        annotations.append(ConversationAnnotation(
+            id: UUID(), messageID: selection.messageID, blockID: selection.blockID,
+            startOffset: selection.range.location, endOffset: NSMaxRange(selection.range),
+            text: selection.text, comment: annotationComment.trimmingCharacters(in: .whitespacesAndNewlines)
+        ))
+        annotationSelection = nil
+        currentTextSelection = nil
+        annotationComment = ""
+    }
+
+    private func responseAnnotationReferences(for message: ConversationMessage) -> [ResponseAnnotationReference] {
+        guard let messageIndex = messages.firstIndex(where: { $0.id == message.id }),
+              let userMessage = messages[..<messageIndex].last(where: { $0.role == .user }),
+              let start = userMessage.text.range(of: "<response-comments>")
+                ?? userMessage.text.range(of: "<response-annotations>"),
+              let end = userMessage.text.range(of: "</response-comments>", range: start.upperBound..<userMessage.text.endIndex)
+                ?? userMessage.text.range(of: "</response-annotations>", range: start.upperBound..<userMessage.text.endIndex),
+              let data = String(userMessage.text[start.upperBound..<end.lowerBound]).data(using: .utf8),
+              let items = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
+        return items.compactMap { item in
+            guard let text = item["text"] as? String,
+                  let comment = item["comment"] as? String ?? item["annotation"] as? String else { return nil }
+            return ResponseAnnotationReference(text: text, comment: comment)
+        }
     }
 
     private static func markdownBlocks(_ markdown: String) -> [AssistantMarkdownBlock] {
@@ -1962,6 +2283,11 @@ struct TaskConversationView: View {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             guard !line.isEmpty else {
                 flushParagraph()
+                continue
+            }
+            if line.range(of: #":codex-annotation\{index=\"\d+\"\}"#, options: .regularExpression) != nil {
+                flushParagraph()
+                blocks.append(AssistantMarkdownBlock(id: index, kind: .paragraph, text: line))
                 continue
             }
             let headingPrefix = line.prefix(while: { $0 == "#" })
@@ -2021,18 +2347,24 @@ struct TaskConversationView: View {
                     .accessibilityIdentifier("provider-capabilities-notice")
             }
 
-            if workspaceRootURLs.isEmpty {
-                Label("Choose at least one working folder before sending a message.", systemImage: "exclamationmark.triangle.fill")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("Choose at least one working folder before sending a message.")
-                    .accessibilityIdentifier("no-working-folders-error")
+            if !isRepositoryRootConfigured {
+                HStack(spacing: 8) {
+                    Label("Set the repository root folder before sending.", systemImage: "folder.badge.questionmark")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier("repository-root-required-notice")
+                    Spacer(minLength: 0)
+                    Button("Set root folder…") {
+                        chooseRepositoryParentFolder(showRepositoryPickerWhenFinished: false)
+                    }
+                    .buttonHoverPointer()
+                    .buttonStyle(.bordered)
+                    .help("Choose the folder that contains your repositories.")
+                    .accessibilityIdentifier("set-conversation-repository-root-button")
+                }
             }
 
-            if let errorMessage,
-               errorMessage != WorkspaceError.noRoots.localizedDescription {
+            if let errorMessage {
                 Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.red)
@@ -2122,6 +2454,18 @@ struct TaskConversationView: View {
             }
 
             VStack(alignment: .leading, spacing: 10) {
+                let pendingCommentCount = annotations.filter(\.pending).count
+                if pendingCommentCount > 0 {
+                    Label("\(pendingCommentCount) comment\(pendingCommentCount == 1 ? "" : "s")", systemImage: "text.bubble")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.primary.opacity(0.82))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.primary.opacity(0.1), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(Color.primary.opacity(0.08)))
+                        .accessibilityIdentifier("pending-comment-count")
+                }
+
                 if let activeGoal, activeGoal.status != "complete", !isReadOnly, provider.supportsGoals {
                     HStack(spacing: 10) {
                         Image(systemName: "scope").font(.system(size: 17, weight: .medium)).foregroundStyle(.secondary)
@@ -2459,6 +2803,13 @@ struct TaskConversationView: View {
         userInputRequest = nil
         userInputAnswers = [:]
         userInputOther = [:]
+        if request.isBlocking {
+            do {
+                _ = try await BoardTaskManager(modelContext: modelContext).resumeWaitingResponseAfterUserInput(task.id)
+            } catch {
+                errorMessage = "Your answer was sent, but StationAI couldn't update the task status: \(error.localizedDescription)"
+            }
+        }
     }
 
     private func loadConversation() async {
@@ -2471,6 +2822,7 @@ struct TaskConversationView: View {
                 actionNotice = approvalNotice
             }
             messages = history.messages
+            restoreAnnotations(from: history.messages)
             answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
             activities = history.activities
             providerBoundaries = history.providerBoundaries
@@ -2553,6 +2905,33 @@ struct TaskConversationView: View {
         }
     }
 
+    private func restoreAnnotations(from messages: [ConversationMessage]) {
+        var restored: [ConversationAnnotation] = []
+        for message in messages where message.role == .user {
+            guard let start = message.text.range(of: "<response-comments>")
+                    ?? message.text.range(of: "<response-annotations>"),
+                  let end = message.text.range(of: "</response-comments>", range: start.upperBound..<message.text.endIndex)
+                    ?? message.text.range(of: "</response-annotations>", range: start.upperBound..<message.text.endIndex),
+                  let data = String(message.text[start.upperBound..<end.lowerBound]).data(using: .utf8),
+                  let items = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { continue }
+            for item in items {
+                guard let selectedText = item["text"] as? String,
+                      let comment = item["comment"] as? String ?? item["annotation"] as? String,
+                      let source = item["source"] as? [String: Any],
+                      let sourceID = source["messageId"] as? String,
+                      let blockID = source["blockID"] as? Int,
+                      let startOffset = source["startOffset"] as? Int,
+                      let endOffset = source["endOffset"] as? Int else { continue }
+                restored.append(ConversationAnnotation(
+                    id: UUID(), messageID: sourceID, blockID: blockID,
+                    startOffset: startOffset, endOffset: endOffset,
+                    text: selectedText, comment: comment, pending: false
+                ))
+            }
+        }
+        annotations = restored
+    }
+
     private func loadModels() async {
         if modelOptions.isEmpty || !modelOptions.contains(where: { $0.id == selectedModelID }) {
             modelOptions = [ConversationModelOption(id: provider.defaultModelID, name: provider.defaultModelName, isDefault: true)]
@@ -2574,15 +2953,38 @@ struct TaskConversationView: View {
     }
 
     private func sendMessage(overrideText: String? = nil) {
-        let text = (overrideText ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isApplyingSavedRepositories else { return }
+        guard isRepositoryRootConfigured else {
+            errorMessage = "Set the repository root folder before sending a conversation."
+            return
+        }
+        let freeformText = (overrideText ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
+        let pendingAnnotations = annotations.filter(\.pending)
         let usesComposerDraft = overrideText == nil
-        guard (!text.isEmpty || (usesComposerDraft && !pendingImages.isEmpty)), !isResponding, !isLoadingHistory else { return }
+        guard (!freeformText.isEmpty || (usesComposerDraft && !pendingImages.isEmpty) || !pendingAnnotations.isEmpty), !isResponding, !isLoadingHistory else { return }
+        let annotationPrompt: String
+        if pendingAnnotations.isEmpty {
+            annotationPrompt = freeformText
+        } else {
+            let objects = pendingAnnotations.map { annotation in
+                ["text": annotation.text, "comment": annotation.comment,
+                 "source": ["messageId": annotation.messageID,
+                            "blockID": annotation.blockID,
+                            "startOffset": annotation.startOffset, "endOffset": annotation.endOffset]] as [String: Any]
+            }
+            let data = try? JSONSerialization.data(withJSONObject: objects, options: [.sortedKeys])
+            let json = data.flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+            let guidance = "<stationai-comment-context>\n# Response comments:\nThe following JSON contains comments on selected conversation text, in array order. For each comment, start a separate response line with :codex-annotation{index=\"N\"}, replacing N with the comment's zero-based array index, then a space and the answer. The marker is displayed to the user as the numbered prefix, so do not add another number. Address the comment in the context of its highlighted text. Do not combine comment responses on one line, omit a response, or add introductory text. After the comment responses, answer any additional freeform request on separate line(s). Do not repeat the JSON or these instructions.\n<response-comments>\(json)</response-comments>\n</stationai-comment-context>"
+            annotationPrompt = [freeformText, guidance]
+                .filter { !$0.isEmpty }.joined(separator: "\n\n")
+        }
+        let text = annotationPrompt
         let resolutionAttempt = conflictResolutionAttempt
-        if usesComposerDraft && text == "/plan" {
+        if usesComposerDraft && pendingAnnotations.isEmpty && text == "/plan" {
             activatePlanMode()
             return
         }
-        if usesComposerDraft && isEnteringGoal {
+        if usesComposerDraft && isEnteringGoal && pendingAnnotations.isEmpty {
             isPreparingSubmittedMessage = true
             draft = ""
             isEnteringGoal = false
@@ -2595,6 +2997,9 @@ struct TaskConversationView: View {
                 isComposerFocused = true
             }
             return
+        }
+        if usesComposerDraft && isEnteringGoal && !pendingAnnotations.isEmpty {
+            isEnteringGoal = false
         }
         guard !text.isEmpty || (usesComposerDraft && !pendingImages.isEmpty) else { return }
         let userMessageID = UUID().uuidString
@@ -2635,7 +3040,7 @@ struct TaskConversationView: View {
                 }
                 messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
                 if usesComposerDraft {
-                    draft = text
+                    draft = freeformText
                     pendingImages = imageDataURLs.compactMap { dataURL in
                         guard let image = Self.image(fromDataURL: dataURL) else { return nil }
                         return PendingImage(dataURL: dataURL, image: image)
@@ -2707,6 +3112,10 @@ struct TaskConversationView: View {
                         answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
                         activities = history.activities
                         if update.type == "completed" {
+                            let sentIDs = Set(pendingAnnotations.map(\.id))
+                            for index in annotations.indices where sentIDs.contains(annotations[index].id) {
+                                annotations[index].pending = false
+                            }
                             if let responseStartedAt {
                                 let duration = Self.elapsedSeconds(since: responseStartedAt, now: Date())
                                 completedResponseDuration = duration
@@ -2779,7 +3188,7 @@ struct TaskConversationView: View {
                 } else {
                     messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
                     if usesComposerDraft {
-                        draft = text
+                        draft = freeformText
                         pendingImages = imageDataURLs.compactMap { dataURL in
                             guard let image = Self.image(fromDataURL: dataURL) else { return nil }
                             return PendingImage(dataURL: dataURL, image: image)
@@ -3639,6 +4048,340 @@ private final class ChatEditorTextView: NSTextView {
             onPasteImage?(image)
         } else {
             super.paste(sender)
+        }
+    }
+}
+
+private struct SelectableAnnotationText: NSViewRepresentable {
+    let text: String
+    let annotations: [ConversationAnnotation]
+    var responseAnnotations: [ResponseAnnotationReference] = []
+    var responseCommentSourcePrefix = ""
+    var textColor: NSColor = .labelColor
+    let onSelection: (NSRange, String, CGRect) -> Void
+    var formattedText: NSAttributedString? = nil
+    var font = NSFont.systemFont(ofSize: 16)
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            onSelection: onSelection,
+            responseCommentSourcePrefix: responseCommentSourcePrefix
+        )
+    }
+
+    func makeNSView(context: Context) -> NSTextView {
+        let view = CommentTrackingTextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.drawsBackground = false
+        view.textContainerInset = NSSize(width: 0, height: 5)
+        view.textContainer?.lineFragmentPadding = 0
+        view.isVerticallyResizable = true
+        view.isHorizontallyResizable = false
+        view.autoresizingMask = [.width]
+        view.textContainer?.widthTracksTextView = true
+        view.delegate = context.coordinator
+        context.coordinator.anchorView = view
+        view.hoverTrackingOwner = context.coordinator
+        view.updateTrackingAreas()
+        update(view, coordinator: context.coordinator)
+        context.coordinator.renderedKey = renderKey
+        return view
+    }
+
+    func updateNSView(_ view: NSTextView, context: Context) {
+        context.coordinator.onSelection = onSelection
+        context.coordinator.responseCommentSourcePrefix = responseCommentSourcePrefix
+        context.coordinator.anchorView = view
+        guard context.coordinator.renderedKey != renderKey else {
+            return
+        }
+        update(view, coordinator: context.coordinator)
+        context.coordinator.renderedKey = renderKey
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextView, context: Context) -> CGSize? {
+        let width = max(40, proposal.width ?? 500)
+        guard let renderedText = nsView.textStorage else { return nil }
+        let storage = NSTextStorage(attributedString: renderedText)
+        let layoutManager = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(width: width, height: .greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        layoutManager.addTextContainer(container)
+        storage.addLayoutManager(layoutManager)
+        layoutManager.ensureLayout(for: container)
+        let contentHeight = layoutManager.usedRect(for: container).height
+        return CGSize(width: width, height: ceil(contentHeight) + 2 * nsView.textContainerInset.height + 2)
+    }
+
+    private var renderKey: String {
+        responseCommentSourcePrefix + "|" + text + annotations.map { "\($0.startOffset):\($0.endOffset)" }.joined(separator: ",")
+            + responseAnnotations.map { "\($0.text):\($0.comment)" }.joined(separator: "|")
+    }
+
+    private func update(_ view: NSTextView, coordinator: Coordinator) {
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = 4
+        let value: NSMutableAttributedString
+        if let formattedText {
+            value = NSMutableAttributedString(attributedString: formattedText)
+            for (key, fallback) in [(NSAttributedString.Key.font, font as Any),
+                                    (.foregroundColor, textColor as Any),
+                                    (.paragraphStyle, style as Any)] {
+                var missingRanges: [NSRange] = []
+                value.enumerateAttribute(key, in: NSRange(location: 0, length: value.length)) { attribute, range, _ in
+                    if attribute == nil { missingRanges.append(range) }
+                }
+                for range in missingRanges where range.length > 0 {
+                    value.addAttribute(key, value: fallback, range: range)
+                }
+            }
+        } else {
+            value = NSMutableAttributedString(string: text, attributes: [
+                .font: font,
+                .foregroundColor: textColor,
+                .paragraphStyle: style
+            ])
+        }
+        for annotation in annotations {
+            let range = NSRange(location: annotation.startOffset, length: annotation.endOffset - annotation.startOffset)
+            guard range.location >= 0, NSMaxRange(range) <= value.length else { continue }
+            value.addAttribute(.foregroundColor, value: NSColor.systemOrange, range: range)
+        }
+        Self.replaceResponseAnnotationMarkers(in: value, references: responseAnnotations)
+        view.font = font
+        view.textColor = textColor
+        view.backgroundColor = .clear
+        view.textStorage?.setAttributedString(value)
+        view.setSelectedRange(NSRange(location: 0, length: 0))
+        coordinator.responseCommentContentDidChange()
+    }
+
+    private static let responseCommentTextKey = NSAttributedString.Key("StationAIResponseCommentText")
+    private static let responseCommentBodyKey = NSAttributedString.Key("StationAIResponseCommentBody")
+
+    private static func replaceResponseAnnotationMarkers(in value: NSMutableAttributedString, references: [ResponseAnnotationReference]) {
+        let pattern = #":codex-annotation\{index=\"(\d+)\"\}"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return }
+        let originalText = value.string as NSString
+        for match in regex.matches(in: value.string, range: NSRange(location: 0, length: originalText.length)).reversed() {
+            guard match.numberOfRanges > 1,
+                  let index = Int(originalText.substring(with: match.range(at: 1))) else { continue }
+            let label = match.range.location == 0 ? "\(index + 1)." : "Comment \(index + 1)"
+            let isResolved = references.indices.contains(index)
+            let replacement = NSMutableAttributedString(string: label, attributes: [
+                .font: NSFont.systemFont(ofSize: 16),
+                .foregroundColor: isResolved ? NSColor.controlAccentColor
+                    : (value.attribute(.foregroundColor, at: match.range.location, effectiveRange: nil) as? NSColor ?? .labelColor),
+            ])
+            if isResolved {
+                let reference = references[index]
+                replacement.addAttribute(.underlineStyle,
+                                         value: NSUnderlineStyle.single.rawValue | NSUnderlineStyle.patternDot.rawValue,
+                                         range: NSRange(location: 0, length: replacement.length))
+                replacement.addAttribute(responseCommentTextKey, value: reference.text, range: NSRange(location: 0, length: replacement.length))
+                replacement.addAttribute(responseCommentBodyKey, value: reference.comment, range: NSRange(location: 0, length: replacement.length))
+            }
+            value.replaceCharacters(in: match.range, with: replacement)
+        }
+    }
+
+    final class Coordinator: NSResponder, NSTextViewDelegate, NSPopoverDelegate {
+        var onSelection: (NSRange, String, CGRect) -> Void
+        var responseCommentSourcePrefix: String
+        weak var anchorView: NSTextView?
+        var renderedKey = ""
+        private var responseCommentPopover: NSPopover?
+        private var activeResponseCommentID: String?
+        private var pendingResponseCommentSourceID: String?
+        private var pendingResponseCommentWorkItem: DispatchWorkItem?
+
+        init(
+            onSelection: @escaping (NSRange, String, CGRect) -> Void,
+            responseCommentSourcePrefix: String
+        ) {
+            self.onSelection = onSelection
+            self.responseCommentSourcePrefix = responseCommentSourcePrefix
+            super.init()
+        }
+
+        required init?(coder: NSCoder) {
+            return nil
+        }
+
+        override func mouseEntered(with event: NSEvent) {
+            updateHover(for: event)
+        }
+
+        override func mouseMoved(with event: NSEvent) {
+            updateHover(for: event)
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            guard let anchorView else { return }
+            updateResponseCommentHover(at: nil, in: anchorView)
+        }
+
+        private func updateHover(for event: NSEvent) {
+            guard let anchorView else { return }
+            updateResponseCommentHover(at: anchorView.convert(event.locationInWindow, from: nil), in: anchorView)
+        }
+
+        func updateResponseCommentHover(at point: CGPoint?, in view: NSTextView) {
+            let hit = point.flatMap { responseComment(at: $0, in: view) }
+            guard let hit else {
+                cancelPendingResponseCommentHover()
+                closeResponseCommentPopover()
+                return
+            }
+            let sourceID = hit.sourceID
+            if sourceID == pendingResponseCommentSourceID ||
+                (sourceID == activeResponseCommentID && responseCommentPopover?.isShown == true) {
+                return
+            }
+            cancelPendingResponseCommentHover()
+            closeResponseCommentPopover()
+            pendingResponseCommentSourceID = sourceID
+            let workItem = DispatchWorkItem { [weak self, weak view] in
+                guard let self, let view,
+                      self.pendingResponseCommentSourceID == sourceID,
+                      let window = view.window else { return }
+                self.pendingResponseCommentWorkItem = nil
+                self.pendingResponseCommentSourceID = nil
+                let currentPoint = view.convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
+                let currentHit = self.responseComment(at: currentPoint, in: view)
+                guard let currentHit,
+                      currentHit.sourceID == sourceID else { return }
+                self.showResponseCommentPopover(
+                    sourceID: sourceID,
+                    selectedText: currentHit.selectedText,
+                    comment: currentHit.comment,
+                    bounds: currentHit.anchor,
+                    anchorView: view
+                )
+            }
+            pendingResponseCommentWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(200), execute: workItem)
+        }
+
+        private func responseComment(at point: CGPoint, in view: NSTextView) -> (sourceID: String, selectedText: String, comment: String, anchor: CGRect)? {
+            guard let storage = view.textStorage,
+                  let layoutManager = view.layoutManager,
+                  let textContainer = view.textContainer,
+                  let window = view.window else { return nil }
+            var hit: (sourceID: String, selectedText: String, comment: String, anchor: CGRect)?
+            storage.enumerateAttribute(
+                SelectableAnnotationText.responseCommentTextKey,
+                in: NSRange(location: 0, length: storage.length)
+            ) { selectedTextValue, range, stop in
+                guard let selectedText = selectedTextValue as? String, range.length > 0,
+                      let comment = storage.attribute(SelectableAnnotationText.responseCommentBodyKey,
+                                                      at: range.location, effectiveRange: nil) as? String else { return }
+                let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+                var fragments: [CGRect] = []
+                layoutManager.enumerateEnclosingRects(
+                    forGlyphRange: glyphRange,
+                    withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
+                    in: textContainer
+                ) { rect, _ in
+                    let origin = view.textContainerOrigin
+                    fragments.append(CGRect(
+                        x: origin.x + rect.minX,
+                        y: view.isFlipped ? origin.y + rect.minY : view.bounds.height - origin.y - rect.maxY,
+                        width: rect.width,
+                        height: rect.height
+                    ))
+                }
+                guard let firstFragment = fragments.first else { return }
+                let firstScreenRect = view.firstRect(forCharacterRange: range, actualRange: nil)
+                guard !firstScreenRect.isNull, !firstScreenRect.isEmpty else { return }
+                let firstViewRect = view.convert(window.convertFromScreen(firstScreenRect), from: nil)
+                let offset = CGPoint(x: firstViewRect.minX - firstFragment.minX,
+                                     y: firstViewRect.minY - firstFragment.minY)
+                for (index, fragment) in fragments.enumerated() {
+                    let glyphBounds = index == 0 ? firstViewRect
+                        : fragment.offsetBy(dx: offset.x, dy: offset.y)
+                    let bounds = glyphBounds.insetBy(dx: -4, dy: -5)
+                    guard bounds.contains(point) else { continue }
+                    hit = (
+                        sourceID: "\(self.responseCommentSourcePrefix):\(range.location)",
+                        selectedText: selectedText,
+                        comment: comment,
+                        anchor: CGRect(x: bounds.minX, y: bounds.midY, width: bounds.width, height: 1)
+                    )
+                    stop.pointee = true
+                    break
+                }
+            }
+            return hit
+        }
+
+
+        private func showResponseCommentPopover(
+            sourceID: String,
+            selectedText: String,
+            comment: String,
+            bounds: CGRect,
+            anchorView: NSView
+        ) {
+            guard activeResponseCommentID != sourceID || responseCommentPopover?.isShown != true else { return }
+            closeResponseCommentPopover()
+            activeResponseCommentID = sourceID
+
+            let popover = NSPopover()
+            popover.behavior = .applicationDefined
+            popover.animates = false
+            popover.delegate = self
+            let hostingController = NSHostingController(rootView: ResponseCommentHoverCard(
+                selectedText: selectedText,
+                comment: comment
+            ))
+            hostingController.view.frame = CGRect(x: 0, y: 0, width: 320, height: 120)
+            popover.contentViewController = hostingController
+            popover.contentSize = NSSize(width: 320, height: 120)
+            responseCommentPopover = popover
+            popover.show(relativeTo: bounds, of: anchorView, preferredEdge: .minY)
+        }
+
+        private func closeResponseCommentPopover() {
+            responseCommentPopover?.close()
+            responseCommentPopover = nil
+            activeResponseCommentID = nil
+        }
+
+        private func cancelPendingResponseCommentHover() {
+            pendingResponseCommentWorkItem?.cancel()
+            pendingResponseCommentWorkItem = nil
+            pendingResponseCommentSourceID = nil
+        }
+
+        func responseCommentContentDidChange() {
+            cancelPendingResponseCommentHover()
+            closeResponseCommentPopover()
+        }
+
+        func popoverDidClose(_ notification: Notification) {
+            guard let popover = notification.object as? NSPopover,
+                  popover === responseCommentPopover else { return }
+            responseCommentPopover = nil
+            activeResponseCommentID = nil
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let view = notification.object as? NSTextView else { return }
+            let range = view.selectedRange()
+            guard range.length > 0, NSMaxRange(range) <= (view.string as NSString).length else {
+                onSelection(range, "", .zero)
+                return
+            }
+            let text = (view.string as NSString).substring(with: range)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return }
+            let glyphs = view.layoutManager?.glyphRange(forCharacterRange: range, actualCharacterRange: nil) ?? NSRange(location: 0, length: 0)
+            var bounds = view.layoutManager?.boundingRect(forGlyphRange: glyphs, in: view.textContainer!) ?? .zero
+            bounds.origin.x += view.textContainerOrigin.x
+            bounds.origin.y += view.textContainerOrigin.y
+            onSelection(range, text, bounds)
         }
     }
 }

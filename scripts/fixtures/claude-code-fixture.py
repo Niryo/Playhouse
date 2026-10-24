@@ -70,7 +70,18 @@ def run_tool(tool_id, name, tool_input, command=None):
 
 def respond(user_text, instructions):
     commands = []
-    if "story" in user_text.lower():
+    if user_text.startswith("Write a concise task title"):
+        if "title-failure" not in sys.argv[0]:
+            text("msg_title", "Generated Claude title")
+    elif "<response-comments>" in user_text:
+        payload = user_text.split("<response-comments>", 1)[1].split("</response-comments>", 1)[0]
+        comments = json.loads(payload)
+        answer = "\n".join(
+            f':codex-annotation{{index="{index}"}} For ‘{item["text"]}’: {item["comment"]}'
+            for index, item in enumerate(comments)
+        )
+        text("msg_comments", answer)
+    elif "story" in user_text.lower():
         text("msg_story", STORY)
         progress_clear = report_command(instructions, " task progress clear ")
         outcome = report_command(instructions, " task outcome ", "completed")

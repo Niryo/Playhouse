@@ -425,7 +425,7 @@ struct KanbanBoardView: View {
                 Image("StationAILogo")
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 42, height: 42)
+                    .frame(width: 50, height: 50)
                     .accessibilityLabel("StationAI logo")
 
                 VStack(alignment: .leading, spacing: 3) {
