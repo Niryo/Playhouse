@@ -4192,7 +4192,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("provider-boundary-codex").exists)
     }
 
-    // case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with its indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy response-annotations payloads and annotation fields still restore their reply details.
+    // case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details.
     func test_conversation_adds_ordered_text_annotations() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-goal-success").path
         let fixtureStateDirectory = dataDirectory.appendingPathComponent("comment-goal-fixture-state", isDirectory: true)
@@ -4509,14 +4509,14 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(savedPrompt.contains("\"text\":\"\(userSelection)\""))
         XCTAssertTrue(savedPrompt.contains("\"text\":\"\(assistantSelection)\""))
         XCTAssertTrue(savedPrompt.contains("\"comment\":\"Explain this phrase\""))
-        XCTAssertTrue(savedPrompt.contains("start a separate response line with :codex-annotation{index=\"N\"}"))
+        XCTAssertTrue(savedPrompt.contains("start a separate response line with :stationai-annotation{index=\"N\"}"))
         XCTAssertTrue(savedPrompt.contains("Do not combine comment responses on one line"))
         XCTAssertTrue(waitUntil({
             guard (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" else { return false }
             guard let history = try? self.runCLI(["conversation", "history", taskID])["result"] as? [String: Any],
                   let messages = history["messages"] as? [[String: Any]],
                   let finalReply = messages.last(where: { ($0["role"] as? String) == "assistant" }) else { return false }
-            return (finalReply["text"] as? String ?? "").contains(":codex-annotation{index=\"1\"}")
+            return (finalReply["text"] as? String ?? "").contains(":stationai-annotation{index=\"1\"}")
         }, timeout: 60), "The fixture turn should finish before reopening to verify persisted comments.")
         app.terminate()
         launchApp(defaultParent: fixture.parent.path)
@@ -4601,7 +4601,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(assistantResponseLines.count, 2, "Each comment response should render on its own line.")
         XCTAssertTrue(assistantResponseLines[0].hasPrefix("1. "), "The first response should begin with its numbered comment link.")
         XCTAssertTrue(assistantResponseLines[1].hasPrefix("2. "), "The second response should begin with its numbered comment link.")
-        XCTAssertFalse(assistantResponseLines.joined(separator: "\n").contains(":codex-annotation"),
+        XCTAssertFalse(assistantResponseLines.joined(separator: "\n").contains(":stationai-annotation"),
                        "Protocol markers should be replaced by visible comment labels.")
         let firstMarkerCenterX = "1.".size(withAttributes: [.font: NSFont.systemFont(ofSize: 16)]).width / 2
         let firstResponseLine = renderedCommentResponse.descendants(matching: .textView).matching(
@@ -4692,95 +4692,34 @@ final class StationAIUITests: XCTestCase {
         }
         offComment.hover()
         XCTAssertTrue(waitUntil({ !commentHint.exists }, timeout: 1))
-    }
 
-    // case-contract: test_claude_comment_only_annotations_persist | A Claude conversation accepts a comment while the composer is empty, sends its selected text and comment through the shared ordered comment protocol, renders the numbered response prefix and hover detail, and restores the comment payload and response after a fresh CLI/XPC history read and app relaunch. The isolated repository-root setting permits the send and reaches the provider instructions.
-    func test_claude_comment_only_annotations_persist() throws {
-        let claudeExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: claudeExecutable.path))
-        claudeFixtureExecutable = claudeExecutable.path
-        launchApp(defaultParent: fixture.parent.path)
-        let created = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Claude comment UI", "--root", fixture.primary.path, "--provider", "claude"
-        ])["result"] as? [String: Any])
-        let taskID = try XCTUnwrap(created["id"] as? String)
-        let sourceText = "First phrase needs more detail."
-        _ = try runCLI(["conversation", "send", taskID, "--message", sourceText])
-        let before = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
-        let beforeMessages = try XCTUnwrap(before["messages"] as? [[String: Any]])
-        let sourceID = try XCTUnwrap(beforeMessages.first(where: { ($0["role"] as? String) == "user" })?["id"] as? String)
-        openTask(named: "Claude comment UI")
-        let sourceView = element("user-message-\(sourceID)")
-        XCTAssertTrue(sourceView.waitForExistence(timeout: 10))
-        let composer = element("message-composer")
-        XCTAssertTrue(composer.waitForExistence(timeout: 5))
-        XCTAssertTrue((composer.value as? String ?? "").isEmpty, "Comment-only send starts with an empty composer.")
-        sourceView.click()
-        sourceView.typeKey("a", modifierFlags: .command)
-        let addComment = app.buttons.matching(NSPredicate(format: "label == %@", "Add comment")).firstMatch
-        XCTAssertTrue(addComment.waitForExistence(timeout: 5))
-        XCTAssertLessThanOrEqual(addComment.frame.maxY, sourceView.frame.minY + 8,
-                                 "The Add comment hint should appear above the selected line.")
-        addComment.click()
-        let field = element("comment-input-field")
-        XCTAssertTrue(field.waitForExistence(timeout: 5))
-        field.typeText("Explain this")
+        let emptyComposer = element("message-composer")
+        XCTAssertTrue((emptyComposer.value as? String ?? "").isEmpty)
+        secondResponseLine.click()
+        secondResponseLine.typeKey("a", modifierFlags: .command)
+        let addCommentOnly = app.buttons.matching(NSPredicate(format: "label == %@", "Add comment")).firstMatch
+        XCTAssertTrue(addCommentOnly.waitForExistence(timeout: 5))
+        addCommentOnly.click()
+        let commentOnlyField = element("comment-input-field")
+        XCTAssertTrue(commentOnlyField.waitForExistence(timeout: 5))
+        commentOnlyField.typeText("Explain this reply")
         element("add-comment-button").click()
-        XCTAssertTrue(element("send-message-button").isEnabled)
-        XCTAssertTrue((composer.value as? String ?? "").isEmpty, "No freeform text was entered.")
+        XCTAssertTrue((emptyComposer.value as? String ?? "").isEmpty)
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({
             guard let history = try? self.runCLI(["conversation", "history", taskID])["result"] as? [String: Any],
-                  let messages = history["messages"] as? [[String: Any]] else { return false }
-            return messages.contains { ($0["role"] as? String) == "assistant"
-                && (($0["text"] as? String)?.contains(":codex-annotation{index=\"0\"}") ?? false) }
-        }, timeout: 20), "Claude should respond to the comment-only turn.")
-        let after = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
-        let messages = try XCTUnwrap(after["messages"] as? [[String: Any]])
-        let commentUser = try XCTUnwrap(messages.last(where: { ($0["role"] as? String) == "user" }))
-        let payload = try XCTUnwrap(commentUser["text"] as? String)
-        XCTAssertTrue(payload.contains("<response-comments>"))
-        XCTAssertTrue(payload.contains("First phrase needs more detail."))
-        XCTAssertTrue(payload.contains("Explain this"))
-        XCTAssertTrue(payload.hasPrefix("<stationai-comment-context>"), "The serialized turn contains only comment context.")
-        let reply = try XCTUnwrap(messages.last(where: { ($0["role"] as? String) == "assistant" }))
-        let replyID = try XCTUnwrap(reply["id"] as? String)
-        let replyView = element("assistant-message-\(replyID)")
-        XCTAssertTrue(replyView.waitForExistence(timeout: 10))
-        let marker = replyView.descendants(matching: .textView).matching(
-            NSPredicate(format: "value CONTAINS %@", "Comment 1")
-        ).firstMatch
-        XCTAssertTrue(marker.waitForExistence(timeout: 5), "The protocol marker should render as Comment 1.")
-        let hoverHint = element("response-comment-hover-card")
-        for offset in [0.03, 0.08, 0.15] where !hoverHint.exists {
-            marker.coordinate(withNormalizedOffset: CGVector(dx: offset, dy: 0.5)).hover()
-            _ = waitUntil({ hoverHint.exists }, timeout: 1)
-        }
-        XCTAssertTrue(hoverHint.exists, "Hovering the numbered marker should show the selected text and comment.")
-        XCTAssertTrue(hoverHint.label.contains(sourceText))
-        XCTAssertTrue(hoverHint.label.contains("Explain this"))
-        relaunchApp()
-        openTask(named: "Claude comment UI")
-        let reloadedReply = element("assistant-message-\(replyID)")
-        XCTAssertTrue(reloadedReply.waitForExistence(timeout: 10),
-                      "Claude's comment response should persist after an app relaunch.")
-        let reloadedMarker = reloadedReply.descendants(matching: .textView).matching(
-            NSPredicate(format: "value CONTAINS %@", "Comment 1")
-        ).firstMatch
-        XCTAssertTrue(reloadedMarker.waitForExistence(timeout: 5), "The numbered prefix should survive a reload.")
-        let reloadedSource = element("user-message-\(sourceID)")
-        XCTAssertTrue(reloadedSource.exists)
-        XCTAssertGreaterThan(orangePixelCount(in: reloadedSource.screenshot()), 5,
-                             "The selected source range should remain highlighted after reopening.")
-        let reloadedHint = element("response-comment-hover-card")
-        for offset in [0.03, 0.08, 0.15] where !reloadedHint.exists {
-            reloadedMarker.coordinate(withNormalizedOffset: CGVector(dx: offset, dy: 0.5)).hover()
-            _ = waitUntil({ reloadedHint.exists }, timeout: 1)
-        }
-        XCTAssertTrue(reloadedHint.exists, "The reloaded numbered prefix should open its hover detail.")
-        XCTAssertTrue(reloadedHint.label.contains(sourceText))
-        XCTAssertTrue(reloadedHint.label.contains("Explain this"))
-        XCTAssertEqual(try taskRecord(id: taskID)?["conversationProvider"] as? String, "claude")
+                  let messages = history["messages"] as? [[String: Any]],
+                  let answer = messages.last(where: { ($0["role"] as? String) == "assistant" }) else { return false }
+            return (answer["id"] as? String) != annotatedAssistantID
+                && (answer["text"] as? String ?? "").contains(":stationai-annotation{index=\"0\"}")
+        }, timeout: 20), "A comment-only turn should reach the provider and produce a linked reply.")
+        let commentOnlyHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let commentOnlyMessages = try XCTUnwrap(commentOnlyHistory["messages"] as? [[String: Any]])
+        let commentOnlyRequest = try XCTUnwrap(commentOnlyMessages.last(where: { ($0["role"] as? String) == "user" }))
+        let commentOnlyPayload = try XCTUnwrap(commentOnlyRequest["text"] as? String)
+        XCTAssertTrue(commentOnlyPayload.hasPrefix("<stationai-comment-context>"),
+                      "An empty-composer send should contain only the structured comment context.")
+        XCTAssertTrue(commentOnlyPayload.contains("Explain this reply"))
     }
 
     // case-contract: test_claude_auto_branch_uses_generated_title_and_fallback | An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree.

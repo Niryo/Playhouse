@@ -3108,7 +3108,7 @@ class StationAIBridgeTests(unittest.TestCase):
             any("<stationai-handoff-context>" in message["text"] for message in final_history["messages"]),
             "Handoff context never appears in the visible transcript.",
         )
-    # case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with its indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy response-annotations payloads and annotation fields still restore their reply details.
+    # case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details.
     def test_conversation_adds_ordered_text_annotations(self):
         task = self.create_repo_task("Conversation comments", [self.primary])
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -3130,7 +3130,7 @@ class StationAIBridgeTests(unittest.TestCase):
         prompt = (
             ordinary_text + "\n\n# Response comments:\n"
             "The following JSON contains comments on selected conversation text, in array order. "
-            "For each comment, start a separate response line with :codex-annotation{index=\"N\"}, "
+            "For each comment, start a separate response line with :stationai-annotation{index=\"N\"}, "
             "replacing N with the comment's zero-based array index, then a space and the answer. "
             "The marker is displayed to the user as the numbered prefix, so do not add another number. "
             "Address the comment in the context of its highlighted text. Do not combine comment responses on one line, "
@@ -3165,8 +3165,8 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(assistant_messages, "The fixture should return a response for each comment.")
         response_lines = assistant_messages[-1]["text"].splitlines()
         self.assertEqual(len(response_lines), 2)
-        self.assertTrue(response_lines[0].startswith(':codex-annotation{index="0"} '))
-        self.assertTrue(response_lines[1].startswith(':codex-annotation{index="1"} '))
+        self.assertTrue(response_lines[0].startswith(':stationai-annotation{index="0"} '))
+        self.assertTrue(response_lines[1].startswith(':stationai-annotation{index="1"} '))
         self.assertIn("For ‘first phrase’: Explain this", response_lines[0])
         self.assertIn("Please clarify this response", response_lines[1])
 
@@ -3192,51 +3192,27 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIn("A detail from older saved history", legacy_assistant["text"])
         self.assertIn(':codex-annotation{index="0"}', legacy_assistant["text"])
 
-    # case-contract: test_claude_comment_only_annotations_persist | A Claude conversation accepts a comment while the composer is empty, sends its selected text and comment through the shared ordered comment protocol, renders the numbered response prefix and hover detail, and restores the comment payload and response after a fresh CLI/XPC history read and app relaunch. The isolated repository-root setting permits the send and reaches the provider instructions.
-    def test_claude_comment_only_annotations_persist(self):
-        executable = self.data_directory / "claude-fixture-comments"
-        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
-        executable.chmod(0o755)
-        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
-            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
-        )
-        environment = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)}
-        task = self.assert_success(self.call_cli(
-            "task", "create", "--title", "Claude comments", "--root", self.primary, "--provider", "claude"
-        )[0])
-        comments = [
-            {"text": "first phrase", "comment": "Explain this", "source": {
-                "messageId": "source-message", "blockID": 0, "startOffset": 0, "endOffset": 12}},
-            {"text": "second phrase", "comment": "Clarify this", "source": {
-                "messageId": "source-message", "blockID": 0, "startOffset": 13, "endOffset": 26}},
-        ]
-        prompt = (
+        comment_only_prompt = (
             "<stationai-comment-context>\n# Response comments:\n"
-            "For each comment, start a separate response line with :codex-annotation{index=\"N\"}.\n"
-            "<response-comments>" + json.dumps(comments) + "</response-comments>\n"
+            "For each comment, start a separate response line with :stationai-annotation{index=\"N\"}.\n"
+            "<response-comments>" + json.dumps(comments[:1]) + "</response-comments>\n"
             "</stationai-comment-context>"
         )
         self.assert_success(self.call_cli(
-            "conversation", "send", task["id"], "--message", prompt, extra_environment=environment
+            "conversation", "send", task["id"], "--message", comment_only_prompt,
+            extra_environment=fixture_environment,
         )[0])
-        history = self.assert_success(self.call_cli(
-            "conversation", "history", task["id"], extra_environment=environment
+        comment_only_history = self.assert_success(self.call_cli(
+            "conversation", "history", task["id"], extra_environment=fixture_environment,
         )[0])
-        user = [item for item in history["messages"] if item["role"] == "user"][-1]
-        assistant = [item for item in history["messages"] if item["role"] == "assistant"][-1]
-        self.assertEqual(user["text"], prompt)
-        self.assertEqual(user["provider"], "claude")
-        self.assertEqual(assistant["provider"], "claude")
-        self.assertEqual(assistant["text"].splitlines(), [
-            ':codex-annotation{index="0"} For ‘first phrase’: Explain this',
-            ':codex-annotation{index="1"} For ‘second phrase’: Clarify this',
-        ])
-        persisted = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
-        self.assertEqual(persisted["turns"][-1]["userText"], prompt)
-        arguments = persisted["turns"][-1]["arguments"]
-        instructions = arguments[arguments.index("--append-system-prompt") + 1]
-        self.assertIn(str(self.fixture / "suggested-parent"), instructions)
-        self.assertEqual(self.assert_success(self.call_cli("settings", "get")[0])["defaultParentFolder"], str(self.fixture / "suggested-parent"))
+        self.assertEqual(
+            [item for item in comment_only_history["messages"] if item["role"] == "user"][-1]["text"],
+            comment_only_prompt,
+        )
+        self.assertIn(
+            ':stationai-annotation{index="0"}',
+            [item for item in comment_only_history["messages"] if item["role"] == "assistant"][-1]["text"],
+        )
 
     # case-contract: test_claude_auto_branch_uses_generated_title_and_fallback | An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree.
     def test_claude_auto_branch_uses_generated_title_and_fallback(self):

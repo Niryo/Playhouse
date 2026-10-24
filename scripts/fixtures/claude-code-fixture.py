@@ -77,7 +77,7 @@ def respond(user_text, instructions):
         payload = user_text.split("<response-comments>", 1)[1].split("</response-comments>", 1)[0]
         comments = json.loads(payload)
         answer = "\n".join(
-            f':codex-annotation{{index="{index}"}} For ‘{item["text"]}’: {item["comment"]}'
+            f':stationai-annotation{{index="{index}"}} For ‘{item["text"]}’: {item["comment"]}'
             for index, item in enumerate(comments)
         )
         text("msg_comments", answer)

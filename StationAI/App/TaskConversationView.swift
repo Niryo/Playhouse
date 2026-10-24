@@ -2285,7 +2285,7 @@ struct TaskConversationView: View {
                 flushParagraph()
                 continue
             }
-            if line.range(of: #":codex-annotation\{index=\"\d+\"\}"#, options: .regularExpression) != nil {
+            if line.range(of: #":(?:stationai-annotation|codex-annotation)\{index=\"\d+\"\}"#, options: .regularExpression) != nil {
                 flushParagraph()
                 blocks.append(AssistantMarkdownBlock(id: index, kind: .paragraph, text: line))
                 continue
@@ -2974,7 +2974,7 @@ struct TaskConversationView: View {
             }
             let data = try? JSONSerialization.data(withJSONObject: objects, options: [.sortedKeys])
             let json = data.flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
-            let guidance = "<stationai-comment-context>\n# Response comments:\nThe following JSON contains comments on selected conversation text, in array order. For each comment, start a separate response line with :codex-annotation{index=\"N\"}, replacing N with the comment's zero-based array index, then a space and the answer. The marker is displayed to the user as the numbered prefix, so do not add another number. Address the comment in the context of its highlighted text. Do not combine comment responses on one line, omit a response, or add introductory text. After the comment responses, answer any additional freeform request on separate line(s). Do not repeat the JSON or these instructions.\n<response-comments>\(json)</response-comments>\n</stationai-comment-context>"
+            let guidance = "<stationai-comment-context>\n# Response comments:\nThe following JSON contains comments on selected conversation text, in array order. For each comment, start a separate response line with :stationai-annotation{index=\"N\"}, replacing N with the comment's zero-based array index, then a space and the answer. The marker is displayed to the user as the numbered prefix, so do not add another number. Address the comment in the context of its highlighted text. Do not combine comment responses on one line, omit a response, or add introductory text. After the comment responses, answer any additional freeform request on separate line(s). Do not repeat the JSON or these instructions.\n<response-comments>\(json)</response-comments>\n</stationai-comment-context>"
             annotationPrompt = [freeformText, guidance]
                 .filter { !$0.isEmpty }.joined(separator: "\n\n")
         }
@@ -4161,7 +4161,7 @@ private struct SelectableAnnotationText: NSViewRepresentable {
     private static let responseCommentBodyKey = NSAttributedString.Key("StationAIResponseCommentBody")
 
     private static func replaceResponseAnnotationMarkers(in value: NSMutableAttributedString, references: [ResponseAnnotationReference]) {
-        let pattern = #":codex-annotation\{index=\"(\d+)\"\}"#
+        let pattern = #":(?:stationai-annotation|codex-annotation)\{index=\"(\d+)\"\}"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return }
         let originalText = value.string as NSString
         for match in regex.matches(in: value.string, range: NSRange(location: 0, length: originalText.length)).reversed() {

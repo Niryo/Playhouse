@@ -59,7 +59,7 @@ def answer_text(user_message):
             annotations = json.loads(payload)
             if isinstance(annotations, list) and annotations:
                 return "\n".join(
-                    (f":codex-annotation{{index=\"{index}\"}} For ‘{item['text']}’: "
+                    (f":stationai-annotation{{index=\"{index}\"}} For ‘{item['text']}’: "
                      f"{item.get('comment', item.get('annotation', ''))}"
                      if tag == "response-comments" else
                      f"For ‘{item['text']}’: {item.get('comment', item.get('annotation', ''))} "
