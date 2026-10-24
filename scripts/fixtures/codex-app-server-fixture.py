@@ -26,6 +26,8 @@ def write(value):
 
 
 def answer_text(user_message):
+    if Path(sys.argv[0]).name.endswith("-user-question"):
+        return "Answer received: Continue."
     if isinstance(user_message, str) and user_message.startswith("Long response fixture input."):
         return "A long fixture response gives the conversation enough content to test comment hint truncation. " * 8
     if isinstance(user_message, str) and ("<response-comments>" in user_message or "<response-annotations>" in user_message):
@@ -49,7 +51,20 @@ def answer_text(user_message):
 
 def question_request(request_id):
     mode = os.path.basename(sys.argv[0])
-    questions = [] if mode.endswith("-empty") else [
+    if mode.endswith("-user-question"):
+        questions = [{
+            "id": "question_action",
+            "header": "Next step",
+            "question": "Which approach should I take?",
+            "options": [
+                {"label": "Continue", "description": "Proceed with the current task."},
+                {"label": "Pause", "description": "Wait for more information."},
+            ],
+            "isOther": False,
+            "isSecret": False,
+        }]
+    else:
+        questions = [] if mode.endswith("-empty") else [
         {
             "id": "color",
             "header": "Color",
@@ -69,7 +84,7 @@ def question_request(request_id):
             "isOther": False,
             "isSecret": True,
         },
-    ]
+        ]
     write({
         "jsonrpc": "2.0",
         "id": request_id,
@@ -246,6 +261,8 @@ def main():
                 history.update({
                     "threadID": THREAD_ID,
                     "threadStartDeveloperInstructions": thread_start_instructions,
+                    "threadStartCwd": message.get("params", {}).get("cwd"),
+                    "threadStartRuntimeWorkspaceRoots": message.get("params", {}).get("runtimeWorkspaceRoots", []),
                     "threadStartCount": history.get("threadStartCount", 0) + 1,
                 })
                 history_path.write_text(json.dumps(history), encoding="utf-8")
@@ -336,6 +353,8 @@ def main():
                 "imageInputs": image_inputs,
                 "conversationMode": message.get("params", {}).get("collaborationMode", {}).get("mode"),
                 "developerInstructions": message.get("params", {}).get("collaborationMode", {}).get("settings", {}).get("developerInstructions"),
+                "cwd": message.get("params", {}).get("cwd"),
+                "runtimeWorkspaceRoots": message.get("params", {}).get("runtimeWorkspaceRoots", []),
             }
             if serial_mode:
                 saved_history = serial_history()
@@ -854,10 +873,13 @@ def main():
                 answers = message.get("result", {}).get("answers")
             if "-slow" in mode and not mode.endswith("-interrupted"):
                 time.sleep(2)
-            failed = mode.endswith("-empty") or mode.endswith("-fail") or answers != {
+            expected_answers = {
                 "color": {"answers": ["Blue"]},
                 "token": {"answers": ["fixture-secret"]},
             }
+            if mode.endswith("-user-question"):
+                expected_answers = {"question_action": {"answers": ["Continue"]}}
+            failed = mode.endswith("-empty") or mode.endswith("-fail") or answers != expected_answers
             if not failed and Path(str(sys.argv[0]) + ".outcome-hold").exists():
                 active = Path(str(sys.argv[0]) + ".outcome-active")
                 release = Path(str(sys.argv[0]) + ".outcome-release")
@@ -875,6 +897,15 @@ def main():
                 "turn": {"id": TURN_ID, "status": "interrupted" if mode.endswith("-interrupted") else ("failed" if failed else "completed"),
                          **({"error": {"message": "Codex interrupted this turn."}} if mode.endswith("-interrupted") else ({"error": {"message": "Question response was missing or incorrect."}} if failed else {}))},
             }})
+        elif message.get("method") == "turn/steer":
+            params = message.get("params", {})
+            if params.get("threadId") != THREAD_ID or params.get("expectedTurnId") != TURN_ID:
+                write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32010, "message": "The expected turn ID is stale."}})
+            else:
+                saved_history = serial_history()
+                saved_history.setdefault("steerRequests", []).append(params)
+                history_path.write_text(json.dumps(saved_history), encoding="utf-8")
+                write({"jsonrpc": "2.0", "id": message["id"], "result": {"turnId": TURN_ID}})
         elif message.get("method") == "turn/interrupt":
             write({"jsonrpc": "2.0", "id": message["id"], "result": {}})
         elif message.get("method") == "thread/read":

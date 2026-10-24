@@ -1786,8 +1786,14 @@ final class CodexAppServerClient: ObservableObject {
     }
 }
 
-enum TaskProgressReportInstructions {
-    static func make(taskID: UUID) -> String {
+enum TaskThreadDeveloperInstructions {
+    /// Instructions StationAI attaches to Codex's thread/start and thread/resume requests.
+    static func make(
+        taskID: UUID,
+        repositories: [RepositoryWorktreeRecord] = [],
+        contextFolders: [String] = [],
+        repositoryRootPath: String? = nil
+    ) -> String {
         let executable = cliExecutableURL().path
         let quotedExecutable = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
         let id = taskID.uuidString
@@ -1795,6 +1801,55 @@ enum TaskProgressReportInstructions {
         Report your current work on the StationAI task board using the StationAI CLI. Publish at every phase change, when starting or finishing a substantial tool call, and at least every 30 seconds during long commands, builds, tests, waits, or investigation. Keep the report current while a tool runs; after it finishes, replace it with the next active action. During tests, identify the active suite/case and position when known (for example, "CLI/XPC 3/8: task progress persistence"); during other work, name the concrete action and useful target. Keep each detail to a short subtitle, ideally under 80 characters. Do not report every tiny edit. Use these commands for this task:
         \(quotedExecutable) task progress publish \(id) --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail \"short detail\"]
         \(quotedExecutable) task progress custom \(id) --label \"short label\" [--detail \"short detail\"]
+        \(quotedExecutable) task progress clear \(id)
+        Progress reports are hidden from the conversation and shown on the task card. Keep details brief. Do not use lifecycle task status commands for progress.
+
+        Repository context for this task:
+        - Selected repositories (source identity): \(repositories.isEmpty ? "none" : repositories.map(\.repositoryPath).joined(separator: ", "))
+        - Active task worktrees for edits: \(repositories.isEmpty ? "none" : repositories.map { "\($0.repositoryPath) -> \($0.worktreePath)" }.joined(separator: "; "))
+        - Additional context folders: \(contextFolders.isEmpty ? "none" : contextFolders.joined(separator: ", "))
+        - Configured repository root: \(repositoryRootPath ?? "not available")
+        A task may intentionally have no selected repository. Decide whether it is standalone or needs repository context. For read-only inspection, you do not need to attach a repository or create a worktree: call \(quotedExecutable) workspace repos list, then inspect a clearly matching returned repository path read-only. Never edit files in those source paths. If the request is standalone, proceed without repository context.
+        Add a repository to this task only when you intend to create or commit changes in it. If the needed repository is not already selected, call \(quotedExecutable) workspace repos list, choose a clearly matching returned path, then call \(quotedExecutable) task repository add <task-id> --repo <path> (or add-batch for multiple repositories). This creates the task worktree and returns the source-to-worktree mapping; make all changes in the returned worktreePath. You do not need to ask the user for special permission to read another listed repository, and you do not need to add a repository just to inspect it. If no returned path clearly matches a requested change, ask the user which repository to modify. Do not add or replace repositories merely because the selected context seems unrelated to the task; the user may have intentionally left a sticky default selected.
+        For already selected repositories, make changes in their corresponding active task worktrees above. For folder-only tasks, use the selected additional context folder; with no repository or folder context, treat the task as standalone unless the user asks for files that clearly belong in a repository. StationAI starts the Codex thread and user turn with the active task worktree as cwd and runtime workspace root. Temporary files under /tmp and other non-repository directories remain available when useful.
+        Use the workspace repos list API for repository discovery; do not search the configured root to find repositories yourself. Once the API returns a repository path, you may inspect that repository's contents read-only without adding it. For read-only inspection of returned source paths, you do not need to add a repository.
+        A selected repository can be a sticky default from an earlier task, and the user may have forgotten to change it. Do not interrupt the user or ask them to confirm the selection merely because the task appears unrelated. Use workspace repos list to discover alternatives when needed. Read-only inspection of returned source paths does not require adding repositories. Add a repository only when you intend to make or commit changes there, and use its task worktreePath for every edit. Do not replace or remove selected repositories unless the user explicitly asks; adding a worktree for a change is sufficient. Never silently edit a source repository path.
+        Repository context commands for this task:
+        \(quotedExecutable) task get \(id)
+        \(quotedExecutable) task repository add \(id) --repo <path>
+        \(quotedExecutable) task repository add-batch \(id) --repo <path> [--repo <path>...]
+        \(quotedExecutable) task repository replace \(id) --repo <path> [--repo <path>...]
+        \(quotedExecutable) task repository remove \(id) --repo <path>
+        \(quotedExecutable) settings get
+        \(quotedExecutable) workspace repos list
+
+        At the very end of every turn, make exactly one definitive outcome call using this task ID:
+        \(quotedExecutable) task outcome \(id) <completed|waiting-response>
+        Use completed only when all work for this turn is finished and no user decision or response is needed. If you need the user to answer, choose between options, provide missing information, or take another action before you can continue, use waiting-response. The outcome call must be your final CLI action for the turn. StationAI moves the task to Review only for completed. If you omit the outcome call, StationAI moves it to Waiting Response.
+        """
+    }
+
+    private static func cliExecutableURL() -> URL {
+        let fileManager = FileManager.default
+        var candidate = Bundle.main.bundleURL
+        for _ in 0..<5 {
+            let cli = candidate.appendingPathComponent("Contents/MacOS/stationai-cli")
+            if fileManager.isExecutableFile(atPath: cli.path) { return cli }
+            candidate.deleteLastPathComponent()
+        }
+        return Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/stationai-cli")
+    }
+}
+
+enum TaskProgressReportInstructions {
+    static func make(taskID: UUID) -> String {
+        let executable = cliExecutableURL().path
+        let quotedExecutable = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let id = taskID.uuidString
+        return """
+        Report your current work on the StationAI task board using the StationAI CLI. Publish at every phase change, when starting or finishing a substantial tool call, and at least every 30 seconds during long commands, builds, tests, waits, or investigation. Keep the report current while a tool runs; after it finishes, replace it with the next active action. During tests, identify the active suite/case and position when known (for example, "CLI/XPC 3/8: task progress persistence"); during other work, name the concrete action and useful target. Keep each detail to a short subtitle, ideally under 80 characters. Do not report every tiny edit. Use these commands for this task:
+        \(quotedExecutable) task progress publish \(id) --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail "short detail"]
+        \(quotedExecutable) task progress custom \(id) --label "short label" [--detail "short detail"]
         \(quotedExecutable) task progress clear \(id)
         Progress reports are hidden from the conversation and shown on the task card. Keep details brief. Do not use lifecycle task status commands for progress.
 

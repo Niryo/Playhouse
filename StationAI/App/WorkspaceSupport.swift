@@ -104,31 +104,30 @@ enum WorkspaceTheme {
 
 struct CodexWorkspaceContext {
     let roots: [URL]
-
-    var cwd: URL { roots[0] }
+    let cwd: URL
 
     init(roots: [URL]) throws {
         let normalized = roots.map(\.standardizedFileURL)
-        guard !normalized.isEmpty else {
-            throw WorkspaceError.noRoots
-        }
         guard normalized.allSatisfy({ WorkspaceSettings.validDirectoryURL(for: $0.path) != nil }) else {
             throw WorkspaceError.unavailableRoot
         }
-        self.roots = Array(NSOrderedSet(array: normalized.map(\.path))).compactMap {
+        let uniqueRoots = Array(NSOrderedSet(array: normalized.map(\.path))).compactMap {
             ($0 as? String).map { URL(fileURLWithPath: $0, isDirectory: true) }
+        }
+        self.roots = uniqueRoots
+        if let firstRoot = uniqueRoots.first {
+            cwd = firstRoot
+        } else {
+            cwd = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL
         }
     }
 }
 
 enum WorkspaceError: LocalizedError {
-    case noRoots
     case unavailableRoot
 
     var errorDescription: String? {
         switch self {
-        case .noRoots:
-            "Choose at least one working folder before sending a message."
         case .unavailableRoot:
             "One or more working folders are unavailable. Edit the task folders and try again."
         }
@@ -1341,8 +1340,8 @@ struct WorkspaceSettingsView: View {
                 .accessibilityIdentifier("appearance-picker")
                 .accessibilityValue(appearance)
             }
-            Section("Workspace suggestions") {
-                Text("Choose a parent folder. New tasks will search below it for Git repositories to suggest as working folders.")
+            Section("Repository root") {
+                Text("Choose the root folder that contains your repositories. StationAI searches below it for repository suggestions, and a valid root is required before sending a conversation.")
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 10) {
                     Image(systemName: "folder")
@@ -1355,7 +1354,7 @@ struct WorkspaceSettingsView: View {
                     Spacer()
                     Button(parentFolderURL == nil ? "Choose…" : "Change…", action: chooseParentFolder)
                     .buttonHoverPointer()
-                    .help("Choose parent folder")
+                        .help("Choose repository root folder")
                         .accessibilityIdentifier("choose-default-parent-folder-button")
                     if parentFolderURL != nil {
                         Button("Clear") {
@@ -1367,7 +1366,7 @@ struct WorkspaceSettingsView: View {
                             }
                         }
                         .buttonHoverPointer()
-                        .help("Clear default parent folder")
+                        .help("Clear repository root folder")
                         .accessibilityIdentifier("clear-default-parent-folder-button")
                     }
                 }
@@ -1399,8 +1398,8 @@ struct WorkspaceSettingsView: View {
 
     private func chooseParentFolder() {
         let panel = NSOpenPanel()
-        panel.title = "Choose default parent folder"
-        panel.message = "StationAI will suggest Git repositories found under this folder."
+        panel.title = "Choose repository root folder"
+        panel.message = "StationAI will search below this folder for repositories. A root folder is required before sending conversations."
         panel.prompt = "Use This Folder"
         panel.canChooseDirectories = true
         panel.canChooseFiles = false

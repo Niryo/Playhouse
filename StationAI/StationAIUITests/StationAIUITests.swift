@@ -456,23 +456,37 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(loggedStorePaths.contains(where: { $0.hasPrefix(primaryDataDirectory) }), "The test app's log must not route to the primary store.")
     }
 
-    // case-contract: test_task_creation_rejects_invalid_title_roots_and_missing_folder | New Task immediately opens an empty conversation with the repository picker focused and a visible red missing-working-folder warning; sending stays disabled until a working folder is added. A persisted empty-root task shows the same red warning when its conversation is reopened. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets.
+    // case-contract: test_task_creation_rejects_invalid_title_roots_and_missing_folder | New Task opens with the repository picker closed and composer focused; no selected repository is valid and shows no red missing-folder warning when the required repository root is configured. A standalone conversation can be sent without repository roots, while GUI and CLI reject sends if the configured repository root is missing. The UI and CLI accept standalone sends after the root is configured. The CLI accepts empty-root tasks and rejects blank titles, missing folders, unavailable roots, and invalid merge targets.
     func test_task_creation_rejects_invalid_title_roots_and_missing_folder() throws {
-        launchApp(defaultParent: fixture.parent.path)
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success").path
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
+        launchApp(defaultParent: nil)
         openNewTaskConversation()
         XCTAssertTrue(element("empty-conversation").waitForExistence(timeout: 10))
+        XCTAssertEqual(repositoryTitle().label, "No repository selected")
         let repositorySearch = element("conversation-repository-search")
-        XCTAssertTrue(repositorySearch.waitForExistence(timeout: 10), "New Task should open the repository picker immediately.")
-        let composer = element("chat-composer")
+        XCTAssertFalse(repositorySearch.exists, "New Task should keep the repository picker closed by default.")
+        let composer = element("message-composer")
         XCTAssertTrue(composer.waitForExistence(timeout: 10), "The chat composer should be visible.")
-        let missingFolderError = composer.descendants(matching: .any)
-            .matching(identifier: "no-working-folders-error").firstMatch
-        XCTAssertTrue(missingFolderError.waitForExistence(timeout: 10), "A task without a repository should show its error in red.")
-        XCTAssertEqual(missingFolderError.label, "Choose at least one working folder before sending a message.")
-        assertContainsRedForeground(in: missingFolderError)
-        repositorySearch.typeText("primary")
-        XCTAssertEqual(repositorySearch.value as? String, "primary", "Typing after New Task should go directly to the focused repository search.")
-        XCTAssertFalse(element("send-message-button").isEnabled, "An empty task without a working folder cannot send a message.")
+        XCTAssertTrue(element("repository-root-required-notice").exists, "An unset repository root should show the setup notice.")
+        XCTAssertFalse(element("no-working-folders-error").exists, "A standalone conversation should not warn that a repository is missing.")
+        composer.typeText("A standalone question that needs no repository context.")
+        XCTAssertFalse(element("send-message-button").isEnabled, "Sending must stay disabled until the repository root is configured.")
+        element("set-conversation-repository-root-button").click()
+        try chooseFolder(in: openFolderPanel, folder: fixture.parent, confirmationButton: "Use This Folder")
+        XCTAssertFalse(element("repository-root-required-notice").exists)
+        XCTAssertFalse(element("conversation-repository-search").exists, "Setting the root should leave the picker closed.")
+        XCTAssertTrue(element("send-message-button").isEnabled, "A configured root should permit standalone work without selecting a repository.")
+        let standalonePrompt = "A standalone question that needs no repository context."
+        element("send-message-button").click()
+        XCTAssertTrue(app.staticTexts[standalonePrompt].waitForExistence(timeout: 10), "The UI should submit a standalone conversation after the root is configured.")
+        let mainHistoryURL = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history")
+        let mainHistory = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: mainHistoryURL)) as? [String: Any])
+        let instructions = try XCTUnwrap(mainHistory["threadStartDeveloperInstructions"] as? String)
+        XCTAssertTrue(instructions.contains("read-only inspection of returned source paths"))
+        XCTAssertTrue(instructions.contains("Add a repository to this task only when you intend to create or commit changes in it"))
+        XCTAssertTrue(instructions.contains("Do not interrupt the user or ask them to confirm the selection merely because the task appears unrelated."))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(codexFixtureExecutable) + ".assessment.history"), "A new conversation should not launch a separate repository assessment.")
 
         assertCLIError(
             try runCLI(["task", "create", "--title", "   ", "--root", fixture.primary.path], expectedStatus: 2),
@@ -484,6 +498,12 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(emptyRootTask["workspaceRoots"] as? [String], [])
         XCTAssertTrue(try XCTUnwrap(emptyRootTask["repositoryWorktrees"] as? [[String: Any]]).isEmpty)
         let emptyRootTaskID = try XCTUnwrap(emptyRootTask["id"] as? String)
+        _ = try runCLI(["settings", "clear-parent"])
+        assertCLIError(
+            try runCLI(["conversation", "send", emptyRootTaskID, "--message", "Standalone request"], expectedStatus: 1),
+            code: "settings_required"
+        )
+        _ = try runCLI(["settings", "set-parent", fixture.parent.path])
         assertCLIError(
             try runCLI(
                 ["task", "create", "--title", "Missing folder", "--root", fixture.missing.path],
@@ -498,26 +518,24 @@ final class StationAIUITests: XCTestCase {
             ], expectedStatus: 2),
             code: "invalid_argument"
         )
-        closeConversationRepositoryPicker()
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
-        XCTAssertEqual(try tasksFromBoardList().map { $0["id"] as? String }, [emptyRootTaskID])
+        let tasksAfterStandaloneSend = try tasksFromBoardList()
+        XCTAssertEqual(tasksAfterStandaloneSend.count, 2, "The board should contain the standalone UI conversation and the separate CLI task.")
+        XCTAssertTrue(tasksAfterStandaloneSend.contains { $0["id"] as? String == emptyRootTaskID })
         relaunchApp()
         openTask(named: "No roots")
         let reopenedComposer = element("chat-composer")
         XCTAssertTrue(reopenedComposer.waitForExistence(timeout: 10), "The reopened task should show its chat composer.")
-        let reopenedMissingFolderError = reopenedComposer.descendants(matching: .any)
-            .matching(identifier: "no-working-folders-error").firstMatch
-        XCTAssertTrue(reopenedMissingFolderError.waitForExistence(timeout: 10), "Opening the saved task should show the missing-folder error in the conversation too.")
-        assertContainsRedForeground(in: reopenedMissingFolderError)
+        XCTAssertFalse(element("no-working-folders-error").exists, "An empty-root standalone task should not show a red missing-folder warning.")
         let deletedEmptyRootTask = try XCTUnwrap(
             try runCLI(["task", "delete", emptyRootTaskID])["result"] as? [String: Any]
         )
         XCTAssertEqual(deletedEmptyRootTask["deleted"] as? Bool, true)
-        attachScreenshot(named: "Conversation shows the missing working folder warning")
+        attachScreenshot(named: "Standalone task has no missing-folder warning")
     }
 
-    // case-contract: test_task_creation_persists_ordered_roots_across_fresh_connections | A directly created conversation can add repositories in order, edit pending branch settings, and add a context folder; these settings persist across fresh connections without creating branches or worktrees before the first send. Saving an unsent prompt records task creation, prompt save, and subsequent reads with safe argument metadata, result state, and outcome while excluding prompt text.
+    // case-contract: test_task_creation_persists_ordered_roots_across_fresh_connections | A directly created conversation can add repositories in order, edit pending branch settings, and add a context folder; these settings persist across fresh connections without creating branches or worktrees before the first send. The conversation shows the additional context folder without repeating repository worktrees in a Working in summary. Saving an unsent prompt records task creation, prompt save, and subsequent reads with safe argument metadata, result state, and outcome while excluding prompt text.
     func test_task_creation_persists_ordered_roots_across_fresh_connections() throws {
         launchApp(defaultParent: fixture.parent.path)
         openNewTaskConversation()
@@ -1240,7 +1258,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
     }
 
-    // case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 10 seconds; rapid focus changes are suppressed. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls.
+    // case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the prompt before title generation, so starting the user turn does not wait for title assessment. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 10 seconds; rapid focus changes are suppressed. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls.
     func test_task_done_preserves_worktree_and_branch() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         let ghEnvironment = try makeGitHubStateFixture()
@@ -1259,7 +1277,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(record["isPending"] as? Bool, true)
         XCTAssertEqual(path, fixture.primary.path)
         let taskPrompt = "Please update the README and add concise setup steps for first time contributors tomorrow."
-        let generatedBranch = "generated-fixture-title"
+        let generatedBranch = "please-update-the-readme-and-add-concise-setup-steps"
         XCTAssertEqual(record["mergeTarget"] as? String, "main")
         let composer = element("message-composer")
         let composerIsAvailable = waitUntil({ composer.isEnabled && composer.isHittable }, timeout: 15)
@@ -1275,6 +1293,13 @@ final class StationAIUITests: XCTestCase {
         branch = try XCTUnwrap(startedRecord["branch"] as? String)
         XCTAssertNotEqual(path, fixture.primary.path)
         XCTAssertEqual(branch, generatedBranch)
+        let codexHistoryURL = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history")
+        let codexHistory = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: codexHistoryURL)) as? [String: Any])
+        XCTAssertEqual(codexHistory["threadStartCwd"] as? String, path, "Codex thread startup must use the managed worktree as cwd.")
+        let turnHistory = try XCTUnwrap((codexHistory["turns"] as? [[String: Any]])?.first)
+        XCTAssertEqual(turnHistory["cwd"] as? String, path, "The user turn must use the managed worktree as cwd.")
+        let activeWorktreePaths = try XCTUnwrap(taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]]).compactMap { $0["worktreePath"] as? String }
+        XCTAssertEqual(turnHistory["runtimeWorkspaceRoots"] as? [String], activeWorktreePaths)
         let taskBranchHead = try runGitOutput(URL(fileURLWithPath: path), "rev-parse", "HEAD")
         let originalTargetHead = try runGitOutput(fixture.primary, "rev-parse", "main")
         XCTAssertEqual(taskBranchHead, originalTargetHead)
@@ -1666,7 +1691,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(current["status"] as? String, "Done")
     }
 
-    // case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects conflicts without mutation and blocks PR creation until the explicit Fix Conflicts action is used; it resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI verifies PR creation directs the user to resolve conflicts in the task worktree and leaves unresolved conflicts uncommitted and unpublished.
+    // case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects merge conflicts without mutation, and PR creation still publishes the task branch and reaches the normal GitHub CLI path; conflicts do not block PR creation. The case resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI confirms the PR action attempts normal creation for a conflicted branch, publishes it, and reports the local fixture's expected GitHub CLI authentication guidance.
     func test_task_pr_conflicts_detect_without_mutation() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -1707,17 +1732,18 @@ final class StationAIUITests: XCTestCase {
         let prButton = element("task-create-pr-\(taskID)")
         XCTAssertTrue(prButton.waitForExistence(timeout: 5))
         prButton.click()
-        let blockedAlert = app.alerts["Couldn't create pull request"]
-        XCTAssertTrue(blockedAlert.waitForExistence(timeout: 10), "PR creation should direct the user to resolve conflicts in the task worktree.")
-        XCTAssertTrue(blockedAlert.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Resolve conflicts in the task worktree")).firstMatch.exists)
-        blockedAlert.buttons["OK"].click()
-        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), branchHead, "Blocked PR creation must leave the task branch unchanged.")
+        let failureAlert = app.alerts["Pull request operation failed"]
+        XCTAssertTrue(failureAlert.waitForExistence(timeout: 10), "The local bare remote should reach the normal GitHub CLI failure after the task branch is published.")
+        XCTAssertFalse(failureAlert.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Resolve conflicts in the task worktree")).firstMatch.exists)
+        XCTAssertTrue(failureAlert.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "gh auth login")).firstMatch.exists)
+        failureAlert.buttons["OK"].click()
+        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), branchHead)
         XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetHead)
         XCTAssertEqual(
             try runGitOutput(fixture.primary, "ls-remote", "--heads", "origin", try XCTUnwrap(completedRecord["branch"] as? String))
                 .trimmingCharacters(in: .whitespacesAndNewlines),
-            "",
-            "Blocked PR creation must not publish the task branch."
+            "refs/heads/\(try XCTUnwrap(completedRecord["branch"] as? String))\t\(branchHead)",
+            "A conflicted task branch should still be published for PR creation."
         )
         XCTAssertTrue(waitUntil({ prButton.isEnabled }, timeout: 10))
         XCTAssertNil((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"])
@@ -2136,7 +2162,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(resumeInstructions.allSatisfy { ($0 as? String)?.contains("task outcome") == true })
     }
 
-    // case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; a staged completed outcome is discarded if its turn fails, leaving the task Blocked. The task card removes the report while lifecycle states remain Blocked or Waiting Response, and answering the question resumes the task successfully.
+    // case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; a staged completed outcome is discarded if its turn fails, leaving the task Blocked. The task card removes the report while lifecycle states remain Blocked or Waiting Response. A generic blocking question appears in a confirmation sheet; the answer reaches Codex and the task resumes while its turn is active. A late UI answer callback preserves Waiting Response after the active-turn marker clears, verified after the helper records its skipped transition. First-thread instructions distinguish source repository paths from active task worktree paths, allow read-only inspection without attaching a repo, and reserve repository add APIs for changes that need a worktree.
     func test_task_progress_reports_clear_on_failed_turns_and_questions() throws {
         launchApp(defaultParent: fixture.parent.path)
         var heldTurns: [(Process, URL, URL)] = []
@@ -2187,21 +2213,37 @@ final class StationAIUITests: XCTestCase {
             assertTaskVisible(title, inColumn: "Blocked")
         }
 
-        let questionFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-progress-question")
+        let questionFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-progress-user-question")
         codexFixtureExecutable = questionFixture.path
         app.launchEnvironment["STATIONAI_E2E_CODEX_EXECUTABLE"] = questionFixture.path
         relaunchApp()
-        try createTaskFixture(title: "Progress question", roots: [fixture.primary.path])
+        let questionTask = try runCLI([
+            "task", "create", "--title", "Progress question",
+            "--repo", fixture.primary.path, "--root", fixture.parent.path,
+        ])["result"] as? [String: Any]
+        let initialRepositories = try XCTUnwrap(questionTask?["repositoryWorktrees"] as? [[String: Any]])
+        XCTAssertEqual(initialRepositories.map { $0["repositoryPath"] as? String }, [fixture.primary.path])
         openTask(named: "Progress question")
         let questionTaskID = try taskID(named: "Progress question")
+        let questionHistoryURL = URL(fileURLWithPath: questionFixture.path + ".history")
         let activeMarker = URL(fileURLWithPath: questionFixture.path + ".turn-active")
         let releaseMarker = URL(fileURLWithPath: questionFixture.path + ".turn-release")
+        let outcomeHold = URL(fileURLWithPath: questionFixture.path + ".outcome-hold")
+        let outcomeActive = URL(fileURLWithPath: questionFixture.path + ".outcome-active")
+        let outcomeRelease = URL(fileURLWithPath: questionFixture.path + ".outcome-release")
         try? FileManager.default.removeItem(at: activeMarker)
         try? FileManager.default.removeItem(at: releaseMarker)
+        try? FileManager.default.removeItem(at: outcomeHold)
+        try? FileManager.default.removeItem(at: outcomeActive)
+        try? FileManager.default.removeItem(at: outcomeRelease)
         defer {
             try? "Release the active turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+            try? "Release final turn completion.\n".write(to: outcomeRelease, atomically: true, encoding: .utf8)
             try? FileManager.default.removeItem(at: activeMarker)
             try? FileManager.default.removeItem(at: releaseMarker)
+            try? FileManager.default.removeItem(at: outcomeHold)
+            try? FileManager.default.removeItem(at: outcomeActive)
+            try? FileManager.default.removeItem(at: outcomeRelease)
         }
         element("message-composer").click()
         element("message-composer").typeText("Please share your plan.")
@@ -2210,7 +2252,20 @@ final class StationAIUITests: XCTestCase {
         let waitingReport = try runCLI(["task", "progress", "publish", questionTaskID, "--type", "reviewing", "--detail", "Preparing a question"])
         XCTAssertEqual((waitingReport["result"] as? [String: Any])?["progressLabel"] as? String, "Reviewing")
         try "Release the active turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("ai-question-confirmation-sheet").waitForExistence(timeout: 10), "Blocking AI questions should open a modal confirmation sheet.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: questionHistoryURL.path) }, timeout: 5))
+        let questionHistory = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: questionHistoryURL)) as? [String: Any])
+        let threadInstructions = try XCTUnwrap(questionHistory["threadStartDeveloperInstructions"] as? String)
+        XCTAssertTrue(threadInstructions.contains("Active task worktrees for edits"))
+        XCTAssertTrue(threadInstructions.contains("workspace repos list"))
+        XCTAssertTrue(threadInstructions.contains("task repository add"))
+        XCTAssertTrue(threadInstructions.contains("read-only inspection of returned source paths"))
+        XCTAssertTrue(threadInstructions.contains("Add a repository to this task only when you intend to create or commit changes in it"))
+        XCTAssertTrue(threadInstructions.contains("workspace repos list"))
+        XCTAssertTrue(threadInstructions.contains("task repository add"))
+        XCTAssertTrue(threadInstructions.contains("Do not interrupt the user or ask them to confirm the selection merely because the task appears unrelated."))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: questionFixture.path + ".assessment.history"), "A question should not spawn a parallel repository-assessment thread.")
+        XCTAssertTrue(element("ai-question-form-title").exists)
         XCTAssertEqual(try taskRecord(id: questionTaskID)?["status"] as? String, "Waiting Response")
         XCTAssertNil(try taskRecord(id: questionTaskID)?["progressLabel"] as? String, "Progress should clear as soon as Codex requests user input.")
         element("back-to-board-button").click()
@@ -2218,11 +2273,29 @@ final class StationAIUITests: XCTestCase {
         let waitingReportLabel = element("task-progress-label-\(questionTaskID.uppercased())")
         XCTAssertTrue(waitForDisappearance(waitingReportLabel), "The Waiting Response card should not retain the agent's progress row.")
         openTask(named: "Progress question")
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 5), "Reopening should preserve the pending question.")
-        app.buttons["Blue"].click()
-        element("ai-question-answer-token").click()
-        element("ai-question-answer-token").typeText("fixture-secret")
+        XCTAssertTrue(element("ai-question-confirmation-sheet").waitForExistence(timeout: 5), "Reopening should restore the pending question in its modal sheet.")
+        XCTAssertTrue(app.buttons["Continue"].exists)
+        app.buttons["Continue"].click()
+        try "Hold final turn completion for answer status verification.\n".write(to: outcomeHold, atomically: true, encoding: .utf8)
+        let operationBarrier = try TaskOperationLockBarrier(dataDirectory: dataDirectory, taskID: questionTaskID)
+        defer { try? operationBarrier.release() }
         element("submit-ai-answers-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: outcomeActive.path) }, timeout: 10), "The fixture should acknowledge the answer and hold final completion.")
+        let turnOutcomeMarker = dataDirectory.appendingPathComponent("conversation-turn-locks", isDirectory: true)
+            .appendingPathComponent("\(questionTaskID).active")
+        try FileManager.default.removeItem(at: turnOutcomeMarker)
+        try operationBarrier.release()
+        XCTAssertTrue(waitUntil({
+            (try? diagnosticEvents().contains {
+                $0["event"] as? String == "task.lifecycle_status.user_input_resume.skipped" &&
+                $0["taskID"] as? String == questionTaskID &&
+                $0["reason"] as? String == "turn_outcome_inactive"
+            }) == true
+        }, timeout: 5), "The late answer callback should finish its marker check before status is asserted.")
+        XCTAssertEqual(try taskRecord(id: questionTaskID)?["status"] as? String, "Waiting Response", "A late answer callback must preserve the completed turn state after its outcome marker is cleared.")
+        try "Release final turn completion.\n".write(to: outcomeRelease, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ !element("ai-question-confirmation-sheet").exists }, timeout: 5), "Submitting the answer should dismiss the blocking question sheet.")
+        XCTAssertTrue(app.staticTexts["Answer received: Continue."].waitForExistence(timeout: 10), "The resumed turn should receive the submitted answer.")
         let completionDeadline = Date().addingTimeInterval(10)
         var completedStatus: String?
         while Date() < completionDeadline {
@@ -2379,7 +2452,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Edited ordered folders in task conversation")
     }
 
-    // case-contract: test_conversation_repository_picker_adds_repository_worktree | Repository suggestions can be filtered and navigated with Up/Down, and Enter selects the highlighted repository; adding it waits for an active conversation turn, then persists a pending auto branch with labeled branch, merge-from, and merge-to values, and no worktree exists before the first send.
+    // case-contract: test_conversation_repository_picker_adds_repository_worktree | Repository suggestions can be filtered and navigated with Up/Down, and Enter selects the highlighted repository; UI selection waits for an active turn and persists a pending auto branch. While the conversation is empty, a prominent theme-colored heading names all selected repositories and updates as repository APIs add or replace context; compact repository labels remain in the header without a duplicate repository summary. Dark and light themes use distinct prominent title colors, the supporting model prompt sits below with generous spacing, and the generic Start a conversation heading is absent. Additional context folders remain identifiable. The task repository API remains available during an active turn, prepares a managed worktree, updates saved repository selection, replaces repository context safely, and the paired UI shows API additions/removals. The main assistant is instructed to list repositories through StationAI, inspect listed source paths read-only without attaching them, and add repositories only when it needs a task worktree for changes or commits.
     func test_conversation_repository_picker_adds_repository_worktree() throws {
         launchApp(defaultParent: fixture.parent.path)
         let created = try runCLI(["task", "create", "--title", "Header repository picker", "--root", fixture.primary.path])["result"] as? [String: Any]
@@ -2420,6 +2493,18 @@ final class StationAIUITests: XCTestCase {
         conversationReservationReleased = true
         let badge = element("conversation-repository-badge-primary")
         XCTAssertTrue(badge.waitForExistence(timeout: 10))
+        let emptyTitle = repositoryTitle()
+        XCTAssertEqual(emptyTitle.label, "primary", "The prominent empty-conversation title should identify the selected repository.")
+        XCTAssertTrue(waitUntil({ repositoryTitleHasColor(emptyTitle, appearance: "dark") }, timeout: 5), "Dark appearance should render an orange repository title.")
+        let conversationIcon = app.images["Conversation"]
+        XCTAssertTrue(conversationIcon.waitForExistence(timeout: 5))
+        XCTAssertGreaterThan(conversationIcon.frame.minY - emptyTitle.frame.maxY, 40, "The conversation prompt should have breathing room below the repository title.")
+        XCTAssertFalse(app.staticTexts["Start a conversation"].exists, "The redundant Start a conversation heading should be removed.")
+        XCTAssertFalse(element("working-folders-summary").exists, "Selected repositories already appear in the title and compact header labels.")
+        _ = try runCLI(["settings", "set-appearance", "light"])
+        XCTAssertTrue(waitUntil({ repositoryTitleHasColor(emptyTitle, appearance: "light") }, timeout: 5), "Light appearance should render an indigo repository title.")
+        _ = try runCLI(["settings", "set-appearance", "dark"])
+        XCTAssertTrue(waitUntil({ repositoryTitleHasColor(emptyTitle, appearance: "dark") }, timeout: 5), "Changing appearance should update the title color.")
         let title = element("task-view-title")
         XCTAssertTrue(title.waitForExistence(timeout: 5))
         XCTAssertGreaterThan(badge.frame.minX, title.frame.maxX, "Repository badges should appear to the right of the task title.")
@@ -2453,6 +2538,46 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("conversation-repository-branch-edit").exists)
         XCTAssertTrue(element("conversation-repository-branch-from-edit").exists)
         XCTAssertTrue(element("conversation-repository-merge-target-edit").exists)
+
+        let apiReservation = try ConversationTurnLockBarrier(dataDirectory: dataDirectory, taskID: taskID)
+        var apiReservationReleased = false
+        defer {
+            if !apiReservationReleased { try? apiReservation.release() }
+        }
+        let apiAdded = try runCLI(["task", "repository", "add", taskID, "--repo", fixture.secondary.path])["result"] as? [String: Any]
+        let apiRepositories = try XCTUnwrap(apiAdded?["repositoryWorktrees"] as? [[String: Any]])
+        XCTAssertEqual(apiRepositories.count, 2)
+        let secondary = try XCTUnwrap(apiRepositories.first { ($0["repositoryPath"] as? String) == fixture.secondary.path })
+        XCTAssertEqual(secondary["isPending"] as? Bool, false, "The AI-facing API should return an editable worktree.")
+        let managedWorktree = try XCTUnwrap(secondary["worktreePath"] as? String)
+        XCTAssertNotEqual(managedWorktree, fixture.secondary.path)
+        XCTAssertTrue(managedWorktree.hasPrefix(dataDirectory.appendingPathComponent("worktrees", isDirectory: true).path))
+        XCTAssertTrue(element("conversation-repository-badge-secondary").waitForExistence(timeout: 10), "Repository additions made through the AI API should appear in the open task header.")
+        XCTAssertEqual(repositoryTitle().label, "primary · secondary", "The prominent title should update when the API adds a repository.")
+        XCTAssertFalse(element("working-folders-summary").exists, "Repository worktrees should not be repeated in a separate working-folders line.")
+        let savedRepositories = try runCLI(["settings", "get"])["result"] as? [String: Any]
+        XCTAssertEqual(savedRepositories?["lastSelectedRepositories"] as? [String], [fixture.primary.path, fixture.secondary.path])
+        let replaced = try runCLI(["task", "repository", "replace", taskID, "--repo", fixture.secondary.path])["result"] as? [String: Any]
+        XCTAssertEqual((replaced?["repositoryWorktrees"] as? [[String: Any]])?.compactMap { $0["repositoryPath"] as? String }, [fixture.secondary.path])
+        XCTAssertTrue(element("conversation-repository-badge-secondary").exists)
+        XCTAssertFalse(element("conversation-repository-badge-primary").exists, "API replacement should immediately remove the old repository badge.")
+        XCTAssertEqual(repositoryTitle().label, "secondary", "The title should track the active repository context.")
+        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["lastSelectedRepositories"] as? [String], [fixture.secondary.path])
+        try apiReservation.release()
+        apiReservationReleased = true
+
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        composer.click()
+        composer.typeText("Start working in the selected repositories.")
+        element("send-message-button").click()
+        XCTAssertTrue(app.staticTexts["Start working in the selected repositories."].waitForExistence(timeout: 10))
+        XCTAssertFalse(repositoryTitle().exists, "The prominent repository title should leave the timeline once the conversation has messages.")
+        XCTAssertFalse(app.staticTexts["Start a conversation"].exists)
+        let badgeAfterSend = element("conversation-repository-badge-secondary")
+        XCTAssertTrue(badgeAfterSend.exists, "Compact repository badges should remain in the fixed task header after the timeline scrolls.")
+        XCTAssertGreaterThan(badgeAfterSend.frame.minX, title.frame.maxX, "Repository badges should remain beside the task title after a message is sent.")
+        XCTAssertLessThan(abs(badgeAfterSend.frame.midY - title.frame.midY), 8, "Repository badges should stay on the fixed title row after the timeline scrolls.")
     }
 
     // case-contract: test_task_repository_settings_validate_persist_and_lock_after_start | Pending repository branch, merge-from, and merge-to settings wait for an active conversation turn, then persist across fresh CLI/XPC reads; invalid settings leave prior values intact, and settings are locked after worktree creation.
@@ -2600,7 +2725,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Concurrent repository removal rejects a stale settings save")
     }
 
-    // case-contract: test_task_repository_removal_preserves_state_on_dirty_worktree | Removing the only pending repository leaves the task with no workspace and preserves the source repository; removing a pending repository preserves other context folders; removing a clean managed worktree waits for an active conversation turn and then succeeds, while a dirty worktree rejects removal and preserves its task record and files.
+    // case-contract: test_task_repository_removal_preserves_state_on_dirty_worktree | Removing the only pending repository leaves the task with no workspace and preserves the source repository; removing a pending repository preserves other context folders; removing a clean managed worktree through the GUI waits for an active turn, while the task repository API removes it from context immediately and defers clean worktree deletion until the turn releases; a bridge service restart preserves the cleanup intent and a fresh request completes removal; if the active turn writes files before release, deferred cleanup preserves that worktree and its changes; a dirty worktree rejects removal and preserves its task record and files.
     func test_task_repository_removal_preserves_state_on_dirty_worktree() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -2641,6 +2766,41 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.primary.path), "The source repository must remain on disk.")
 
         element("back-to-board-button").click()
+        let cleanTitle = "Clean active repository removal through API"
+        let cleanActive = try runCLI([
+            "task", "create", "--title", cleanTitle,
+            "--repo", fixture.alternate.path,
+            "--root", fixture.custom.path,
+        ])["result"] as? [String: Any]
+        let cleanActiveID = try XCTUnwrap(cleanActive?["id"] as? String)
+        openTask(named: cleanTitle)
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: cleanTitle)
+        let cleanRecord = try XCTUnwrap(repositoryRecord(taskID: cleanActiveID, repositoryPath: fixture.alternate.path))
+        let cleanWorktreePath = try XCTUnwrap(cleanRecord["worktreePath"] as? String)
+        let cleanReservation = try ConversationTurnLockBarrier(dataDirectory: dataDirectory, taskID: cleanActiveID)
+        var cleanReservationReleased = false
+        defer {
+            if !cleanReservationReleased { try? cleanReservation.release() }
+        }
+        _ = try runCLI(["task", "repository", "remove", cleanActiveID, "--repo", fixture.alternate.path])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cleanWorktreePath))
+        let cleanupScheduled = try XCTUnwrap(diagnosticEvents().first {
+            $0["event"] as? String == "workspace.repository.deferred_removal_scheduled"
+                && $0["taskID"] as? String == cleanActiveID
+        })
+        let bridgePIDText = try XCTUnwrap(cleanupScheduled["processID"] as? String)
+        let bridgePID = pid_t(try XCTUnwrap(Int32(bridgePIDText)))
+        if kill(bridgePID, SIGKILL) != 0 {
+            XCTAssertEqual(errno, ESRCH, "The bridge service should either be killed here or already have exited.")
+        }
+        XCTAssertTrue(waitUntil({ kill(bridgePID, 0) != 0 && errno == ESRCH }, timeout: 5), "The isolated bridge service should exit before recovery is tested.")
+        try cleanReservation.release()
+        cleanReservationReleased = true
+        _ = try taskRecord(id: cleanActiveID)
+        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: cleanWorktreePath) }, timeout: 10),
+                      "Deferred cleanup should remove an unchanged managed worktree after the turn releases.")
+
+        element("back-to-board-button").click()
         let activeTitle = "Started repository removal through UI"
         let active = try runCLI([
             "task", "create", "--title", activeTitle,
@@ -2679,17 +2839,47 @@ final class StationAIUITests: XCTestCase {
             "Repository removal should wait while a conversation turn holds its reservation."
         )
         XCTAssertTrue(FileManager.default.fileExists(atPath: worktreePath))
+        let inFlightURL = worktreeURL.appendingPathComponent("written-during-removal.txt")
+        try Data("preserve edits made before the turn ended\n".utf8).write(to: inFlightURL)
         try conversationReservation.release()
         conversationReservationReleased = true
         XCTAssertTrue(waitUntil({
             guard let result = try? self.taskRecord(id: activeID),
                   let records = result["repositoryWorktrees"] as? [[String: Any]] else { return false }
             return records.isEmpty
-        }, timeout: 10), "Removing a clean managed worktree should update the persisted task.")
+        }, timeout: 10), "Repository removal should update the persisted task.")
+        XCTAssertTrue(waitUntil({
+            (try? self.diagnosticEvents().contains {
+                $0["event"] as? String == "workspace.repository.deferred_removal_kept_dirty"
+                    && $0["taskID"] as? String == activeID
+            }) ?? false
+        }, timeout: 10), "Deferred cleanup should report that active-turn edits were preserved.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: inFlightURL.path), "Deferred cleanup must preserve active-turn edits.")
         let activeAfterRemoval = try XCTUnwrap(taskRecord(id: activeID))
         XCTAssertEqual(activeAfterRemoval["workspaceRoots"] as? [String], [fixture.custom.path])
         XCTAssertEqual(activeAfterRemoval["contextFolders"] as? [String], [fixture.custom.path])
-        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: worktreePath) }, timeout: 10), "Removing the clean managed repository should finish deleting its worktree.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktreePath), "Deferred cleanup must preserve the worktree containing active-turn edits.")
+
+        element("back-to-board-button").click()
+        let apiTitle = "Active API repository removal through UI"
+        let apiTask = try runCLI(["task", "create", "--title", apiTitle, "--repo", fixture.primary.path])["result"] as? [String: Any]
+        let apiTaskID = try XCTUnwrap(apiTask?["id"] as? String)
+        openTask(named: apiTitle)
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: apiTitle)
+        let apiRecord = try XCTUnwrap(repositoryRecord(taskID: apiTaskID, repositoryPath: fixture.primary.path))
+        let apiWorktreePath = try XCTUnwrap(apiRecord["worktreePath"] as? String)
+        let apiReservation = try ConversationTurnLockBarrier(dataDirectory: dataDirectory, taskID: apiTaskID)
+        var apiReservationReleased = false
+        defer {
+            if !apiReservationReleased { try? apiReservation.release() }
+        }
+        let removed = try runCLI(["task", "repository", "remove", apiTaskID, "--repo", fixture.primary.path])["result"] as? [String: Any]
+        XCTAssertEqual((removed?["repositoryWorktrees"] as? [Any])?.count, 0)
+        XCTAssertFalse(element("conversation-repository-badge-primary").exists, "API removal should immediately update the visible repository badges.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: apiWorktreePath), "The active turn worktree must remain until its reservation releases.")
+        try apiReservation.release()
+        apiReservationReleased = true
+        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: apiWorktreePath) }, timeout: 10), "API removal should clean up the worktree after the active reservation releases.")
     }
 
     // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; confirmed deletion waits for an active conversation turn; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives and reports the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree.
@@ -2899,15 +3089,20 @@ final class StationAIUITests: XCTestCase {
         XCTAssertNil(initialSettings?["defaultParentFolder"] as? String)
         openNewTaskConversation()
         XCTAssertEqual(try tasksFromBoardList().count, 1, "New Task should create its pending conversation before folder discovery.")
-        element("choose-repository-suggestion-parent-button").click()
+        XCTAssertTrue(element("repository-root-required-notice").exists)
+        XCTAssertFalse(element("send-message-button").isEnabled)
+        element("set-conversation-repository-root-button").click()
         let firstRunPanel = openFolderPanel
         XCTAssertTrue(firstRunPanel.waitForExistence(timeout: 10))
         firstRunPanel.buttons["Cancel"].click()
-        XCTAssertTrue(element("conversation-repository-search").waitForExistence(timeout: 5), "Canceling folder selection should leave the direct-created task and picker open.")
+        XCTAssertFalse(element("conversation-repository-search").exists, "Canceling root setup should leave the direct-created task and picker closed.")
         XCTAssertEqual(try tasksFromBoardList().count, 1)
 
-        element("choose-repository-suggestion-parent-button").click()
+        element("set-conversation-repository-root-button").click()
         try chooseFolder(in: openFolderPanel, folder: fixture.parent, confirmationButton: "Use This Folder")
+        XCTAssertFalse(element("repository-root-required-notice").exists)
+        XCTAssertFalse(element("conversation-repository-search").exists, "Setting the root should leave the repo picker closed.")
+        element("add-conversation-repository-button").click()
         XCTAssertTrue(element("conversation-repository-suggestion-primary").waitForExistence(timeout: 10), "Choosing a suggestion folder should populate the conversation picker.")
         let parentVisibleToBridge = waitUntil({
             guard let response = try? self.runCLI(["settings", "get"]),
@@ -2983,14 +3178,23 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("board-title").exists, "The main board should remain open when Settings closes.")
     }
 
-    // case-contract: test_repository_suggestions_skip_nested_repositories_and_symlinks | The CLI returns top-level Git repository suggestions while excluding nested repositories and symlink targets. The conversation picker shows those suggestions, filters by repository name or parent path, and reports no matches for non-repository folders.
+    // case-contract: test_repository_suggestions_skip_nested_repositories_and_symlinks | The configured-root workspace repos list API returns top-level Git repositories while excluding nested repositories and symlink targets. The conversation picker shows those suggestions, filters by repository name or parent path, and reports no matches for non-repository folders.
     func test_repository_suggestions_skip_nested_repositories_and_symlinks() throws {
         launchApp(defaultParent: fixture.parent.path)
-        let result = try runCLI(["workspace", "suggest", "--parent", fixture.parent.path])["result"] as? [String: Any]
+        let configuredRoot = fixture.parent.appendingPathComponent("suggested-parent")
+        _ = try runCLI(["settings", "set-parent", configuredRoot.path])
+        let listed = try runCLI(["workspace", "repos", "list"])["result"] as? [String: Any]
         let expectedRepositories = [fixture.primary.path, fixture.secondary.path, fixture.alternate.path, fixture.changes.path].sorted()
+        XCTAssertEqual(listed?["root"] as? String, configuredRoot.path)
+        XCTAssertEqual(listed?["repositories"] as? [String], expectedRepositories)
+        XCTAssertFalse((listed?["repositories"] as? [String] ?? []).contains(fixture.nested.path))
+        XCTAssertFalse((listed?["repositories"] as? [String] ?? []).contains(fixture.linkedOutside.path))
+
+        let result = try runCLI(["workspace", "suggest", "--parent", fixture.parent.path])["result"] as? [String: Any]
         XCTAssertEqual(result?["repositories"] as? [String], expectedRepositories)
 
         openNewTaskConversation()
+        element("add-conversation-repository-button").click()
         let search = element("conversation-repository-search")
         XCTAssertTrue(element("conversation-repository-suggestion-primary").waitForExistence(timeout: 10))
         XCTAssertFalse(element("conversation-repository-suggestion-nested").exists, "Nested Git folders should not be suggested.")
@@ -3009,15 +3213,13 @@ final class StationAIUITests: XCTestCase {
         assertScreenshotIfVisible(named: "Repository suggestions exclude nested and symlinked folders")
     }
 
-    // case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections and applies them to empty tasks through repository batches with ordered roots and default auto/main/main branch settings; a newly saved list applies to a fresh task and remains saved. Invalid repository paths are rejected without changing the saved preference. In the UI, the picker placeholder shows saved repository names in order followed immediately by a Return key indicator; blank Return restores the saved repositories, while typing and arrow selection replaces and persists the list for the next conversation.
+    // case-contract: test_new_task_remembers_last_selected_repositories | The CLI reads and writes ordered last-selected repositories across fresh XPC connections; repository batches prepare managed worktrees in order, use task-title-derived branches and main/main merge settings, and set the active task roots to those worktrees. The selected source repository list remains saved and applies to subsequent tasks. Invalid repository paths are rejected without changing the saved preference. In the UI, a new conversation automatically attaches saved repositories in order while the picker stays closed and the composer remains focused. Opening the picker and choosing another suggestion adds it to the ordered context and saved selection for subsequent conversations.
     func test_new_task_remembers_last_selected_repositories() throws {
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["settings", "set-last-repositories", "--repo", fixture.secondary.path, "--repo", fixture.primary.path])
 
         openNewTaskConversation()
-        let search = element("conversation-repository-search")
-        XCTAssertEqual(search.placeholderValue, "secondary, primary ↵", "The conversation picker should show the saved repository order followed by the Return key indicator.")
-        search.typeKey(.return, modifierFlags: [])
+        XCTAssertFalse(element("conversation-repository-search").exists, "Saved repositories should apply without opening the picker.")
         XCTAssertTrue(element("conversation-repository-badge-secondary").waitForExistence(timeout: 10))
         XCTAssertTrue(element("conversation-repository-badge-primary").waitForExistence(timeout: 10))
         let firstTask = try XCTUnwrap(tasksFromBoardList().first)
@@ -3034,38 +3236,32 @@ final class StationAIUITests: XCTestCase {
         assertCLIError(try runCLI(["task", "get", firstTaskID], expectedStatus: 3), code: "not_found")
 
         openNewTaskConversation()
+        XCTAssertTrue(element("conversation-repository-badge-secondary").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-repository-badge-primary").exists)
+        element("add-conversation-repository-button").click()
         let overrideSearch = element("conversation-repository-search")
-        XCTAssertTrue((overrideSearch.placeholderValue ?? "").contains("secondary, primary"))
+        XCTAssertTrue(overrideSearch.waitForExistence(timeout: 5))
         replaceText(overrideSearch, with: "alternate")
         XCTAssertTrue(element("conversation-repository-suggestion-alternate").waitForExistence(timeout: 10))
         overrideSearch.typeKey(.downArrow, modifierFlags: [])
         overrideSearch.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(element("conversation-repository-badge-alternate").waitForExistence(timeout: 10))
-        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["lastSelectedRepositories"] as? [String], [fixture.alternate.path])
-        XCTAssertEqual(try XCTUnwrap(tasksFromBoardList().first?["workspaceRoots"] as? [String]), [fixture.alternate.path])
+        let expandedSelection = [fixture.secondary.path, fixture.primary.path, fixture.alternate.path]
+        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["lastSelectedRepositories"] as? [String], expandedSelection)
+        XCTAssertEqual(try XCTUnwrap(tasksFromBoardList().first?["workspaceRoots"] as? [String]), expandedSelection)
         element("back-to-board-button").click()
 
         openNewTaskConversation()
-        let persistedSearch = element("conversation-repository-search")
-        XCTAssertTrue((persistedSearch.placeholderValue ?? "").contains("alternate"), "The overridden repository should be the next conversation default.")
-        persistedSearch.typeKey(.return, modifierFlags: [])
+        XCTAssertFalse(element("conversation-repository-search").exists)
+        XCTAssertTrue(element("conversation-repository-badge-secondary").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("conversation-repository-badge-primary").exists)
         XCTAssertTrue(element("conversation-repository-badge-alternate").waitForExistence(timeout: 10))
-        XCTAssertEqual(try XCTUnwrap(tasksFromBoardList().first?["workspaceRoots"] as? [String]), [fixture.alternate.path])
-        element("back-to-board-button").click()
-
-        openNewTaskConversation()
-        let typedSearch = element("conversation-repository-search")
-        replaceText(typedSearch, with: "primary")
-        XCTAssertTrue(element("conversation-repository-suggestion-primary").waitForExistence(timeout: 10))
-        typedSearch.typeKey(.return, modifierFlags: [])
-        XCTAssertTrue(element("conversation-repository-badge-primary").waitForExistence(timeout: 10))
-        XCTAssertEqual(try XCTUnwrap(tasksFromBoardList().first?["workspaceRoots"] as? [String]), [fixture.primary.path])
-        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["lastSelectedRepositories"] as? [String], [fixture.primary.path])
+        XCTAssertEqual(try XCTUnwrap(tasksFromBoardList().first?["workspaceRoots"] as? [String]), expandedSelection)
         element("back-to-board-button").click()
         assertScreenshotIfVisible(named: "New conversation restores and remembers repository choices")
     }
 
-    // case-contract: test_new_task_repository_restore_is_atomic_on_invalid_default | Applying an ordered repository batch with a valid repository followed by an empty Git repository fails without mutation: the CLI reports invalid_argument and fresh reads show no repository attachments or workspace roots; New Task blank Return keeps the picker open, shows an error, attaches neither repository, keeps roots empty, and preserves the saved repository order.
+    // case-contract: test_new_task_repository_restore_is_atomic_on_invalid_default | Applying an ordered repository batch with a valid repository followed by an empty Git repository fails without mutation: the CLI reports invalid_argument and fresh reads show no repository attachments or workspace roots; New Task automatically applies saved repositories; an invalid batch shows an error, attaches neither repository, keeps roots empty, preserves the saved order, and leaves the picker closed by default.
     func test_new_task_repository_restore_is_atomic_on_invalid_default() throws {
         launchApp(defaultParent: fixture.parent.path)
         let savedDefaults = [fixture.primary.path, fixture.emptyGitRepository.path]
@@ -3078,11 +3274,8 @@ final class StationAIUITests: XCTestCase {
 
         openNewTaskConversation()
         let search = element("conversation-repository-search")
-        XCTAssertTrue((search.placeholderValue ?? "").contains("primary, empty-git-repo"))
-        search.typeKey(.return, modifierFlags: [])
-
         XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10), "The failed saved-repository batch should display an error.")
-        XCTAssertTrue(search.waitForExistence(timeout: 5), "A failed restore should leave the repository picker open.")
+        XCTAssertFalse(search.exists, "A failed default restore should not open the repository picker.")
         XCTAssertFalse(element("conversation-repository-badge-primary").exists, "The first valid repository must not remain attached after the batch fails.")
         XCTAssertFalse(element("conversation-repository-badge-empty-git-repo").exists)
 
@@ -3128,7 +3321,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Existing task roots survive clearing the default parent")
     }
 
-    // case-contract: test_new_task_has_empty_conversation_history | The CLI creates an Untitled task with no roots, logs task.create.succeeded for its ID, verifies empty history, and deletes it cleanly. New Task logs start and completion events with the same attempt ID and created task ID, then opens one empty conversation with its repository picker focused and no create sheet. Adding folder-only context leaves history empty, and backing out deletes the pending task without confirmation.
+    // case-contract: test_new_task_has_empty_conversation_history | The CLI creates an Untitled task with no roots, logs task.create.succeeded for its ID, verifies empty history, and deletes it cleanly. New Task logs start and completion events with the same attempt ID and created task ID, then opens one empty conversation with the repository picker closed, the composer focused, and no create sheet. With no selected repositories, the empty conversation prominently says no repository is selected; typing starts immediately and, with a configured repository root, the UI enables standalone Send. Adding folder-only context leaves history empty, and backing out deletes the pending task without confirmation.
     func test_new_task_has_empty_conversation_history() throws {
         launchApp(defaultParent: fixture.parent.path)
         openNewTaskConversation()
@@ -3137,13 +3330,16 @@ final class StationAIUITests: XCTestCase {
         }, timeout: 2), "The New Task start event should reach the diagnostics file promptly after the click.")
         XCTAssertEqual(app.windows.count, 1, "New Task should open one conversation window.")
         XCTAssertTrue(element("empty-conversation").waitForExistence(timeout: 10))
+        XCTAssertEqual(repositoryTitle().label, "No repository selected")
         let repositorySearch = element("conversation-repository-search")
-        XCTAssertTrue(repositorySearch.waitForExistence(timeout: 10), "The new conversation should open its repository picker automatically.")
-        repositorySearch.typeText("primary")
-        XCTAssertEqual(repositorySearch.value as? String, "primary", "Typing without clicking should go to the focused repository search.")
+        XCTAssertFalse(repositorySearch.exists, "The new conversation should keep the repository picker closed by default.")
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        composer.typeText("Standalone draft")
+        XCTAssertEqual(composer.value as? String, "Standalone draft", "The composer should receive typing immediately.")
         XCTAssertFalse(element("create-task-button").exists, "Direct task creation should not present a create sheet.")
         XCTAssertFalse(element("workspace-repository-search").exists, "The sheet repository search should not appear.")
-        XCTAssertFalse(element("send-message-button").isEnabled, "A task with no working folders cannot send a message.")
+        XCTAssertTrue(element("send-message-button").isEnabled, "A configured root allows a standalone message even when no repository is selected.")
         let shell = try XCTUnwrap(tasksFromBoardList().first)
         XCTAssertTrue((shell["workspaceRoots"] as? [String] ?? []).isEmpty, "New Task should persist an empty pending task before repository selection.")
 
@@ -3290,7 +3486,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Unsent task prompt is saved after returning to backlog")
     }
 
-    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline prompts persist as typed text, the composer expands beyond five lines, stops at its 12-line limit, and retains all lines while scrolling. Long saved drafts reopen intact and immediately expand before typing, including after restart, remain editable, grow for wrapped text, shrink when shortened, and show their own overflow scrollbar for earlier and later content. The CLI/XPC preserves a 15-line draft. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI recover a submitted prompt with no Codex thread or active send reservation to Waiting Response, clear the pending marker, preserve the draft, and return it to the composer. Sending to an Untitled auto-branch task derives its branch from the Codex-generated title or from the prompt fallback when title generation fails. During title preparation, CLI/XPC confirms the submitted prompt and conversation thread remain attached to the task, while the UI keeps Pause disabled until the task's conversation client has an interruptible turn. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, Return queues a follow-up, queued rows offer Steer, and queued follow-ups persist across reopening. The obsolete footer Queue and Steer buttons are absent.
+    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the prompt while title generation runs in parallel; title generation uses its result or a prompt fallback, and does not delay starting the conversation. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
     func test_conversation_composer_rejects_blank_and_supports_live_turn_controls() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -3466,9 +3662,9 @@ final class StationAIUITests: XCTestCase {
             }, timeout: 20), "Sending a prompt from an empty task should persist the Codex-generated title.")
             XCTAssertTrue(waitUntil({
                 guard let repository = try? self.repositoryRecord(taskID: titleTaskID, repositoryPath: self.fixture.primary.path) else { return false }
-                return repository["branch"] as? String == "generated-fixture-title" && repository["isPending"] as? Bool == false
-            }, timeout: 20), "The new auto branch should use the generated task title.")
-            try runGit(fixture.primary, "show-ref", "--verify", "--quiet", "refs/heads/generated-fixture-title")
+                return repository["branch"] as? String == "transcript-entry-readable-chat-content-for-scrolling-readable" && repository["isPending"] as? Bool == false
+            }, timeout: 20), "The worktree should be prepared from the prompt before title generation finishes.")
+            try runGit(fixture.primary, "show-ref", "--verify", "--quiet", "refs/heads/transcript-entry-readable-chat-content-for-scrolling-readable")
             XCTAssertTrue(waitUntil({
                 (try? self.diagnosticEvents().contains { $0["taskID"] as? String == titleTaskID && $0["event"] as? String == "task.title_apply.succeeded" }) == true
             }, timeout: 10), "The generated title application should be logged.")
@@ -4266,7 +4462,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts[secondPrompt].waitForExistence(timeout: 10), "Reopening the task should load the completed second send from the real app-server thread.")
     }
 
-    // case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; with no active turn, a missed queued-row steer dispatches synchronously as its own turn and leaves the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up; its row Steer uses the active turn ID, appears in the transcript, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
+    // case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, a missed queued-row steer dispatches synchronously as its own turn and leaves the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up; its row Steer uses the active turn ID, appears in the transcript, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
     func test_conversation_steers_and_queues_active_turn() throws {
         let sharedFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-steer-queue-serial-success-wait")
         let fixtureOwner = try String(contentsOf: WorkspaceFixture.root.appendingPathComponent(WorkspaceFixture.ownerMarker), encoding: .utf8)
@@ -4289,7 +4485,8 @@ final class StationAIUITests: XCTestCase {
         let missedRowSteerText = "Queue this missed row steer for its own turn."
         let rowSteeringText = "Send this queued follow-up into the active turn."
         let queuedText = "After the current work, verify the saved follow-up."
-        XCTAssertTrue(app.staticTexts["Start a conversation"].waitForExistence(timeout: 15), "Conversation history should finish loading before the composer is used.")
+        XCTAssertTrue(modelPrompt().waitForExistence(timeout: 15), "Conversation history should finish loading before the composer is used.")
+        XCTAssertFalse(app.staticTexts["Start a conversation"].exists, "The empty state should not include the removed generic heading.")
         let composer = app.textViews.matching(identifier: "message-composer").firstMatch
         XCTAssertTrue(composer.waitForExistence(timeout: 10), "The native message editor should be exposed as a text view.")
         let composerReady = waitUntil({ composer.isHittable }, timeout: 15)
@@ -5574,7 +5771,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(element("goal-clear-button").exists)
     }
 
-    // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer shows a Codex-reported model, while unsupported modes and malformed model IDs are rejected before creating history.
+    // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer and empty-state prompt show the selected Codex-reported model and update when the user changes it, while unsupported modes and malformed model IDs are rejected before creating history.
     func test_conversation_mode_rejects_unknown_mode_without_starting_a_turn() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Conversation modes", roots: [fixture.primary.path])
@@ -5597,6 +5794,9 @@ final class StationAIUITests: XCTestCase {
         }, "The composer should expose a model returned by Codex.")
         let selectedModelName = try XCTUnwrap(selectedModel["name"] as? String)
         let selectedModelID = try XCTUnwrap(selectedModel["id"] as? String)
+        let emptyModelPrompt = modelPrompt()
+        XCTAssertTrue(emptyModelPrompt.waitForExistence(timeout: 5))
+        XCTAssertTrue(emptyModelPrompt.label.contains(selectedModelName), "The empty-state prompt should show the active model.")
         let modelMenu = modelPicker
         XCTAssertTrue(displayedModelValue().caseInsensitiveCompare(selectedModelName) == .orderedSame
             || displayedModelValue().caseInsensitiveCompare(selectedModelID) == .orderedSame)
@@ -5613,6 +5813,9 @@ final class StationAIUITests: XCTestCase {
                 return displayedModel.caseInsensitiveCompare(alternateName) == .orderedSame
                     || displayedModel.caseInsensitiveCompare(alternateID) == .orderedSame
             }, timeout: 5), "Choosing a model should update the composer selection.")
+            XCTAssertTrue(waitUntil({
+                emptyModelPrompt.label.contains(alternateName)
+            }, timeout: 5), "The empty-state prompt should react to model changes.")
         }
 
         let modeMenu = element("conversation-mode-menu")
@@ -6452,9 +6655,13 @@ final class StationAIUITests: XCTestCase {
         app.activate()
         element("new-task-button").click()
         XCTAssertTrue(element("empty-conversation").waitForExistence(timeout: 10), "New Task should create and open an empty conversation.")
-        let repositorySearch = element("conversation-repository-search")
-        XCTAssertTrue(repositorySearch.waitForExistence(timeout: 10), "A new conversation should open its repository picker.")
-        repositorySearch.click()
+        XCTAssertFalse(element("conversation-repository-search").exists, "A new conversation should keep its repository picker closed.")
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitForExistence(timeout: 10), "A new conversation should focus the chat composer.")
+        app.typeKey("x", modifierFlags: [])
+        XCTAssertEqual(composer.value as? String, "x", "The chat composer should receive keyboard input immediately.")
+        app.typeKey(XCUIKeyboardKey.delete.rawValue, modifierFlags: [])
+        XCTAssertEqual(composer.value as? String, "", "The focus check should leave the new composer empty.")
         XCTAssertFalse(element("create-task-button").exists, "Direct creation should not show the New Task sheet.")
     }
 
@@ -6763,6 +6970,40 @@ final class StationAIUITests: XCTestCase {
         XCTAssertGreaterThan(greenPixels, 3, "The merged-PR completion checkmark should render green foreground pixels.", file: file, line: line)
     }
 
+    private func repositoryTitleHasColor(_ element: XCUIElement, appearance: String) -> Bool {
+        guard let cgImage = element.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            return false
+        }
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        var matchingPixels = 0
+        for x in 0..<cgImage.width {
+            for y in 0..<cgImage.height {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                let isMatch: Bool
+                if appearance == "dark" {
+                    isMatch = color.redComponent > 0.65
+                        && color.greenComponent > 0.25
+                        && color.redComponent > color.greenComponent * 1.3
+                        && color.blueComponent < 0.25
+                } else {
+                    isMatch = color.blueComponent > color.redComponent * 1.5
+                        && color.blueComponent > color.greenComponent * 1.2
+                        && color.greenComponent > 0.18
+                }
+                if isMatch { matchingPixels += 1 }
+            }
+        }
+        return matchingPixels > 3
+    }
+
+    private func repositoryTitle() -> XCUIElement {
+        element("empty-conversation").staticTexts.firstMatch
+    }
+
+    private func modelPrompt() -> XCUIElement {
+        element("empty-conversation").staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Send a message to ")).firstMatch
+    }
+
     private func deleteTaskFromContextMenu(_ title: String) {
         let card = app.buttons[title].firstMatch
         XCTAssertTrue(card.waitForExistence(timeout: 5))
@@ -6773,13 +7014,27 @@ final class StationAIUITests: XCTestCase {
     }
 
     private func assertOrderedRoots(_ paths: [String], file: StaticString = #filePath, line: UInt = #line) {
+        let taskTitle = element("task-view-title").label
+        let task = try? taskRecord(named: taskTitle)
+        let repositories = (task?["repositoryWorktrees"] as? [[String: Any]] ?? [])
+            .compactMap { $0["worktreePath"] as? String }
+        let contextFolders = paths.filter { !repositories.contains($0) }
         let summary = element("working-folders-summary")
+        guard !contextFolders.isEmpty else {
+            XCTAssertFalse(summary.exists, "Repository worktrees should not be repeated as additional working folders.", file: file, line: line)
+            return
+        }
         XCTAssertTrue(summary.waitForExistence(timeout: 10), "Working folder summary is missing.", file: file, line: line)
         let text = [summary.label, summary.value as? String ?? "", summary.placeholderValue ?? ""]
             .filter { !$0.isEmpty }
             .joined(separator: " ")
+        for repositoryPath in repositories {
+            let repositoryName = URL(fileURLWithPath: repositoryPath).lastPathComponent
+            XCTAssertFalse(text.contains(repositoryPath), "Repository worktrees should not appear in the additional-folder summary.", file: file, line: line)
+            XCTAssertFalse(text.contains(repositoryName), "Repository labels should not be duplicated in the additional-folder summary.", file: file, line: line)
+        }
         var searchStart = text.startIndex
-        for path in paths {
+        for path in contextFolders {
             XCTAssertEqual(
                 text.components(separatedBy: path).count - 1,
                 1,

@@ -746,10 +746,6 @@ struct KanbanBoardView: View {
             defer { taskCreatingPullRequests.remove(task.id) }
             do {
                 let manager = BoardTaskManager(modelContext: modelContext)
-                let conflictRepositories = try await manager.pullRequestConflictRepositories(task.id)
-                if !conflictRepositories.isEmpty {
-                    throw BridgeCommandError(code: "conflicts_require_confirmation", message: "Resolve conflicts in the task worktree before creating pull requests.")
-                }
                 _ = try await manager.createPullRequests(task.id, client: codexClient)
             } catch {
                 pullRequestError = error.localizedDescription
