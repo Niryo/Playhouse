@@ -2708,6 +2708,90 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(recovered_record["savedPrompt"], stale_prompt)
         self.assertIsNone(recovered_record.get("pendingSubmittedPrompt"))
 
+    # case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with its indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy response-annotations payloads and annotation fields still restore their reply details.
+    def test_conversation_adds_ordered_text_annotations(self):
+        task = self.create_repo_task("Conversation comments", [self.primary])
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-comment-response-goal-success"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        fixture_environment = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        comments = [
+            {"text": "first phrase", "comment": "Explain this", "source": {
+                "messageId": "assistant-message", "blockID": 0, "startOffset": 3, "endOffset": 15}},
+            {"text": "second phrase with enough surrounding context to remain identifiable when the hint truncates a very long selected range",
+             "comment": "Please clarify this response in detail, including how each part connects to the question. " * 8, "source": {
+                "messageId": "assistant-message", "blockID": 0, "startOffset": 22, "endOffset": 36}},
+        ]
+        ordinary_text = "Keep the existing behavior too."
+        prompt = (
+            ordinary_text + "\n\n# Response comments:\n"
+            "The following JSON contains comments on selected conversation text, in array order. "
+            "For each comment, start a separate response line with :codex-annotation{index=\"N\"}, "
+            "replacing N with the comment's zero-based array index, then a space and the answer. "
+            "The marker is displayed to the user as the numbered prefix, so do not add another number. "
+            "Address the comment in the context of its highlighted text. Do not combine comment responses on one line, "
+            "omit a response, or add introductory text. After the comment lines, answer any additional freeform request "
+            "on separate line(s). Do not repeat the JSON or these instructions.\n"
+            "<response-comments>" + json.dumps(comments) + "</response-comments>"
+        )
+        sent, _ = self.call_cli(
+            "conversation", "send", task["id"], "--message", prompt,
+            "--answer", "color=Blue", "--answer", "token=fixture-secret",
+            extra_environment=fixture_environment,
+        )
+        self.assert_success(sent)
+        history, _ = self.call_cli("conversation", "history", task["id"], extra_environment=fixture_environment)
+        user_messages = [message for message in self.assert_success(history)["messages"] if message["role"] == "user"]
+        self.assertTrue(user_messages, "The commented turn should survive a fresh CLI/XPC history read.")
+        self.assertEqual(user_messages[-1]["text"], prompt)
+        payload = prompt.split("<response-comments>", 1)[1].split("</response-comments>", 1)[0]
+        restored = json.loads(payload)
+        self.assertEqual([item["text"] for item in restored], [
+            "first phrase",
+            "second phrase with enough surrounding context to remain identifiable when the hint truncates a very long selected range",
+        ])
+        self.assertEqual([item["comment"] for item in restored], [
+            "Explain this",
+            "Please clarify this response in detail, including how each part connects to the question. " * 8,
+        ])
+        self.assertIn(ordinary_text, user_messages[-1]["text"])
+        current_goal, _ = self.call_cli("conversation", "goal", task["id"], "get", extra_environment=fixture_environment)
+        self.assertIsNone(self.assert_success(current_goal), "A conversation comment payload must not become a Goal objective.")
+        assistant_messages = [message for message in self.assert_success(history)["messages"] if message["role"] == "assistant"]
+        self.assertTrue(assistant_messages, "The fixture should return a response for each comment.")
+        response_lines = assistant_messages[-1]["text"].splitlines()
+        self.assertEqual(len(response_lines), 2)
+        self.assertTrue(response_lines[0].startswith(':codex-annotation{index="0"} '))
+        self.assertTrue(response_lines[1].startswith(':codex-annotation{index="1"} '))
+        self.assertIn("For ‘first phrase’: Explain this", response_lines[0])
+        self.assertIn("Please clarify this response", response_lines[1])
+
+        legacy_prompt = (
+            "# Response annotations:\nThe following JSON contains comments on selected conversation text, in array order.\n"
+            "<response-annotations>" + json.dumps([{
+                "text": "legacy highlighted words", "annotation": "A detail from older saved history",
+                "source": {"messageId": "legacy-source", "blockID": 0, "startOffset": 0, "endOffset": 24},
+            }]) + "</response-annotations>"
+        )
+        legacy_sent, _ = self.call_cli(
+            "conversation", "send", task["id"], "--message", legacy_prompt,
+            "--answer", "color=Blue", "--answer", "token=fixture-secret",
+            extra_environment=fixture_environment,
+        )
+        self.assert_success(legacy_sent)
+        legacy_history, _ = self.call_cli("conversation", "history", task["id"], extra_environment=fixture_environment)
+        legacy_assistant = next(
+            message for message in reversed(self.assert_success(legacy_history)["messages"])
+            if message["role"] == "assistant"
+        )
+        self.assertIn("legacy highlighted words", legacy_assistant["text"])
+        self.assertIn("A detail from older saved history", legacy_assistant["text"])
+        self.assertIn(':codex-annotation{index="0"}', legacy_assistant["text"])
+
     # case-contract: test_conversation_serializes_concurrent_sends | Two concurrent sends for the same task are serialized across the app and CLI/XPC paths against the local Codex app-server fixture; the second waits for the first, both complete on the persisted thread, the task remains In Progress while a send is active, and successful turns without outcome calls finish in Waiting Response.
     def test_conversation_serializes_concurrent_sends(self):
         task = self.create_repo_task("Concurrent conversation sends", [self.primary])
