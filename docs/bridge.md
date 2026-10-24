@@ -21,8 +21,13 @@ The service accepts a versioned JSON request, returns a versioned JSON response,
 | `workspace suggest --parent <path>` | Find Git repository roots below a parent folder |
 | `settings get` | Read the default parent folder |
 | `settings set-parent <path>` / `settings clear-parent` | Change the default parent folder |
-| `conversation history <task-id>` | Load the task's Codex transcript |
-| `conversation send <task-id> --message <text>` | Send a Codex turn and stream JSON event lines |
+| `task create ... [--provider <codex\|claude>]` | Create a task with a specific conversation provider instead of the default |
+| `settings set-default-provider <codex\|claude>` | Change the provider new tasks start with |
+| `conversation history <task-id>` | Load the task's transcript, including turns from every provider it has used |
+| `conversation send <task-id> --message <text>` | Send a turn to the task's current provider and stream JSON event lines |
+| `conversation stop <task-id>` | Stop the active turn, including one started by another process |
+| `conversation provider <task-id>` / `conversation provider <task-id> set <codex\|claude>` | Read or switch the task's provider; switching requires a settled conversation and records a boundary |
+| `conversation provider <task-id> capabilities` | Report the provider's availability, version, and capabilities |
 
 For example:
 
@@ -34,11 +39,11 @@ For example:
 
 Repository worktrees are created under `~/.stationAI/worktrees`; if the requested branch already has a worktree, StationAI reuses its current path. By default, the branch name is derived from the task title. `--branch` and `--branch-from` values are keyed to the repository path as `<repo-path>=<value>`. Branch creation uses `master`, or the detected default branch if `master` is absent. Moving a task to Done removes clean worktree directories while leaving their branches; a dirty worktree blocks the status change. Folder-only tasks store their roots directly.
 
-The selected worktrees and context folders define task context and the initial working directory; they do not restrict Codex's full-access sandbox configuration.
+The selected worktrees and context folders define task context and the initial working directory; they do not restrict the provider's full-access sandbox configuration.
 
 ## Shared implementation
 
-The GUI and service both compile `BoardTaskManager`, `WorkspaceManager`, `WorkspaceSettingsManager`, and `CodexConversationManager` from `StationAI/App/BridgeCore.swift`. SwiftUI actions call these managers, and XPC commands dispatch to the same operations. `StationAIStore` opens the same application-support SwiftData store in both processes. In debug bridge tests, each request can supply an isolated store and defaults suite; release builds ignore those overrides.
+The GUI and service both compile `BoardTaskManager`, `WorkspaceManager`, `WorkspaceSettingsManager`, and `ConversationManager` from `StationAI/App/BridgeCore.swift`. SwiftUI actions call these managers, and XPC commands dispatch to the same operations. `StationAIStore` opens the same application-support SwiftData store in both processes. In debug bridge tests, each request can supply an isolated store and defaults suite; release builds ignore those overrides.
 
 The service bundle and CLI are built by `scripts/build-bridge.sh` during the app target's Xcode build phase. The CLI name is deliberately distinct from `StationAI` because the default macOS filesystem is case-insensitive. Keeping both executables in `Contents/MacOS` also lets the CLI discover its app's private XPC service.
 
@@ -56,4 +61,4 @@ The UI suite requires XCTest UI automation in a logged-in macOS desktop session.
 
 To run UI tests, first run `scripts/setup-ui-tart-vm.sh`, then use `scripts/test-ui-tart.sh [--vm <name>] [--show-vm] [--case <case-id>]`. The setup script creates the default VM from `ghcr.io/cirruslabs/macos-tahoe-xcode:26.5` with 6 CPUs and 12 GB memory; it requires at least 110 GiB free in Tart storage. This image includes Xcode 26.5, auto-login, Automation Mode configuration, and the Tart guest agent. The test runner starts the stopped VM with the checkout shared read-only, copies the checkout into guest-local storage, and runs the existing UI suite there. The VM-local copy is fixed for the run, so host edits made during testing do not affect it. Build products, fixtures, and app data remain in the guest during the run; test logs and `.xcresult` bundles are copied to `${TMPDIR}/stationai-ui-tart-artifacts/`, then the per-run guest snapshot is removed. The runner stops the VM when the run ends. Use `--show-vm` to open the display and configure Accessibility before the test starts. UI test execution on the regular host is blocked by the `test-ui.sh` handoff.
 
-The live Codex integration suite is opt-in because it requires an authenticated host Codex CLI with access to the pinned Luna model. Run it with `STATIONAI_RUN_CODEX_INTEGRATION=1 ./scripts/test-codex-integration.sh`. It streams a turn that edits files in two disposable Git roots, checks command output and the diff, resumes the thread, and reloads the full history. Its live UI case is handed off to Tart and requires the Codex CLI and a separate Codex login in the guest. For an interactive guest login, run `scripts/test-ui-tart.sh --show-vm --live-codex --case test_conversation_composer_rejects_blank_and_supports_live_turn_controls`.
+The live provider integration suite is opt-in because it requires an authenticated host provider CLI: Claude Code (the default) or Codex with access to the pinned Luna model. Run it with `STATIONAI_RUN_LIVE_INTEGRATION=1 ./scripts/test-live-integration.sh [--provider claude|codex|all] [--scenario <name>] [--skip-ui]`. Shared scenarios run against the selected provider: a plan turn, then an edit turn in two disposable Git roots with command output and diff checks, a resumed turn, and a full history reload; steering an active turn; stopping an active turn from another process; and concurrent automatic-branch claims. Claude-only scenarios cover the question round trip and the capability report; the Codex-only scenario covers the pinned model. `--provider all` also runs a Claude → Codex → Claude handoff and checks the mixed transcript's ordering and provider boundaries. Set `STATIONAI_LIVE_KEEP_WORKSPACE=1` to keep the disposable workspace for inspection. `scripts/test-codex-integration.sh` is kept as a wrapper for `--provider codex`. The live UI cases are handed off to Tart and require the provider CLI and a separate login in the guest. For an interactive guest login, run `scripts/test-ui-tart.sh --show-vm --live-provider claude --case test_conversation_composer_rejects_blank_and_supports_live_turn_controls` (`--live-codex` is an alias for `--live-provider codex`).

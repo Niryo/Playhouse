@@ -1152,7 +1152,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Conversation status and history persist after shared store contention")
     }
 
-    // case-contract: test_task_worktree_preparation_serializes_auto_branch_claims | Tasks with the same automatic branch choice remain pending without creating a worktree before conversation start; the opt-in live Codex integration sends both turns concurrently and confirms only one task claims the generated branch.
+    // case-contract: test_task_worktree_preparation_serializes_auto_branch_claims | Tasks with the same automatic branch choice remain pending without creating a worktree before conversation start. When one task has claimed the generated branch, a send from the other (through the CLI, or through the composer, which shows the error and returns the prompt to it) is rejected without creating a worktree and restores the task to Backlog with its prompt saved as a draft and no pending submitted prompt; the opt-in live provider integration sends both turns concurrently and confirms only one task claims the generated branch.
     func test_task_worktree_preparation_serializes_auto_branch_claims() throws {
         launchApp(defaultParent: fixture.parent.path)
         let existingWorktreeCount = try runGitOutput(fixture.primary, "worktree", "list", "--porcelain")
@@ -1211,6 +1211,41 @@ final class StationAIUITests: XCTestCase {
                 let card = element("task-card-\(taskID.uppercased())")
                 XCTAssertTrue(card.waitForExistence(timeout: 10), "Pending tasks should remain visible on the board before conversation start.")
             }
+
+            // Materialize the first task's generated branch, then let the second
+            // claim the same branch: the rejected claim must restore Backlog.
+            codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+            let winnerID = taskIDs[0]
+            let loserID = taskIDs[1]
+            _ = try runCLI(["conversation", "send", winnerID, "--message", "Claim the generated branch.", "--answer", "color=Blue", "--answer", "token=fixture-secret"])
+            let claimed = try XCTUnwrap((try taskRecord(id: winnerID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+            XCTAssertEqual(claimed["isPending"] as? Bool, false)
+            let claimedCount = try runGitOutput(fixture.primary, "worktree", "list", "--porcelain").components(separatedBy: "worktree ").count - 1
+            XCTAssertEqual(claimedCount, existingWorktreeCount + 1)
+            // The composer saves the submitted prompt as In Progress before the
+            // manager runs, so the rejection must restore the status it replaced.
+            let loserPrompt = "Claim the same generated branch."
+            let loserCard = element("task-card-\(loserID.uppercased())")
+            XCTAssertTrue(loserCard.waitForExistence(timeout: 10))
+            loserCard.click()
+            let composer = element("message-composer")
+            XCTAssertTrue(waitUntil({ composer.isEnabled && composer.isHittable }, timeout: 15), "The losing task's composer should be available before its first turn.")
+            composer.click()
+            composer.typeText(loserPrompt)
+            element("send-message-button").click()
+            let error = element("codex-chat-error")
+            XCTAssertTrue(error.waitForExistence(timeout: 15), "A rejected branch claim should show its error in the conversation.")
+            XCTAssertTrue(error.label.contains("already assigned") || (error.value as? String ?? "").contains("already assigned"), "The error should explain the branch is already assigned: \(error.label)")
+            XCTAssertTrue(waitUntil({ composer.value as? String == loserPrompt }, timeout: 10), "The rejected prompt should return to the composer.")
+            let rejected = try XCTUnwrap(taskRecord(id: loserID))
+            XCTAssertEqual(rejected["status"] as? String, "Backlog", "A rejected branch claim must restore the task's prior status.")
+            XCTAssertEqual((rejected["repositoryWorktrees"] as? [[String: Any]])?.first?["isPending"] as? Bool, true)
+            XCTAssertEqual(rejected["savedPrompt"] as? String, loserPrompt)
+            XCTAssertNil(rejected["pendingSubmittedPrompt"] as? String)
+            XCTAssertEqual(try runGitOutput(fixture.primary, "worktree", "list", "--porcelain").components(separatedBy: "worktree ").count - 1, claimedCount)
+            element("back-to-board-button").click()
+            let backlogColumn = element("column-backlog")
+            XCTAssertTrue(waitUntil({ loserCard.exists && backlogColumn.exists && backlogColumn.frame.contains(loserCard.frame) }, timeout: 10), "The rejected task should remain visible in Backlog.")
             return
         }
 
@@ -1979,7 +2014,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ lowestTask.exists && lowestTask.isHittable }, timeout: 10), "Vertical board scrolling should make lower backlog tasks reachable.")
     }
 
-    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review.
+    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review.
     func test_task_progress_reports_publish_persist_and_clear() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Progress reports", roots: [fixture.primary.path])
@@ -2132,6 +2167,32 @@ final class StationAIUITests: XCTestCase {
         let resumeInstructions = try XCTUnwrap(turn["threadResumeDeveloperInstructions"] as? [Any])
         XCTAssertFalse(resumeInstructions.isEmpty, "Resumed task threads should receive updated task instructions.")
         XCTAssertTrue(resumeInstructions.allSatisfy { ($0 as? String)?.contains("task outcome") == true })
+
+        // A composer turn runs its provider from the app process, which must hand
+        // the provider this app's bridge service and store for in-turn outcomes.
+        let bridgeEnvironmentURL = URL(fileURLWithPath: executable.path + ".bridge-environment")
+        try? FileManager.default.removeItem(at: bridgeEnvironmentURL)
+        relaunchApp()
+        openTask(named: "Progress reports")
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.isEnabled && composer.isHittable }, timeout: 15), "The composer should be available for a follow-up.")
+        composer.click()
+        composer.typeText("Finish this task from the app.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 15), "The composer turn should hold the fixture turn open.")
+        let bridgeEnvironment = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: bridgeEnvironmentURL)) as? [String: String],
+            "The provider process should receive the bridge service name and store directory."
+        )
+        XCTAssertEqual(bridgeEnvironment["STATIONAI_BRIDGE_SERVICE_NAME"], serviceName)
+        XCTAssertEqual(
+            URL(fileURLWithPath: try XCTUnwrap(bridgeEnvironment["STATIONAI_DATA_DIRECTORY"])).resolvingSymlinksInPath().path,
+            dataDirectory.resolvingSymlinksInPath().path
+        )
+        let appOutcome = try runCLI(["task", "outcome", taskID, "completed"], extraEnvironment: bridgeEnvironment)
+        XCTAssertEqual((appOutcome["result"] as? [String: Any])?["outcome"] as? String, "completed")
+        try "Release the composer turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 15), "An outcome reported with the provider's inherited environment should move the app-started turn to Review.")
     }
 
     // case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; a staged completed outcome is discarded if its turn fails, leaving the task Blocked. The task card removes the report while lifecycle states remain Blocked or Waiting Response, and answering the question resumes the task successfully.

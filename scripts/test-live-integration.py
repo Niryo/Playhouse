@@ -345,7 +345,8 @@ def scenario_steer_active_turn(ws):
 
 def scenario_stop_active_turn(ws):
     task_id = ws.create_task(f"{ws.provider} stop integration")["id"]
-    turn = ws.start_turn(task_id, "Run exactly one shell command: `sleep 120 && echo STATIONAI_STOP_NOT_EXPECTED`. Then reply with one short sentence.")
+    # The output token is built from pieces so it never appears in the command text itself.
+    turn = ws.start_turn(task_id, "Run exactly one shell command: `sleep 120 && printf 'STOP_%s' NOT_EXPECTED`. Then reply with one short sentence.")
     try:
         turn.wait_for(lambda event: activity_is_running(event, "sleep 120"), 180, "the long command to start")
         stopped_at = time.monotonic()
@@ -357,7 +358,7 @@ def scenario_stop_active_turn(ws):
     status, final = turn.finish(timeout=90)
     require(time.monotonic() - stopped_at < 60, "The turn kept running long after Stop.")
     require(not final.get("ok"), f"A stopped turn should not report success: {final}")
-    require(not any("STATIONAI_STOP_NOT_EXPECTED" in json.dumps(event) for event in turn.events), "The interrupted command still finished.")
+    require(not any("STOP_NOT_EXPECTED" in json.dumps(event) for event in turn.events), "The interrupted command still produced its output.")
     record = ws.run_cli("task", "get", task_id)
     require(record["status"] in {"Blocked", "Waiting Response"}, f"A stopped turn should leave the task resumable: {record['status']}")
     return "stop an active turn from another process"
@@ -374,22 +375,19 @@ def scenario_concurrent_auto_branch(ws):
     repository_branch_worktree_state = ws.repository_branch_worktree_state
 
     def start_turn(task_id, message):
-        return ws.start_turn(task_id, message).process
+        # StreamingTurn owns stdout; never read the process directly here.
+        return ws.start_turn(task_id, message)
 
-    def exited_turn_diagnostics(turn_processes):
+    def exited_turn_diagnostics(turns):
         diagnostics = []
-        for index, process in enumerate(turn_processes, start=1):
-            if process.poll() is None:
+        for index, turn in enumerate(turns, start=1):
+            if turn.process.poll() is None:
                 continue
-            diagnostics.append(f"turn {index} exited with status {process.returncode}")
+            diagnostics.append(f"turn {index} exited with status {turn.process.returncode}")
         return diagnostics
 
-    def finish_turn(process):
-        stdout, stderr = process.communicate(timeout=300)
-        records = [json.loads(line) for line in stdout.splitlines() if line.strip()]
-        final = next((record for record in reversed(records) if "version" in record and "ok" in record), None)
-        require(final is not None, f"Concurrent turn returned no final CLI response: {stderr}")
-        return process.returncode, final
+    def finish_turn(turn):
+        return turn.finish(timeout=300)
 
     auto_title = f"Concurrent live auto branch {uuid.uuid4().hex[:8]}"
     auto_tasks = [
@@ -531,19 +529,19 @@ def scenario_concurrent_auto_branch(ws):
             f"persisted-path keys={expected_lock_paths}; lock files during hold={lock_paths_during_hold}",
         )
     except BaseException:
-        for process in turn_processes:
-            if process.poll() is None:
-                process.terminate()
+        for turn in turn_processes:
+            if turn.process.poll() is None:
+                turn.process.terminate()
                 try:
-                    process.communicate(timeout=20)
+                    turn.process.wait(timeout=20)
                 except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.communicate()
+                    turn.process.kill()
+                    turn.process.wait()
         raise
     finally:
         fcntl.lockf(lock_descriptor, fcntl.LOCK_UN, 0, 0, os.SEEK_SET)
         os.close(lock_descriptor)
-    outcomes = [finish_turn(process) for process in turn_processes]
+    outcomes = [finish_turn(turn) for turn in turn_processes]
     require(sorted(status for status, _ in outcomes) == [0, 2], f"Expected one live branch claim and one assignment conflict; got {[status for status, _ in outcomes]}.")
     successful = [response for _, response in outcomes if response.get("ok") is True]
     rejected = [response for _, response in outcomes if response.get("ok") is False]
@@ -554,7 +552,9 @@ def scenario_concurrent_auto_branch(ws):
     prepared = [task for task in persisted if not task["repositoryWorktrees"][0]["isPending"]]
     pending = [task for task in persisted if task["repositoryWorktrees"][0]["isPending"]]
     require(len(prepared) == len(pending) == 1, f"Concurrent auto branch turns must leave one prepared task and one pending task: {persisted}")
-    require(prepared[0]["status"] == "Review" and pending[0]["status"] == "Backlog", f"Task statuses do not match the branch allocation result: {persisted}")
+    require(prepared[0]["status"] == "Review", f"The winning turn should finish in Review after reporting its outcome: {persisted}")
+    require(pending[0]["status"] == "Backlog", f"A rejected branch claim must restore the losing contender to Backlog: {persisted}")
+    require(pending[0].get("pendingSubmittedPrompt") is None, f"A rejected branch claim left a pending submitted prompt: {persisted}")
     prepared_path = Path(prepared[0]["repositoryWorktrees"][0]["worktreePath"])
     require(prepared_path.is_dir() and data_directory.joinpath("worktrees") in prepared_path.parents, f"The winning managed worktree is missing or outside the owned worktree directory: {prepared_path}")
     worktree_count_after = subprocess.run(
@@ -703,7 +703,10 @@ def main():
             passed.append(f"{provider}: {summary}")
             print(f"Live {provider}: {scenario.__name__} passed in {time.monotonic() - started:.1f}s", flush=True)
         finally:
-            ws.remove()
+            if os.environ.get("STATIONAI_LIVE_KEEP_WORKSPACE") == "1":
+                print(f"Kept workspace for diagnosis: {ws.root}", flush=True)
+            else:
+                ws.remove()
     print(f"Live integration passed for {', '.join(providers)} ({len(passed)} scenarios):")
     for item in passed:
         print(f"  - {item}")

@@ -57,7 +57,7 @@
   },
   {
     "id": "test_task_worktree_preparation_serializes_auto_branch_claims",
-    "expectation": "Tasks with the same automatic branch choice remain pending without creating a worktree before conversation start; the opt-in live Codex integration sends both turns concurrently and confirms only one task claims the generated branch."
+    "expectation": "Tasks with the same automatic branch choice remain pending without creating a worktree before conversation start. When one task has claimed the generated branch, a send from the other (through the CLI, or through the composer, which shows the error and returns the prompt to it) is rejected without creating a worktree and restores the task to Backlog with its prompt saved as a draft and no pending submitted prompt; the opt-in live provider integration sends both turns concurrently and confirms only one task claims the generated branch."
   },
   {
     "id": "test_task_done_preserves_worktree_and_branch",
@@ -77,7 +77,7 @@
   },
   {
     "id": "test_task_progress_reports_publish_persist_and_clear",
-    "expectation": "The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review."
+    "expectation": "The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review."
   },
   {
     "id": "test_task_progress_reports_clear_on_failed_turns_and_questions",

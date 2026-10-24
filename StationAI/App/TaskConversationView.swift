@@ -2618,6 +2618,7 @@ struct TaskConversationView: View {
         actionNotice = nil
         activities = []
         isPreparingSubmittedMessage = true
+        let statusBeforeSubmission = task.status
 
         Task { @MainActor in
             let saved = await saveDraftAndGenerateTitle(
@@ -2652,7 +2653,7 @@ struct TaskConversationView: View {
                 return
             }
             do {
-                _ = try await conversationManager.send(taskID: task.id, text: text, imageDataURLs: imageDataURLs, mode: conversationMode, modelID: selectedModelID.isEmpty ? nil : selectedModelID, onTurnStarting: {
+                _ = try await conversationManager.send(taskID: task.id, text: text, imageDataURLs: imageDataURLs, mode: conversationMode, modelID: selectedModelID.isEmpty ? nil : selectedModelID, statusBeforeSubmission: statusBeforeSubmission, onTurnStarting: {
                     isResponding = true
                 }, onUpdate: { update in
                     switch update.type {

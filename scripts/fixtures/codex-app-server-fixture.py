@@ -10,6 +10,16 @@ import time
 import uuid
 from pathlib import Path
 
+# Record the bridge environment StationAI handed this provider process, so tests
+# can run in-turn `stationai` calls with exactly what a real provider inherits.
+Path(str(sys.argv[0]) + ".bridge-environment").write_text(
+    json.dumps({
+        name: os.environ.get(name)
+        for name in ("STATIONAI_BRIDGE_SERVICE_NAME", "STATIONAI_DATA_DIRECTORY")
+    }),
+    encoding="utf-8",
+)
+
 if "-title-" in Path(sys.argv[0]).name:
     THREAD_ID = f"stationai-fixture-{os.getpid()}"
     TURN_ID = f"turn-stationai-fixture-{os.getpid()}"

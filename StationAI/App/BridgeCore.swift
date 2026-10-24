@@ -3574,6 +3574,7 @@ final class ConversationManager {
         modelID: String? = nil,
         userInputAnswers: [String: [String]] = [:],
         retainQueuedMessagesOnFailure: Bool = true,
+        statusBeforeSubmission: TaskStatus? = nil,
         onTurnStarting: (() -> Void)? = nil,
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in },
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void = { _ in }
@@ -3594,6 +3595,7 @@ final class ConversationManager {
                         mode: mode,
                         requestedModelID: modelID,
                         userInputAnswers: userInputAnswers,
+                        statusBeforeSubmission: statusBeforeSubmission,
                         onTurnStarting: onTurnStarting,
                         onUpdate: onUpdate,
                         onUserInput: onUserInput
@@ -3774,6 +3776,7 @@ final class ConversationManager {
         mode: ConversationMode,
         requestedModelID: String?,
         userInputAnswers: [String: [String]],
+        statusBeforeSubmission: TaskStatus?,
         onTurnStarting: (() -> Void)?,
         onUpdate: @escaping (ConversationUpdate) -> Void,
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void
@@ -3808,72 +3811,86 @@ final class ConversationManager {
             throw StationAIManagerError.invalidTransition("Done tasks are closed. Create a new task for follow-up work.")
         }
         let shouldGenerateTitle = !normalizedText.isEmpty && ["Untitled task", "Generating title…"].contains(task.title)
+        // A caller that already saved the submitted prompt (the composer does,
+        // so it survives navigation) supplies the status it replaced.
+        let priorStatus = statusBeforeSubmission ?? task.status
+        let priorStatusMessage = task.statusMessage
         _ = try await tasks.savePrompt(taskID, prompt: normalizedText, status: .inProgress, submitted: true)
-        let titleMustPrecedeAutoWorktree = task.repositoryWorktrees.contains {
-            $0.isPending && $0.branch == "auto"
-        }
-        let resolveTitleBeforeWorktree = shouldGenerateTitle && titleMustPrecedeAutoWorktree
-        if resolveTitleBeforeWorktree {
-            let reserved = try await tasks.renameIfTitleMatches(
-                taskID,
-                expectedTitle: task.title,
-                title: "Generating title…"
-            )
-            if reserved != nil {
-                let titleRoots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
-                let titleWorkspace = try ConversationWorkspaceContext(roots: titleRoots)
-                try await generateAndApplyTitle(
-                    taskID: taskID,
-                    prompt: normalizedText,
-                    workspace: titleWorkspace,
-                    clients: clients.helperClients(preferring: provider)
-                )
-            }
-            task = try tasks.taskModel(taskID)
-            if ["Untitled task", "Generating title…"].contains(task.title) {
-                throw BridgeCommandError(
-                    code: "invalid_transition",
-                    message: "The task title changed while it was being prepared. Try sending again."
-                )
-            }
-        }
-        task = try await tasks.prepareRepositoryWorktrees(taskID, fallbackPrompt: normalizedText)
-        if !normalizedText.isEmpty {
-            _ = try await tasks.savePrompt(taskID, prompt: normalizedText, status: .inProgress, submitted: true)
-        }
-        let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
-        let workspace = try ConversationWorkspaceContext(roots: roots)
-        _ = try await tasks.clearProgressReport(taskID)
+        let resolveTitleBeforeWorktree: Bool
+        let workspace: ConversationWorkspaceContext
         let titleGeneration: Task<Void, Never>?
-        if shouldGenerateTitle && !resolveTitleBeforeWorktree {
-            let latest = try tasks.taskModel(taskID)
-            let titleReserved = ["Untitled task", "Generating title…"].contains(latest.title)
-                ? try await tasks.renameIfTitleMatches(
+        do {
+            let titleMustPrecedeAutoWorktree = task.repositoryWorktrees.contains {
+                $0.isPending && $0.branch == "auto"
+            }
+            resolveTitleBeforeWorktree = shouldGenerateTitle && titleMustPrecedeAutoWorktree
+            if resolveTitleBeforeWorktree {
+                let reserved = try await tasks.renameIfTitleMatches(
                     taskID,
-                    expectedTitle: latest.title,
+                    expectedTitle: task.title,
                     title: "Generating title…"
-                ) != nil
-                : false
-            if titleReserved {
-                let titleClients = clients.helperClients(preferring: provider)
-                titleGeneration = Task { @MainActor in
-                    do {
-                        try await self.generateAndApplyTitle(
-                            taskID: taskID,
-                            prompt: normalizedText,
-                            workspace: workspace,
-                            clients: titleClients
-                        )
-                    } catch {
-                        // Background title generation has always been best-effort;
-                        // the helper records persistence failures before returning.
+                )
+                if reserved != nil {
+                    let titleRoots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
+                    let titleWorkspace = try ConversationWorkspaceContext(roots: titleRoots)
+                    try await generateAndApplyTitle(
+                        taskID: taskID,
+                        prompt: normalizedText,
+                        workspace: titleWorkspace,
+                        clients: clients.helperClients(preferring: provider)
+                    )
+                }
+                task = try tasks.taskModel(taskID)
+                if ["Untitled task", "Generating title…"].contains(task.title) {
+                    throw BridgeCommandError(
+                        code: "invalid_transition",
+                        message: "The task title changed while it was being prepared. Try sending again."
+                    )
+                }
+            }
+            task = try await tasks.prepareRepositoryWorktrees(taskID, fallbackPrompt: normalizedText)
+            if !normalizedText.isEmpty {
+                _ = try await tasks.savePrompt(taskID, prompt: normalizedText, status: .inProgress, submitted: true)
+            }
+            let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            workspace = try ConversationWorkspaceContext(roots: roots)
+            _ = try await tasks.clearProgressReport(taskID)
+            if shouldGenerateTitle && !resolveTitleBeforeWorktree {
+                let latest = try tasks.taskModel(taskID)
+                let titleReserved = ["Untitled task", "Generating title…"].contains(latest.title)
+                    ? try await tasks.renameIfTitleMatches(
+                        taskID,
+                        expectedTitle: latest.title,
+                        title: "Generating title…"
+                    ) != nil
+                    : false
+                if titleReserved {
+                    let titleClients = clients.helperClients(preferring: provider)
+                    titleGeneration = Task { @MainActor in
+                        do {
+                            try await self.generateAndApplyTitle(
+                                taskID: taskID,
+                                prompt: normalizedText,
+                                workspace: workspace,
+                                clients: titleClients
+                            )
+                        } catch {
+                            // Background title generation has always been best-effort;
+                            // the helper records persistence failures before returning.
+                        }
                     }
+                } else {
+                    titleGeneration = nil
                 }
             } else {
                 titleGeneration = nil
             }
-        } else {
-            titleGeneration = nil
+        } catch {
+            // No turn started: a rejected branch claim, title race, or missing
+            // root must not leave the task In Progress. The prompt stays saved
+            // as a draft.
+            _ = try? await tasks.setLifecycleStatus(taskID, to: priorStatus, message: priorStatusMessage)
+            throw error
         }
         let started = try await tasks.setLifecycleStatus(taskID, to: .inProgress)
         onUpdate(ConversationUpdate(type: "started", taskStatus: started.status))

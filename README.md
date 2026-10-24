@@ -69,12 +69,14 @@ For full end-to-end coverage, the combined script checks that the CLI and UI tes
 
 The fast verifier runs all CLI/XPC cases and checks that the UI suite has the exact same case IDs and expectations. After the CLI gate passes, the UI coverage reviewer inspects only the paired cases affected by the change and does not execute tests. Any UI execution, including full E2E runs, happens in the Tart VM. Keep `./scripts/test-full-e2e.sh` for deliberate full E2E runs across every CLI and UI case. Add the same named case and shared expectation to both suites for each new behavior; `scripts/check-test-parity.py` rejects unmatched, duplicate, or mismatched cases. The VM needs XCTest UI automation available. It does not require Codex sign-in.
 
-Real Codex turns use a separate opt-in suite that requires a working host `codex login` and Luna access. Its live UI case also runs in Tart; the VM must have the Codex CLI installed and a separate guest login. Use `--show-vm` on the direct Tart command when you need to sign in interactively:
+Real provider turns use a separate opt-in suite. It runs against Claude Code by default; pass `--provider codex` for Codex or `--provider all` to also check a Claude → Codex → Claude handoff. Claude needs a working host `claude` login; Codex needs `codex login` and Luna access. Its live UI cases also run in Tart, where the VM needs the provider CLI installed and its own guest login. Use `--show-vm` on the direct Tart command when you need to sign in interactively:
 
 ```sh
-STATIONAI_RUN_CODEX_INTEGRATION=1 ./scripts/test-codex-integration.sh
+STATIONAI_RUN_LIVE_INTEGRATION=1 ./scripts/test-live-integration.sh                    # Claude
+STATIONAI_RUN_LIVE_INTEGRATION=1 ./scripts/test-live-integration.sh --provider codex
+STATIONAI_RUN_LIVE_INTEGRATION=1 ./scripts/test-live-integration.sh --skip-ui --provider all
 ```
 
-For a focused live UI case after guest sign-in, run `scripts/test-ui-tart.sh --live-codex --case test_conversation_composer_rejects_blank_and_supports_live_turn_controls`.
+`scripts/test-codex-integration.sh` remains as a wrapper for `--provider codex`. For a focused live UI case after guest sign-in, run `scripts/test-ui-tart.sh --live-provider claude --case test_conversation_composer_rejects_blank_and_supports_live_turn_controls`.
 
 See `AGENTS.md` for the development testing, Git, and task-verification rules.

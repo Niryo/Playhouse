@@ -1093,7 +1093,7 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assertEqual(marker.read_text(encoding="utf-8"), "StationAI bridge guard test (v1).\n")
             shutil.rmtree(unsafe)
 
-    # case-contract: test_task_worktree_preparation_serializes_auto_branch_claims | Tasks with the same automatic branch choice remain pending without creating a worktree before conversation start; the opt-in live Codex integration sends both turns concurrently and confirms only one task claims the generated branch.
+    # case-contract: test_task_worktree_preparation_serializes_auto_branch_claims | Tasks with the same automatic branch choice remain pending without creating a worktree before conversation start. When one task has claimed the generated branch, a send from the other (through the CLI, or through the composer, which shows the error and returns the prompt to it) is rejected without creating a worktree and restores the task to Backlog with its prompt saved as a draft and no pending submitted prompt; the opt-in live provider integration sends both turns concurrently and confirms only one task claims the generated branch.
     def test_task_worktree_preparation_serializes_auto_branch_claims(self):
         title = f"Concurrent auto branch {uuid.uuid4().hex[:8]}"
         existing_worktree_count = self.run_git(self.primary, "worktree", "list", "--porcelain").count("worktree ")
@@ -1107,6 +1107,26 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(all(record["repositoryWorktrees"][0]["branch"] == "auto" for record in records))
         self.assertTrue(all(record["repositoryWorktrees"][0]["worktreePath"] == str(self.primary) for record in records))
         self.assertTrue(all(record["status"] == "Backlog" for record in records))
+        winner, loser = tasks
+        self.complete_fixture_turn(winner["id"])
+        claimed = self.assert_success(self.call_cli("task", "get", winner["id"])[0])["repositoryWorktrees"][0]
+        self.assertFalse(claimed["isPending"])
+        claimed_count = self.run_git(self.primary, "worktree", "list", "--porcelain").count("worktree ")
+        self.assertEqual(claimed_count, existing_worktree_count + 1)
+        loser_prompt = "Claim the same generated branch."
+        response, _ = self.call_cli(
+            "conversation", "send", loser["id"], "--message", loser_prompt,
+            expected_status=2,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture")},
+        )
+        self.assert_failure(response, "invalid_argument")
+        rejected = self.assert_success(self.call_cli("task", "get", loser["id"])[0])
+        self.assertEqual(rejected["status"], "Backlog", "A rejected branch claim must restore the task's prior status.")
+        self.assertTrue(rejected["repositoryWorktrees"][0]["isPending"])
+        self.assertEqual(rejected["savedPrompt"], loser_prompt)
+        self.assertIsNone(rejected.get("pendingSubmittedPrompt"))
+        self.assertIsNone(rejected.get("codexThreadID"))
+        self.assertEqual(self.run_git(self.primary, "worktree", "list", "--porcelain").count("worktree "), claimed_count)
 
     # case-contract: test_task_done_preserves_worktree_and_branch | Sending the first message derives an auto branch from the generated task title. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 10 seconds; rapid focus changes are suppressed. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls.
     def test_task_done_preserves_worktree_and_branch(self):
@@ -1536,7 +1556,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(waiting["status"], "Waiting Response")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", blocked_id)[0])["status"], "Blocked")
 
-    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review.
+    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review.
     def test_task_progress_reports_publish_persist_and_clear(self):
         task_id = self.create_task("Progress reports", roots=[self.primary])["id"]
         response, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "building", expected_status=1)
@@ -1598,7 +1618,12 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assertIsNone(self.assert_success(cleared).get("progressLabel"))
             final_report, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "testing")
             self.assertEqual(self.assert_success(final_report)["progressLabel"], "Testing")
-            completed, _ = self.call_cli("task", "outcome", task_id, "completed")
+            # The provider process must inherit this service's name and store, so
+            # its in-turn outcome call reaches this task rather than the defaults.
+            bridge_environment = json.loads(Path(str(executable) + ".bridge-environment").read_text(encoding="utf-8"))
+            self.assertEqual(bridge_environment["STATIONAI_BRIDGE_SERVICE_NAME"], arguments.service_name)
+            self.assertEqual(Path(bridge_environment["STATIONAI_DATA_DIRECTORY"]).resolve(), self.data_directory.resolve())
+            completed, _ = self.call_cli("task", "outcome", task_id, "completed", extra_environment=bridge_environment)
             completed_record = self.assert_success(completed)
             self.assertEqual(completed_record["outcome"], "completed")
             self.assertEqual(completed_record["taskStatus"], "In Progress", "The outcome is staged until the Codex turn completes successfully.")

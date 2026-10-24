@@ -34,6 +34,9 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     /// The first Claude Code release StationAI verified for active-turn steering
     /// (`priority: "next"`) and command lifecycle events.
     nonisolated static let minimumVersion = "2.1.296"
+    nonisolated static let foregroundExecutionInstruction = """
+        Run every shell command in the foreground and wait for it to finish, including long sleeps, builds, and tests. Never set run_in_background, never background a command with &, and never end your turn while work you started is still running.
+        """
 
     let provider = ConversationProvider.claude
     private static var processActiveSessionIDs = Set<String>()
@@ -497,12 +500,17 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         if modelID != Self.defaultModelID { arguments += ["--model", modelID] }
         if !persistsSessions { arguments.append("--no-session-persistence") }
         for root in workspace.roots.dropFirst() { arguments += ["--add-dir", root.path] }
+        // Each turn's process exits when the turn ends, so work Claude moves to the
+        // background is lost and its turn stops early. Keep every command in the foreground.
+        var systemPrompt = Self.foregroundExecutionInstruction
         if let developerInstructions, !developerInstructions.isEmpty {
-            arguments += ["--append-system-prompt", developerInstructions]
+            systemPrompt += "\n\n" + developerInstructions
         }
+        arguments += ["--append-system-prompt", systemPrompt]
 
         var environment = ProcessInfo.processInfo.environment
         environment["PATH"] = Self.expandedSearchPath(environment["PATH"])
+        ConversationProcessEnvironment.forwardStationAIBridgeEnvironment(&environment)
         // Claude Code finds its keychain sign-in by user name; services started by
         // launchd are not guaranteed a login environment.
         environment["HOME"] = environment["HOME"] ?? NSHomeDirectory()

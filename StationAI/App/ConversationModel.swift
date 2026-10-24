@@ -406,3 +406,22 @@ enum ConversationSteerMailbox {
         return directory.appendingPathComponent("active-\(key).json")
     }
 }
+
+/// Shared child-process environment for provider CLIs.
+@MainActor
+enum ConversationProcessEnvironment {
+    /// Lets a provider's child process run `stationai` back into this app's service.
+    /// The child inherits the launching process's environment (the GUI app or the
+    /// XPC service), not the CLI caller's, so the service name and store directory
+    /// must be passed on explicitly. The app identity is the same in both processes.
+    static func forwardStationAIBridgeEnvironment(_ environment: inout [String: String]) {
+        if environment["STATIONAI_BRIDGE_SERVICE_NAME"] == nil {
+            environment["STATIONAI_BRIDGE_SERVICE_NAME"] = BridgeContract.serviceName(
+                forApplication: StationAIAppIdentity.applicationIdentifier
+            )
+        }
+        if environment["STATIONAI_DATA_DIRECTORY"] == nil {
+            environment["STATIONAI_DATA_DIRECTORY"] = StationAIDiagnostics.storeURL.deletingLastPathComponent().path
+        }
+    }
+}

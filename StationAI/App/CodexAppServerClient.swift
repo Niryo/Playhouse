@@ -726,6 +726,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
 
         var environment = ProcessInfo.processInfo.environment
         environment["PATH"] = Self.expandedSearchPath(environment["PATH"])
+        ConversationProcessEnvironment.forwardStationAIBridgeEnvironment(&environment)
         if let codexHomeOverride { environment["CODEX_HOME"] = codexHomeOverride }
         child.environment = environment
 

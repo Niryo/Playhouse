@@ -3,6 +3,11 @@ import Foundation
 enum BridgeContract {
     static let currentVersion = 1
     static let serviceName = "com.stationai.app.bridge"
+
+    /// The bundled XPC service is named after its app (see scripts/build-bridge.sh).
+    static func serviceName(forApplication applicationIdentifier: String) -> String {
+        applicationIdentifier.isEmpty ? serviceName : applicationIdentifier + ".bridge"
+    }
 }
 
 enum BridgeValue: Codable, Equatable {
