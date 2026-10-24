@@ -105,7 +105,6 @@ struct TaskConversationView: View {
     @State private var userInputRequest: CodexUserInputRequest?
     @State private var userInputAnswers: [String: [String]] = [:]
     @State private var userInputOther: [String: String] = [:]
-    @State private var repositoryMismatch: RepositoryMismatchAssessment?
     @State private var asyncQuestionAnswers: [String: String] = [:]
     @State private var answeredAsyncQuestionIDs: Set<String> = []
     @State private var errorMessage: String?
@@ -250,40 +249,6 @@ struct TaskConversationView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(WorkspaceTheme.windowBackground)
-        .alert(
-            "Possible repository mismatch",
-            isPresented: Binding(
-                get: { repositoryMismatch != nil },
-                set: { if !$0 { repositoryMismatch = nil } }
-            )
-        ) {
-            Button("Review repository context") {
-                let assessment = repositoryMismatch
-                repositoryMismatch = nil
-                steerRepositoryAssessment(
-                    "The fast repository assessment reported: \(assessment?.reason ?? "the selected context may not match"). Suggested repository: \(assessment?.suggestedRepositoryPath ?? "none"). Please ask me to confirm whether to keep, add, replace, or use standalone context before editing. Use StationAI's task repository APIs and workspace repos list API; do not scan the root yourself."
-                )
-            }
-            .buttonHoverPointer()
-            .help("Ask the assistant to review repository choices before editing.")
-            Button("Continue with current context", role: .cancel) {
-                let assessment = repositoryMismatch
-                repositoryMismatch = nil
-                let detail = assessment.map {
-                    "StationAI's fast repository assessment reported: \($0.reason) Suggested repository: \($0.suggestedRepositoryPath ?? "none")."
-                } ?? "StationAI flagged a possible repository mismatch."
-                steerRepositoryAssessment("\(detail) I confirm that you should continue with the current task context. Do not change repositories.")
-            }
-            .buttonHoverPointer()
-            .help("Continue using the selected repositories for this task.")
-        } message: {
-            Text(repositoryMismatch.map {
-                if let suggestion = $0.suggestedRepositoryPath {
-                    return "\($0.reason) StationAI found a possible match: \(suggestion). Review the repository context before continuing, or keep the current context."
-                }
-                return "\($0.reason) StationAI did not find a clear matching repository. Review the context or continue with the current selection."
-            } ?? "The current repository may not match this task.")
-        }
         .onAppear {
             guard isNewTask else { return }
             isShowingRepositoryPicker = false
@@ -1263,14 +1228,16 @@ struct TaskConversationView: View {
     }
 
     private var safetyNotice: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            if !workspaceRootURLs.isEmpty {
-                let folderLabels = workspaceRootURLs.map { url in
-                    task.repositoryWorktrees.first(where: { URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == url.path })
-                        .map { "\(URL(fileURLWithPath: $0.repositoryPath).lastPathComponent) · \($0.branch)" } ?? url.lastPathComponent
-                }
+        let additionalFolders = workspaceRootURLs.filter { url in
+            !task.repositoryWorktrees.contains {
+                URL(fileURLWithPath: $0.worktreePath).standardizedFileURL.path == url.path
+            }
+        }
+        return Group {
+            if !additionalFolders.isEmpty {
+                let folderLabels = additionalFolders.map(\.lastPathComponent)
                 let folderSummary = "Working in: " + folderLabels.joined(separator: " · ")
-                let fullFolderSummary = "Working in: " + workspaceRootURLs.map(\.path).joined(separator: " · ")
+                let fullFolderSummary = "Working in: " + additionalFolders.map(\.path).joined(separator: " · ")
                 Text(folderSummary)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
@@ -1279,12 +1246,12 @@ struct TaskConversationView: View {
                     .accessibilityLabel(folderSummary)
                     .accessibilityValue(fullFolderSummary)
                     .accessibilityIdentifier("working-folders-summary")
+                    .frame(maxWidth: 820, alignment: .leading)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 28)
+                    .padding(.top, 12)
             }
         }
-        .frame(maxWidth: 820, alignment: .leading)
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, 28)
-        .padding(.top, 12)
     }
 
     private var conversation: some View {
@@ -1292,18 +1259,27 @@ struct TaskConversationView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     if messages.isEmpty && activeGoal?.status != "complete" && !isLoadingHistory {
-                        VStack(spacing: 12) {
-                            Image(systemName: "bubble.left.and.bubble.right")
-                                .font(.system(size: 25, weight: .regular))
-                                .foregroundStyle(Color.accentColor.opacity(0.8))
-                            Text("Start a conversation")
-                                .font(.system(size: 17, weight: .semibold))
-                            Text("Send a message to Codex · Luna.")
-                                .font(.system(size: 13))
-                                .foregroundStyle(.secondary)
+                        VStack(spacing: 0) {
+                            Text(emptyConversationRepositoryTitle)
+                                .font(.system(size: 30, weight: .bold))
+                                .foregroundStyle(emptyConversationRepositoryTitleColor)
+                                .multilineTextAlignment(.center)
+                                .lineLimit(2)
+                            Spacer(minLength: 58)
+                            VStack(spacing: 14) {
+                                Image(systemName: "bubble.left.and.bubble.right")
+                                    .font(.system(size: 29, weight: .regular))
+                                    .foregroundStyle(Color.accentColor.opacity(0.8))
+                                    .accessibilityLabel("Conversation")
+                                Text("Send a message to \(selectedModelName).")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 28)
                         }
-                        .frame(maxWidth: .infinity, minHeight: 210)
-                        .padding(30)
+                        .frame(maxWidth: .infinity, minHeight: 280)
+                        .padding(.horizontal, 30)
+                        .padding(.vertical, 38)
                         .accessibilityIdentifier("empty-conversation")
                     } else if !messages.isEmpty {
                         LazyVStack(alignment: .leading, spacing: 16) {
@@ -1401,6 +1377,19 @@ struct TaskConversationView: View {
                 scrollToLatest(using: scrollProxy)
             }
         }
+    }
+
+    private var emptyConversationRepositoryTitle: String {
+        let repositoryNames = task.repositoryWorktrees.map {
+            URL(fileURLWithPath: $0.repositoryPath).lastPathComponent
+        }
+        return repositoryNames.isEmpty ? "No repository selected" : repositoryNames.joined(separator: " · ")
+    }
+
+    private var emptyConversationRepositoryTitleColor: Color {
+        colorScheme == .dark
+            ? .orange
+            : Color(red: 0.18, green: 0.31, blue: 0.68)
     }
 
     private var activeSubagents: [CodexActivity] {
@@ -2402,49 +2391,20 @@ struct TaskConversationView: View {
             if let other = userInputOther[question.id]?.trimmingCharacters(in: .whitespacesAndNewlines), !other.isEmpty { values.append(other) }
             answers[question.id] = values
         }
-        if request.isBlocking {
-            do {
-                _ = try await BoardTaskManager(modelContext: modelContext).setLifecycleStatus(task.id, to: .inProgress)
-            } catch {
-                errorMessage = error.localizedDescription
-                return
-            }
-        }
         guard codexClient.answerUserInput(requestID: request.id, threadID: request.threadID, answers: answers) else {
-            if request.isBlocking {
-                _ = try? await BoardTaskManager(modelContext: modelContext).setLifecycleStatus(task.id, to: .waitingResponse)
-            }
             errorMessage = "Codex couldn't accept those answers. Please check the responses and try again."
             return
         }
         userInputRequest = nil
         userInputAnswers = [:]
         userInputOther = [:]
-    }
-
-    private func steerRepositoryAssessment(_ message: String) {
-        Task { @MainActor in
+        if request.isBlocking {
             do {
-                guard try await conversationManager.steer(taskID: task.id, text: message) else {
-                    preserveRepositoryAssessmentForFollowup(message)
-                    return
-                }
+                _ = try await BoardTaskManager(modelContext: modelContext).resumeWaitingResponseAfterUserInput(task.id)
             } catch {
-                preserveRepositoryAssessmentForFollowup(message)
-                errorMessage = "Couldn't update Codex about the repository assessment: \(error.localizedDescription). Its result and your choice are in the composer; send them to continue."
+                errorMessage = "Your answer was sent, but StationAI couldn't update the task status: \(error.localizedDescription)"
             }
         }
-    }
-
-    private func preserveRepositoryAssessmentForFollowup(_ message: String) {
-        let existingDraft = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        if existingDraft.isEmpty {
-            draft = message
-        } else if !existingDraft.contains(message) {
-            draft = "\(message)\n\n\(draft)"
-        }
-        isComposerFocused = true
-        actionNotice = "The repository check finished after the active turn. I added its result to the composer; send it to continue."
     }
 
     private func loadConversation() async {
@@ -2713,8 +2673,6 @@ struct TaskConversationView: View {
                         if let message = update.message, draft == message { draft = "" }
                     case "action_notice":
                         actionNotice = update.message
-                    case "repository_mismatch":
-                        repositoryMismatch = update.repositoryMismatch
                     default:
                         break
                     }

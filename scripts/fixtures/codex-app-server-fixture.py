@@ -27,7 +27,20 @@ def write(value):
 
 def question_request(request_id):
     mode = os.path.basename(sys.argv[0])
-    questions = [] if mode.endswith("-empty") else [
+    if mode.endswith("-user-question"):
+        questions = [{
+            "id": "question_action",
+            "header": "Next step",
+            "question": "Which approach should I take?",
+            "options": [
+                {"label": "Continue", "description": "Proceed with the current task."},
+                {"label": "Pause", "description": "Wait for more information."},
+            ],
+            "isOther": False,
+            "isSecret": False,
+        }]
+    else:
+        questions = [] if mode.endswith("-empty") else [
         {
             "id": "color",
             "header": "Color",
@@ -47,7 +60,7 @@ def question_request(request_id):
             "isOther": False,
             "isSecret": True,
         },
-    ]
+        ]
     write({
         "jsonrpc": "2.0",
         "id": request_id,
@@ -58,33 +71,6 @@ def question_request(request_id):
             "itemId": "item_stationai_question",
             "questions": questions,
             "isBlocking": "-nonblocking" not in mode and "-plan" not in mode,
-        },
-    })
-
-
-def repository_confirmation_request(request_id):
-    write({
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "method": "tool/requestUserInput",
-        "params": {
-            "threadId": THREAD_ID,
-            "turnId": TURN_ID,
-            "itemId": "item_stationai_repository_confirmation",
-            "questions": [{
-                "id": "repository_action",
-                "header": "Repository context",
-                "question": "How should I handle the possible repository mismatch?",
-                "options": [
-                    {"label": "Keep current repository", "description": "Continue using the selected repository."},
-                    {"label": "Add suggested repository", "description": "Keep the selected repository and add the suggestion."},
-                    {"label": "Replace with suggested repository", "description": "Use only the suggested repository."},
-                    {"label": "Continue as standalone", "description": "Remove repository context for this task."},
-                ],
-                "isOther": False,
-                "isSecret": False,
-            }],
-            "isBlocking": True,
         },
     })
 
@@ -179,6 +165,12 @@ def diagnostic_action_items(cwd):
     ]
 
 
+def fixture_answer_text():
+    if Path(sys.argv[0]).name.endswith("-user-question"):
+        return "Answer received: Continue."
+    return "Answers received: Blue / fixture-secret."
+
+
 def main():
     global THREAD_ID, TURN_ID
     mode = os.path.basename(sys.argv[0])
@@ -186,8 +178,6 @@ def main():
     saw_question = False
     saw_turn = False
     turn_message = None
-    is_assessment = False
-    assessment_turn_count = 0
     history_path = Path(str(sys.argv[0]) + ".history")
     if "-goal" in mode:
         Path(str(sys.argv[0]) + ".launch-args").write_text(json.dumps(sys.argv[1:]), encoding="utf-8")
@@ -237,11 +227,6 @@ def main():
             write({"jsonrpc": "2.0", "id": message["id"], "result": {}})
         elif message.get("method") == "thread/start":
             thread_start_instructions = message.get("params", {}).get("developerInstructions")
-            if isinstance(thread_start_instructions, str) and "fast repository-context assessor" in thread_start_instructions:
-                is_assessment = True
-                history_path = Path(str(sys.argv[0]) + ".assessment.history")
-                THREAD_ID = f"stationai-assessment-{os.getpid()}"
-                TURN_ID = f"turn-stationai-assessment-{os.getpid()}"
             if serial_mode:
                 history = serial_history()
                 if history.get("threadID") is not None:
@@ -294,7 +279,7 @@ def main():
             turn_message = next((item.get("text") for item in turn_input if item.get("type") == "text"), None)
             is_title_request = (turn_message or "").startswith("Write a concise task title of at most 8 words")
             serial_first_turn = False
-            if serial_mode and not is_title_request and not is_assessment:
+            if serial_mode and not is_title_request:
                 TURN_ID = f"turn-{uuid.uuid4()}"
                 first_turn_marker = Path(str(sys.argv[0]) + ".serial-first-turn")
                 try:
@@ -305,46 +290,13 @@ def main():
                     os.close(descriptor)
                     serial_first_turn = True
             turn_thread_id = message.get("params", {}).get("threadId")
-            if serial_mode and not is_assessment and turn_thread_id != THREAD_ID:
+            if serial_mode and turn_thread_id != THREAD_ID:
                 write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32003, "message": "The turn must use the active fixture thread."}})
                 continue
             fail_marker = Path(str(sys.argv[0]) + ".fail-next-turn-start")
             if serial_mode and fail_marker.exists():
                 fail_marker.unlink(missing_ok=True)
                 write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32099, "message": "Fixture rejected the targeted queued turn."}})
-                continue
-            if is_assessment:
-                assessment_turn_count += 1
-                if "late-result" in (turn_message or ""):
-                    time.sleep(1.5)
-                write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": TURN_ID, "status": "inProgress"}}})
-                if assessment_turn_count == 1:
-                    mismatch = os.environ.get("STATIONAI_E2E_REPOSITORY_ASSESSMENT") == "mismatch" or "mobile app login screen" in (turn_message or "").lower()
-                    answer = json.dumps({
-                        "likelyMismatch": mismatch,
-                        "reason": "The task appears to target a different repository." if mismatch else "The selected repository appears relevant.",
-                    })
-                else:
-                    available = turn_message.split("These are the only repositories you may recommend:", 1)[-1]
-                    candidate = next((line.strip() for line in available.splitlines() if line.strip().startswith("/")), None)
-                    answer = json.dumps({
-                        "likelyMismatch": True,
-                        "suggestedRepositoryPath": candidate,
-                        "reason": "The task appears to target a different repository.",
-                    })
-                saved_history = serial_history()
-                saved_history.setdefault("turns", []).append({
-                    "userMessage": turn_message,
-                    "assistantMessage": answer,
-                    "cwd": message.get("params", {}).get("cwd"),
-                    "runtimeWorkspaceRoots": message.get("params", {}).get("runtimeWorkspaceRoots", []),
-                })
-                history_path.write_text(json.dumps(saved_history), encoding="utf-8")
-                item = {"id": f"item_assessment_{assessment_turn_count}", "type": "agentMessage", "phase": "final_answer", "text": answer}
-                write({"jsonrpc": "2.0", "method": "item/started", "params": {"threadId": THREAD_ID, "turnId": TURN_ID, "item": item}})
-                write({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"threadId": THREAD_ID, "turnId": TURN_ID, "itemId": item["id"], "delta": answer}})
-                write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "turnId": TURN_ID, "item": item}})
-                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"}}})
                 continue
             if is_title_request:
                 if mode.endswith("-title-failure"):
@@ -542,39 +494,6 @@ def main():
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
-            elif mode.endswith("-assessment-wait") and "late-result" not in (turn_message or "") and "I confirm" not in (turn_message or ""):
-                active = Path(str(sys.argv[0]) + ".turn-active")
-                active.write_text("The main fixture turn is waiting for the repository assessment steer.\n", encoding="utf-8")
-                deadline = time.monotonic() + 30
-                steer_requests = []
-                required_steers = 2 if os.environ.get("STATIONAI_E2E_REPOSITORY_CONFIRM_SECOND_STEER") == "1" else 1
-                while len(steer_requests) < required_steers and time.monotonic() < deadline:
-                    readable, _, _ = select.select([sys.stdin], [], [], 0.02)
-                    if not readable:
-                        continue
-                    try:
-                        steer_request = json.loads(sys.stdin.readline())
-                    except json.JSONDecodeError:
-                        continue
-                    if steer_request.get("method") == "thread/items/list":
-                        write({"jsonrpc": "2.0", "id": steer_request.get("id"), "result": {"data": [], "nextCursor": None}})
-                    elif steer_request.get("method") == "turn/steer":
-                        params = steer_request.get("params", {})
-                        if params.get("threadId") == THREAD_ID and params.get("expectedTurnId") == TURN_ID:
-                            steer_requests.append(params)
-                            write({"jsonrpc": "2.0", "id": steer_request["id"], "result": {"turnId": TURN_ID}})
-                        else:
-                            write({"jsonrpc": "2.0", "id": steer_request.get("id"), "error": {"code": -32010, "message": "The expected turn ID is stale."}})
-                    else:
-                        write({"jsonrpc": "2.0", "id": steer_request.get("id"), "error": {"code": -32601, "message": "Unsupported fixture request."}})
-                active.unlink(missing_ok=True)
-                if len(steer_requests) < required_steers:
-                    return 3
-                saved_history = serial_history()
-                saved_history["steerRequests"] = saved_history.get("steerRequests", []) + steer_requests
-                history_path.write_text(json.dumps(saved_history), encoding="utf-8")
-                repository_confirmation_request(901)
-                continue
             elif serial_mode and Path(str(sys.argv[0]) + ".hold-next-queued-turn").exists():
                 hold_marker = Path(str(sys.argv[0]) + ".hold-next-queued-turn")
                 hold_marker.unlink(missing_ok=True)
@@ -915,18 +834,6 @@ def main():
                     "threadId": "00000000-0000-0000-0000-000000000001",
                     "turn": {"id": "turn_stationai_fixture", "status": turn_status, **turn_error},
                 }})
-            elif mode.endswith("-assessment-wait"):
-                item = {"id": f"item_stationai_final_{uuid.uuid4()}", "type": "agentMessage", "phase": "final_answer", "text": "I have recorded the repository decision."}
-                write({"jsonrpc": "2.0", "method": "item/started", "params": {"threadId": THREAD_ID, "turnId": TURN_ID, "item": item}})
-                write({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"threadId": THREAD_ID, "turnId": TURN_ID, "itemId": item["id"], "delta": item["text"]}})
-                write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "turnId": TURN_ID, "item": item}})
-                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"}}})
-            elif os.environ.get("STATIONAI_E2E_REPOSITORY_ASSESSMENT") == "mismatch":
-                item = {"id": "item_stationai_final", "type": "agentMessage", "phase": "final_answer", "text": "I will wait for your repository choice."}
-                write({"jsonrpc": "2.0", "method": "item/started", "params": {"threadId": THREAD_ID, "turnId": TURN_ID, "item": item}})
-                write({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"threadId": THREAD_ID, "turnId": TURN_ID, "itemId": item["id"], "delta": item["text"]}})
-                write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "turnId": TURN_ID, "item": item}})
-                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"}}})
             else:
                 question_request(901)
         elif message.get("id") == 901:
@@ -936,10 +843,12 @@ def main():
                 answers = message.get("result", {}).get("answers")
             if "-slow" in mode and not mode.endswith("-interrupted"):
                 time.sleep(2)
-            expected_answers = {"repository_action": {"answers": ["Keep current repository"]}} if mode.endswith("-assessment-wait") else {
+            expected_answers = {
                 "color": {"answers": ["Blue"]},
                 "token": {"answers": ["fixture-secret"]},
             }
+            if mode.endswith("-user-question"):
+                expected_answers = {"question_action": {"answers": ["Continue"]}}
             failed = mode.endswith("-empty") or mode.endswith("-fail") or answers != expected_answers
             if not failed and Path(str(sys.argv[0]) + ".outcome-hold").exists():
                 active = Path(str(sys.argv[0]) + ".outcome-active")
@@ -1044,7 +953,7 @@ def main():
                     if user_content:
                         contents.extend([
                             {"id": f"item_user_fixture_{index}", "type": "userMessage", "content": user_content},
-                            {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."},
+                            {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": fixture_answer_text()},
                         ])
             elif saved_history.get("turns"):
                 contents = []
@@ -1057,7 +966,7 @@ def main():
                     if user_content:
                         contents.extend([
                             {"id": f"item_user_fixture_{index}", "type": "userMessage", "content": user_content},
-                            {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."},
+                            {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": fixture_answer_text()},
                         ])
             else:
                 user_message = saved_history.get("userMessage") or (turn_message if answers else None)
@@ -1067,7 +976,7 @@ def main():
                 ]
                 contents = ([
                     {"id": "item_user_fixture", "type": "userMessage", "content": user_content},
-                    {"id": "item_assistant_fixture", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."},
+                    {"id": "item_assistant_fixture", "type": "agentMessage", "text": fixture_answer_text()},
                 ] if user_content and not mode.endswith("-empty") else [])
             if mode.endswith("-subagent") or mode.endswith("-subagent-wait"):
                 contents = [

@@ -1823,10 +1823,6 @@ final class BoardTaskManager {
     }
 
     func createPullRequests(_ id: UUID, client: CodexAppServerClient) async throws -> BoardTaskRecord {
-        let conflicts = try await pullRequestConflictRepositories(id)
-        if !conflicts.isEmpty {
-            throw BridgeCommandError(code: "conflicts_require_confirmation", message: "Pull request conflicts were found. Resolve conflicts in the task worktree before creating pull requests.")
-        }
         let lookup = try await withTaskOperationLock(id) {
             let initialTask = try requireTask(id)
             let originalRecords = initialTask.repositoryWorktrees
@@ -2066,6 +2062,30 @@ final class BoardTaskManager {
             if status != .inProgress { clearProgressReport(task) }
             try await saveTaskContext(taskID: id)
             StationAIDiagnostics.record("task.lifecycle_status.write.succeeded", fields: [
+                "taskID": id.uuidString,
+                "status": task.status.rawValue
+            ])
+            return BoardTaskRecord(task: task)
+        }
+    }
+
+    func resumeWaitingResponseAfterUserInput(_ id: UUID) async throws -> BoardTaskRecord {
+        let activeTurnURL = try conversationTurnActiveURL(id)
+        StationAIDiagnostics.record("task.lifecycle_status.user_input_resume.started", fields: ["taskID": id.uuidString])
+        return try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.status == .waitingResponse,
+                  FileManager.default.fileExists(atPath: activeTurnURL.path) else {
+                StationAIDiagnostics.record("task.lifecycle_status.user_input_resume.skipped", fields: [
+                    "taskID": id.uuidString,
+                    "reason": FileManager.default.fileExists(atPath: activeTurnURL.path) ? "status_not_waiting_response" : "turn_outcome_inactive",
+                ])
+                return BoardTaskRecord(task: task)
+            }
+            task.status = .inProgress
+            task.statusMessage = nil
+            try await saveTaskContext(taskID: id)
+            StationAIDiagnostics.record("task.lifecycle_status.user_input_resumed", fields: [
                 "taskID": id.uuidString,
                 "status": task.status.rawValue
             ])
@@ -3123,21 +3143,7 @@ struct ConversationUpdate: Codable {
     var message: String?
     var imageDataURLs: [String]?
     var userInputRequest: CodexUserInputRequest?
-    var repositoryMismatch: RepositoryMismatchAssessment?
     var taskStatus: String?
-}
-
-struct RepositoryMismatchAssessment: Codable, Identifiable {
-    var id: String { suggestedRepositoryPath ?? "no-repository-match" }
-    let reason: String
-    let selectedRepositoryPaths: [String]
-    let suggestedRepositoryPath: String?
-}
-
-private struct RepositoryMismatchAssessmentResult: Decodable {
-    let likelyMismatch: Bool
-    let suggestedRepositoryPath: String?
-    let reason: String
 }
 
 @MainActor
@@ -3720,7 +3726,6 @@ final class CodexConversationManager {
         var phase = "thread-start"
         do {
             let threadID: String
-            let isNewConversation = task.codexThreadID == nil
             if let existing = task.codexThreadID {
                 threadID = existing
             } else {
@@ -3737,19 +3742,6 @@ final class CodexConversationManager {
                 phase = "thread-persistence"
                 _ = try await tasks.persistCodexThreadID(taskID, threadID: threadID)
                 persistedThreadID = threadID
-            }
-            if isNewConversation {
-                Task { @MainActor in
-                    await self.assessRepositorySelection(
-                        taskID: taskID,
-                        prompt: normalizedText,
-                        threadID: threadID,
-                        workspace: workspace,
-                        repositories: task.repositoryWorktrees,
-                        repositoryRoot: repositoryRoot,
-                        onUpdate: onUpdate
-                    )
-                }
             }
             if onTurnStarting != nil {
                 client.markTurnStarting(threadID: threadID)
@@ -3813,7 +3805,7 @@ final class CodexConversationManager {
                             answers: userInputAnswers
                         )
                         if answersAccepted, request.isBlocking {
-                            let resumed = try? await self.tasks.setLifecycleStatus(taskID, to: .inProgress)
+                            let resumed = try? await self.tasks.resumeWaitingResponseAfterUserInput(taskID)
                             onUpdate(ConversationUpdate(type: "task_status", taskStatus: resumed?.status))
                         } else if !answersAccepted {
                             onUpdate(ConversationUpdate(type: "action_notice", message: "The supplied answers didn't match Codex's questions."))
@@ -3874,141 +3866,6 @@ final class CodexConversationManager {
         }
         onUpdate(ConversationUpdate(type: "completed", history: finalHistory))
         return finalHistory
-    }
-
-    private func assessRepositorySelection(
-        taskID: UUID,
-        prompt: String,
-        threadID: String,
-        workspace: CodexWorkspaceContext,
-        repositories: [RepositoryWorktreeRecord],
-        repositoryRoot: URL,
-        onUpdate: @escaping (ConversationUpdate) -> Void
-    ) async {
-        do {
-            let assessmentClient = CodexAppServerClient(codexExecutableOverride: client.executableOverrideForTitleGeneration)
-            let assessmentInstructions = """
-            You are StationAI's fast repository-context assessor. You run in a separate process from the main assistant.
-            Compare the user's task with the selected repository worktrees. If selected repositories appear relevant, return likelyMismatch=false. If selected repositories appear unrelated, return likelyMismatch=true. With no repositories selected, return likelyMismatch=false and let the main assistant decide whether this is standalone or should use the workspace repos list and task repository add APIs to choose and attach a clear match. A request that needs no repository is standalone.
-            Do not edit files or run commands that change files. Do not scan the configured repository root. You may inspect only the selected worktree's top-level project description when the task text and repository name are insufficient. Return exactly one JSON object with keys likelyMismatch (boolean), reason (one short sentence). Treat uncertainty as likelyMismatch=false.
-            """
-            let assessmentThread = try await assessmentClient.startThread(
-                workspace: workspace,
-                modelID: CodexAppServerClient.modelID,
-                developerInstructions: assessmentInstructions
-            )
-            let repositoryMappings = repositories.map { "\($0.repositoryPath) -> \($0.worktreePath)" }.joined(separator: "\n")
-            let assessmentPrompt = """
-            User request:
-            \(prompt)
-
-            Selected source repository to active task worktree mappings:
-            \(repositoryMappings.isEmpty ? "none" : repositoryMappings)
-
-            """
-            var finalMessage = ""
-            try await assessmentClient.sendMessage(
-                assessmentPrompt,
-                mode: .plan,
-                modelID: CodexAppServerClient.modelID,
-                threadID: assessmentThread,
-                workspace: workspace,
-                onDelta: { _ in },
-                onFinalMessage: { finalMessage = $0 },
-                onActivity: { _ in },
-                onDiff: { _ in },
-                onHistory: { _ in },
-                onActionRequest: {},
-                onUserInput: { _ in }
-            )
-            guard let result = Self.decodeRepositoryAssessment(finalMessage) else {
-                StationAIDiagnostics.record("conversation.repository_assessment.inconclusive", fields: [
-                    "taskID": taskID.uuidString,
-                    "threadID": threadID
-                ])
-                return
-            }
-            guard result.likelyMismatch else {
-                StationAIDiagnostics.record("conversation.repository_assessment.matched", fields: [
-                    "taskID": taskID.uuidString,
-                    "threadID": threadID,
-                    "steered": "false"
-                ])
-                return
-            }
-            let availableRepositories = try await WorkspaceManager().suggestedRepositories(parentPath: repositoryRoot.path)
-            let recommendationPrompt = """
-            The first assessment found a likely repository-context mismatch: \(result.reason)
-            StationAI has now called its workspace repos list API. These are the only repositories you may recommend:
-            \(availableRepositories.isEmpty ? "none found" : availableRepositories.joined(separator: "\n"))
-            Return exactly one JSON object with keys likelyMismatch (boolean, true), suggestedRepositoryPath (one exact listed path or null when no clear match), and reason (one short sentence). Do not inspect or enumerate the configured root.
-            """
-            finalMessage = ""
-            try await assessmentClient.sendMessage(
-                recommendationPrompt,
-                mode: .plan,
-                modelID: CodexAppServerClient.modelID,
-                threadID: assessmentThread,
-                workspace: workspace,
-                onDelta: { _ in },
-                onFinalMessage: { finalMessage = $0 },
-                onActivity: { _ in },
-                onDiff: { _ in },
-                onHistory: { _ in },
-                onActionRequest: {},
-                onUserInput: { _ in }
-            )
-            let recommendation = Self.decodeRepositoryAssessment(finalMessage)
-            let validSuggestion = recommendation?.suggestedRepositoryPath.flatMap { candidate in
-                availableRepositories.contains(candidate) ? candidate : nil
-            }
-            let mismatch = RepositoryMismatchAssessment(
-                reason: recommendation?.reason ?? result.reason,
-                selectedRepositoryPaths: repositories.map(\.repositoryPath),
-                suggestedRepositoryPath: validSuggestion
-            )
-            onUpdate(ConversationUpdate(type: "repository_mismatch", message: mismatch.reason, repositoryMismatch: mismatch))
-            let steeringMessage = """
-            A separate fast repository assessment found a possible context mismatch: \(mismatch.reason)
-            Suggested repository from StationAI's list: \(validSuggestion ?? "none clearly matched")
-            Pause repository edits. Ask the user to confirm whether to keep the current context, add a repository, replace the selected repositories, or treat the task as standalone. Use the StationAI task repository API after the user's choice; do not search the filesystem or switch context silently.
-            """
-            let steered = await steerMainTurnWhenActive(threadID: threadID, message: steeringMessage)
-            if !steered {
-                onUpdate(ConversationUpdate(type: "action_notice", message: "The mismatch confirmation is ready, but the first AI turn already ended. Choose a repository context above, then send a follow-up to continue."))
-            }
-            StationAIDiagnostics.record("conversation.repository_assessment.mismatch", fields: [
-                "taskID": taskID.uuidString,
-                "threadID": threadID,
-                "hasSuggestion": String(validSuggestion != nil),
-                "steered": String(steered)
-            ])
-        } catch {
-            StationAIDiagnostics.record("conversation.repository_assessment.failed", fields: [
-                "taskID": taskID.uuidString,
-                "threadID": threadID,
-                "error": error.localizedDescription
-            ])
-        }
-    }
-
-    private func steerMainTurnWhenActive(threadID: String, message: String) async -> Bool {
-        for _ in 0..<50 {
-            if client.activeThreadID == threadID, client.isTurnActive {
-                return (try? await client.steerActiveTurn(threadID: threadID, text: message)) == true
-            }
-            try? await Task.sleep(for: .milliseconds(100))
-        }
-        return false
-    }
-
-    private static func decodeRepositoryAssessment(_ message: String) -> RepositoryMismatchAssessmentResult? {
-        guard let firstBrace = message.firstIndex(of: "{"),
-              let lastBrace = message.lastIndex(of: "}"), firstBrace <= lastBrace else { return nil }
-        return try? JSONDecoder().decode(
-            RepositoryMismatchAssessmentResult.self,
-            from: Data(message[firstBrace...lastBrace].utf8)
-        )
     }
 
     private func generateAndApplyTitle(
