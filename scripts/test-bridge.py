@@ -468,7 +468,7 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         return response
 
-    # case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label, displays the StationAILogo asset, and the bridge reports API version 1.
+    # case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label, shows the Playhouse logo on a solid #2C2F36 background, uses the same artwork for the Dock AppIcon, and the bridge reports API version 1.
     def test_service_reports_bridge_version(self):
         response, _ = self.call_cli("status")
         self.assertEqual(self.assert_success(response), {"bridgeVersion": 1, "service": "StationAI"})
@@ -482,9 +482,18 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assertEqual(catalog.returncode, 0, f"Could not inspect the app asset catalog: {catalog.stderr}")
         assets = json.loads(catalog.stdout)
+        bundled_assets = {asset.get("Name") for asset in assets}
         self.assertTrue(
-            any(asset.get("Name") == "StationAILogo" for asset in assets),
-            "The app bundle should contain the StationAILogo asset.",
+            {"StationAILogo", "AppIcon"}.issubset(bundled_assets),
+            f"The app bundle should contain StationAILogo and AppIcon assets; found {bundled_assets}.",
+        )
+        repository_root = Path(__file__).resolve().parent.parent
+        app_icon = repository_root / "StationAI/Assets.xcassets/AppIcon.appiconset/AppIcon.png"
+        header_logo = repository_root / "StationAI/Assets.xcassets/StationAILogo.imageset/StationAILogo.png"
+        self.assertEqual(
+            app_icon.read_bytes(),
+            header_logo.read_bytes(),
+            "The Dock AppIcon source should match the main header logo artwork.",
         )
 
     # case-contract: test_app_override_rejects_incompatible_bundles | Explicit app overrides reject obsolete compatibility metadata, foreign worktree or bridge identities, test IDs that do not match the current worktree, and nonisolated test data before launching; the current app preserves a saved draft across restart.
