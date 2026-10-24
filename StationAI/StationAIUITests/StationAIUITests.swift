@@ -329,14 +329,28 @@ final class StationAIUITests: XCTestCase {
         try FileManager.default.removeItem(at: runDirectory)
     }
 
-    // case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label and the bridge reports API version 1.
+    // case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label, keeps a fixed Kanban sidebar left of the columns while they scroll, places its placeholder button below the full logo header, and the bridge reports API version 1.
     func test_service_reports_bridge_version() throws {
         launchApp(defaultParent: fixture.parent.path)
         XCTAssertEqual(app.windows.count, 1, "StationAI should open one board window on launch.")
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 15), "The StationAI window did not open.")
+        let sidebar = element(containingAccessibilityText: "Kanban sidebar")
+        let placeholder = app.buttons.matching(NSPredicate(format: "label == %@", "Placeholder")).firstMatch
+        XCTAssertTrue(sidebar.waitForExistence(timeout: 5), "The Kanban sidebar should be visible.")
+        XCTAssertTrue(placeholder.isHittable, "The placeholder button should be visible and hittable in the sidebar.")
+        XCTAssertTrue(sidebar.frame.contains(placeholder.frame), "The placeholder button should be inside the Kanban sidebar.")
+        XCTAssertGreaterThanOrEqual(sidebar.frame.minY, element(containingAccessibilityText: "Kanban header").frame.maxY, "The sidebar should begin below the full logo header.")
+        let sidebarFrame = sidebar.frame
+        let backlogColumn = element("column-backlog")
+        XCTAssertLessThan(sidebarFrame.maxX, backlogColumn.frame.minX, "The sidebar should stay left of the board columns.")
+        let backlogColumnStartX = backlogColumn.frame.minX
+        element("board-columns-scroll-view").swipeLeft()
+        XCTAssertLessThan(backlogColumn.frame.minX, backlogColumnStartX, "The board columns should scroll horizontally.")
+        XCTAssertEqual(sidebar.frame, sidebarFrame, "Scrolling the board columns should not move the sidebar.")
         XCTAssertEqual(app.windows.firstMatch.title, "StationAI — StationAI UI Test Worktree")
         relaunchApp()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 15), "The board should reopen after relaunch.")
+        XCTAssertTrue(element(containingAccessibilityText: "Kanban sidebar").exists, "The Kanban sidebar should remain visible after relaunch.")
         XCTAssertEqual(app.windows.firstMatch.title, "StationAI — StationAI UI Test Worktree")
         let response = try runCLI(["status"])
         XCTAssertEqual(response["ok"] as? Bool, true)

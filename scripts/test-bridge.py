@@ -463,7 +463,7 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         return response
 
-    # case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label and the bridge reports API version 1.
+    # case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label, keeps a fixed Kanban sidebar left of the columns while they scroll, places its placeholder button below the full logo header, and the bridge reports API version 1.
     def test_service_reports_bridge_version(self):
         response, _ = self.call_cli("status")
         self.assertEqual(self.assert_success(response), {"bridgeVersion": 1, "service": "StationAI"})

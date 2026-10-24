@@ -224,6 +224,14 @@ struct KanbanBoardView: View {
                 .fill(Color.primary.opacity(0.07))
                 .frame(height: 1)
 
+            HStack(spacing: 0) {
+                boardSidebar
+
+                Rectangle()
+                    .fill(Color.primary.opacity(0.07))
+                    .frame(width: 1)
+
+                VStack(spacing: 0) {
             if let lifecycleResetNotice {
                 HStack(alignment: .top, spacing: 12) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -302,6 +310,8 @@ struct KanbanBoardView: View {
                     .padding(.trailing, 12)
                     .background(LinearGradient(colors: [WorkspaceTheme.windowBackground.opacity(0), WorkspaceTheme.windowBackground.opacity(0.96)], startPoint: .leading, endPoint: .trailing))
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
+                }
+            }
                 }
             }
         }
@@ -448,6 +458,30 @@ struct KanbanBoardView: View {
         .accessibilityIdentifier("board-search-bar")
     }
 
+    private var boardSidebar: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button {} label: {
+                Label("Placeholder", systemImage: "square.dashed")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .buttonHoverPointer()
+            .help("Placeholder sidebar button")
+
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .frame(width: 232)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+        .background(WorkspaceTheme.panelBackground.opacity(0.62))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Kanban sidebar")
+    }
+
     private var boardHeader: some View {
         HStack(alignment: .center, spacing: 24) {
             HStack(spacing: 14) {
@@ -519,6 +553,8 @@ struct KanbanBoardView: View {
         .padding(.horizontal, 30)
         .padding(.top, 24)
         .padding(.bottom, 21)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Kanban header")
     }
 
     private var doneArchivePanel: some View {
