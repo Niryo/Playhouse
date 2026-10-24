@@ -14,24 +14,26 @@ fi
 
 usage() {
 	cat <<'USAGE'
-Usage: scripts/test-ui-tart.sh [--vm <tart-vm>] [--show-vm] [--live-codex] [--case <case-id>]...
+Usage: scripts/test-ui-tart.sh [--vm <tart-vm>] [--show-vm] [--live-provider <claude|codex>] [--case <case-id>]...
 
 Runs visible UI tests in a stopped Tart macOS VM. It snapshots the checkout
 inside the VM and copies test artifacts back to the host.
 Pass --show-vm to open the VM display through Screen Sharing.
 The runner holds the host repository's .e2e.lock for the full UI test session.
-Pass --live-codex only when the guest has Codex CLI access and a Codex login.
+Pass --live-provider only when the guest has that provider's CLI and a login
+(Claude Code for claude, Codex CLI for codex). --live-codex is shorthand for
+--live-provider codex.
 
 Environment:
   STATIONAI_UI_TART_VM         VM name (default: stationai-ui)
   STATIONAI_UI_TART_ARTIFACTS  Host artifact root
-  --live-codex                 Run the live Codex UI case; guest Codex access is required
+  --live-provider <provider>   Run live UI cases against claude or codex; guest access is required
 USAGE
 }
 
 ui_cases=()
 show_vm=0
-live_codex=0
+live_provider=""
 while (($#)); do
 	case "$1" in
 		--vm)
@@ -55,8 +57,16 @@ while (($#)); do
 			shift
 			;;
 		--live-codex)
-			live_codex=1
+			live_provider=codex
 			shift
+			;;
+		--live-provider)
+			if (($# < 2)) || [[ "$2" != claude && "$2" != codex ]]; then
+				printf 'Expected claude or codex after --live-provider.\n' >&2
+				exit 2
+			fi
+			live_provider="$2"
+			shift 2
 			;;
 		-h|--help)
 			usage
@@ -158,12 +168,15 @@ fi
 
 printf 'Running UI tests in VM-local source snapshot...\n'
 set +e
-tart exec -i "$vm_name" /bin/bash -s -- "$run_id" "$live_codex" "${ui_cases[@]}" <<'GUEST_SCRIPT'
+tart exec -i "$vm_name" /bin/bash -s -- "$run_id" "${live_provider:-none}" "${ui_cases[@]}" <<'GUEST_SCRIPT'
 set -uo pipefail
 run_id="$1"
 shift
-live_codex="$1"
+live_provider="$1"
 shift
+if [[ "$live_provider" == "none" ]]; then
+	live_provider=""
+fi
 if [[ "${1:-}" == "--all-cases" ]]; then
 	shift
 fi
@@ -194,8 +207,8 @@ if ! xcode-select -p >/dev/null 2>&1; then
 	printf 'Xcode command line tools are not configured in the VM.\n' >&2
 	exit 2
 fi
-if [[ "$live_codex" == "1" ]] && ! command -v codex >/dev/null 2>&1; then
-	printf 'Live Codex UI execution requires the Codex CLI inside the VM. Configure guest Codex access first.\n' >&2
+if [[ -n "$live_provider" ]] && ! command -v "$live_provider" >/dev/null 2>&1; then
+	printf 'Live %s UI execution requires the %s CLI inside the VM. Configure guest access first.\n' "$live_provider" "$live_provider" >&2
 	exit 2
 fi
 
@@ -231,16 +244,17 @@ printf 'Xcode: %s\n' "$(xcodebuild -version | tr '\n' ' ')"
 osascript -e 'tell application "Terminal" to quit' >/dev/null 2>&1 || true
 sleep 2
 
-if [[ "$live_codex" == "1" ]]; then
-	touch /tmp/stationai-codex-live-ui-integration
-	export STATIONAI_RUN_CODEX_INTEGRATION=1
+if [[ -n "$live_provider" ]]; then
+	printf '%s\n' "$live_provider" > /tmp/stationai-live-ui-integration
+	export STATIONAI_RUN_LIVE_INTEGRATION=1
+	export STATIONAI_LIVE_PROVIDER="$live_provider"
 fi
 set +e
 STATIONAI_UI_TART_GUEST=1 STATIONAI_UI_DASHBOARD=0 TMPDIR="$guest_tmp" "${source_snapshot_root}/scripts/test-ui.sh" "$@" 2>&1 | tee "$guest_log"
 test_status=${PIPESTATUS[0]}
 set -e
-if [[ "$live_codex" == "1" ]]; then
-	rm -f /tmp/stationai-codex-live-ui-integration
+if [[ -n "$live_provider" ]]; then
+	rm -f /tmp/stationai-live-ui-integration
 fi
 
 artifact_copy_status=0

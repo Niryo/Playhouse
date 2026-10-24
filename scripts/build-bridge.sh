@@ -38,6 +38,9 @@ shared_sources=(
   "${repository_root}/StationAI/App/WorkspaceSupport.swift"
   "${repository_root}/StationAI/App/WorkspaceChanges.swift"
   "${repository_root}/StationAI/App/CodexAppServerClient.swift"
+  "${repository_root}/StationAI/App/ConversationModel.swift"
+  "${repository_root}/StationAI/App/ClaudeCodeClient.swift"
+  "${repository_root}/StationAI/App/ConversationTranscriptStore.swift"
   "${repository_root}/StationAI/App/BridgeCore.swift"
   "${repository_root}/StationAI/Bridge/BridgeContract.swift"
 )
@@ -86,6 +89,9 @@ cat > "${service_contents}/Info.plist" <<PLIST
   <key>XPCService</key>
   <dict>
     <key>ServiceType</key><string>Application</string>
+    <!-- Run in the caller's security session so provider CLIs that keep their
+         sign-in in the login keychain (Claude Code) can authenticate. -->
+    <key>JoinExistingSession</key><true/>
   </dict>
 </dict>
 </plist>

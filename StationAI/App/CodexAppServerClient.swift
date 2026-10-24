@@ -2,103 +2,6 @@ import Combine
 import Darwin
 import Foundation
 
-enum CodexChatRole: String, Codable, Equatable {
-    case user
-    case assistant
-}
-
-struct CodexChatMessage: Codable, Identifiable, Equatable {
-    let id: String
-    let role: CodexChatRole
-    var text: String
-    var imageDataURLs: [String]
-    var phase: String?
-    var turnID: String?
-    var timelineOrder: Int?
-    var asyncQuestions: [CodexAsyncUserQuestion]?
-
-    init(id: String, role: CodexChatRole, text: String, imageDataURLs: [String] = [], phase: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil, asyncQuestions: [CodexAsyncUserQuestion]? = nil) {
-        self.id = id
-        self.role = role
-        self.text = text
-        self.imageDataURLs = imageDataURLs
-        self.phase = phase
-        self.turnID = turnID
-        self.timelineOrder = timelineOrder
-        self.asyncQuestions = asyncQuestions
-    }
-
-    private enum CodingKeys: String, CodingKey { case id, role, text, imageDataURLs, phase, turnID, timelineOrder, asyncQuestions }
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = try container.decode(String.self, forKey: .id)
-        role = try container.decode(CodexChatRole.self, forKey: .role)
-        text = try container.decode(String.self, forKey: .text)
-        imageDataURLs = try container.decodeIfPresent([String].self, forKey: .imageDataURLs) ?? []
-        phase = try container.decodeIfPresent(String.self, forKey: .phase)
-        turnID = try container.decodeIfPresent(String.self, forKey: .turnID)
-        timelineOrder = try container.decodeIfPresent(Int.self, forKey: .timelineOrder)
-        asyncQuestions = try container.decodeIfPresent([CodexAsyncUserQuestion].self, forKey: .asyncQuestions)
-    }
-}
-
-struct CodexAsyncUserQuestion: Codable, Equatable {
-    let title: String
-    let options: [String]?
-}
-
-struct CodexUserQuestion: Identifiable, Codable, Equatable {
-    struct Option: Identifiable, Codable, Equatable {
-        let label: String
-        let description: String?
-        var id: String { label }
-    }
-    let id: String
-    let header: String
-    let question: String
-    let options: [Option]
-    let allowsOther: Bool
-    let isSecret: Bool
-}
-
-struct CodexUserInputRequest: Identifiable, Codable, Equatable {
-    let id: String
-    let threadID: String
-    let questions: [CodexUserQuestion]
-    let isBlocking: Bool
-}
-
-private struct ConversationSteerMailboxRequest: Codable {
-    let id: String
-    let threadID: String
-    let expectedTurnID: String
-    let text: String
-    var imageDataURLs: [String]? = []
-}
-
-private struct ConversationSteerMailboxActiveTurn: Codable {
-    let threadID: String
-    let turnID: String
-    let processID: Int32
-}
-
-private struct ConversationSteerMailboxResponse: Codable {
-    let accepted: Bool
-    let error: String?
-}
-
-enum CodexConversationMode: String, CaseIterable, Hashable {
-    case code = "default"
-    case plan
-
-    var title: String {
-        switch self {
-        case .code: "Code mode"
-        case .plan: "Plan mode"
-        }
-    }
-}
-
 struct CodexThreadGoal: Codable, Equatable {
     let threadID: String
     let objective: String
@@ -112,22 +15,16 @@ struct CodexThreadGoal: Codable, Equatable {
     }
 }
 
-struct CodexModelOption: Codable, Identifiable, Hashable {
-    let id: String
-    let name: String
-    let isDefault: Bool
-}
-
 @MainActor
-final class CodexAppServerClient: ObservableObject {
+final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
+    let provider = ConversationProvider.codex
     nonisolated static let modelID = "gpt-6-luna"
     private static var processActiveThreadIDs = Set<String>()
     private static var activeClientsByThreadID: [String: CodexAppServerClient] = [:]
-    private static var steerMailboxDirectory: URL?
     private var startingThreadIDs = Set<String>()
     @Published private(set) var isTurnActive = false
     @Published private(set) var activeThreadID: String?
-    @Published private(set) var pendingUserInputRequest: CodexUserInputRequest?
+    @Published private(set) var pendingUserInputRequest: ConversationUserInputRequest?
     @Published private(set) var goalStateThreadID: String?
     @Published private(set) var goalStateRevision = 0
     @Published private(set) var goalTurnRevision = 0
@@ -135,7 +32,7 @@ final class CodexAppServerClient: ObservableObject {
     @Published private(set) var goalTurnCompletedTurnID: String?
     @Published private(set) var goalTurnStartedThreadID: String?
     let goalRuntimeEnabled: Bool
-    private var activeConversationMode: CodexConversationMode = .code
+    private var activeConversationMode: ConversationMode = .code
 
     private enum ClientError: LocalizedError {
         case cliNotFound
@@ -196,37 +93,39 @@ final class CodexAppServerClient: ObservableObject {
     private(set) var isPreparingForApplicationTermination = false
     private var activeDeltaHandler: ((String) -> Void)?
     private var activeFinalMessageHandler: ((String) -> Void)?
-    private var activeProgressMessageHandler: ((CodexChatMessage) -> Void)?
+    private var activeProgressMessageHandler: ((ConversationMessage) -> Void)?
     private var activeSteerMessageHandler: ((String, [String]) -> Void)?
-    private var activeActivityHandler: ((CodexActivity) -> Void)?
-    private var activeDiffHandler: ((CodexTurnDiff) -> Void)?
-    private var activeActivities: [String: CodexActivity] = [:]
+    private var activeActivityHandler: ((ConversationActivity) -> Void)?
+    private var activeDiffHandler: ((ConversationTurnDiff) -> Void)?
+    private var activeActivities: [String: ConversationActivity] = [:]
     private var goalObservationThreadID: String?
     private var goalTurnStartRevision = 0
     private var activityStartedAtUptime: [String: UInt64] = [:]
     private var activityStartedAtDate: [String: Date] = [:]
     private(set) var lastTurnActivityDurations: [String: Int] = [:]
     private var actionRequestHandler: (() -> Void)?
-    private var userInputHandler: ((CodexUserInputRequest) async -> Void)?
+    private var userInputHandler: ((ConversationUserInputRequest) async -> Void)?
     private var pendingUserInputRequestID: Any?
     private var pendingUserInputThreadID: String?
-    private var pendingUserInputQuestions: [String: CodexUserQuestion] = [:]
+    private var pendingUserInputQuestions: [String: ConversationUserQuestion] = [:]
     private let codexExecutableOverride: String?
     private let codexHomeOverride: String?
     private let goalFeatureEnabled: Bool
-    var executableOverrideForTitleGeneration: String? { codexExecutableOverride }
     private var turnWaiters: [String: CheckedContinuation<Void, Error>] = [:]
     private var completedTurns: [String: Result<Void, Error>] = [:]
     private var rejectedTurnKeys = Set<String>()
 
     init(codexExecutableOverride: String? = nil, codexHomeOverride: String? = nil, goalFeatureEnabled: Bool = false, goalRuntimeEnabled: Bool = false) {
-        self.codexExecutableOverride = Self.ownedTestFixtureExecutable(codexExecutableOverride)
+        self.codexExecutableOverride = ConversationProviderFixture.ownedExecutable(
+            codexExecutableOverride,
+            providerMarker: (".stationai-codex-fixture-owner", "StationAI test owns this Codex protocol fixture (v1).\n")
+        )
         self.codexHomeOverride = codexHomeOverride
         self.goalFeatureEnabled = goalFeatureEnabled
         self.goalRuntimeEnabled = goalRuntimeEnabled
     }
 
-    func diagnosticFields(_ additionalFields: [String: String] = [:]) -> [String: String] {
+    func diagnosticFields(_ additionalFields: [String: String]) -> [String: String] {
         var fields = additionalFields
         fields["clientPID"] = String(ProcessInfo.processInfo.processIdentifier)
         fields["codexPID"] = String(process?.processIdentifier ?? -1)
@@ -239,10 +138,10 @@ final class CodexAppServerClient: ObservableObject {
 
     func loadThread(
         id threadID: String,
-        workspace: CodexWorkspaceContext,
+        workspace: ConversationWorkspaceContext,
         developerInstructions: String? = nil,
         onActionRequest: @escaping () -> Void
-    ) async throws -> CodexThreadHistory {
+    ) async throws -> ConversationHistory {
         actionRequestHandler = onActionRequest
         if goalRuntimeEnabled {
             if activeThreadID != threadID {
@@ -258,7 +157,7 @@ final class CodexAppServerClient: ObservableObject {
     }
 
     /// Reads a child thread without resuming it or changing its turn state.
-    func inspectThreadReadOnly(id threadID: String, workspace: CodexWorkspaceContext) async throws -> CodexThreadHistory {
+    func inspectThreadReadOnly(id threadID: String, workspace: ConversationWorkspaceContext) async throws -> ConversationHistory {
         try await ensureInitialized(workspace: workspace)
         _ = try await request(method: "thread/read", params: ["threadId": threadID])
         _ = try await request(method: "thread/turns/list", params: ["threadId": threadID, "limit": 100])
@@ -266,7 +165,7 @@ final class CodexAppServerClient: ObservableObject {
     }
 
     func startThread(
-        workspace: CodexWorkspaceContext,
+        workspace: ConversationWorkspaceContext,
         modelID: String = CodexAppServerClient.modelID,
         developerInstructions: String? = nil
     ) async throws -> String {
@@ -298,24 +197,28 @@ final class CodexAppServerClient: ObservableObject {
         return threadID
     }
 
-    func availableModels(workspace: CodexWorkspaceContext) async throws -> [CodexModelOption] {
+    func availableModels(workspace: ConversationWorkspaceContext) async throws -> [ConversationModelOption] {
         try await ensureInitialized(workspace: workspace)
         let response = try await request(method: "model/list", params: ["includeHidden": false])
-        let models = (response["data"] as? [[String: Any]] ?? []).compactMap { item -> CodexModelOption? in
+        let models = (response["data"] as? [[String: Any]] ?? []).compactMap { item -> ConversationModelOption? in
             guard let id = item["id"] as? String, !id.isEmpty else { return nil }
-            return CodexModelOption(
+            return ConversationModelOption(
                 id: id,
                 name: item["displayName"] as? String ?? item["model"] as? String ?? id,
                 isDefault: item["isDefault"] as? Bool ?? false
             )
         }
-        return models.isEmpty ? [CodexModelOption(id: Self.modelID, name: "GPT-6 Luna", isDefault: true)] : models
+        return models.isEmpty ? [ConversationModelOption(id: Self.modelID, name: "GPT-6 Luna", isDefault: true)] : models
     }
 
     func interruptActiveTurn(threadID expectedThreadID: String) async throws -> Bool {
         guard let threadID = activeThreadID,
               threadID == expectedThreadID,
-              let turnID = activeTurnID else { return false }
+              let turnID = activeTurnID else {
+            // Another StationAI process may own the turn.
+            guard Self.activeClientsByThreadID[expectedThreadID] == nil else { return false }
+            return try await ConversationSteerMailbox.requestInterrupt(threadID: expectedThreadID)
+        }
         wasLastTurnInterrupted = true
         do {
             _ = try await request(method: "turn/interrupt", params: ["threadId": threadID, "turnId": turnID])
@@ -326,14 +229,14 @@ final class CodexAppServerClient: ObservableObject {
         }
     }
 
-    func getGoal(threadID: String, workspace: CodexWorkspaceContext) async throws -> CodexThreadGoal? {
+    func getGoal(threadID: String, workspace: ConversationWorkspaceContext) async throws -> CodexThreadGoal? {
         try await resumeThreadIfNeeded(id: threadID, workspace: workspace)
         let response = try await request(method: "thread/goal/get", params: ["threadId": threadID])
         guard let value = response["goal"] as? [String: Any] else { return nil }
         return Self.decodeGoal(value)
     }
 
-    func setGoal(threadID: String, objective: String? = nil, status: String? = nil, workspace: CodexWorkspaceContext, observeRuntime: Bool = false) async throws -> CodexThreadGoal? {
+    func setGoal(threadID: String, objective: String? = nil, status: String? = nil, workspace: ConversationWorkspaceContext, observeRuntime: Bool = false) async throws -> CodexThreadGoal? {
         let startRevision = goalTurnStartRevision
         if observeRuntime && goalRuntimeEnabled {
             activeThreadID = threadID
@@ -357,7 +260,7 @@ final class CodexAppServerClient: ObservableObject {
         return Self.decodeGoal(value)
     }
 
-    func clearGoal(threadID: String, workspace: CodexWorkspaceContext) async throws {
+    func clearGoal(threadID: String, workspace: ConversationWorkspaceContext) async throws {
         try await resumeThreadIfNeeded(id: threadID, workspace: workspace)
         _ = try await request(method: "thread/goal/clear", params: ["threadId": threadID])
     }
@@ -464,15 +367,11 @@ final class CodexAppServerClient: ObservableObject {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty || !imageDataURLs.isEmpty else { throw StationAIManagerError.invalidMessage }
         guard let target = Self.activeClientsByThreadID[expectedThreadID] else {
-            return try await requestSteerFromTurnOwner(threadID: expectedThreadID, text: normalized, imageDataURLs: imageDataURLs)
+            return try await ConversationSteerMailbox.requestSteer(threadID: expectedThreadID, text: normalized, imageDataURLs: imageDataURLs)
         }
         guard let threadID = target.activeThreadID, threadID == expectedThreadID,
               let turnID = target.activeTurnID, target.isTurnActive else { return false }
         return try await target.sendSteerRequest(threadID: threadID, turnID: turnID, text: normalized, imageDataURLs: imageDataURLs)
-    }
-
-    static func configureSteerMailbox(directory: URL) {
-        steerMailboxDirectory = directory
     }
 
     private func sendSteerRequest(threadID: String, turnID: String, text: String, imageDataURLs: [String] = []) async throws -> Bool {
@@ -497,126 +396,39 @@ final class CodexAppServerClient: ObservableObject {
         return true
     }
 
-    private func requestSteerFromTurnOwner(threadID: String, text: String, imageDataURLs: [String]) async throws -> Bool {
-        guard let directory = Self.steerMailboxDirectory else { return false }
-        let activeURL = Self.activeTurnMailboxURL(threadID: threadID, directory: directory)
-        guard FileManager.default.fileExists(atPath: activeURL.path) else { return false }
-        let activeTurn = try JSONDecoder().decode(ConversationSteerMailboxActiveTurn.self, from: Data(contentsOf: activeURL))
-        guard activeTurn.threadID == threadID else { return false }
-        guard Darwin.kill(activeTurn.processID, 0) == 0 || errno == EPERM else {
-            try? FileManager.default.removeItem(at: activeURL)
-            return false
-        }
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        _ = Darwin.chmod(directory.path, mode_t(0o700))
-        let requestID = UUID().uuidString
-        let requestURL = directory.appendingPathComponent("\(requestID).request.json")
-        let responseURL = directory.appendingPathComponent("\(requestID).response.json")
-        let request = ConversationSteerMailboxRequest(id: requestID, threadID: threadID, expectedTurnID: activeTurn.turnID, text: text, imageDataURLs: imageDataURLs)
-        try JSONEncoder().encode(request).write(to: requestURL, options: .atomic)
-        _ = Darwin.chmod(requestURL.path, mode_t(0o600))
-        defer {
-            try? FileManager.default.removeItem(at: requestURL)
-            try? FileManager.default.removeItem(at: responseURL)
-        }
-        let deadline = Date().addingTimeInterval(30)
-        while Date() < deadline {
-            if FileManager.default.fileExists(atPath: responseURL.path) {
-                let response = try JSONDecoder().decode(ConversationSteerMailboxResponse.self, from: Data(contentsOf: responseURL))
-                if let error = response.error {
-                    throw ClientError.server(error)
-                }
-                return response.accepted
-            }
-            if !FileManager.default.fileExists(atPath: activeURL.path) { return false }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        return false
-    }
-
     private func serviceSteerMailbox(threadID: String, turnID: String) async {
-        guard let directory = Self.steerMailboxDirectory,
-              let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
-        for requestURL in files where requestURL.lastPathComponent.hasSuffix(".request.json") {
-            guard let request = try? JSONDecoder().decode(ConversationSteerMailboxRequest.self, from: Data(contentsOf: requestURL)),
-                  request.threadID == threadID else { continue }
-            let claimedURL = directory.appendingPathComponent("\(request.id).claimed.json")
-            do { try FileManager.default.moveItem(at: requestURL, to: claimedURL) }
-            catch { continue }
-            let responseURL = directory.appendingPathComponent("\(request.id).response.json")
-            let response: ConversationSteerMailboxResponse
-            if request.expectedTurnID != turnID {
-                response = ConversationSteerMailboxResponse(accepted: false, error: nil)
-            } else {
-                do {
-                    let images = request.imageDataURLs ?? []
-                    let accepted = try await sendSteerRequest(threadID: threadID, turnID: turnID, text: request.text, imageDataURLs: images)
-                    if accepted {
-                        activeSteerMessageHandler?(request.text, images)
-                        response = ConversationSteerMailboxResponse(accepted: true, error: nil)
-                    } else {
-                        response = ConversationSteerMailboxResponse(accepted: false, error: nil)
-                    }
-                } catch {
-                    if case ClientError.staleTurn = error {
-                        response = ConversationSteerMailboxResponse(accepted: false, error: nil)
-                    } else {
-                        response = ConversationSteerMailboxResponse(accepted: false, error: error.localizedDescription)
-                    }
-                }
+        await ConversationSteerMailbox.service(threadID: threadID, turnID: turnID) { text, images in
+            let accepted: Bool
+            do {
+                accepted = try await sendSteerRequest(threadID: threadID, turnID: turnID, text: text, imageDataURLs: images)
+            } catch {
+                if case ClientError.staleTurn = error { return false }
+                throw error
             }
-            if let data = try? JSONEncoder().encode(response) {
-                try? data.write(to: responseURL, options: .atomic)
-            }
-            try? FileManager.default.removeItem(at: claimedURL)
+            if accepted { activeSteerMessageHandler?(text, images) }
+            return accepted
+        } interrupt: {
+            try await interruptActiveTurn(threadID: threadID)
         }
-    }
-
-    private static func activeTurnMailboxURL(threadID: String, directory: URL) -> URL {
-        let key = threadID.utf8.map { String(format: "%02x", $0) }.joined()
-        return directory.appendingPathComponent("active-\(key).json")
-    }
-
-    private func publishActiveTurnForMailbox(threadID: String, turnID: String) {
-        guard let directory = Self.steerMailboxDirectory else { return }
-        do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            _ = Darwin.chmod(directory.path, mode_t(0o700))
-            let data = try JSONEncoder().encode(ConversationSteerMailboxActiveTurn(
-                threadID: threadID,
-                turnID: turnID,
-                processID: Int32(ProcessInfo.processInfo.processIdentifier)
-            ))
-            let url = Self.activeTurnMailboxURL(threadID: threadID, directory: directory)
-            try data.write(to: url, options: .atomic)
-            _ = Darwin.chmod(url.path, mode_t(0o600))
-        } catch {
-            StationAIDiagnostics.record("conversation.steer_mailbox.publish_failed", fields: ["threadID": threadID])
-        }
-    }
-
-    private func clearActiveTurnForMailbox(threadID: String) {
-        guard let directory = Self.steerMailboxDirectory else { return }
-        try? FileManager.default.removeItem(at: Self.activeTurnMailboxURL(threadID: threadID, directory: directory))
     }
 
     func sendMessage(
         _ text: String,
         imageDataURLs: [String] = [],
-        mode: CodexConversationMode,
+        mode: ConversationMode,
         modelID: String,
         threadID: String,
-        workspace: CodexWorkspaceContext,
+        workspace: ConversationWorkspaceContext,
         developerInstructions: String? = nil,
         onDelta: @escaping (String) -> Void,
         onFinalMessage: @escaping (String) -> Void,
-        onActivity: @escaping (CodexActivity) -> Void,
-        onDiff: @escaping (CodexTurnDiff) -> Void,
-        onHistory: @escaping (CodexThreadHistory) -> Void,
+        onActivity: @escaping (ConversationActivity) -> Void,
+        onDiff: @escaping (ConversationTurnDiff) -> Void,
+        onHistory: @escaping (ConversationHistory) -> Void,
         onActionRequest: @escaping () -> Void,
-        onUserInput: @escaping (CodexUserInputRequest) async -> Void,
+        onUserInput: @escaping (ConversationUserInputRequest) async -> Void,
         onSteerMessage: @escaping (String, [String]) -> Void = { _, _ in },
-        onProgressMessage: @escaping (CodexChatMessage) -> Void = { _ in }
+        onProgressMessage: @escaping (ConversationMessage) -> Void = { _ in }
     ) async throws {
         actionRequestHandler = onActionRequest
         userInputHandler = onUserInput
@@ -645,7 +457,7 @@ final class CodexAppServerClient: ObservableObject {
         lastTurnActivityDurations.removeAll()
         defer {
             Self.processActiveThreadIDs.remove(threadID)
-            clearActiveTurnForMailbox(threadID: threadID)
+            ConversationSteerMailbox.clearActiveTurn(threadID: threadID)
             if Self.activeClientsByThreadID[threadID] === self {
                 Self.activeClientsByThreadID.removeValue(forKey: threadID)
             }
@@ -689,7 +501,7 @@ final class CodexAppServerClient: ObservableObject {
         }
         activeTurnID = turnID
         isTurnActive = true
-        publishActiveTurnForMailbox(threadID: threadID, turnID: turnID)
+        ConversationSteerMailbox.publishActiveTurn(threadID: threadID, turnID: turnID)
         Self.processActiveThreadIDs.insert(threadID)
         StationAIDiagnostics.record("codex.turn.started", fields: diagnosticFields([
             "threadID": threadID,
@@ -826,15 +638,7 @@ final class CodexAppServerClient: ObservableObject {
            target.isTurnActive(threadID: threadID) {
             return Int32(ProcessInfo.processInfo.processIdentifier)
         }
-        guard let directory = Self.steerMailboxDirectory else { return nil }
-        let activeURL = Self.activeTurnMailboxURL(threadID: threadID, directory: directory)
-        guard let active = try? JSONDecoder().decode(ConversationSteerMailboxActiveTurn.self, from: Data(contentsOf: activeURL)),
-              active.threadID == threadID else { return nil }
-        guard Darwin.kill(active.processID, 0) == 0 || errno == EPERM else {
-            try? FileManager.default.removeItem(at: activeURL)
-            return nil
-        }
-        return active.processID
+        return ConversationSteerMailbox.activeTurnOwnerProcessID(threadID: threadID)
     }
 
     func canInterruptActiveTurn(threadID: String) -> Bool {
@@ -853,11 +657,22 @@ final class CodexAppServerClient: ObservableObject {
         }
     }
 
-    static func isTurnActiveInProcess(threadID: String) -> Bool {
-        processActiveThreadIDs.contains(threadID)
+    func isTurnActiveInProcess(threadID: String) -> Bool {
+        Self.processActiveThreadIDs.contains(threadID)
     }
 
-    private func ensureInitialized(workspace: CodexWorkspaceContext) async throws {
+    func makeAuxiliaryClient() -> ConversationProviderClient {
+        CodexAppServerClient(codexExecutableOverride: codexExecutableOverride)
+    }
+
+    func isProviderUnavailable(_ error: Error) -> Bool {
+        switch error as? ClientError {
+        case .cliNotFound, .processStart, .authentication: true
+        default: false
+        }
+    }
+
+    private func ensureInitialized(workspace: ConversationWorkspaceContext) async throws {
         if initialized, process?.isRunning == true {
             return
         }
@@ -914,6 +729,7 @@ final class CodexAppServerClient: ObservableObject {
 
         var environment = ProcessInfo.processInfo.environment
         environment["PATH"] = Self.expandedSearchPath(environment["PATH"])
+        ConversationProcessEnvironment.forwardStationAIBridgeEnvironment(&environment)
         if let codexHomeOverride { environment["CODEX_HOME"] = codexHomeOverride }
         child.environment = environment
 
@@ -965,7 +781,7 @@ final class CodexAppServerClient: ObservableObject {
 
     private func resumeThreadIfNeeded(
         id threadID: String,
-        workspace: CodexWorkspaceContext,
+        workspace: ConversationWorkspaceContext,
         modelID: String = CodexAppServerClient.modelID,
         developerInstructions: String? = nil
     ) async throws {
@@ -1006,8 +822,8 @@ final class CodexAppServerClient: ObservableObject {
         ]))
     }
 
-    private func readMessages(threadID: String) async throws -> CodexThreadHistory {
-        var messages: [CodexChatMessage] = []
+    private func readMessages(threadID: String) async throws -> ConversationHistory {
+        var messages: [ConversationMessage] = []
         var latestTurnItems: [[String: Any]] = []
         var compactionHistory: [(item: [String: Any], turnID: String?, order: Int)] = []
         var historicalToolItems: [[String: Any]] = []
@@ -1052,7 +868,7 @@ final class CodexAppServerClient: ObservableObject {
                     }
                 }
                 if item["type"] as? String == "subAgentActivity",
-                   let activity = CodexActivity.from(item: item),
+                   let activity = ConversationActivity.from(item: item),
                    let childThreadID = activity.childThreadID {
                     if let index = subagentIndexes[childThreadID] {
                         var mergedItem = item
@@ -1099,9 +915,9 @@ final class CodexAppServerClient: ObservableObject {
         } while cursor != nil
 
         var activityIndexes: [String: Int] = [:]
-        var activities: [CodexActivity] = []
+        var activities: [ConversationActivity] = []
         for record in compactionHistory {
-            guard var activity = CodexActivity.from(item: record.item, lifecycle: "completed") else { continue }
+            guard var activity = ConversationActivity.from(item: record.item, lifecycle: "completed") else { continue }
             activity.turnID = record.turnID
             activity.timelineOrder = record.order
             let key = activity.childThreadID ?? activity.id
@@ -1112,7 +928,7 @@ final class CodexAppServerClient: ObservableObject {
                 activities.append(activity)
             }
         }
-        for activity in historicalToolItems.compactMap({ CodexActivity.from(item: $0) }) {
+        for activity in historicalToolItems.compactMap({ ConversationActivity.from(item: $0) }) {
             let key = activity.childThreadID ?? activity.id
             if let index = activityIndexes[key] { activities[index] = activity }
             else { activityIndexes[key] = activities.count; activities.append(activity) }
@@ -1120,20 +936,20 @@ final class CodexAppServerClient: ObservableObject {
         for activity in latestTurnItems
             .filter({ $0["type"] as? String != "contextCompaction" })
             .filter({ !["mcpToolCall", "dynamicToolCall"].contains($0["type"] as? String ?? "") })
-            .compactMap({ CodexActivity.from(item: $0) }) {
+            .compactMap({ ConversationActivity.from(item: $0) }) {
             let key = activity.childThreadID ?? activity.id
             if let index = activityIndexes[key] { activities[index] = activity }
             else { activityIndexes[key] = activities.count; activities.append(activity) }
         }
-        for activity in historicalSubagentItems.compactMap({ CodexActivity.from(item: $0) }) {
+        for activity in historicalSubagentItems.compactMap({ ConversationActivity.from(item: $0) }) {
             let key = activity.childThreadID ?? activity.id
             if let index = activityIndexes[key] { activities[index] = activity }
             else { activityIndexes[key] = activities.count; activities.append(activity) }
         }
-        return CodexThreadHistory(
+        return ConversationHistory(
             messages: messages,
             activities: activities,
-            diff: CodexTurnDiff.fromFileChangeItems(latestTurnItems)
+            diff: ConversationTurnDiff.fromFileChangeItems(latestTurnItems)
         )
     }
 
@@ -1387,7 +1203,7 @@ final class CodexAppServerClient: ObservableObject {
                 guard !text.isEmpty || questions != nil else { return }
                 if itemType == "agentMessage", item["delivery"] as? String == "async",
                    let questions {
-                    activeProgressMessageHandler?(CodexChatMessage(
+                    activeProgressMessageHandler?(ConversationMessage(
                         id: item["id"] as? String ?? UUID().uuidString,
                         role: .assistant,
                         text: text,
@@ -1396,7 +1212,7 @@ final class CodexAppServerClient: ObservableObject {
                         asyncQuestions: questions
                     ))
                 } else if itemType == "agentMessage", item["phase"] as? String == "commentary" {
-                    activeProgressMessageHandler?(CodexChatMessage(
+                    activeProgressMessageHandler?(ConversationMessage(
                         id: item["id"] as? String ?? UUID().uuidString,
                         role: .assistant,
                         text: text,
@@ -1421,7 +1237,7 @@ final class CodexAppServerClient: ObservableObject {
             } else {
                 measuredDuration = nil
             }
-            guard let activity = CodexActivity.from(
+            guard let activity = ConversationActivity.from(
                 item: item,
                 lifecycle: method == "item/completed" ? "completed" : "inProgress",
                 turnID: params["turnId"] as? String,
@@ -1447,7 +1263,7 @@ final class CodexAppServerClient: ObservableObject {
         case "turn/diff/updated":
             guard params["threadId"] as? String == activeThreadID,
                   let diff = params["diff"] as? String, !diff.isEmpty else { return }
-            activeDiffHandler?(CodexTurnDiff(unifiedDiff: diff))
+            activeDiffHandler?(ConversationTurnDiff(unifiedDiff: diff))
         case "turn/completed":
             // A terminal notification has the same threadId/turn envelope; only a matching waiter completes.
             guard let threadID = params["threadId"] as? String,
@@ -1467,7 +1283,7 @@ final class CodexAppServerClient: ObservableObject {
                 isTurnActive = false
                 goalTurnCompletedTurnID = turnID
                 Self.processActiveThreadIDs.remove(threadID)
-                clearActiveTurnForMailbox(threadID: threadID)
+                ConversationSteerMailbox.clearActiveTurn(threadID: threadID)
                 goalTurnRevision += 1
                 goalTurnCompletedRevision += 1
                 return
@@ -1514,13 +1330,13 @@ final class CodexAppServerClient: ObservableObject {
                 sendServerError(requestID: requestID, code: -32602, message: "Invalid user input request.")
                 return
             }
-            let questions = questionsRaw.compactMap { raw -> CodexUserQuestion? in
+            let questions = questionsRaw.compactMap { raw -> ConversationUserQuestion? in
                 guard let id = raw["id"] as? String, let question = raw["question"] as? String else { return nil }
-                let options = (raw["options"] as? [[String: Any]] ?? []).compactMap { option -> CodexUserQuestion.Option? in
+                let options = (raw["options"] as? [[String: Any]] ?? []).compactMap { option -> ConversationUserQuestion.Option? in
                     guard let label = option["label"] as? String else { return nil }
-                    return CodexUserQuestion.Option(label: label, description: option["description"] as? String)
+                    return ConversationUserQuestion.Option(label: label, description: option["description"] as? String)
                 }
-                return CodexUserQuestion(id: id, header: raw["header"] as? String ?? "Question", question: question,
+                return ConversationUserQuestion(id: id, header: raw["header"] as? String ?? "Question", question: question,
                                          options: options, allowsOther: raw["isOther"] as? Bool ?? false,
                                          isSecret: raw["isSecret"] as? Bool ?? false)
             }
@@ -1535,7 +1351,7 @@ final class CodexAppServerClient: ObservableObject {
             pendingUserInputRequestID = requestID
             pendingUserInputThreadID = threadID
             pendingUserInputQuestions = Dictionary(uniqueKeysWithValues: questions.map { ($0.id, $0) })
-            let request = CodexUserInputRequest(
+            let request = ConversationUserInputRequest(
                 id: requestIDString,
                 threadID: threadID,
                 questions: questions,
@@ -1647,7 +1463,7 @@ final class CodexAppServerClient: ObservableObject {
         }
     }
 
-    private static func chatMessage(from entry: [String: Any]) -> CodexChatMessage? {
+    private static func chatMessage(from entry: [String: Any]) -> ConversationMessage? {
         guard let item = entry["item"] as? [String: Any],
               let itemID = item["id"] as? String,
               let type = item["type"] as? String else {
@@ -1657,36 +1473,37 @@ final class CodexAppServerClient: ObservableObject {
         switch type {
         case "userMessage":
             let content = item["content"] as? [[String: Any]] ?? []
-            let text = content.compactMap { part -> String? in
+            let text = ConversationHandoff.stripContext(from: content.compactMap { part -> String? in
                 guard part["type"] as? String == "text" else { return nil }
                 return part["text"] as? String
-            }.joined()
+            }.joined())
             let images = content.compactMap { part -> String? in
                 guard part["type"] as? String == "image" else { return nil }
                 return part["url"] as? String ?? part["image_url"] as? String
             }
             guard !text.isEmpty || !images.isEmpty else { return nil }
-            return CodexChatMessage(id: itemID, role: .user, text: text, imageDataURLs: images, turnID: entry["turnId"] as? String)
+            return ConversationMessage(id: itemID, role: .user, text: text, imageDataURLs: images, turnID: entry["turnId"] as? String, provider: .codex)
         case "agentMessage", "plan":
-            let text = item["text"] as? String ?? ""
+            let text = LeakedTurnOutcome.visibleText(item["text"] as? String ?? "")
             let questions = type == "agentMessage" && item["delivery"] as? String == "async"
                 ? asyncQuestions(from: item) : nil
             guard !text.isEmpty || questions != nil else { return nil }
-            return CodexChatMessage(id: itemID, role: .assistant, text: text,
+            return ConversationMessage(id: itemID, role: .assistant, text: text,
                                     phase: type == "plan" ? "final_answer" : item["phase"] as? String,
                                     turnID: entry["turnId"] as? String,
-                                    asyncQuestions: questions)
+                                    asyncQuestions: questions,
+                                    provider: .codex)
         default:
             return nil
         }
     }
 
-    private static func asyncQuestions(from item: [String: Any]) -> [CodexAsyncUserQuestion]? {
+    private static func asyncQuestions(from item: [String: Any]) -> [ConversationAsyncQuestion]? {
         guard let rawQuestions = item["questions"] as? [[String: Any]] else { return nil }
-        let questions = rawQuestions.compactMap { raw -> CodexAsyncUserQuestion? in
+        let questions = rawQuestions.compactMap { raw -> ConversationAsyncQuestion? in
             guard let title = raw["title"] as? String,
                   !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-            return CodexAsyncUserQuestion(title: title, options: raw["options"] as? [String])
+            return ConversationAsyncQuestion(title: title, options: raw["options"] as? [String])
         }
         return questions.isEmpty ? nil : questions
     }
@@ -1742,6 +1559,8 @@ final class CodexAppServerClient: ObservableObject {
         return ClientError.server(message)
     }
 
+    static var isInstalled: Bool { findCodexExecutable(override: nil) != nil }
+
     private static func findCodexExecutable(override: String?) -> String? {
         if let override, FileManager.default.isExecutableFile(atPath: override) { return override }
         let home = NSHomeDirectory()
@@ -1765,20 +1584,6 @@ final class CodexAppServerClient: ObservableObject {
         return nil
     }
 
-    private static func ownedTestFixtureExecutable(_ path: String?) -> String? {
-        guard let path, FileManager.default.isExecutableFile(atPath: path) else { return nil }
-        let directory = URL(fileURLWithPath: path).deletingLastPathComponent()
-        let markerValues = [
-            (".stationai-codex-fixture-owner", "StationAI test owns this Codex protocol fixture (v1).\n"),
-            (".stationai-bridge-fixture", "StationAI bridge tests own this deterministic fixture (v1).\n"),
-        ]
-        for (name, value) in markerValues {
-            let marker = directory.appendingPathComponent(name)
-            if (try? String(contentsOf: marker, encoding: .utf8)) == value { return path }
-        }
-        return nil
-    }
-
     private static func expandedSearchPath(_ existingPath: String?) -> String {
         var paths = (existingPath ?? "").split(separator: ":").map(String.init)
         paths.append(contentsOf: ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin", "/usr/bin", "/bin"])
@@ -1787,7 +1592,7 @@ final class CodexAppServerClient: ObservableObject {
 }
 
 enum TaskThreadDeveloperInstructions {
-    /// Instructions StationAI attaches to Codex's thread/start and thread/resume requests.
+    /// Instructions StationAI attaches to provider conversation turns.
     static func make(
         taskID: UUID,
         repositories: [RepositoryWorktreeRecord] = [],
@@ -1811,7 +1616,7 @@ enum TaskThreadDeveloperInstructions {
         - Configured repository root: \(repositoryRootPath ?? "not available")
         A task may intentionally have no selected repository. Decide whether it is standalone or needs repository context. For read-only inspection, you do not need to attach a repository or create a worktree: call \(quotedExecutable) workspace repos list, then inspect a clearly matching returned repository path read-only. Never edit files in those source paths. If the request is standalone, proceed without repository context.
         Add a repository to this task only when you intend to create or commit changes in it. If the needed repository is not already selected, call \(quotedExecutable) workspace repos list, choose a clearly matching returned path, then call \(quotedExecutable) task repository add <task-id> --repo <path> (or add-batch for multiple repositories). This creates the task worktree and returns the source-to-worktree mapping; make all changes in the returned worktreePath. You do not need to ask the user for special permission to read another listed repository, and you do not need to add a repository just to inspect it. If no returned path clearly matches a requested change, ask the user which repository to modify. Do not add or replace repositories merely because the selected context seems unrelated to the task; the user may have intentionally left a sticky default selected.
-        For already selected repositories, make changes in their corresponding active task worktrees above. For folder-only tasks, use the selected additional context folder; with no repository or folder context, treat the task as standalone unless the user asks for files that clearly belong in a repository. StationAI starts the Codex thread and user turn with the active task worktree as cwd and runtime workspace root. Temporary files under /tmp and other non-repository directories remain available when useful.
+        For already selected repositories, make changes in their corresponding active task worktrees above. For folder-only tasks, use the selected additional context folder; with no repository or folder context, treat the task as standalone unless the user asks for files that clearly belong in a repository. StationAI starts the provider conversation with the active task worktree as cwd and runtime workspace root. Temporary files under /tmp and other non-repository directories remain available when useful.
         Use the workspace repos list API for repository discovery; do not search the configured root to find repositories yourself. Once the API returns a repository path, you may inspect that repository's contents read-only without adding it. For read-only inspection of returned source paths, you do not need to add a repository.
         A selected repository can be a sticky default from an earlier task, and the user may have forgotten to change it. Do not interrupt the user or ask them to confirm the selection merely because the task appears unrelated. Use workspace repos list to discover alternatives when needed. Read-only inspection of returned source paths does not require adding repositories. Add a repository only when you intend to make or commit changes there, and use its task worktreePath for every edit. Do not replace or remove selected repositories unless the user explicitly asks; adding a worktree for a change is sufficient. Never silently edit a source repository path.
         Repository context commands for this task:
@@ -1842,31 +1647,18 @@ enum TaskThreadDeveloperInstructions {
 }
 
 enum TaskProgressReportInstructions {
-    static func make(taskID: UUID) -> String {
-        let executable = cliExecutableURL().path
-        let quotedExecutable = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        let id = taskID.uuidString
-        return """
-        Report your current work on the StationAI task board using the StationAI CLI. Publish at every phase change, when starting or finishing a substantial tool call, and at least every 30 seconds during long commands, builds, tests, waits, or investigation. Keep the report current while a tool runs; after it finishes, replace it with the next active action. During tests, identify the active suite/case and position when known (for example, "CLI/XPC 3/8: task progress persistence"); during other work, name the concrete action and useful target. Keep each detail to a short subtitle, ideally under 80 characters. Do not report every tiny edit. Use these commands for this task:
-        \(quotedExecutable) task progress publish \(id) --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail "short detail"]
-        \(quotedExecutable) task progress custom \(id) --label "short label" [--detail "short detail"]
-        \(quotedExecutable) task progress clear \(id)
-        Progress reports are hidden from the conversation and shown on the task card. Keep details brief. Do not use lifecycle task status commands for progress.
+    static let executableName = "stationai-cli"
+    static let progressSubcommand = "task progress"
+    static let outcomeSubcommand = "task outcome"
 
-        At the very end of every turn, make exactly one definitive outcome call using this task ID:
-        \(quotedExecutable) task outcome \(id) <completed|waiting-response>
-        Use completed only when all work for this turn is finished and no user decision or response is needed. If you need the user to answer, choose between options, provide missing information, or take another action before you can continue, use waiting-response. The outcome call must be your final CLI action for the turn. StationAI moves the task to Review only for completed. If you omit the outcome call, StationAI moves it to Waiting Response.
-        """
+    enum ReportCommand { case progress, outcome }
+
+    /// Classifies a provider shell command as one of the reports these instructions request.
+    static func reportCommand(in shellCommand: String) -> ReportCommand? {
+        guard shellCommand.contains(executableName) else { return nil }
+        if shellCommand.contains(" \(outcomeSubcommand) ") { return .outcome }
+        if shellCommand.contains(" \(progressSubcommand) ") { return .progress }
+        return nil
     }
 
-    private static func cliExecutableURL() -> URL {
-        let fileManager = FileManager.default
-        var candidate = Bundle.main.bundleURL
-        for _ in 0..<5 {
-            let cli = candidate.appendingPathComponent("Contents/MacOS/stationai-cli")
-            if fileManager.isExecutableFile(atPath: cli.path) { return cli }
-            candidate.deleteLastPathComponent()
-        }
-        return Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/stationai-cli")
-    }
 }
