@@ -8,6 +8,7 @@ struct StationAIApp: App {
     private let modelContainer: ModelContainer
     private let appPreferences: UserDefaults
     @StateObject private var codexClient: CodexAppServerClient
+    @StateObject private var claudeClient: ClaudeCodeClient
 
     private var windowTitle: String {
         let configuredTitle = ProcessInfo.processInfo.environment["STATIONAI_WINDOW_TITLE"]?
@@ -24,8 +25,11 @@ struct StationAIApp: App {
             codexExecutableOverride: environment["STATIONAI_E2E_CODEX_EXECUTABLE"],
             goalRuntimeEnabled: true
         ))
-        StationAIApplicationDelegate.terminationHandler = { [weak client = _codexClient.wrappedValue] in
-            await client?.prepareForApplicationTermination()
+        _claudeClient = StateObject(wrappedValue: ClaudeCodeClient(executableOverride: environment["STATIONAI_E2E_CLAUDE_EXECUTABLE"]))
+        StationAIApplicationDelegate.terminationHandler = { [weak codex = _codexClient.wrappedValue, weak claude = _claudeClient.wrappedValue] in
+            // Both runtimes drain within their own bounded deadlines.
+            await codex?.prepareForApplicationTermination()
+            await claude?.prepareForApplicationTermination()
         }
         #if DEBUG
         if let suiteName = environment["STATIONAI_E2E_DEFAULTS_SUITE"],
@@ -76,6 +80,7 @@ struct StationAIApp: App {
         MainWindowView()
             .modelContainer(modelContainer)
             .environmentObject(codexClient)
+            .environmentObject(claudeClient)
             .defaultAppStorage(appPreferences)
     }
 }

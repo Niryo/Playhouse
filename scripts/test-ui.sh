@@ -13,8 +13,11 @@ if [[ "${STATIONAI_UI_TART_GUEST:-}" != "1" || "$vm_model" != VirtualMac* ]]; th
 		shift
 		export STATIONAI_UI_TART_HOST_LOCKED=1
 	fi
+	if [[ "${STATIONAI_RUN_LIVE_INTEGRATION:-0}" == "1" ]]; then
+		exec "${repository_root}/scripts/test-ui-tart.sh" --live-provider "${STATIONAI_LIVE_PROVIDER:-claude}" "$@"
+	fi
 	if [[ "${STATIONAI_RUN_CODEX_INTEGRATION:-0}" == "1" ]]; then
-		exec "${repository_root}/scripts/test-ui-tart.sh" --live-codex "$@"
+		exec "${repository_root}/scripts/test-ui-tart.sh" --live-provider codex "$@"
 	fi
 	exec "${repository_root}/scripts/test-ui-tart.sh" "$@"
 fi
@@ -71,7 +74,7 @@ if [[ "$(cat "${fixture_root}/.stationai-bridge-fixture" 2>/dev/null || true)" !
   exit 1
 fi
 codex_fixtures=(
-  ui empty nonblocking slow plan-slow interrupted abort success
+  ui empty nonblocking slow plan-slow interrupted abort success goal-success
   title-success title-failure title-success-wait hold
   progress-hold-release progress-hold-release-failed progress-hold-release-interrupted
   progress-question success-wait store-write-success-wait concurrent-serial-success-wait
@@ -82,7 +85,9 @@ for fixture in "${codex_fixtures[@]}"; do
   cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_path}"
   chmod 755 "${fixture_path}"
 done
-for fixture in subagent context-compaction tool-activity markdown async-question async-question-queued; do
+cp "${repository_root}/scripts/fixtures/claude-code-fixture.py" "${fixture_root}/claude-fixture-ui"
+chmod 755 "${fixture_root}/claude-fixture-ui"
+for fixture in subagent context-compaction tool-activity markdown async-question async-question-queued goal-success; do
   fixture_path="${fixture_root}/codex-fixture-${fixture}"
   xattr -d com.apple.quarantine "${fixture_path}" 2>/dev/null || true
   xattr -d com.apple.provenance "${fixture_path}" 2>/dev/null || true
@@ -159,13 +164,21 @@ legacy_store_seeder="${fixture_root}/seed-legacy-task-store"
 xcrun swiftc -parse-as-library -swift-version 5 -O \
   "${repository_root}/scripts/seed-legacy-task-store.swift" \
   -o "${legacy_store_seeder}"
-live_ui_marker="/tmp/stationai-codex-live-ui-integration"
+# Live UI cases read the selected provider from this marker; the guest
+# runner exports STATIONAI_LIVE_PROVIDER alongside STATIONAI_RUN_LIVE_INTEGRATION.
+live_ui_marker="/tmp/stationai-live-ui-integration"
+live_ui_provider=""
+if [[ "${STATIONAI_RUN_LIVE_INTEGRATION:-0}" == "1" ]]; then
+  live_ui_provider="${STATIONAI_LIVE_PROVIDER:-claude}"
+elif [[ "${STATIONAI_RUN_CODEX_INTEGRATION:-0}" == "1" ]]; then
+  live_ui_provider="codex"
+fi
 rm -f "${live_ui_marker}"
-if [[ "${STATIONAI_RUN_CODEX_INTEGRATION:-0}" == "1" ]]; then
-  touch "${live_ui_marker}"
+if [[ -n "${live_ui_provider}" ]]; then
+  printf '%s\n' "${live_ui_provider}" > "${live_ui_marker}"
 fi
 cleanup() {
-  if [[ "${STATIONAI_RUN_CODEX_INTEGRATION:-0}" == "1" ]]; then
+  if [[ -n "${live_ui_provider}" ]]; then
     rm -f "${live_ui_marker}"
   fi
   printf "Visible UI test artifacts: %s\n" "${test_output_dir}"

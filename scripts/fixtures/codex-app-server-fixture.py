@@ -10,6 +10,16 @@ import time
 import uuid
 from pathlib import Path
 
+# Record the bridge environment StationAI handed this provider process, so tests
+# can run in-turn `stationai` calls with exactly what a real provider inherits.
+Path(str(sys.argv[0]) + ".bridge-environment").write_text(
+    json.dumps({
+        name: os.environ.get(name)
+        for name in ("STATIONAI_BRIDGE_SERVICE_NAME", "STATIONAI_DATA_DIRECTORY")
+    }),
+    encoding="utf-8",
+)
+
 if "-title-" in Path(sys.argv[0]).name:
     THREAD_ID = f"stationai-fixture-{os.getpid()}"
     TURN_ID = f"turn-stationai-fixture-{os.getpid()}"
@@ -20,14 +30,63 @@ else:
 
 MARKDOWN_PLAN = '## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening'
 
+ECHOED_OUTCOME_PREFIX = "Echo the outcome command for "
+ECHOED_OUTCOME_ANSWER = "Fixture answer with an echoed outcome."
+
+
+def echoed_outcome_answer(user_message):
+    """Reproduces a model writing its final outcome command as answer text."""
+    if not user_message or not user_message.startswith(ECHOED_OUTCOME_PREFIX):
+        return None
+    task_id = user_message[len(ECHOED_OUTCOME_PREFIX):].strip().rstrip(".")
+    return f"{ECHOED_OUTCOME_ANSWER}\U0001F6E0\uFE0F\nstationai-cli task outcome {task_id} completed"
+
+
 def write(value):
     sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
     sys.stdout.flush()
 
 
+def answer_text(user_message):
+    if Path(sys.argv[0]).name.endswith("-user-question"):
+        return "Answer received: Continue."
+    if isinstance(user_message, str) and user_message.startswith("Long response fixture input."):
+        return "A long fixture response gives the conversation enough content to test comment hint truncation. " * 8
+    if isinstance(user_message, str) and ("<response-comments>" in user_message or "<response-annotations>" in user_message):
+        try:
+            tag = "response-comments" if "<response-comments>" in user_message else "response-annotations"
+            payload = user_message.split(f"<{tag}>", 1)[1].split(f"</{tag}>", 1)[0]
+            annotations = json.loads(payload)
+            if isinstance(annotations, list) and annotations:
+                return "\n".join(
+                    (f":stationai-annotation{{index=\"{index}\"}} For ‘{item['text']}’: "
+                     f"{item.get('comment', item.get('annotation', ''))}"
+                     if tag == "response-comments" else
+                     f"For ‘{item['text']}’: {item.get('comment', item.get('annotation', ''))} "
+                     f":codex-annotation{{index=\"{index}\"}}")
+                    for index, item in enumerate(annotations)
+                )
+        except (KeyError, TypeError, ValueError):
+            pass
+    return "Answers received: Blue / fixture-secret."
+
+
 def question_request(request_id):
     mode = os.path.basename(sys.argv[0])
-    questions = [] if mode.endswith("-empty") else [
+    if mode.endswith("-user-question"):
+        questions = [{
+            "id": "question_action",
+            "header": "Next step",
+            "question": "Which approach should I take?",
+            "options": [
+                {"label": "Continue", "description": "Proceed with the current task."},
+                {"label": "Pause", "description": "Wait for more information."},
+            ],
+            "isOther": False,
+            "isSecret": False,
+        }]
+    else:
+        questions = [] if mode.endswith("-empty") else [
         {
             "id": "color",
             "header": "Color",
@@ -47,7 +106,7 @@ def question_request(request_id):
             "isOther": False,
             "isSecret": True,
         },
-    ]
+        ]
     write({
         "jsonrpc": "2.0",
         "id": request_id,
@@ -160,9 +219,10 @@ def main():
     saw_turn = False
     turn_message = None
     history_path = Path(str(sys.argv[0]) + ".history")
+    fixture_state_directory = Path(os.environ.get("STATIONAI_E2E_FIXTURE_STATE_DIRECTORY", str(Path(sys.argv[0]).parent)))
     if "-goal" in mode:
-        Path(str(sys.argv[0]) + ".launch-args").write_text(json.dumps(sys.argv[1:]), encoding="utf-8")
-    goal_path = Path(str(sys.argv[0]) + ".goal")
+        (fixture_state_directory / f"{Path(sys.argv[0]).name}.launch-args").write_text(json.dumps(sys.argv[1:]), encoding="utf-8")
+    goal_path = fixture_state_directory / f"{Path(sys.argv[0]).name}.goal"
     async_mode = mode.endswith("-async-question") or mode.endswith("-async-question-queued")
     serial_mode = mode.endswith("-serial-success-wait") or mode.endswith("-serial-success") or async_mode
     if serial_mode:
@@ -223,6 +283,8 @@ def main():
                 history.update({
                     "threadID": THREAD_ID,
                     "threadStartDeveloperInstructions": thread_start_instructions,
+                    "threadStartCwd": message.get("params", {}).get("cwd"),
+                    "threadStartRuntimeWorkspaceRoots": message.get("params", {}).get("runtimeWorkspaceRoots", []),
                     "threadStartCount": history.get("threadStartCount", 0) + 1,
                 })
                 history_path.write_text(json.dumps(history), encoding="utf-8")
@@ -313,6 +375,8 @@ def main():
                 "imageInputs": image_inputs,
                 "conversationMode": message.get("params", {}).get("collaborationMode", {}).get("mode"),
                 "developerInstructions": message.get("params", {}).get("collaborationMode", {}).get("settings", {}).get("developerInstructions"),
+                "cwd": message.get("params", {}).get("cwd"),
+                "runtimeWorkspaceRoots": message.get("params", {}).get("runtimeWorkspaceRoots", []),
             }
             if serial_mode:
                 saved_history = serial_history()
@@ -817,6 +881,12 @@ def main():
                 if not was_released:
                     return 3
                 turn_status = "interrupted" if "-interrupted" in mode else ("failed" if "-failed" in mode else "completed")
+                echoed = echoed_outcome_answer(turn_message)
+                if echoed and turn_status == "completed":
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                        "threadId": THREAD_ID, "turnId": TURN_ID,
+                        "item": {"id": "item_stationai_echoed_outcome", "type": "agentMessage", "phase": "final_answer", "text": echoed},
+                    }})
                 turn_error = {"error": {"message": "Codex interrupted this turn." if turn_status == "interrupted" else "Codex failed this turn."}} if turn_status != "completed" else {}
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": "00000000-0000-0000-0000-000000000001",
@@ -831,10 +901,13 @@ def main():
                 answers = message.get("result", {}).get("answers")
             if "-slow" in mode and not mode.endswith("-interrupted"):
                 time.sleep(2)
-            failed = mode.endswith("-empty") or mode.endswith("-fail") or answers != {
+            expected_answers = {
                 "color": {"answers": ["Blue"]},
                 "token": {"answers": ["fixture-secret"]},
             }
+            if mode.endswith("-user-question"):
+                expected_answers = {"question_action": {"answers": ["Continue"]}}
+            failed = mode.endswith("-empty") or mode.endswith("-fail") or answers != expected_answers
             if not failed and Path(str(sys.argv[0]) + ".outcome-hold").exists():
                 active = Path(str(sys.argv[0]) + ".outcome-active")
                 release = Path(str(sys.argv[0]) + ".outcome-release")
@@ -852,6 +925,15 @@ def main():
                 "turn": {"id": TURN_ID, "status": "interrupted" if mode.endswith("-interrupted") else ("failed" if failed else "completed"),
                          **({"error": {"message": "Codex interrupted this turn."}} if mode.endswith("-interrupted") else ({"error": {"message": "Question response was missing or incorrect."}} if failed else {}))},
             }})
+        elif message.get("method") == "turn/steer":
+            params = message.get("params", {})
+            if params.get("threadId") != THREAD_ID or params.get("expectedTurnId") != TURN_ID:
+                write({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32010, "message": "The expected turn ID is stale."}})
+            else:
+                saved_history = serial_history()
+                saved_history.setdefault("steerRequests", []).append(params)
+                history_path.write_text(json.dumps(saved_history), encoding="utf-8")
+                write({"jsonrpc": "2.0", "id": message["id"], "result": {"turnId": TURN_ID}})
         elif message.get("method") == "turn/interrupt":
             write({"jsonrpc": "2.0", "id": message["id"], "result": {}})
         elif message.get("method") == "thread/read":
@@ -929,7 +1011,7 @@ def main():
                     if user_content:
                         contents.extend([
                             {"id": f"item_user_fixture_{index}", "type": "userMessage", "content": user_content},
-                            {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."},
+                            {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": answer_text(user_message)},
                         ])
             elif saved_history.get("turns"):
                 contents = []
@@ -940,9 +1022,13 @@ def main():
                         {"type": "image", "url": image_url} for image_url in user_images
                     ]
                     if user_content:
+                        echoed = echoed_outcome_answer(user_message)
+                        assistant = {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."}
+                        if echoed:
+                            assistant.update(phase="final_answer", text=echoed)
                         contents.extend([
                             {"id": f"item_user_fixture_{index}", "type": "userMessage", "content": user_content},
-                            {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."},
+                            assistant if echoed else {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": answer_text(user_message)},
                         ])
             else:
                 user_message = saved_history.get("userMessage") or (turn_message if answers else None)
@@ -952,7 +1038,7 @@ def main():
                 ]
                 contents = ([
                     {"id": "item_user_fixture", "type": "userMessage", "content": user_content},
-                    {"id": "item_assistant_fixture", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."},
+                    {"id": "item_assistant_fixture", "type": "agentMessage", "text": answer_text(user_message)},
                 ] if user_content and not mode.endswith("-empty") else [])
             if mode.endswith("-subagent") or mode.endswith("-subagent-wait"):
                 contents = [

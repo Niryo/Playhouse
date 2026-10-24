@@ -30,6 +30,21 @@ enum TaskStatus: String, CaseIterable, Identifiable {
     }
 }
 
+/// The agent runtime that executes a task's conversation turns.
+enum ConversationProvider: String, Codable, CaseIterable, Identifiable, Sendable {
+    case codex
+    case claude
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .codex: "Codex"
+        case .claude: "Claude"
+        }
+    }
+}
+
 enum TaskProgressType: String, CaseIterable, Identifiable {
     case planning
     case searching
@@ -71,6 +86,9 @@ final class BoardTask {
     var inProgressStartedAt: Date?
     var totalInProgressSeconds: Double = 0
     var codexThreadID: String?
+    var claudeSessionID: String?
+    /// Nil for tasks created before provider selection; those use Codex.
+    var conversationProviderRawValue: String?
     var savedPrompt: String?
     var pendingSubmittedPrompt: String?
     var workspaceRootPathsData: Data?
@@ -113,6 +131,25 @@ final class BoardTask {
         set { draftImageDataURLsData = try? JSONEncoder().encode(newValue) }
     }
 
+    var conversationProvider: ConversationProvider {
+        get { conversationProviderRawValue.flatMap(ConversationProvider.init(rawValue:)) ?? .codex }
+        set { conversationProviderRawValue = newValue.rawValue }
+    }
+
+    /// The native thread or session ID a provider uses for this task.
+    func conversationID(for provider: ConversationProvider) -> String? {
+        switch provider {
+        case .codex: codexThreadID
+        case .claude: claudeSessionID
+        }
+    }
+
+    /// The conversation the task's current provider continues.
+    var activeConversationID: String? { conversationID(for: conversationProvider) }
+
+    /// Whether any provider has started a conversation for this task.
+    var hasConversation: Bool { codexThreadID != nil || claudeSessionID != nil }
+
     var status: TaskStatus {
         get { TaskStatus(rawValue: statusRawValue) ?? .backlog }
         set {
@@ -131,7 +168,7 @@ final class BoardTask {
         totalInProgressSeconds + (status == .inProgress ? max(0, Date.now.timeIntervalSince(inProgressStartedAt ?? .now)) : 0)
     }
 
-    init(title: String, status: TaskStatus = .backlog, workspaceRootPaths: [String] = []) {
+    init(title: String, status: TaskStatus = .backlog, workspaceRootPaths: [String] = [], conversationProvider: ConversationProvider = .codex) {
         id = UUID()
         self.title = title
         statusRawValue = status.rawValue
@@ -143,6 +180,8 @@ final class BoardTask {
         inProgressStartedAt = status == .inProgress ? .now : nil
         totalInProgressSeconds = 0
         codexThreadID = nil
+        claudeSessionID = nil
+        conversationProviderRawValue = conversationProvider.rawValue
         savedPrompt = nil
         pendingSubmittedPrompt = nil
         workspaceRootPathsData = try? JSONEncoder().encode(workspaceRootPaths)

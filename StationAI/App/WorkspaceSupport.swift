@@ -60,6 +60,7 @@ enum WorkspaceSettings {
     static let defaultParentFolderKey = "defaultWorkspaceParentFolderPath"
     static let lastSelectedRepositoriesKey = "lastSelectedRepositories"
     static let appearanceKey = "appearance"
+    static let defaultConversationProviderKey = "defaultConversationProvider"
 
     static var preferencesStore: UserDefaults {
         #if DEBUG
@@ -102,40 +103,39 @@ enum WorkspaceTheme {
     }
 }
 
-struct CodexWorkspaceContext {
+struct ConversationWorkspaceContext {
     let roots: [URL]
-
-    var cwd: URL { roots[0] }
+    let cwd: URL
 
     init(roots: [URL]) throws {
         let normalized = roots.map(\.standardizedFileURL)
-        guard !normalized.isEmpty else {
-            throw WorkspaceError.noRoots
-        }
         guard normalized.allSatisfy({ WorkspaceSettings.validDirectoryURL(for: $0.path) != nil }) else {
             throw WorkspaceError.unavailableRoot
         }
-        self.roots = Array(NSOrderedSet(array: normalized.map(\.path))).compactMap {
+        let uniqueRoots = Array(NSOrderedSet(array: normalized.map(\.path))).compactMap {
             ($0 as? String).map { URL(fileURLWithPath: $0, isDirectory: true) }
+        }
+        self.roots = uniqueRoots
+        if let firstRoot = uniqueRoots.first {
+            cwd = firstRoot
+        } else {
+            cwd = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL
         }
     }
 }
 
 enum WorkspaceError: LocalizedError {
-    case noRoots
     case unavailableRoot
 
     var errorDescription: String? {
         switch self {
-        case .noRoots:
-            "Choose at least one working folder before sending a message."
         case .unavailableRoot:
             "One or more working folders are unavailable. Edit the task folders and try again."
         }
     }
 }
 
-struct CodexActivity: Codable, Identifiable, Equatable {
+struct ConversationActivity: Codable, Identifiable, Equatable {
     let id: String
     let title: String
     var detail: String
@@ -247,14 +247,14 @@ struct CodexActivity: Codable, Identifiable, Equatable {
         }
     }
 
-    static func from(item: [String: Any], lifecycle: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil, startedAt: Date? = nil, measuredDurationMs: Int? = nil) -> CodexActivity? {
+    static func from(item: [String: Any], lifecycle: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil, startedAt: Date? = nil, measuredDurationMs: Int? = nil) -> ConversationActivity? {
         guard let id = item["id"] as? String, let type = item["type"] as? String else { return nil }
         let status = lifecycle ?? (item["status"] as? String ?? "inProgress")
         switch type {
         case "contextCompaction":
             // The installed app-server schema currently supplies only id/type.
             // Never serialize unknown machine fields into user-visible prose.
-            return CodexActivity(
+            return ConversationActivity(
                 id: id,
                 title: "Context compacted",
                 detail: "",
@@ -281,7 +281,7 @@ struct CodexActivity: Codable, Identifiable, Equatable {
             let name = spacedName.prefix(1).uppercased() + spacedName.dropFirst()
             let metadata = [item["model"] as? String, item["reasoningEffort"] as? String]
                 .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
-            return CodexActivity(
+            return ConversationActivity(
                 id: childThreadID,
                 title: name.isEmpty ? "Subagent" : name,
                 detail: [path, metadata].filter { !$0.isEmpty }.joined(separator: "\n"),
@@ -301,7 +301,7 @@ struct CodexActivity: Codable, Identifiable, Equatable {
                 .compactMap { $0 }
                 .filter { !$0.isEmpty }
                 .joined(separator: "\n")
-            return CodexActivity(
+            return ConversationActivity(
                 id: id,
                 title: command.isEmpty ? "Running command" : "Running \(command)",
                 detail: detail,
@@ -312,7 +312,7 @@ struct CodexActivity: Codable, Identifiable, Equatable {
         case "fileChange":
             let changes = item["changes"] as? [[String: Any]] ?? []
             let paths = changes.compactMap { $0["path"] as? String }
-            return CodexActivity(
+            return ConversationActivity(
                 id: id,
                 title: paths.isEmpty ? "Editing files" : "Editing \(paths.count) \(paths.count == 1 ? "file" : "files")",
                 detail: paths.joined(separator: ", "),
@@ -321,9 +321,9 @@ struct CodexActivity: Codable, Identifiable, Equatable {
                 startedAt: startedAt
             )
         case "webSearch":
-            return CodexActivity(id: id, title: "Searching the web", detail: item["query"] as? String ?? "", status: status, durationMs: item["durationMs"] as? Int ?? measuredDurationMs, startedAt: startedAt)
+            return ConversationActivity(id: id, title: "Searching the web", detail: item["query"] as? String ?? "", status: status, durationMs: item["durationMs"] as? Int ?? measuredDurationMs, startedAt: startedAt)
         case "imageView":
-            return CodexActivity(id: id, title: "Viewing image", detail: item["path"] as? String ?? "", status: status, durationMs: item["durationMs"] as? Int ?? measuredDurationMs, startedAt: startedAt)
+            return ConversationActivity(id: id, title: "Viewing image", detail: item["path"] as? String ?? "", status: status, durationMs: item["durationMs"] as? Int ?? measuredDurationMs, startedAt: startedAt)
         case "mcpToolCall":
             let server = item["server"] as? String
             let tool = item["tool"] as? String
@@ -338,7 +338,7 @@ struct CodexActivity: Codable, Identifiable, Equatable {
             } else {
                 summary = "Waiting for result"
             }
-            return CodexActivity(
+            return ConversationActivity(
                 id: id,
                 title: "MCP · \(tool ?? "Tool")",
                 detail: [server.map { "Server · \($0)" }, summary].compactMap { $0 }.joined(separator: "\n"),
@@ -361,7 +361,7 @@ struct CodexActivity: Codable, Identifiable, Equatable {
             } else {
                 summary = "Waiting for result"
             }
-            return CodexActivity(
+            return ConversationActivity(
                 id: id,
                 title: "Tool · \(tool ?? "Dynamic tool")",
                 detail: summary,
@@ -381,14 +381,14 @@ struct CodexActivity: Codable, Identifiable, Equatable {
                 return [agentStatus, message].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ": ")
             }
             let detail = ([prompt] + stateDetails).filter { !$0.isEmpty }.joined(separator: "\n")
-            return CodexActivity(id: id, title: "Task delegated to subagent", detail: detail, status: status, durationMs: item["durationMs"] as? Int ?? measuredDurationMs, startedAt: startedAt)
+            return ConversationActivity(id: id, title: "Task delegated to subagent", detail: detail, status: status, durationMs: item["durationMs"] as? Int ?? measuredDurationMs, startedAt: startedAt)
         default:
             return nil
         }
     }
 }
 
-struct CodexTurnDiff: Codable, Equatable {
+struct ConversationTurnDiff: Codable, Equatable {
     let unifiedDiff: String
 
     private struct FileChunk {
@@ -406,7 +406,7 @@ struct CodexTurnDiff: Codable, Equatable {
         return paths
     }
 
-    func merging(_ update: CodexTurnDiff) -> CodexTurnDiff {
+    func merging(_ update: ConversationTurnDiff) -> ConversationTurnDiff {
         var chunks = fileChunks()
         for updateChunk in update.fileChunks() {
             if let index = chunks.firstIndex(where: { $0.path == updateChunk.path }) {
@@ -415,8 +415,8 @@ struct CodexTurnDiff: Codable, Equatable {
                 chunks.append(updateChunk)
             }
         }
-        guard !chunks.isEmpty else { return CodexTurnDiff(unifiedDiff: update.unifiedDiff) }
-        return CodexTurnDiff(unifiedDiff: chunks.map(\.text).joined(separator: "\n"))
+        guard !chunks.isEmpty else { return ConversationTurnDiff(unifiedDiff: update.unifiedDiff) }
+        return ConversationTurnDiff(unifiedDiff: chunks.map(\.text).joined(separator: "\n"))
     }
 
     private func fileChunks() -> [FileChunk] {
@@ -454,7 +454,7 @@ struct CodexTurnDiff: Codable, Equatable {
         return chunks
     }
 
-    static func fromFileChangeItems(_ items: [[String: Any]]) -> CodexTurnDiff? {
+    static func fromFileChangeItems(_ items: [[String: Any]]) -> ConversationTurnDiff? {
         var chunks: [String] = []
         for item in items where item["type"] as? String == "fileChange" {
             let changes = item["changes"] as? [[String: Any]] ?? []
@@ -465,15 +465,17 @@ struct CodexTurnDiff: Codable, Equatable {
             }
         }
         guard !chunks.isEmpty else { return nil }
-        return CodexTurnDiff(unifiedDiff: chunks.joined(separator: "\n"))
+        return ConversationTurnDiff(unifiedDiff: chunks.joined(separator: "\n"))
     }
 }
 
-struct CodexThreadHistory: Codable, Equatable {
-    let messages: [CodexChatMessage]
-    let activities: [CodexActivity]
-    let diff: CodexTurnDiff?
+struct ConversationHistory: Codable, Equatable {
+    let messages: [ConversationMessage]
+    let activities: [ConversationActivity]
+    let diff: ConversationTurnDiff?
     var answeredAsyncQuestionIDs: [String] = []
+    /// Dividers where the task's conversation moved to another provider.
+    var providerBoundaries: [ConversationProviderBoundary] = []
 }
 
 enum RepositoryScanner {
@@ -1342,8 +1344,8 @@ struct WorkspaceSettingsView: View {
                 .accessibilityIdentifier("appearance-picker")
                 .accessibilityValue(appearance)
             }
-            Section("Workspace suggestions") {
-                Text("Choose a parent folder. New tasks will search below it for Git repositories to suggest as working folders.")
+            Section("Repository root") {
+                Text("Choose the root folder that contains your repositories. StationAI searches below it for repository suggestions, and a valid root is required before sending a conversation.")
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 10) {
                     Image(systemName: "folder")
@@ -1356,7 +1358,7 @@ struct WorkspaceSettingsView: View {
                     Spacer()
                     Button(parentFolderURL == nil ? "Choose…" : "Change…", action: chooseParentFolder)
                     .buttonHoverPointer()
-                    .help("Choose parent folder")
+                        .help("Choose repository root folder")
                         .accessibilityIdentifier("choose-default-parent-folder-button")
                     if parentFolderURL != nil {
                         Button("Clear") {
@@ -1368,7 +1370,7 @@ struct WorkspaceSettingsView: View {
                             }
                         }
                         .buttonHoverPointer()
-                        .help("Clear default parent folder")
+                        .help("Clear repository root folder")
                         .accessibilityIdentifier("clear-default-parent-folder-button")
                     }
                 }
@@ -1411,8 +1413,8 @@ struct WorkspaceSettingsView: View {
 
     private func chooseParentFolder() {
         let panel = NSOpenPanel()
-        panel.title = "Choose default parent folder"
-        panel.message = "StationAI will suggest Git repositories found under this folder."
+        panel.title = "Choose repository root folder"
+        panel.message = "StationAI will search below this folder for repositories. A root folder is required before sending conversations."
         panel.prompt = "Use This Folder"
         panel.canChooseDirectories = true
         panel.canChooseFiles = false

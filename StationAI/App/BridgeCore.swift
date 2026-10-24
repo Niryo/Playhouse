@@ -45,32 +45,51 @@ enum CodexGoalGenerationStore {
     }
 }
 
+/// Generates a short task title with a one-shot helper turn. Clients are tried
+/// in order, moving to the next only when a provider is unavailable (not
+/// installed, can't start, or not signed in), so a working provider's empty
+/// answer still falls back to the prompt rather than to another model.
 @MainActor
-struct CodexTaskTitleGenerator {
-    let client: CodexAppServerClient
+struct ConversationTitleGenerator {
+    let clients: [ConversationProviderClient]
 
-    func generateTitle(from prompt: String, workspace: CodexWorkspaceContext, taskID: UUID) async -> String? {
+    func generateTitle(from prompt: String, workspace: ConversationWorkspaceContext, taskID: UUID) async -> (title: String, provider: ConversationProvider)? {
+        for client in clients {
+            switch await attempt(client, prompt: prompt, workspace: workspace, taskID: taskID) {
+            case .generated(let title): return (title, client.provider)
+            case .unavailable: continue
+            case .failed: return nil
+            }
+        }
+        return nil
+    }
+
+    private enum Attempt {
+        case generated(String)
+        case unavailable
+        case failed
+    }
+
+    private func attempt(_ client: ConversationProviderClient, prompt: String, workspace: ConversationWorkspaceContext, taskID: UUID) async -> Attempt {
         var phase = "thread-start"
         var threadID = ""
         do {
-            threadID = try await client.startThread(workspace: workspace, modelID: CodexAppServerClient.modelID)
+            threadID = try await client.startThread(workspace: workspace, modelID: client.provider.titleModelID, developerInstructions: nil)
             StationAIDiagnostics.record("task.title_generation.started", fields: [
                 "taskID": taskID.uuidString,
                 "threadID": threadID,
-                "modelID": CodexAppServerClient.modelID
+                "modelID": client.provider.titleModelID,
+                "provider": client.provider.rawValue
             ])
             var generated: String?
             phase = "title-turn"
             try await client.sendMessage(
                 "Write a concise task title of at most 8 words for this request. Return only the title:\n\n\(prompt)",
                 mode: .plan,
-                modelID: CodexAppServerClient.modelID,
+                modelID: client.provider.titleModelID,
                 threadID: threadID,
                 workspace: workspace,
-                onDelta: { _ in },
-                onFinalMessage: { generated = $0.trimmingCharacters(in: .whitespacesAndNewlines) },
-                onActivity: { _ in }, onDiff: { _ in }, onHistory: { _ in },
-                onActionRequest: {}, onUserInput: { _ in }
+                onFinalMessage: { generated = $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             )
             guard let title = generated?.components(separatedBy: .newlines).first,
                   !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -78,24 +97,29 @@ struct CodexTaskTitleGenerator {
                     "taskID": taskID.uuidString,
                     "threadID": threadID,
                     "phase": phase,
+                    "provider": client.provider.rawValue,
                     "reason": "empty_response"
                 ])
-                return nil
+                return .failed
             }
             StationAIDiagnostics.record("task.title_generation.succeeded", fields: [
                 "taskID": taskID.uuidString,
                 "threadID": threadID,
                 "phase": phase,
+                "provider": client.provider.rawValue,
                 "titleWordCount": String(title.split(whereSeparator: \.isWhitespace).count)
             ])
-            return title
+            return .generated(title)
         } catch {
+            let unavailable = client.isProviderUnavailable(error)
             var fields = StationAIDiagnostics.errorFields(error, redacting: [prompt])
             fields["taskID"] = taskID.uuidString
             fields["threadID"] = threadID
             fields["phase"] = phase
+            fields["provider"] = client.provider.rawValue
+            fields["providerUnavailable"] = String(unavailable)
             StationAIDiagnostics.record("task.title_generation.failed", fields: fields)
-            return nil
+            return unavailable ? .unavailable : .failed
         }
     }
 }
@@ -641,6 +665,8 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let progressDetail: String?
     let createdAt: Date
     let codexThreadID: String?
+    let claudeSessionID: String?
+    let conversationProvider: String
     let savedPrompt: String?
     let pendingSubmittedPrompt: String?
     let workspaceRoots: [String]
@@ -658,6 +684,8 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         progressDetail = task.progressDetail
         createdAt = task.createdAt
         codexThreadID = task.codexThreadID
+        claudeSessionID = task.claudeSessionID
+        conversationProvider = task.conversationProvider.rawValue
         savedPrompt = task.savedPrompt
         pendingSubmittedPrompt = task.pendingSubmittedPrompt
         workspaceRoots = task.workspaceRootPaths
@@ -934,8 +962,8 @@ final class BoardTaskManager {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty || !imageDataURLs.isEmpty else { throw StationAIManagerError.invalidMessage }
         let task = try taskModel(taskID)
-        guard let threadID = task.codexThreadID else {
-            throw BridgeCommandError(code: "invalid_transition", message: "A follow-up can only be queued after this conversation has a Codex thread.")
+        guard let threadID = task.activeConversationID else {
+            throw BridgeCommandError(code: "invalid_transition", message: "A follow-up can only be queued after this conversation has a \(task.conversationProvider.displayName) conversation.")
         }
         let item = QueuedConversationMessage(
             id: UUID(), taskID: taskID, threadID: threadID, text: normalized, imageDataURLs: imageDataURLs, state: .queued,
@@ -950,6 +978,13 @@ final class BoardTaskManager {
             throw BridgeCommandError(code: "operation_failed", message: "Couldn't locate the task store for steering requests.")
         }
         return storeURL.deletingLastPathComponent().appendingPathComponent("conversation-steer-mailbox", isDirectory: true)
+    }
+
+    func conversationTranscriptStore() throws -> ConversationTranscriptStore {
+        guard let storeURL = modelContext.container.configurations.first?.url else {
+            throw BridgeCommandError(code: "operation_failed", message: "Couldn't locate the task store for conversation transcripts.")
+        }
+        return ConversationTranscriptStore(directory: storeURL.deletingLastPathComponent().appendingPathComponent("conversation-transcripts", isDirectory: true))
     }
 
     func claimNextQueuedMessage(taskID: UUID, threadID: String, messageID: UUID? = nil) throws -> QueuedConversationMessage? {
@@ -1085,7 +1120,7 @@ final class BoardTaskManager {
             .appendingPathComponent("conversation-turn-locks", isDirectory: true)
     }
 
-    private func withTaskOperationLock<T>(
+    fileprivate func withTaskOperationLock<T>(
         _ id: UUID,
         operation: @MainActor () async throws -> T
     ) async throws -> T {
@@ -1155,6 +1190,39 @@ final class BoardTaskManager {
             throw BridgeFileLockError(message: "Couldn't inspect the conversation-turn reservation (errno \(errno)).")
         }
         return lock.l_type != Int16(F_UNLCK)
+    }
+
+    fileprivate func queueDeferredRepositoryRemoval(taskID: UUID, record: RepositoryWorktreeRecord) throws -> URL {
+        guard let conversationTurnLockDirectory else {
+            throw BridgeFileLockError(message: "Couldn't determine the task-store location for deferred repository cleanup.")
+        }
+        try FileManager.default.createDirectory(at: conversationTurnLockDirectory, withIntermediateDirectories: true)
+        let payload = DeferredRepositoryRemoval(taskID: taskID, record: record)
+        let url = conversationTurnLockDirectory.appendingPathComponent("\(taskID.uuidString).\(UUID().uuidString).repository-removal.json")
+        try JSONEncoder().encode(payload).write(to: url, options: .atomic)
+        guard Darwin.chmod(url.path, mode_t(0o600)) == 0 else {
+            let code = errno
+            try? FileManager.default.removeItem(at: url)
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+        }
+        return url
+    }
+
+    fileprivate func deferredRepositoryRemovals() throws -> [(URL, DeferredRepositoryRemoval)] {
+        guard let conversationTurnLockDirectory else {
+            throw BridgeFileLockError(message: "Couldn't determine the task-store location for deferred repository cleanup.")
+        }
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: conversationTurnLockDirectory,
+            includingPropertiesForKeys: nil
+        ) else { return [] }
+        return try urls.filter { $0.lastPathComponent.hasSuffix(".repository-removal.json") }.compactMap { url in
+            (url, try JSONDecoder().decode(DeferredRepositoryRemoval.self, from: Data(contentsOf: url)))
+        }
+    }
+
+    fileprivate func clearDeferredRepositoryRemoval(at url: URL) throws {
+        try FileManager.default.removeItem(at: url)
     }
 
     private func conversationTurnOutcomeURL(_ id: UUID) throws -> URL {
@@ -1318,11 +1386,11 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func create(title: String, workspaceRoots: [String]) async throws -> BoardTaskRecord {
+    func create(title: String, workspaceRoots: [String], provider: ConversationProvider = .codex) async throws -> BoardTaskRecord {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty else { throw StationAIManagerError.invalidTitle }
         let normalizedRoots = try Self.normalizeRoots(workspaceRoots)
-        let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: normalizedRoots)
+        let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: normalizedRoots, conversationProvider: provider)
         modelContext.insert(task)
         try await saveTaskContext(taskID: task.id)
         StationAIDiagnostics.record("task.create.succeeded", fields: [
@@ -1336,7 +1404,7 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String]) async throws -> BoardTaskRecord {
+    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex) async throws -> BoardTaskRecord {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty else { throw StationAIManagerError.invalidTitle }
         let folders = try Self.normalizeOptionalRoots(contextFolders)
@@ -1351,7 +1419,7 @@ final class BoardTaskManager {
             throw BridgeCommandError(code: "invalid_argument", message: "A repository can be selected only once per task: \(duplicate.repositoryPath)")
         }
         let roots = try Self.normalizeOptionalRoots(worktrees.map(\.repositoryPath) + folders)
-        let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: roots)
+        let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: roots, conversationProvider: provider)
         task.repositoryWorktrees = worktrees
         task.contextFolderPaths = folders
         return try await withRepositoryAllocationLocks(worktrees.map(\.repositoryPath)) {
@@ -1365,19 +1433,32 @@ final class BoardTaskManager {
                 "repositoryPaths": worktrees.map(\.repositoryPath).joined(separator: "\n"),
                 "contextFolderCount": String(folders.count),
                 "contextFolders": folders.joined(separator: "\n"),
-                "status": task.status.rawValue
+                "status": task.status.rawValue,
+                "provider": provider.rawValue
             ])
             return BoardTaskRecord(task: task)
         }
     }
 
     @discardableResult
-    func addRepository(_ id: UUID, repositoryPath: String) async throws -> BoardTaskRecord {
-        return try await addRepositories(id, repositoryPaths: [repositoryPath])
+    func addRepository(
+        _ id: UUID,
+        repositoryPath: String,
+        duringActiveConversation: Bool = false
+    ) async throws -> BoardTaskRecord {
+        return try await addRepositories(
+            id,
+            repositoryPaths: [repositoryPath],
+            duringActiveConversation: duringActiveConversation
+        )
     }
 
     @discardableResult
-    func addRepositories(_ id: UUID, repositoryPaths: [String]) async throws -> BoardTaskRecord {
+    func addRepositories(
+        _ id: UUID,
+        repositoryPaths: [String],
+        duringActiveConversation: Bool = false
+    ) async throws -> BoardTaskRecord {
         guard !repositoryPaths.isEmpty else {
             throw BridgeCommandError(code: "invalid_argument", message: "Add at least one repository.")
         }
@@ -1420,10 +1501,10 @@ final class BoardTaskManager {
             )
         }
 
-        return try await withConversationTurnReservation(id) {
-            return try await withTaskOperationLock(id) {
-                return try await withRepositoryAllocationLocks(records.map(\.repositoryPath)) {
-                    let task = try requireTask(id)
+        let mutation = {
+            try await self.withTaskOperationLock(id) {
+                return try await self.withRepositoryAllocationLocks(records.map(\.repositoryPath)) {
+                    let task = try self.requireTask(id)
                     guard task.status != .done else {
                         throw BridgeCommandError(code: "invalid_transition", message: "Repositories can't be changed on a completed task.")
                     }
@@ -1435,7 +1516,7 @@ final class BoardTaskManager {
                             message: "This repository is already attached to the task: \(duplicate.repositoryPath)"
                         )
                     }
-                    try validateRepositoryAssignments(records, excludingTaskID: id)
+                    try self.validateRepositoryAssignments(records, excludingTaskID: id)
 
                     let repositories = task.repositoryWorktrees + records
                     let contextFolders = try Self.normalizeOptionalRoots(
@@ -1447,7 +1528,7 @@ final class BoardTaskManager {
                     task.repositoryWorktrees = repositories
                     task.contextFolderPaths = contextFolders
                     task.workspaceRootPaths = roots
-                    try await saveTaskContext(taskID: id)
+                    try await self.saveTaskContext(taskID: id)
                     StationAIDiagnostics.record("workspace.repository.add.succeeded", fields: [
                         "taskID": id.uuidString,
                         "repositoryCount": String(records.count),
@@ -1457,6 +1538,71 @@ final class BoardTaskManager {
                 }
             }
         }
+        if duringActiveConversation {
+            return try await mutation()
+        }
+        return try await withConversationTurnReservation(id) {
+            try await mutation()
+        }
+    }
+
+    @discardableResult
+    func replaceRepositories(
+        _ id: UUID,
+        repositoryPaths: [String],
+        duringActiveConversation: Bool = false
+    ) async throws -> BoardTaskRecord {
+        guard !repositoryPaths.isEmpty else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Replace with at least one repository.")
+        }
+        let initialTask = try requireTask(id)
+        guard initialTask.status != .done else {
+            throw BridgeCommandError(code: "invalid_transition", message: "Repositories can't be changed on a completed task.")
+        }
+
+        var seen = Set<String>()
+        var normalizedPaths: [String] = []
+        for path in repositoryPaths {
+            let record = try await worktreeService.pendingRecord(
+                spec: RepositoryWorktreeSpec(repositoryPath: path, branch: nil, branchFrom: nil)
+            )
+            let canonical = Self.canonicalPath(record.repositoryPath)
+            guard seen.insert(canonical).inserted else {
+                throw BridgeCommandError(code: "invalid_argument", message: "A repository can be selected only once per task: \(record.repositoryPath)")
+            }
+            normalizedPaths.append(record.repositoryPath)
+        }
+
+        let desired = Set(normalizedPaths.map(Self.canonicalPath))
+        let existing = Set(initialTask.repositoryWorktrees.map { Self.canonicalPath($0.repositoryPath) })
+        let additions = normalizedPaths.filter { !existing.contains(Self.canonicalPath($0)) }
+        if !additions.isEmpty {
+            _ = try await addRepositories(
+                id,
+                repositoryPaths: additions,
+                duringActiveConversation: duringActiveConversation
+            )
+        }
+
+        let latestTask = try requireTask(id)
+        let removals = latestTask.repositoryWorktrees
+            .filter { !desired.contains(Self.canonicalPath($0.repositoryPath)) }
+            .map(\.repositoryPath)
+        for path in removals {
+            do {
+                _ = try await removeRepository(
+                    id,
+                    repositoryPath: path,
+                    duringActiveConversation: duringActiveConversation
+                )
+            } catch {
+                throw BridgeCommandError(
+                    code: "operation_failed",
+                    message: "The replacement repositories were added, but the old repository \(path) couldn't be removed. The task keeps both contexts. \(error.localizedDescription)"
+                )
+            }
+        }
+        return try get(id)
     }
 
     @discardableResult
@@ -1509,7 +1655,18 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func removeRepository(_ id: UUID, repositoryPath: String) async throws -> BoardTaskRecord {
+    func removeRepository(
+        _ id: UUID,
+        repositoryPath: String,
+        duringActiveConversation: Bool = false
+    ) async throws -> BoardTaskRecord {
+        if duringActiveConversation {
+            return try await removeRepositoryWhileTurnReserved(
+                id,
+                repositoryPath: repositoryPath,
+                deferWorktreeRemovalUntilTurnEnds: true
+            )
+        }
         return try await withConversationTurnReservation(id) {
             try await self.removeRepositoryWhileTurnReserved(id, repositoryPath: repositoryPath)
         }
@@ -1517,7 +1674,8 @@ final class BoardTaskManager {
 
     private func removeRepositoryWhileTurnReserved(
         _ id: UUID,
-        repositoryPath: String
+        repositoryPath: String,
+        deferWorktreeRemovalUntilTurnEnds: Bool = false
     ) async throws -> BoardTaskRecord {
         return try await withTaskOperationLock(id) {
             let task = try requireTask(id)
@@ -1529,7 +1687,7 @@ final class BoardTaskManager {
             let originalRoots = task.workspaceRootPaths
             let updatedRepositories = originalRepositories.filter { $0.repositoryPath != record.repositoryPath }
             let roots = try Self.normalizeOptionalRoots(updatedRepositories.map(\.worktreePath) + task.contextFolderPaths)
-            guard !roots.isEmpty || record.isPending else { throw StationAIManagerError.noWorkspaceRoots }
+            // A task with no repository roots is a valid standalone conversation.
             let shouldRemoveWorktree = record.createdByStationAI && !record.isPending
                 && FileManager.default.fileExists(atPath: record.worktreePath)
 
@@ -1547,11 +1705,75 @@ final class BoardTaskManager {
                     )
                 }
 
+                let deferredIntentURL = shouldRemoveWorktree && deferWorktreeRemovalUntilTurnEnds
+                    ? try queueDeferredRepositoryRemoval(taskID: id, record: record)
+                    : nil
+
                 currentTask.repositoryWorktrees = updatedRepositories
                 currentTask.workspaceRootPaths = roots
-                try await saveTaskContext(taskID: id)
+                do {
+                    try await saveTaskContext(taskID: id)
+                } catch {
+                    currentTask.repositoryWorktrees = originalRepositories
+                    currentTask.workspaceRootPaths = originalRoots
+                    throw error
+                }
 
                 if shouldRemoveWorktree {
+                    if deferWorktreeRemovalUntilTurnEnds {
+                        StationAIDiagnostics.record("workspace.repository.deferred_removal_scheduled", fields: [
+                            "taskID": id.uuidString,
+                            "repositoryPath": record.repositoryPath,
+                            "worktreePath": record.worktreePath
+                        ])
+                        Task.detached { @MainActor in
+                            do {
+                                StationAIDiagnostics.record("workspace.repository.deferred_removal_waiting", fields: [
+                                    "taskID": id.uuidString,
+                                    "repositoryPath": record.repositoryPath,
+                                    "worktreePath": record.worktreePath
+                                ])
+                                try await self.withConversationTurnReservation(id) {
+                                    try await self.withTaskOperationLock(id) {
+                                        guard let deferredIntentURL,
+                                              FileManager.default.fileExists(atPath: deferredIntentURL.path) else { return }
+                                        if try self.isRepositoryAttached(record, to: id) {
+                                            try self.clearDeferredRepositoryRemoval(at: deferredIntentURL)
+                                            return
+                                        }
+                                        StationAIDiagnostics.record("workspace.repository.deferred_removal_reservation_acquired", fields: [
+                                            "taskID": id.uuidString,
+                                            "repositoryPath": record.repositoryPath,
+                                            "worktreePath": record.worktreePath
+                                        ])
+                                        if try await self.worktreeService.hasChanges(record) {
+                                            StationAIDiagnostics.record("workspace.repository.deferred_removal_kept_dirty", fields: [
+                                                "taskID": id.uuidString,
+                                                "repositoryPath": record.repositoryPath,
+                                                "worktreePath": record.worktreePath
+                                            ])
+                                            try self.clearDeferredRepositoryRemoval(at: deferredIntentURL)
+                                            return
+                                        }
+                                        try await self.worktreeService.remove(record)
+                                        StationAIDiagnostics.record("workspace.repository.deferred_removal_succeeded", fields: [
+                                            "taskID": id.uuidString,
+                                            "repositoryPath": record.repositoryPath,
+                                            "worktreePath": record.worktreePath
+                                        ])
+                                        try self.clearDeferredRepositoryRemoval(at: deferredIntentURL)
+                                    }
+                                }
+                            } catch {
+                                StationAIDiagnostics.record("workspace.repository.deferred_removal_failed", fields: [
+                                    "taskID": id.uuidString,
+                                    "repositoryPath": record.repositoryPath,
+                                    "worktreePath": record.worktreePath,
+                                    "error": error.localizedDescription
+                                ])
+                            }
+                        }
+                    } else {
                     do {
                         try await worktreeService.remove(record)
                     } catch {
@@ -1572,6 +1794,7 @@ final class BoardTaskManager {
                             )
                         }
                         throw removalError
+                    }
                     }
                 }
                 return try get(id)
@@ -1635,7 +1858,7 @@ final class BoardTaskManager {
         }
     }
 
-    func createPullRequests(_ id: UUID, client: CodexAppServerClient) async throws -> BoardTaskRecord {
+    func createPullRequests(_ id: UUID, clients: ConversationClients, settingsManager: WorkspaceSettingsManager? = nil) async throws -> BoardTaskRecord {
         let conflicts = try await pullRequestConflictRepositories(id)
         if !conflicts.isEmpty {
             throw BridgeCommandError(code: "conflicts_require_confirmation", message: "Pull request conflicts were found. Resolve conflicts in the task worktree before creating pull requests.")
@@ -1678,28 +1901,36 @@ final class BoardTaskManager {
             return lookedUpRecords
         }
 
-        let conversation = try await CodexConversationManager(tasks: self, client: client).history(taskID: id)
+        let conversation = try await ConversationManager(tasks: self, clients: clients, settingsManager: settingsManager).history(taskID: id)
+        let helperClients = clients.helperClients(preferring: try requireTask(id).conversationProvider)
         let conversationText = conversation.messages.map { "\($0.role.rawValue): \($0.text)" }.joined(separator: "\n\n")
         let currentTitle = try requireTask(id).title
         let summary: String
         if !conversationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let roots = records.map { URL(fileURLWithPath: $0.worktreePath, isDirectory: true) }
-            let workspace = try CodexWorkspaceContext(roots: roots)
-            let summaryThread = try await client.startThread(workspace: workspace, modelID: CodexAppServerClient.modelID)
+            let workspace = try ConversationWorkspaceContext(roots: roots)
             var generated = ""
-            try await client.sendMessage(
-                "Write a very concise GitHub pull request description. Explain what problem this change solves, how it solves it, and briefly mention any special issue or caveat from the conversation. Use Markdown, no more than three short sections, and return only the description.\n\nTask: \(currentTitle)\n\nConversation:\n\(conversationText)",
-                mode: .plan,
-                modelID: CodexAppServerClient.modelID,
-                threadID: summaryThread,
-                workspace: workspace,
-                onDelta: { _ in },
-                onFinalMessage: { generated = $0.trimmingCharacters(in: .whitespacesAndNewlines) },
-                onActivity: { _ in }, onDiff: { _ in }, onHistory: { _ in },
-                onActionRequest: {}, onUserInput: { _ in }
-            )
+            var summaryProvider = helperClients[0].provider
+            // Fall back to the other provider only when the task's provider can't run here.
+            for (index, client) in helperClients.enumerated() {
+                summaryProvider = client.provider
+                do {
+                    let summaryThread = try await client.startThread(workspace: workspace, modelID: client.provider.defaultModelID, developerInstructions: nil)
+                    try await client.sendMessage(
+                        "Write a very concise GitHub pull request description. Explain what problem this change solves, how it solves it, and briefly mention any special issue or caveat from the conversation. Use Markdown, no more than three short sections, and return only the description.\n\nTask: \(currentTitle)\n\nConversation:\n\(conversationText)",
+                        mode: .plan,
+                        modelID: client.provider.defaultModelID,
+                        threadID: summaryThread,
+                        workspace: workspace,
+                        onFinalMessage: { generated = $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    )
+                    break
+                } catch where client.isProviderUnavailable(error) && index < helperClients.count - 1 {
+                    continue
+                }
+            }
             guard !generated.isEmpty else {
-                throw BridgeCommandError(code: "operation_failed", message: "Codex returned an empty pull request summary. Try again.")
+                throw BridgeCommandError(code: "operation_failed", message: "\(summaryProvider.displayName) returned an empty pull request summary. Try again.")
             }
             summary = generated
         } else {
@@ -1793,7 +2024,7 @@ final class BoardTaskManager {
         return conflicts
     }
 
-    func resolvePullRequestConflicts(_ id: UUID, action: String, client: CodexAppServerClient) async throws -> BoardTaskRecord {
+    func resolvePullRequestConflicts(_ id: UUID, action: String, clients: ConversationClients) async throws -> BoardTaskRecord {
         guard ["resolve-and-push", "resolve-only", "keep"].contains(action) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Choose resolve-and-push, resolve-only, or keep.")
         }
@@ -1803,7 +2034,7 @@ final class BoardTaskManager {
             let conflicted = try await pullRequestConflictRepositoriesUnlocked(id)
             guard !conflicted.isEmpty else { return try get(id) }
             let affected = records.filter { conflicted.contains($0.repositoryPath) }
-            let roots = try CodexWorkspaceContext(roots: affected.map { URL(fileURLWithPath: $0.worktreePath, isDirectory: true) })
+            let roots = try ConversationWorkspaceContext(roots: affected.map { URL(fileURLWithPath: $0.worktreePath, isDirectory: true) })
             for record in affected {
                 guard let target = record.mergeTarget else { continue }
                 // A prior Codex attempt may have left Git's merge in progress,
@@ -1821,23 +2052,21 @@ final class BoardTaskManager {
                 }
             }
             if needsCodexResolution {
-                let thread = try await client.startThread(workspace: roots, modelID: CodexAppServerClient.modelID)
+                let client = clients.client(for: try requireTask(id).conversationProvider)
+                let thread = try await client.startThread(workspace: roots, modelID: client.provider.defaultModelID, developerInstructions: nil)
                 do {
                     try await client.sendMessage(
                         "Resolve every Git merge conflict in the current workspace. Preserve the intended changes from both sides, inspect the resulting files, and stage the resolved files. Do not commit or push. Report which conflicts you resolved.",
                         mode: .code,
-                        modelID: CodexAppServerClient.modelID,
+                        modelID: client.provider.defaultModelID,
                         threadID: thread,
                         workspace: roots,
-                        onDelta: { _ in },
                         onFinalMessage: { finalMessage = $0 },
-                        onActivity: { _ in }, onDiff: { _ in }, onHistory: { _ in },
-                        onActionRequest: {},
                         onUserInput: { request in
                             client.rejectUserInput(
                                 requestID: request.id,
                                 threadID: request.threadID,
-                                message: "Conflict resolution cannot continue while Codex is waiting for user input."
+                                message: "Conflict resolution cannot continue while \(client.provider.displayName) is waiting for user input."
                             )
                         }
                     )
@@ -1879,6 +2108,30 @@ final class BoardTaskManager {
             if status != .inProgress { clearProgressReport(task) }
             try await saveTaskContext(taskID: id)
             StationAIDiagnostics.record("task.lifecycle_status.write.succeeded", fields: [
+                "taskID": id.uuidString,
+                "status": task.status.rawValue
+            ])
+            return BoardTaskRecord(task: task)
+        }
+    }
+
+    func resumeWaitingResponseAfterUserInput(_ id: UUID) async throws -> BoardTaskRecord {
+        let activeTurnURL = try conversationTurnActiveURL(id)
+        StationAIDiagnostics.record("task.lifecycle_status.user_input_resume.started", fields: ["taskID": id.uuidString])
+        return try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.status == .waitingResponse,
+                  FileManager.default.fileExists(atPath: activeTurnURL.path) else {
+                StationAIDiagnostics.record("task.lifecycle_status.user_input_resume.skipped", fields: [
+                    "taskID": id.uuidString,
+                    "reason": FileManager.default.fileExists(atPath: activeTurnURL.path) ? "status_not_waiting_response" : "turn_outcome_inactive",
+                ])
+                return BoardTaskRecord(task: task)
+            }
+            task.status = .inProgress
+            task.statusMessage = nil
+            try await saveTaskContext(taskID: id)
+            StationAIDiagnostics.record("task.lifecycle_status.user_input_resumed", fields: [
                 "taskID": id.uuidString,
                 "status": task.status.rawValue
             ])
@@ -1988,18 +2241,20 @@ final class BoardTaskManager {
         task.progressDetail = nil
     }
 
-    func reconcileLifecycleStatusOnOpen(_ id: UUID, client: CodexAppServerClient) async throws -> BoardTaskRecord {
+    func reconcileLifecycleStatusOnOpen(_ id: UUID, clients: ConversationClients) async throws -> BoardTaskRecord {
         let currentTask = try requireTask(id)
-        guard currentTask.codexThreadID != nil || currentTask.pendingSubmittedPrompt != nil else {
+        guard currentTask.activeConversationID != nil || currentTask.pendingSubmittedPrompt != nil else {
             return BoardTaskRecord(task: currentTask)
         }
         return try await withTaskOperationLock(id) {
             let task = try requireTask(id)
-            guard let threadID = task.codexThreadID else {
+            let providerName = task.conversationProvider.displayName
+            let client = clients.client(for: task.conversationProvider)
+            guard let threadID = task.activeConversationID else {
                 if task.pendingSubmittedPrompt != nil, !(try hasConversationTurnReservation(id)) {
                     if task.status == .inProgress {
                         task.status = .waitingResponse
-                        task.statusMessage = "StationAI restarted before Codex started this turn. Your prompt is saved; review it and continue when ready."
+                        task.statusMessage = "StationAI restarted before \(providerName) started this turn. Your prompt is saved; review it and continue when ready."
                     }
                     task.pendingSubmittedPrompt = nil
                     try await saveTaskContext(taskID: id)
@@ -2008,14 +2263,14 @@ final class BoardTaskManager {
             }
             let hasActiveReservation = try hasConversationTurnReservation(id)
             guard !client.isTurnActive(threadID: threadID),
-                  !CodexAppServerClient.isTurnActiveInProcess(threadID: threadID),
+                  !client.isTurnActiveInProcess(threadID: threadID),
                   !hasActiveReservation else {
                 return BoardTaskRecord(task: task)
             }
             let message: String
             switch task.status {
             case .inProgress:
-                message = "StationAI restarted before Codex reported that this turn finished. Your conversation is saved; review it and send a follow-up to continue."
+                message = "StationAI restarted before \(providerName) reported that this turn finished. Your conversation is saved; review it and send a follow-up to continue."
             case .waitingResponse:
                 message = "StationAI reopened before the pending question was answered. Review the conversation and send a prompt to continue."
             default:
@@ -2110,7 +2365,7 @@ final class BoardTaskManager {
         if submitted, status != .inProgress {
             throw StationAIManagerError.invalidTransition("A submitted prompt must place the task in Progress.")
         }
-        if let imageDataURLs, imageDataURLs.count > 8 || imageDataURLs.contains(where: { !CodexConversationManager.isValidImageDataURL($0) }) {
+        if let imageDataURLs, imageDataURLs.count > 8 || imageDataURLs.contains(where: { !ConversationManager.isValidImageDataURL($0) }) {
             throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
         }
         return try await withTaskOperationLock(id) {
@@ -2141,28 +2396,53 @@ final class BoardTaskManager {
         }
     }
 
-    func persistCodexThreadID(_ id: UUID, threadID: String) async throws -> BoardTaskRecord {
-        guard !threadID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw BridgeCommandError(code: "invalid_argument", message: "Codex returned an empty thread ID.")
+    func persistConversationID(_ id: UUID, provider: ConversationProvider, id conversationID: String) async throws -> BoardTaskRecord {
+        guard !conversationID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw BridgeCommandError(code: "invalid_argument", message: "\(provider.displayName) returned an empty conversation ID.")
         }
         return try await withTaskOperationLock(id) {
             let task = try requireTask(id)
-            guard task.codexThreadID == nil || task.codexThreadID == threadID else {
-                throw BridgeCommandError(code: "invalid_transition", message: "The task is already linked to a different Codex conversation.")
+            let existing = task.conversationID(for: provider)
+            guard existing == nil || existing == conversationID else {
+                throw BridgeCommandError(code: "invalid_transition", message: "The task is already linked to a different \(provider.displayName) conversation.")
             }
-            guard task.codexThreadID != threadID else { return BoardTaskRecord(task: task) }
-            task.codexThreadID = threadID
+            guard existing != conversationID else { return BoardTaskRecord(task: task) }
+            switch provider {
+            case .codex: task.codexThreadID = conversationID
+            case .claude: task.claudeSessionID = conversationID
+            }
             do {
                 try await saveTaskContext(taskID: id)
             } catch {
-                task.codexThreadID = nil
+                switch provider {
+                case .codex: task.codexThreadID = nil
+                case .claude: task.claudeSessionID = nil
+                }
                 throw error
             }
             return BoardTaskRecord(task: task)
         }
     }
 
-    @discardableResult
+    /// Persists which provider runs the task's next turn. Callers that already
+    /// have a conversation go through `ConversationManager.setProvider`, which
+    /// checks that the conversation is settled and records the boundary.
+    func setConversationProvider(_ id: UUID, provider: ConversationProvider) async throws -> BoardTaskRecord {
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.conversationProvider != provider || task.conversationProviderRawValue == nil else { return BoardTaskRecord(task: task) }
+            let previous = task.conversationProviderRawValue
+            task.conversationProvider = provider
+            do {
+                try await saveTaskContext(taskID: id)
+            } catch {
+                task.conversationProviderRawValue = previous
+                throw error
+            }
+            return BoardTaskRecord(task: task)
+        }
+    }
+
     func setWorkspaceRoots(_ id: UUID, roots: [String]) async throws -> BoardTaskRecord {
         let initialTask = try requireTask(id)
         let initialRepositories = initialTask.repositoryWorktrees
@@ -2243,7 +2523,8 @@ final class BoardTaskManager {
         var fields = [
             "taskID": task.id.uuidString,
             "taskStatus": task.status.rawValue,
-            "threadID": task.codexThreadID ?? "",
+            "threadID": task.activeConversationID ?? "",
+            "provider": task.conversationProvider.rawValue,
             "worktreeCount": String(task.repositoryWorktrees.count),
             "storePath": StationAIDiagnostics.storeURL.path
         ]
@@ -2258,8 +2539,10 @@ final class BoardTaskManager {
                 StationAIDiagnostics.record("task.delete.worktree_removal_succeeded", fields: fields)
             }
             phase = "swiftdata-save"
+            let taskID = task.id
             modelContext.delete(task)
-            try await saveTaskContext(taskID: task.id)
+            try await saveTaskContext(taskID: taskID)
+            try? conversationTranscriptStore().remove(taskID)
             StationAIDiagnostics.record("task.delete.succeeded", fields: fields)
         } catch {
             fields["phase"] = phase
@@ -2273,6 +2556,16 @@ final class BoardTaskManager {
 
     func taskModel(_ id: UUID) throws -> BoardTask {
         try requireTask(id)
+    }
+
+    fileprivate func isRepositoryAttached(_ record: RepositoryWorktreeRecord, to taskID: UUID) throws -> Bool {
+        do {
+            return try requireTask(taskID).repositoryWorktrees.contains {
+                $0.repositoryPath == record.repositoryPath && $0.worktreePath == record.worktreePath
+            }
+        } catch StationAIManagerError.taskNotFound(_) {
+            return false
+        }
     }
 
     func prepareRepositoryWorktrees(_ id: UUID, fallbackPrompt: String? = nil) async throws -> BoardTask {
@@ -2340,7 +2633,7 @@ final class BoardTaskManager {
             }
         }
         if dirtyWorktree { return true }
-        let hasSavedConversation = task.codexThreadID != nil
+        let hasSavedConversation = task.hasConversation
             || !(task.savedPrompt?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         return dirtyWorktree || hasSavedConversation
     }
@@ -2363,6 +2656,7 @@ final class BoardTaskManager {
             fields["repositoryCount"] = String(task.repositoryWorktrees.count)
             fields["workspaceRootCount"] = String(task.workspaceRootPaths.count)
             fields["hasCodexThread"] = String(task.codexThreadID != nil)
+            fields["hasClaudeSession"] = String(task.claudeSessionID != nil)
             fields["hasSavedPrompt"] = String(task.savedPrompt != nil)
             fields["durationMilliseconds"] = String((DispatchTime.now().uptimeNanoseconds - readStartedAt) / 1_000_000)
             StationAIDiagnostics.record("persistence.read.succeeded", fields: fields)
@@ -2560,6 +2854,11 @@ final class BoardTaskManager {
 
 }
 
+private struct DeferredRepositoryRemoval: Codable {
+    var taskID: UUID
+    var record: RepositoryWorktreeRecord
+}
+
 @MainActor
 final class WorkspaceSettingsManager {
     private let defaults: UserDefaults
@@ -2609,8 +2908,39 @@ final class WorkspaceSettingsManager {
         StationAIDiagnostics.record("settings.write.succeeded", fields: ["setting": "appearance", "value": value])
     }
 
+    /// The provider new tasks start with. Codex until the user chooses otherwise.
+    var defaultConversationProvider: ConversationProvider {
+        let value = defaults.string(forKey: WorkspaceSettings.defaultConversationProviderKey)
+        return value.flatMap(ConversationProvider.init(rawValue:)) ?? .codex
+    }
+
+    func setDefaultConversationProvider(_ value: String) throws {
+        StationAIDiagnostics.record("settings.write.started", fields: ["setting": "defaultConversationProvider", "value": value])
+        let provider: ConversationProvider
+        do {
+            provider = try ConversationProvider.parse(value)
+        } catch {
+            StationAIDiagnostics.record("settings.write.failed", fields: [
+                "setting": "defaultConversationProvider", "value": value, "errorCode": "invalid_argument"
+            ])
+            throw error
+        }
+        defaults.set(provider.rawValue, forKey: WorkspaceSettings.defaultConversationProviderKey)
+        StationAIDiagnostics.record("settings.write.succeeded", fields: ["setting": "defaultConversationProvider", "value": provider.rawValue])
+    }
+
     var defaultParentFolderURL: URL? {
         WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath)
+    }
+
+    func requireRepositoryRootFolder() throws -> URL {
+        guard let rootFolder = defaultParentFolderURL else {
+            throw BridgeCommandError(
+                code: "settings_required",
+                message: "Set the repository root folder in Settings before sending a conversation."
+            )
+        }
+        return rootFolder
     }
 
     func setDefaultParentFolder(_ path: String?) throws {
@@ -2674,9 +3004,15 @@ final class WorkspaceSettingsManager {
 @MainActor
 final class WorkspaceManager {
     private let taskManager: BoardTaskManager?
+    private let settingsManager: WorkspaceSettingsManager
+    private let worktreeService = StationAIWorktreeService()
 
-    init(taskManager: BoardTaskManager? = nil) {
+    init(
+        taskManager: BoardTaskManager? = nil,
+        settingsManager: WorkspaceSettingsManager? = nil
+    ) {
         self.taskManager = taskManager
+        self.settingsManager = settingsManager ?? WorkspaceSettingsManager()
     }
 
     func suggestedRepositories(parentPath: String) async throws -> [String] {
@@ -2729,13 +3065,19 @@ final class WorkspaceManager {
             "taskID": taskID.uuidString,
             "repositoryPath": repositoryPath
         ])
-        let record = try await taskManager.addRepository(taskID, repositoryPath: repositoryPath)
+        _ = try await taskManager.addRepository(
+            taskID,
+            repositoryPath: repositoryPath,
+            duringActiveConversation: true
+        )
+        let prepared = try await taskManager.prepareRepositoryWorktrees(taskID)
+        try settingsManager.setLastSelectedRepositories(prepared.repositoryWorktrees.map(\.repositoryPath))
         StationAIDiagnostics.record("workspace.repository.add.succeeded", fields: [
             "taskID": taskID.uuidString,
             "repositoryPath": repositoryPath,
-            "repositoryCount": String(record.repositoryWorktrees.count)
+            "repositoryCount": String(prepared.repositoryWorktrees.count)
         ])
-        return record
+        return BoardTaskRecord(task: prepared)
     }
 
     @discardableResult
@@ -2746,12 +3088,94 @@ final class WorkspaceManager {
             "repositoryPaths": repositoryPaths.joined(separator: "\n"),
             "repositoryCount": String(repositoryPaths.count)
         ])
-        let record = try await taskManager.addRepositories(taskID, repositoryPaths: repositoryPaths)
+        _ = try await taskManager.addRepositories(
+            taskID,
+            repositoryPaths: repositoryPaths,
+            duringActiveConversation: true
+        )
+        let record = try await taskManager.prepareRepositoryWorktrees(taskID)
+        try settingsManager.setLastSelectedRepositories(record.repositoryWorktrees.map(\.repositoryPath))
         StationAIDiagnostics.record("workspace.repositories.add.succeeded", fields: [
             "taskID": taskID.uuidString,
             "repositoryCount": String(record.repositoryWorktrees.count)
         ])
+        return BoardTaskRecord(task: record)
+    }
+
+    @discardableResult
+    func replaceRepositories(_ repositoryPaths: [String], on taskID: UUID) async throws -> BoardTaskRecord {
+        guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
+        StationAIDiagnostics.record("workspace.repositories.replace.started", fields: [
+            "taskID": taskID.uuidString,
+            "repositoryPaths": repositoryPaths.joined(separator: "\n"),
+            "repositoryCount": String(repositoryPaths.count)
+        ])
+        _ = try await taskManager.replaceRepositories(
+            taskID,
+            repositoryPaths: repositoryPaths,
+            duringActiveConversation: true
+        )
+        let record = try await taskManager.prepareRepositoryWorktrees(taskID)
+        try settingsManager.setLastSelectedRepositories(record.repositoryWorktrees.map(\.repositoryPath))
+        StationAIDiagnostics.record("workspace.repositories.replace.succeeded", fields: [
+            "taskID": taskID.uuidString,
+            "repositoryCount": String(record.repositoryWorktrees.count)
+        ])
+        return BoardTaskRecord(task: record)
+    }
+
+    @discardableResult
+    func removeRepository(_ repositoryPath: String, from taskID: UUID) async throws -> BoardTaskRecord {
+        guard let taskManager else { throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.") }
+        let record = try await taskManager.removeRepository(
+            taskID,
+            repositoryPath: repositoryPath,
+            duringActiveConversation: true
+        )
+        try settingsManager.setLastSelectedRepositories(record.repositoryWorktrees.map(\.repositoryPath))
         return record
+    }
+
+    func reconcileDeferredRepositoryRemovals() async throws {
+        guard let taskManager else { return }
+        for (intentURL, intent) in try taskManager.deferredRepositoryRemovals() {
+            guard try !taskManager.hasConversationTurnReservation(intent.taskID) else { continue }
+            do {
+                try await taskManager.withConversationTurnReservation(intent.taskID) {
+                    try await taskManager.withTaskOperationLock(intent.taskID) {
+                        guard FileManager.default.fileExists(atPath: intentURL.path) else { return }
+                        if try taskManager.isRepositoryAttached(intent.record, to: intent.taskID) {
+                            // The intent is written before detaching the task record. If the save failed or
+                            // the service exited before it, leave the still-attached worktree in place.
+                            try taskManager.clearDeferredRepositoryRemoval(at: intentURL)
+                            return
+                        }
+                        if try await self.worktreeService.hasChanges(intent.record) {
+                            StationAIDiagnostics.record("workspace.repository.deferred_removal_kept_dirty", fields: [
+                                "taskID": intent.taskID.uuidString,
+                                "repositoryPath": intent.record.repositoryPath,
+                                "worktreePath": intent.record.worktreePath
+                            ])
+                        } else if FileManager.default.fileExists(atPath: intent.record.worktreePath) {
+                            try await self.worktreeService.remove(intent.record)
+                            StationAIDiagnostics.record("workspace.repository.deferred_removal_succeeded", fields: [
+                                "taskID": intent.taskID.uuidString,
+                                "repositoryPath": intent.record.repositoryPath,
+                                "worktreePath": intent.record.worktreePath
+                            ])
+                        }
+                        try taskManager.clearDeferredRepositoryRemoval(at: intentURL)
+                    }
+                }
+            } catch {
+                StationAIDiagnostics.record("workspace.repository.deferred_removal_failed", fields: [
+                    "taskID": intent.taskID.uuidString,
+                    "repositoryPath": intent.record.repositoryPath,
+                    "worktreePath": intent.record.worktreePath,
+                    "error": error.localizedDescription
+                ])
+            }
+        }
     }
 
     func changes(for taskID: UUID) async throws -> WorkspaceChangeInventory {
@@ -2810,21 +3234,23 @@ struct ConversationUpdate: Codable {
     var text: String?
     var itemID: String?
     var phase: String?
-    var asyncQuestions: [CodexAsyncUserQuestion]?
-    var activity: CodexActivity?
+    var asyncQuestions: [ConversationAsyncQuestion]?
+    var activity: ConversationActivity?
     var diff: String?
-    var history: CodexThreadHistory?
+    var history: ConversationHistory?
     var message: String?
     var imageDataURLs: [String]?
-    var userInputRequest: CodexUserInputRequest?
+    var userInputRequest: ConversationUserInputRequest?
     var taskStatus: String?
 }
 
 @MainActor
-final class CodexConversationManager {
+final class ConversationManager {
     private let tasks: BoardTaskManager
-    private let client: CodexAppServerClient
+    private let clients: ConversationClients
+    private let settingsManager: WorkspaceSettingsManager
     private let preferences: UserDefaults
+    private var dispatchingQueuedMessages = false
     private static var dispatchingQueuedTaskIDs = Set<UUID>()
     private static var pendingQueuedTaskDispatchIDs = Set<UUID>()
     private var activeSendTaskIDs = Set<UUID>()
@@ -2834,61 +3260,208 @@ final class CodexConversationManager {
         return (try? tasks.hasConversationTurnReservation(taskID)) != true
     }
 
-    init(tasks: BoardTaskManager, client: CodexAppServerClient, preferences: UserDefaults = WorkspaceSettings.preferencesStore) {
+    init(tasks: BoardTaskManager, clients: ConversationClients, settingsManager: WorkspaceSettingsManager? = nil, preferences: UserDefaults = WorkspaceSettings.preferencesStore) {
         self.tasks = tasks
-        self.client = client
+        self.clients = clients
+        self.settingsManager = settingsManager ?? WorkspaceSettingsManager()
         self.preferences = preferences
         if let directory = try? tasks.conversationSteerMailboxDirectory() {
-            CodexAppServerClient.configureSteerMailbox(directory: directory)
+            ConversationSteerMailbox.configure(directory: directory)
         }
     }
 
-    func history(taskID: UUID, onActionRequest: @escaping () -> Void = {}) async throws -> CodexThreadHistory {
-        let task = try tasks.taskModel(taskID)
-        guard let threadID = task.codexThreadID else {
-            return CodexThreadHistory(messages: [], activities: [], diff: nil)
-        }
-        let historyRoots = task.workspaceRootPaths.isEmpty && task.status == .done
+    private var transcripts: ConversationTranscriptStore {
+        get throws { try tasks.conversationTranscriptStore() }
+    }
+
+    private func client(for task: BoardTask) -> ConversationProviderClient {
+        clients.client(for: task.conversationProvider)
+    }
+
+    private static func historyRoots(_ task: BoardTask) -> [String] {
+        task.workspaceRootPaths.isEmpty && task.status == .done
             ? task.repositoryWorktrees.map { $0.repositoryPath }
             : task.workspaceRootPaths
-        let workspace = try CodexWorkspaceContext(roots: historyRoots.map {
+    }
+
+    func history(taskID: UUID, onActionRequest: @escaping () -> Void = {}) async throws -> ConversationHistory {
+        let task = try tasks.taskModel(taskID)
+        let transcript = try transcripts.read(taskID)
+        let answered = try tasks.answeredAsyncQuestionIDs(taskID: taskID)
+        // Tasks that never left Codex keep reading their native Codex thread.
+        guard !transcript.isEmpty else {
+            let codex = try await codexHistory(task: task, onActionRequest: onActionRequest)
+                ?? ConversationHistory(messages: [], activities: [], diff: nil)
+            return ConversationHistory(messages: codex.messages, activities: codex.activities, diff: codex.diff, answeredAsyncQuestionIDs: answered)
+        }
+        // Codex can't list a thread before its first turn, so a mixed transcript
+        // reads Codex only once a Codex segment owns turns.
+        let usesCodex = task.codexThreadID != nil && transcript.segments.contains { $0.provider == .codex && !$0.codexTurnIDs.isEmpty }
+        let codex = usesCodex ? try await codexHistory(task: task, onActionRequest: onActionRequest) : nil
+        var history = Self.compose(transcript: transcript, codex: codex)
+        history.answeredAsyncQuestionIDs = answered
+        return history
+    }
+
+    private func codexHistory(task: BoardTask, onActionRequest: @escaping () -> Void) async throws -> ConversationHistory? {
+        guard let threadID = task.codexThreadID else { return nil }
+        let taskID = task.id
+        let codex = clients.codex
+        let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map {
             URL(fileURLWithPath: $0, isDirectory: true)
         })
-        StationAIDiagnostics.record("conversation.history.started", fields: client.diagnosticFields([
+        let settings = settingsManager
+        let repositoryRoot = settings.defaultParentFolderURL
+        StationAIDiagnostics.record("conversation.history.started", fields: codex.diagnosticFields([
             "taskID": taskID.uuidString,
             "threadID": threadID,
             "taskStatus": task.status.rawValue
         ]))
         do {
-            let history = try await client.loadThread(
+            let history = try await codex.loadThread(
                 id: threadID,
                 workspace: workspace,
-                developerInstructions: TaskProgressReportInstructions.make(taskID: taskID),
+                developerInstructions: TaskThreadDeveloperInstructions.make(
+                    taskID: taskID,
+                    repositories: task.repositoryWorktrees,
+                    contextFolders: task.contextFolderPaths,
+                    repositoryRootPath: repositoryRoot?.path
+                ),
                 onActionRequest: onActionRequest
             )
             let savedDurations = tasks.conversationActivityDurations(taskID: taskID)
-            let activities = history.activities.map { activity -> CodexActivity in
+            let activities = history.activities.map { activity -> ConversationActivity in
                 var activity = activity
                 if activity.durationMs == nil { activity.durationMs = savedDurations[activity.id] }
                 return activity
             }
-            StationAIDiagnostics.record("conversation.history.succeeded", fields: client.diagnosticFields([
+            StationAIDiagnostics.record("conversation.history.succeeded", fields: codex.diagnosticFields([
                 "taskID": taskID.uuidString,
                 "threadID": threadID,
                 "messageCount": String(history.messages.count),
                 "activityCount": String(history.activities.count)
             ]))
-            return CodexThreadHistory(messages: history.messages, activities: activities, diff: history.diff,
-                                      answeredAsyncQuestionIDs: try tasks.answeredAsyncQuestionIDs(taskID: taskID))
+            return ConversationHistory(messages: history.messages, activities: activities, diff: history.diff)
         } catch {
             var fields = StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
             fields["taskID"] = taskID.uuidString
             fields["threadID"] = threadID
             fields["taskStatus"] = task.status.rawValue
-            fields.merge(client.diagnosticFields()) { _, new in new }
+            fields.merge(codex.diagnosticFields()) { _, new in new }
             StationAIDiagnostics.record("conversation.history.failed", fields: fields)
             throw error
         }
+    }
+
+    /// Orders every visible element by provider segment, then by its position
+    /// within that provider's own timeline, and inserts a divider wherever the
+    /// provider changes.
+    static func compose(transcript: ConversationTranscript, codex: ConversationHistory?) -> ConversationHistory {
+        enum Element {
+            case message(ConversationMessage)
+            case compaction(ConversationActivity)
+        }
+        var elements: [(segment: Int, order: Int, element: Element)] = []
+        let segments = transcript.segments
+        let lastCodexSegment = segments.lastIndex { $0.provider == .codex } ?? -1
+        var codexSegmentByTurn: [String: Int] = [:]
+        for (index, segment) in segments.enumerated() where segment.provider == .codex {
+            for turnID in segment.codexTurnIDs where codexSegmentByTurn[turnID] == nil {
+                codexSegmentByTurn[turnID] = index
+            }
+        }
+        func codexSegment(_ turnID: String?) -> Int {
+            turnID.flatMap { codexSegmentByTurn[$0] } ?? lastCodexSegment
+        }
+        var codexTurnSegment: Int?
+        for (offset, message) in (codex?.messages ?? []).enumerated() {
+            let segment = message.turnID.map(codexSegment) ?? codexTurnSegment ?? lastCodexSegment
+            codexTurnSegment = segment
+            var attributed = message
+            attributed.provider = attributed.provider ?? .codex
+            elements.append((segment, message.timelineOrder ?? offset, .message(attributed)))
+        }
+        let codexActivities = codex?.activities ?? []
+        for activity in codexActivities where activity.isContextCompaction {
+            let order = activity.timelineOrder ?? Int.max
+            let precedingTurn = codex?.messages.last { ($0.timelineOrder ?? 0) < order }?.turnID
+            elements.append((codexSegment(activity.turnID ?? precedingTurn), order, .compaction(activity)))
+        }
+        var localOrder = 0
+        for turn in transcript.turns {
+            let segment = transcript.segmentIndex(of: turn.segmentID) ?? segments.count
+            for message in turn.messages {
+                elements.append((segment, localOrder, .message(message)))
+                localOrder += 1
+            }
+        }
+        elements.sort { ($0.segment, $0.order) < ($1.segment, $1.order) }
+
+        var messages: [ConversationMessage] = []
+        var compactions: [ConversationActivity] = []
+        var lastMessageBeforeSegment: [Int: String] = [:]
+        var lastMessageID: String?
+        var nextSegment = 0
+        for (order, item) in elements.enumerated() {
+            while nextSegment <= item.segment, nextSegment < segments.count {
+                lastMessageBeforeSegment[nextSegment] = lastMessageID
+                nextSegment += 1
+            }
+            switch item.element {
+            case .message(var message):
+                message.timelineOrder = order
+                messages.append(message)
+                lastMessageID = message.id
+            case .compaction(var activity):
+                activity.timelineOrder = order
+                compactions.append(activity)
+            }
+        }
+        while nextSegment < segments.count {
+            lastMessageBeforeSegment[nextSegment] = lastMessageID
+            nextSegment += 1
+        }
+        var boundaries: [ConversationProviderBoundary] = []
+        for index in segments.indices.dropFirst() where segments[index].provider != segments[index - 1].provider {
+            boundaries.append(ConversationProviderBoundary(
+                id: "provider-boundary-\(segments[index].id)",
+                provider: segments[index].provider,
+                afterMessageID: lastMessageBeforeSegment[index] ?? nil
+            ))
+        }
+
+        // Activity details follow the latest turn, as each provider reports them.
+        let activities: [ConversationActivity]
+        let diff: ConversationTurnDiff?
+        if segments.last?.provider == .claude {
+            let latestTurn = transcript.turns.last
+            let subagents = transcript.turns.dropLast().flatMap { $0.activities.filter(\.isSubagent) }
+            activities = subagents + (latestTurn?.activities ?? []) + compactions
+            diff = nil
+        } else {
+            activities = codexActivities.filter { !$0.isContextCompaction } + compactions
+            diff = codex?.diff
+        }
+        return ConversationHistory(messages: messages, activities: activities, diff: diff, providerBoundaries: boundaries)
+    }
+
+    /// Reads a subagent's work without resuming or changing its turn.
+    func subagentHistory(taskID: UUID, activity: ConversationActivity) async throws -> ConversationHistory {
+        let task = try tasks.taskModel(taskID)
+        guard let childID = activity.childThreadID else {
+            throw BridgeCommandError(code: "invalid_argument", message: "That activity is not a subagent.")
+        }
+        let isClaudeSubagent = try transcripts.read(taskID).turns.contains { turn in
+            turn.activities.contains { $0.childThreadID == childID }
+        }
+        guard isClaudeSubagent else {
+            let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
+            return try await clients.codex.inspectThreadReadOnly(id: childID, workspace: workspace)
+        }
+        // Claude Code reports a subagent's prompt summary and final report to its
+        // parent; StationAI shows those rather than its private sidechain.
+        let report = ConversationMessage(id: "\(childID)-report", role: .assistant, text: activity.detail, phase: "final_answer", provider: .claude)
+        return ConversationHistory(messages: [report], activities: [], diff: nil)
     }
 
     func searchArchive(query: String, codexHomePath: String? = nil) async throws -> [BoardTaskRecord] {
@@ -2915,10 +3488,20 @@ final class CodexConversationManager {
         let scanTask = Task.detached(priority: .userInitiated) {
             try Self.searchSessionFiles(query: normalizedQuery, taskByThread: taskByThread, roots: roots)
         }
-        let conversationIDs = try await withTaskCancellationHandler {
+        var conversationIDs = try await withTaskCancellationHandler {
             try await scanTask.value
         } onCancel: {
             scanTask.cancel()
+        }
+        // Claude turns live in StationAI's transcript store rather than a provider session file.
+        let store = try transcripts
+        let needle = normalizedQuery.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        for task in completed where !titleIDs.contains(task.id) && !conversationIDs.contains(task.id) {
+            try Task.checkCancellation()
+            let matches = try store.read(task.id).turns.contains { turn in
+                turn.messages.contains { $0.text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).contains(needle) }
+            }
+            if matches { conversationIDs.insert(task.id) }
         }
         let byID = Dictionary(uniqueKeysWithValues: completed.map { ($0.id, $0) })
         let titles = titleMatches.sorted { $0.createdAt > $1.createdAt }
@@ -2987,26 +3570,141 @@ final class CodexConversationManager {
         return []
     }
 
-    func models(taskID: UUID) async throws -> [CodexModelOption] {
-        StationAIDiagnostics.record("codex.models.read.started", fields: ["taskID": taskID.uuidString])
+    func models(taskID: UUID) async throws -> [ConversationModelOption] {
+        StationAIDiagnostics.record("conversation.models.read.started", fields: ["taskID": taskID.uuidString])
         let task = try tasks.taskModel(taskID)
-        let workspace = try CodexWorkspaceContext(roots: task.workspaceRootPaths.map {
+        let workspace = try ConversationWorkspaceContext(roots: task.workspaceRootPaths.map {
             URL(fileURLWithPath: $0, isDirectory: true)
         })
-        let models = try await client.availableModels(workspace: workspace)
-        StationAIDiagnostics.record("codex.models.read.succeeded", fields: [
+        let models = try await client(for: task).availableModels(workspace: workspace)
+        StationAIDiagnostics.record("conversation.models.read.succeeded", fields: [
             "taskID": taskID.uuidString,
+            "provider": task.conversationProvider.rawValue,
             "modelCount": String(models.count),
             "modelIDs": models.map(\.id).joined(separator: ",")
         ])
         return models
     }
 
+    // MARK: - Providers
+
+    /// Detected native capabilities, so switching can show what differs. StationAI
+    /// starts Codex without MCP servers, apps, or hooks; Claude Code uses its own
+    /// configuration.
+    func providerCapabilities(taskID: UUID) async throws -> [ConversationProviderCapabilities] {
+        let task = try tasks.taskModel(taskID)
+        let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
+        let codex = ConversationProviderCapabilities(
+            provider: .codex,
+            isAvailable: CodexAppServerClient.isInstalled,
+            supportsGoals: true,
+            notes: ["StationAI runs Codex without MCP servers, apps, or hooks.", "Goals are available."]
+        )
+        return [codex, await clients.claude.capabilities(workspace: workspace)]
+    }
+
+    /// Changes the provider that runs the task's next turn. A switch waits for the
+    /// current turn, pending questions, queued follow-ups, and background
+    /// subagents to settle, and records a boundary in the transcript.
+    func setProvider(taskID: UUID, provider: ConversationProvider) async throws -> BoardTaskRecord {
+        var task = try tasks.taskModel(taskID)
+        StationAIDiagnostics.record("conversation.provider.switch.started", fields: [
+            "taskID": taskID.uuidString, "from": task.conversationProvider.rawValue, "to": provider.rawValue
+        ])
+        guard task.status != .done else {
+            throw StationAIManagerError.invalidTransition("Done tasks are closed. Create a new task to use another provider.")
+        }
+        guard task.conversationProvider != provider else { return try tasks.get(taskID) }
+        guard task.hasConversation else {
+            return try await tasks.setConversationProvider(taskID, provider: provider)
+        }
+        let history = try await requireSettledConversation(task)
+        let transcript = try transcripts.read(taskID)
+        var codexTurnIDs: [String] = []
+        if history.activities.contains(where: { $0.isSubagent && $0.isActive }) {
+            throw Self.switchBlocked("Subagents are still running. Wait for them to finish before switching providers.")
+        }
+        if transcript.isEmpty, task.conversationProvider == .codex {
+            // A Codex-only task's turns all precede its first boundary. Tracked
+            // segments claim their Codex turns as each turn completes.
+            codexTurnIDs = Self.orderedTurnIDs(history.messages)
+        }
+        let claimed = Set(transcript.segments.flatMap(\.codexTurnIDs))
+        try transcripts.mutate(taskID) { transcript in
+            if transcript.segments.isEmpty {
+                transcript.segments.append(.init(id: UUID().uuidString, provider: task.conversationProvider, startedAt: .now, handoffDelivered: true))
+            }
+            if var last = transcript.segments.last, last.provider == .codex {
+                last.codexTurnIDs += codexTurnIDs.filter { !claimed.contains($0) && !last.codexTurnIDs.contains($0) }
+                transcript.segments[transcript.segments.count - 1] = last
+            }
+            // A segment with no turns can be replaced instead of leaving an empty boundary.
+            if let last = transcript.segments.last, transcript.turns(in: last).isEmpty, last.codexTurnIDs.isEmpty, transcript.segments.count > 1 {
+                transcript.segments.removeLast()
+            }
+            if transcript.segments.last?.provider != provider {
+                transcript.segments.append(.init(id: UUID().uuidString, provider: provider, startedAt: .now))
+            }
+        }
+        task = try tasks.taskModel(taskID)
+        let record = try await tasks.setConversationProvider(taskID, provider: provider)
+        StationAIDiagnostics.record("conversation.provider.switch.succeeded", fields: [
+            "taskID": taskID.uuidString, "provider": provider.rawValue,
+            "segmentCount": String((try? transcripts.read(taskID).segments.count) ?? 0)
+        ])
+        return record
+    }
+
+    /// Returns the visible history once nothing is still running or waiting.
+    private func requireSettledConversation(_ task: BoardTask) async throws -> ConversationHistory {
+        let client = client(for: task)
+        if try tasks.hasConversationTurnReservation(task.id) || activeSendTaskIDs.contains(task.id) {
+            throw Self.switchBlocked("Wait for the current turn to finish before switching providers.")
+        }
+        if let conversationID = task.activeConversationID,
+           client.isTurnActive(threadID: conversationID) || client.isTurnActiveInProcess(threadID: conversationID)
+            || client.activeTurnOwnerProcessID(threadID: conversationID) != nil {
+            throw Self.switchBlocked("Wait for the current turn to finish before switching providers.")
+        }
+        if task.pendingSubmittedPrompt != nil {
+            throw Self.switchBlocked("Wait for the submitted prompt to start before switching providers.")
+        }
+        if !(try tasks.queuedConversationMessages(taskID: task.id)).isEmpty {
+            throw Self.switchBlocked("Send or remove the queued follow-ups before switching providers.")
+        }
+        let history = try await self.history(taskID: task.id)
+        let answered = Set(history.answeredAsyncQuestionIDs)
+        if history.messages.contains(where: { $0.asyncQuestions != nil && !answered.contains($0.id) }),
+           task.status == .waitingResponse {
+            throw Self.switchBlocked("Answer the pending question before switching providers.")
+        }
+        return history
+    }
+
+    private static func switchBlocked(_ message: String) -> BridgeCommandError {
+        StationAIDiagnostics.record("conversation.provider.switch.blocked", fields: ["reason": message])
+        return BridgeCommandError(code: "invalid_transition", message: message)
+    }
+
+    private static func orderedTurnIDs(_ messages: [ConversationMessage]) -> [String] {
+        var seen = Set<String>()
+        return messages.compactMap(\.turnID).filter { seen.insert($0).inserted }
+    }
+
+    // MARK: - Goals (Codex only)
+
     func goal(taskID: UUID, objective: String? = nil, action: String = "get", observeRuntime: Bool = false) async throws -> CodexThreadGoal? {
         var task = try tasks.taskModel(taskID)
         guard ["get", "set", "pause", "resume", "clear"].contains(action) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Goal action must be get, set, pause, resume, or clear.")
         }
+        guard task.conversationProvider.supportsGoals else {
+            guard action == "get" else {
+                throw BridgeCommandError(code: "invalid_transition", message: "Goals are available only in Codex conversations. Switch this task to Codex to use a Goal.")
+            }
+            return nil
+        }
+        let client = clients.codex
         guard action == "get" || task.status != .done else {
             throw StationAIManagerError.invalidTransition("Done tasks are closed. Create a new task to change its goal.")
         }
@@ -3020,16 +3718,21 @@ final class CodexConversationManager {
         if task.codexThreadID == nil {
             guard action == "set" else { return nil }
             let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
-            let workspace = try CodexWorkspaceContext(roots: roots)
-            let id = try await client.startThread(workspace: workspace, developerInstructions: TaskProgressReportInstructions.make(taskID: taskID))
-            _ = try await tasks.persistCodexThreadID(taskID, threadID: id)
+            let workspace = try ConversationWorkspaceContext(roots: roots)
+            let id = try await client.startThread(
+                workspace: workspace,
+                developerInstructions: TaskThreadDeveloperInstructions.make(
+                    taskID: taskID,
+                    repositories: task.repositoryWorktrees,
+                    contextFolders: task.contextFolderPaths,
+                    repositoryRootPath: settingsManager.defaultParentFolderURL?.path
+                )
+            )
+            _ = try await tasks.persistConversationID(taskID, provider: .codex, id: id)
             task = try tasks.taskModel(taskID)
         }
         guard let threadID = task.codexThreadID else { return nil }
-        let rootPaths = task.workspaceRootPaths.isEmpty && task.status == .done
-            ? task.repositoryWorktrees.map(\.repositoryPath)
-            : task.workspaceRootPaths
-        let workspace = try CodexWorkspaceContext(roots: rootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) })
+        let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
         switch action {
         case "get": return try await client.getGoal(threadID: threadID, workspace: workspace)
         case "set":
@@ -3052,20 +3755,23 @@ final class CodexConversationManager {
         }
     }
 
+    // MARK: - Turn control
+
     func interrupt(taskID: UUID) async throws -> Bool {
         StationAIDiagnostics.record("conversation.interrupt.started", fields: ["taskID": taskID.uuidString])
         let task = try tasks.taskModel(taskID)
-        guard let threadID = task.codexThreadID else {
+        guard let threadID = task.activeConversationID else {
             StationAIDiagnostics.record("conversation.interrupt.skipped", fields: [
                 "taskID": taskID.uuidString,
                 "reason": "no_thread"
             ])
             return false
         }
-        let interrupted = try await client.interruptActiveTurn(threadID: threadID)
+        let interrupted = try await client(for: task).interruptActiveTurn(threadID: threadID)
         StationAIDiagnostics.record("conversation.interrupt.finished", fields: [
             "taskID": taskID.uuidString,
             "threadID": threadID,
+            "provider": task.conversationProvider.rawValue,
             "interrupted": String(interrupted)
         ])
         return interrupted
@@ -3078,19 +3784,34 @@ final class CodexConversationManager {
             throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
         }
         let task = try tasks.taskModel(taskID)
-        guard let threadID = task.codexThreadID else { return false }
-        return try await client.steerActiveTurn(threadID: threadID, text: normalizedText, imageDataURLs: imageDataURLs)
+        guard let threadID = task.activeConversationID else { return false }
+        let client = client(for: task)
+        // A turn owned by this process records its own steered input; a turn owned
+        // by another process records it when that owner services the mailbox.
+        let ownsTurn = client.isTurnActive(threadID: threadID)
+        let accepted = try await client.steerActiveTurn(threadID: threadID, text: normalizedText, imageDataURLs: imageDataURLs)
+        if accepted, ownsTurn, task.conversationProvider == .claude {
+            recordClaudeMessage(taskID: taskID, ConversationMessage(
+                id: UUID().uuidString.lowercased(), role: .user, text: normalizedText, imageDataURLs: imageDataURLs, provider: .claude
+            ))
+        }
+        return accepted
     }
 
-    func answerAsyncQuestion(taskID: UUID, question: CodexChatMessage, answers: [String]) async throws -> (text: String, queued: Bool, history: CodexThreadHistory?) {
+    func answerUserInput(taskID: UUID, requestID: String, threadID: String, answers: [String: [String]]) throws -> Bool {
+        client(for: try tasks.taskModel(taskID)).answerUserInput(requestID: requestID, threadID: threadID, answers: answers)
+    }
+
+    func answerAsyncQuestion(taskID: UUID, question: ConversationMessage, answers: [String]) async throws -> (text: String, queued: Bool, history: ConversationHistory?) {
+        let providerName = try tasks.taskModel(taskID).conversationProvider.displayName
         guard let questions = question.asyncQuestions, !questions.isEmpty, questions.count == answers.count else {
-            throw BridgeCommandError(code: "invalid_argument", message: "Supply one answer for every question in the Codex item.")
+            throw BridgeCommandError(code: "invalid_argument", message: "Supply one answer for every question in the \(providerName) item.")
         }
         guard !(try tasks.answeredAsyncQuestionIDs(taskID: taskID)).contains(question.id) else {
-            throw BridgeCommandError(code: "invalid_transition", message: "This Codex question has already been answered.")
+            throw BridgeCommandError(code: "invalid_transition", message: "This \(providerName) question has already been answered.")
         }
         guard try !queuedMessages(taskID: taskID).contains(where: { $0.asyncQuestionItemID == question.id }) else {
-            throw BridgeCommandError(code: "invalid_transition", message: "An answer to this Codex question is already pending.")
+            throw BridgeCommandError(code: "invalid_transition", message: "An answer to this \(providerName) question is already pending.")
         }
         let normalized = answers.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         guard normalized.allSatisfy({ !$0.isEmpty }) else {
@@ -3129,14 +3850,14 @@ final class CodexConversationManager {
         imageDataURLs: [String] = [],
         asyncQuestionItemID: String? = nil,
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in },
-        onUserInput: @escaping (CodexUserInputRequest) async -> Void = { _ in }
+        onUserInput: @escaping (ConversationUserInputRequest) async -> Void = { _ in }
     ) async throws -> QueuedConversationMessage {
         let item = try queueMessage(taskID: taskID, text: text, imageDataURLs: imageDataURLs, asyncQuestionItemID: asyncQuestionItemID)
         if shouldDrainMissedSteerImmediately(taskID: taskID) {
             await dispatchQueuedMessages(
                 taskID: taskID,
                 mode: .code,
-                modelID: CodexAppServerClient.modelID,
+                modelID: nil,
                 onlyMessageID: item.id,
                 onUpdate: onUpdate,
                 onUserInput: onUserInput
@@ -3168,7 +3889,7 @@ final class CodexConversationManager {
             else {
                 try tasks.requeueMissedSteer(taskID: taskID, messageID: messageID)
                 if shouldDrainMissedSteerImmediately(taskID: taskID) {
-                    await dispatchQueuedMessages(taskID: taskID, mode: .code, modelID: CodexAppServerClient.modelID, onlyMessageID: messageID, onUpdate: { _ in }, onUserInput: { _ in })
+                    await dispatchQueuedMessages(taskID: taskID, mode: .code, modelID: nil, onlyMessageID: messageID, onUpdate: { _ in }, onUserInput: { _ in })
                 } else if Self.dispatchingQueuedTaskIDs.contains(taskID) {
                     Self.pendingQueuedTaskDispatchIDs.insert(taskID)
                 }
@@ -3184,30 +3905,34 @@ final class CodexConversationManager {
         taskID: UUID,
         messageID: UUID,
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in },
-        onUserInput: @escaping (CodexUserInputRequest) async -> Void = { _ in }
+        onUserInput: @escaping (ConversationUserInputRequest) async -> Void = { _ in }
     ) async throws -> Bool {
         try tasks.retryQueuedMessage(taskID: taskID, messageID: messageID)
-        await dispatchQueuedMessages(taskID: taskID, mode: .code, modelID: CodexAppServerClient.modelID, onlyMessageID: messageID, onUpdate: onUpdate, onUserInput: onUserInput)
+        await dispatchQueuedMessages(taskID: taskID, mode: .code, modelID: nil, onlyMessageID: messageID, onUpdate: onUpdate, onUserInput: onUserInput)
         return try !tasks.queuedConversationMessages(taskID: taskID).contains { $0.id == messageID }
     }
 
+    /// Sends a turn with the task's current provider. A nil model uses that
+    /// provider's default, so queued and resumed turns follow a provider switch.
     func send(
         taskID: UUID,
         text: String,
         imageDataURLs: [String] = [],
-        mode: CodexConversationMode = .code,
-        modelID: String = CodexAppServerClient.modelID,
+        mode: ConversationMode = .code,
+        modelID: String? = nil,
         userInputAnswers: [String: [String]] = [:],
         retainQueuedMessagesOnFailure: Bool = true,
+        statusBeforeSubmission: TaskStatus? = nil,
         onTurnStarting: (() -> Void)? = nil,
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in },
-        onUserInput: @escaping (CodexUserInputRequest) async -> Void = { _ in }
-    ) async throws -> CodexThreadHistory {
-        client.beginConversationOperation()
-        defer { client.finishConversationOperation() }
+        onUserInput: @escaping (ConversationUserInputRequest) async -> Void = { _ in }
+    ) async throws -> ConversationHistory {
+        let operationClient = client(for: try tasks.taskModel(taskID))
+        operationClient.beginConversationOperation()
+        defer { operationClient.finishConversationOperation() }
         activeSendTaskIDs.insert(taskID)
         defer { activeSendTaskIDs.remove(taskID) }
-        let history: CodexThreadHistory
+        let history: ConversationHistory
         do {
             history = try await tasks.withConversationTurnReservation(taskID) {
                 do {
@@ -3216,8 +3941,9 @@ final class CodexConversationManager {
                         text: text,
                         imageDataURLs: imageDataURLs,
                         mode: mode,
-                        modelID: modelID,
+                        requestedModelID: modelID,
                         userInputAnswers: userInputAnswers,
+                        statusBeforeSubmission: statusBeforeSubmission,
                         onTurnStarting: onTurnStarting,
                         onUpdate: onUpdate,
                         onUserInput: onUserInput
@@ -3230,7 +3956,7 @@ final class CodexConversationManager {
                 }
             }
         } catch {
-            if retainQueuedMessagesOnFailure, let threadID = try? tasks.taskModel(taskID).codexThreadID {
+            if retainQueuedMessagesOnFailure, let threadID = try? tasks.taskModel(taskID).activeConversationID {
                 try? tasks.retainQueuedMessagesForUserAction(taskID: taskID, threadID: threadID)
                 onUpdate(ConversationUpdate(type: "queue_changed"))
             }
@@ -3244,15 +3970,15 @@ final class CodexConversationManager {
 
     private func dispatchQueuedMessages(
         taskID: UUID,
-        mode: CodexConversationMode,
-        modelID: String,
+        mode: ConversationMode,
+        modelID: String?,
         onlyMessageID: UUID? = nil,
         onUpdate: @escaping (ConversationUpdate) -> Void,
-        onUserInput: @escaping (CodexUserInputRequest) async -> Void
+        onUserInput: @escaping (ConversationUserInputRequest) async -> Void
     ) async {
         let threadID: String
         do {
-            guard let value = try tasks.taskModel(taskID).codexThreadID else { return }
+            guard let value = try tasks.taskModel(taskID).activeConversationID else { return }
             threadID = value
         } catch { return }
         guard Self.dispatchingQueuedTaskIDs.insert(taskID).inserted else {
@@ -3301,32 +4027,126 @@ final class CodexConversationManager {
         }
     }
 
+    // MARK: - Transcript recording
+
+    /// Appends or updates a visible element of the current Claude turn. Writes
+    /// are incremental so a crash mid-turn keeps everything already shown.
+    private func recordClaudeMessage(taskID: UUID, turnID: String? = nil, _ message: ConversationMessage) {
+        do {
+            try transcripts.mutate(taskID) { transcript in
+                guard let index = turnID.flatMap({ id in transcript.turns.lastIndex { $0.id == id } }) ?? transcript.turns.indices.last else { return }
+                var message = message
+                message.turnID = transcript.turns[index].id
+                message.provider = .claude
+                if let existing = transcript.turns[index].messages.firstIndex(where: { $0.id == message.id }) {
+                    transcript.turns[index].messages[existing] = message
+                } else {
+                    transcript.turns[index].messages.append(message)
+                }
+            }
+        } catch {
+            var fields = StationAIDiagnostics.errorFields(error)
+            fields["taskID"] = taskID.uuidString
+            StationAIDiagnostics.record("conversation.transcript.write_failed", fields: fields)
+        }
+    }
+
+    private func recordClaudeActivity(taskID: UUID, turnID: String, _ activity: ConversationActivity) {
+        do {
+            try transcripts.mutate(taskID) { transcript in
+                guard let index = transcript.turns.lastIndex(where: { $0.id == turnID }) else { return }
+                var activity = activity
+                activity.turnID = turnID
+                if let existing = transcript.turns[index].activities.firstIndex(where: { $0.id == activity.id }) {
+                    transcript.turns[index].activities[existing] = activity
+                } else {
+                    transcript.turns[index].activities.append(activity)
+                }
+            }
+        } catch {
+            var fields = StationAIDiagnostics.errorFields(error)
+            fields["taskID"] = taskID.uuidString
+            StationAIDiagnostics.record("conversation.transcript.write_failed", fields: fields)
+        }
+    }
+
+    /// Assigns Codex turns that ran during a segment to it, so a mixed transcript
+    /// keeps them in order after later switches.
+    private func claimCodexTurns(taskID: UUID, segmentID: String, _ messages: [ConversationMessage]) {
+        let turnIDs = Self.orderedTurnIDs(messages)
+        do {
+            try transcripts.mutate(taskID) { transcript in
+                guard let index = transcript.segments.firstIndex(where: { $0.id == segmentID }) else { return }
+                let claimed = Set(transcript.segments.flatMap(\.codexTurnIDs))
+                transcript.segments[index].codexTurnIDs += turnIDs.filter { !claimed.contains($0) }
+            }
+        } catch {
+            var fields = StationAIDiagnostics.errorFields(error)
+            fields["taskID"] = taskID.uuidString
+            StationAIDiagnostics.record("conversation.transcript.write_failed", fields: fields)
+        }
+    }
+
+    /// Makes the task's provider the current segment and returns it with the
+    /// handoff context its first prompt still needs, if any.
+    private func prepareSegment(task: BoardTask) async throws -> (segmentID: String, handoff: String?)? {
+        let provider = task.conversationProvider
+        var transcript = try transcripts.read(task.id)
+        // Codex-only tasks keep their native history without a transcript file.
+        guard provider == .claude || !transcript.isEmpty else { return nil }
+        if transcript.segments.last?.provider != provider {
+            transcript = try transcripts.mutate(task.id) { transcript in
+                if transcript.segments.last?.provider != provider {
+                    let isFirst = transcript.segments.isEmpty && task.codexThreadID == nil
+                    transcript.segments.append(.init(id: UUID().uuidString, provider: provider, startedAt: .now, handoffDelivered: isFirst))
+                }
+                return transcript
+            }
+        }
+        guard let segment = transcript.segments.last else { return nil }
+        guard !segment.handoffDelivered else { return (segment.id, nil) }
+        let history = try await history(taskID: task.id)
+        let current = transcript.segments.count - 1
+        let previousOwnSegment = transcript.segments[..<current].lastIndex { $0.provider == provider }
+        let unseenStart = previousOwnSegment.map { index in
+            // Everything after this provider's last message is new to it.
+            let ownTurnIDs = Set(transcript.turns(in: transcript.segments[index]).map(\.id) + transcript.segments[index].codexTurnIDs)
+            return (history.messages.lastIndex { $0.turnID.map(ownTurnIDs.contains) == true } ?? -1) + 1
+        } ?? 0
+        let unseen = history.messages.dropFirst(unseenStart).filter { $0.provider != provider }
+        return (segment.id, ConversationHandoff.context(for: provider, messages: Array(unseen)))
+    }
+
     private func sendReserved(
         taskID: UUID,
         text: String,
         imageDataURLs: [String],
-        mode: CodexConversationMode,
-        modelID: String,
+        mode: ConversationMode,
+        requestedModelID: String?,
         userInputAnswers: [String: [String]],
+        statusBeforeSubmission: TaskStatus?,
         onTurnStarting: (() -> Void)?,
         onUpdate: @escaping (ConversationUpdate) -> Void,
-        onUserInput: @escaping (CodexUserInputRequest) async -> Void
-    ) async throws -> CodexThreadHistory {
+        onUserInput: @escaping (ConversationUserInputRequest) async -> Void
+    ) async throws -> ConversationHistory {
         let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedText.isEmpty || !imageDataURLs.isEmpty else { throw StationAIManagerError.invalidMessage }
         guard imageDataURLs.count <= 8, imageDataURLs.allSatisfy(Self.isValidImageDataURL) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
         }
-        guard Self.isValidModelID(modelID) else {
-            throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
-        }
         try tasks.prepareConversationTurnOutcome(taskID)
         defer { tasks.clearConversationTurnOutcome(taskID) }
         var task = try tasks.taskModel(taskID)
-        var persistedThreadID = task.codexThreadID
+        let provider = task.conversationProvider
+        let client = clients.client(for: provider)
+        let modelID = requestedModelID ?? provider.defaultModelID
+        guard Self.isValidModelID(modelID) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
+        }
+        var persistedThreadID = task.activeConversationID
         StationAIDiagnostics.record("conversation.send.started", fields: client.diagnosticFields([
             "taskID": taskID.uuidString,
-            "threadID": task.codexThreadID ?? "new",
+            "threadID": task.activeConversationID ?? "new",
             "taskStatus": task.status.rawValue,
             "mode": mode.rawValue
         ]))
@@ -3338,113 +4158,163 @@ final class CodexConversationManager {
         guard task.status != .done else {
             throw StationAIManagerError.invalidTransition("Done tasks are closed. Create a new task for follow-up work.")
         }
+        let repositoryRoot = try settingsManager.requireRepositoryRootFolder()
         let shouldGenerateTitle = !normalizedText.isEmpty && ["Untitled task", "Generating title…"].contains(task.title)
+        // A caller that already saved the submitted prompt (the composer does,
+        // so it survives navigation) supplies the status it replaced.
+        let priorStatus = statusBeforeSubmission ?? task.status
+        let priorStatusMessage = task.statusMessage
         _ = try await tasks.savePrompt(taskID, prompt: normalizedText, status: .inProgress, submitted: true)
-        let titleMustPrecedeAutoWorktree = task.repositoryWorktrees.contains {
-            $0.isPending && $0.branch == "auto"
-        }
-        let resolveTitleBeforeWorktree = shouldGenerateTitle && titleMustPrecedeAutoWorktree
-        if resolveTitleBeforeWorktree {
-            let reserved = try await tasks.renameIfTitleMatches(
-                taskID,
-                expectedTitle: task.title,
-                title: "Generating title…"
-            )
-            if reserved != nil {
-                let titleRoots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
-                let titleWorkspace = try CodexWorkspaceContext(roots: titleRoots)
-                let titleClient = CodexAppServerClient(
-                    codexExecutableOverride: client.executableOverrideForTitleGeneration
-                )
-                try await generateAndApplyTitle(
-                    taskID: taskID,
-                    prompt: normalizedText,
-                    workspace: titleWorkspace,
-                    client: titleClient
-                )
-            }
-            task = try tasks.taskModel(taskID)
-            if ["Untitled task", "Generating title…"].contains(task.title) {
-                throw BridgeCommandError(
-                    code: "invalid_transition",
-                    message: "The task title changed while it was being prepared. Try sending again."
-                )
-            }
-        }
-        task = try await tasks.prepareRepositoryWorktrees(taskID, fallbackPrompt: normalizedText)
-        if !normalizedText.isEmpty {
-            _ = try await tasks.savePrompt(taskID, prompt: normalizedText, status: .inProgress, submitted: true)
-        }
-        let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
-        let workspace = try CodexWorkspaceContext(roots: roots)
-        _ = try await tasks.clearProgressReport(taskID)
+        let resolveTitleBeforeWorktree: Bool
+        let workspace: ConversationWorkspaceContext
         let titleGeneration: Task<Void, Never>?
-        if shouldGenerateTitle && !resolveTitleBeforeWorktree {
-            let latest = try tasks.taskModel(taskID)
-            let titleReserved = ["Untitled task", "Generating title…"].contains(latest.title)
-                ? try await tasks.renameIfTitleMatches(
+        do {
+            let titleMustPrecedeAutoWorktree = task.repositoryWorktrees.contains {
+                $0.isPending && $0.branch == "auto"
+            }
+            resolveTitleBeforeWorktree = shouldGenerateTitle && titleMustPrecedeAutoWorktree
+            if resolveTitleBeforeWorktree {
+                let reserved = try await tasks.renameIfTitleMatches(
                     taskID,
-                    expectedTitle: latest.title,
+                    expectedTitle: task.title,
                     title: "Generating title…"
-                ) != nil
-                : false
-            if titleReserved {
-                titleGeneration = Task { @MainActor in
-                    let titleClient = CodexAppServerClient(
-                        codexExecutableOverride: self.client.executableOverrideForTitleGeneration
+                )
+                if reserved != nil {
+                    let titleRoots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
+                    let titleWorkspace = try ConversationWorkspaceContext(roots: titleRoots)
+                    try await generateAndApplyTitle(
+                        taskID: taskID,
+                        prompt: normalizedText,
+                        workspace: titleWorkspace,
+                        clients: clients.helperClients(preferring: provider)
                     )
-                    do {
-                        try await self.generateAndApplyTitle(
-                            taskID: taskID,
-                            prompt: normalizedText,
-                            workspace: workspace,
-                            client: titleClient
-                        )
-                    } catch {
-                        // Background title generation has always been best-effort;
-                        // the helper records persistence failures before returning.
+                }
+                task = try tasks.taskModel(taskID)
+                if ["Untitled task", "Generating title…"].contains(task.title) {
+                    throw BridgeCommandError(
+                        code: "invalid_transition",
+                        message: "The task title changed while it was being prepared. Try sending again."
+                    )
+                }
+            }
+            task = try await tasks.prepareRepositoryWorktrees(taskID, fallbackPrompt: normalizedText)
+            if !normalizedText.isEmpty {
+                _ = try await tasks.savePrompt(taskID, prompt: normalizedText, status: .inProgress, submitted: true)
+            }
+            let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            workspace = try ConversationWorkspaceContext(roots: roots)
+            _ = try await tasks.clearProgressReport(taskID)
+            if shouldGenerateTitle && !resolveTitleBeforeWorktree {
+                let latest = try tasks.taskModel(taskID)
+                let titleReserved = ["Untitled task", "Generating title…"].contains(latest.title)
+                    ? try await tasks.renameIfTitleMatches(
+                        taskID,
+                        expectedTitle: latest.title,
+                        title: "Generating title…"
+                    ) != nil
+                    : false
+                if titleReserved {
+                    let titleClients = clients.helperClients(preferring: provider)
+                    titleGeneration = Task { @MainActor in
+                        do {
+                            try await self.generateAndApplyTitle(
+                                taskID: taskID,
+                                prompt: normalizedText,
+                                workspace: workspace,
+                                clients: titleClients
+                            )
+                        } catch {
+                            // Background title generation has always been best-effort;
+                            // the helper records persistence failures before returning.
+                        }
                     }
+                } else {
+                    titleGeneration = nil
                 }
             } else {
                 titleGeneration = nil
             }
-        } else {
-            titleGeneration = nil
+        } catch {
+            // No turn started: a rejected branch claim, title race, or missing
+            // root must not leave the task In Progress. The prompt stays saved
+            // as a draft.
+            _ = try? await tasks.setLifecycleStatus(taskID, to: priorStatus, message: priorStatusMessage)
+            throw error
         }
         let started = try await tasks.setLifecycleStatus(taskID, to: .inProgress)
         onUpdate(ConversationUpdate(type: "started", taskStatus: started.status))
         var phase = "thread-start"
+        let approvalNotice = "\(provider.displayName) requested an approval. StationAI denied it because approval prompts are disabled."
         do {
+            // Read the visible history for the handoff before this provider gets a
+            // new native thread: Codex can't list a thread that has no turns yet.
+            phase = "transcript-segment"
+            let segment = try await prepareSegment(task: try tasks.taskModel(taskID))
+            phase = "thread-start"
             let threadID: String
-            if let existing = task.codexThreadID {
+            if let existing = task.activeConversationID {
                 threadID = existing
             } else {
                 threadID = try await client.startThread(
                     workspace: workspace,
                     modelID: modelID,
-                    developerInstructions: TaskProgressReportInstructions.make(taskID: taskID)
+                    developerInstructions: TaskThreadDeveloperInstructions.make(
+                        taskID: taskID,
+                        repositories: task.repositoryWorktrees,
+                        contextFolders: task.contextFolderPaths,
+                        repositoryRootPath: repositoryRoot.path
+                    )
                 )
                 phase = "thread-persistence"
-                _ = try await tasks.persistCodexThreadID(taskID, threadID: threadID)
+                _ = try await tasks.persistConversationID(taskID, provider: provider, id: threadID)
                 persistedThreadID = threadID
             }
+            let claudeTurnID = provider == .claude ? UUID().uuidString.lowercased() : nil
+            if let claudeTurnID, let segment {
+                try transcripts.mutate(taskID) { transcript in
+                    transcript.turns.append(.init(id: claudeTurnID, segmentID: segment.segmentID, messages: [ConversationMessage(
+                        id: "\(claudeTurnID)-user", role: .user, text: normalizedText, imageDataURLs: imageDataURLs,
+                        turnID: claudeTurnID, provider: .claude
+                    )]))
+                }
+            }
+            var finalMessageCount = 0
+            var leakedOutcome: String?
             if onTurnStarting != nil {
                 client.markTurnStarting(threadID: threadID)
                 onTurnStarting?()
             }
-            phase = "codex-turn"
+            phase = "\(provider.rawValue)-turn"
             try tasks.activateConversationTurnOutcome(taskID)
             try await client.sendMessage(
-                normalizedText,
+                ConversationHandoff.prompt(normalizedText, context: segment?.handoff),
                 imageDataURLs: imageDataURLs,
                 mode: mode,
                 modelID: modelID,
                 threadID: threadID,
                 workspace: workspace,
-                developerInstructions: TaskProgressReportInstructions.make(taskID: taskID),
+                developerInstructions: TaskThreadDeveloperInstructions.make(
+                    taskID: taskID,
+                    repositories: task.repositoryWorktrees,
+                    contextFolders: task.contextFolderPaths,
+                    repositoryRootPath: repositoryRoot.path
+                ),
                 onDelta: { delta in onUpdate(ConversationUpdate(type: "text_delta", text: delta)) },
-                onFinalMessage: { message in onUpdate(ConversationUpdate(type: "assistant_final", text: message)) },
+                onFinalMessage: { answer in
+                    let split = LeakedTurnOutcome.split(answer)
+                    if split.taskID == taskID { leakedOutcome = split.outcome }
+                    let message = split.text
+                    // An answer that was only the echo still replaces the streamed text.
+                    if let claudeTurnID, !message.isEmpty {
+                        finalMessageCount += 1
+                        self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, ConversationMessage(
+                            id: "\(claudeTurnID)-final-\(finalMessageCount)", role: .assistant, text: message, phase: "final_answer"
+                        ))
+                    }
+                    onUpdate(ConversationUpdate(type: "assistant_final", text: message))
+                },
                 onActivity: { activity in
+                    if let claudeTurnID { self.recordClaudeActivity(taskID: taskID, turnID: claudeTurnID, activity) }
                     if let durationMs = activity.durationMs {
                         Task { @MainActor in
                             try? await self.tasks.recordConversationActivityDuration(
@@ -3458,13 +4328,13 @@ final class CodexConversationManager {
                 },
                 onDiff: { diff in onUpdate(ConversationUpdate(type: "diff", diff: diff.unifiedDiff)) },
                 onHistory: { history in
+                    if provider == .codex, let segment { self.claimCodexTurns(taskID: taskID, segmentID: segment.segmentID, history.messages) }
                     var history = history
                     history.answeredAsyncQuestionIDs = (try? self.tasks.answeredAsyncQuestionIDs(taskID: taskID)) ?? []
                     onUpdate(ConversationUpdate(type: "history", history: history))
                 },
                 onActionRequest: {
-                    let message = "Codex requested an approval. StationAI denied it because approval prompts are disabled."
-                    onUpdate(ConversationUpdate(type: "action_notice", message: message))
+                    onUpdate(ConversationUpdate(type: "action_notice", message: approvalNotice))
                 },
                 onUserInput: { request async in
                     let status: BoardTaskRecord?
@@ -3479,24 +4349,30 @@ final class CodexConversationManager {
                         taskStatus: status?.status
                     ))
                     if !userInputAnswers.isEmpty {
-                        let answersAccepted = self.client.answerUserInput(
+                        let answersAccepted = client.answerUserInput(
                             requestID: request.id,
                             threadID: request.threadID,
                             answers: userInputAnswers
                         )
                         if answersAccepted, request.isBlocking {
-                            let resumed = try? await self.tasks.setLifecycleStatus(taskID, to: .inProgress)
+                            let resumed = try? await self.tasks.resumeWaitingResponseAfterUserInput(taskID)
                             onUpdate(ConversationUpdate(type: "task_status", taskStatus: resumed?.status))
                         } else if !answersAccepted {
-                            onUpdate(ConversationUpdate(type: "action_notice", message: "The supplied answers didn't match Codex's questions."))
+                            onUpdate(ConversationUpdate(type: "action_notice", message: "The supplied answers didn't match \(provider.displayName)'s questions."))
                         }
                     }
                     await onUserInput(request)
                 },
                 onSteerMessage: { message, images in
+                    if claudeTurnID != nil {
+                        self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, ConversationMessage(
+                            id: UUID().uuidString.lowercased(), role: .user, text: message, imageDataURLs: images
+                        ))
+                    }
                     onUpdate(ConversationUpdate(type: "steered_message", message: message, imageDataURLs: images))
                 },
                 onProgressMessage: { message in
+                    if let claudeTurnID { self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, message) }
                     onUpdate(ConversationUpdate(
                         type: "assistant_progress",
                         text: message.text,
@@ -3506,6 +4382,12 @@ final class CodexConversationManager {
                     ))
                 }
             )
+            if let segment, segment.handoff != nil || provider == .claude {
+                try transcripts.mutate(taskID) { transcript in
+                    guard let index = transcript.segments.firstIndex(where: { $0.id == segment.segmentID }) else { return }
+                    transcript.segments[index].handoffDelivered = true
+                }
+            }
             for (activityID, durationMs) in client.lastTurnActivityDurations {
                 try await tasks.recordConversationActivityDuration(
                     taskID: taskID,
@@ -3515,7 +4397,7 @@ final class CodexConversationManager {
             }
             phase = "worktree-finalization"
             phase = "review-status-persistence"
-            let reportedOutcome = try await tasks.finishConversationTurnOutcome(taskID)
+            let reportedOutcome = try await tasks.finishConversationTurnOutcome(taskID) ?? leakedOutcome
             let finalStatus: TaskStatus = reportedOutcome == "completed" ? .review : .waitingResponse
             _ = try await tasks.setLifecycleStatus(taskID, to: finalStatus)
         } catch {
@@ -3530,6 +4412,7 @@ final class CodexConversationManager {
             var fields = StationAIDiagnostics.errorFields(error, redacting: [task.title, task.savedPrompt ?? ""])
             fields["taskID"] = taskID.uuidString
             fields["threadID"] = persistedThreadID ?? ""
+            fields["provider"] = provider.rawValue
             fields["phase"] = phase
             fields["storePath"] = StationAIDiagnostics.storeURL.path
             fields.merge(client.diagnosticFields()) { _, new in new }
@@ -3545,10 +4428,7 @@ final class CodexConversationManager {
         }
         await titleGeneration?.value
         let finalHistory = try await history(taskID: taskID) {
-            onUpdate(ConversationUpdate(
-                type: "action_notice",
-                message: "Codex requested an approval. StationAI denied it because approval prompts are disabled."
-            ))
+            onUpdate(ConversationUpdate(type: "action_notice", message: approvalNotice))
         }
         onUpdate(ConversationUpdate(type: "completed", history: finalHistory))
         return finalHistory
@@ -3557,13 +4437,14 @@ final class CodexConversationManager {
     private func generateAndApplyTitle(
         taskID: UUID,
         prompt: String,
-        workspace: CodexWorkspaceContext,
-        client titleClient: CodexAppServerClient
+        workspace: ConversationWorkspaceContext,
+        clients titleClients: [ConversationProviderClient]
     ) async throws {
-        let generated = await CodexTaskTitleGenerator(client: titleClient)
+        let result = await ConversationTitleGenerator(clients: titleClients)
             .generateTitle(from: prompt, workspace: workspace, taskID: taskID)
+        let generated = result?.title
         let fallback = prompt.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
-        let titleSource = generated == nil ? "prompt-fallback" : "codex"
+        let titleSource = result?.provider.rawValue ?? "prompt-fallback"
         let latest: BoardTask
         do {
             latest = try tasks.taskModel(taskID)
@@ -3726,7 +4607,17 @@ final class StationAIBridgeRuntime {
             preferences = UserDefaults(suiteName: applicationIdentifier) ?? .standard
             #endif
             let settings = WorkspaceSettingsManager(defaults: preferences)
-            let workspaces = WorkspaceManager(taskManager: taskManager)
+            let workspaces = WorkspaceManager(taskManager: taskManager, settingsManager: settings)
+            try await workspaces.reconcileDeferredRepositoryRemovals()
+
+            let codexExecutable = request.arguments["__codexExecutable"]?.string
+            let claudeExecutable = request.arguments["__claudeExecutable"]?.string
+            func conversationClients(codexHome: String? = nil, goalFeatureEnabled: Bool = false) -> ConversationClients {
+                ConversationClients(
+                    codex: CodexAppServerClient(codexExecutableOverride: codexExecutable, codexHomeOverride: codexHome, goalFeatureEnabled: goalFeatureEnabled),
+                    claude: ClaudeCodeClient(executableOverride: claudeExecutable)
+                )
+            }
 
             let result: BridgeValue
             switch request.command {
@@ -3735,7 +4626,7 @@ final class StationAIBridgeRuntime {
             case "board.list", "task.list":
                 result = try Self.value(["tasks": taskManager.list()])
             case "archive.search":
-                let conversations = CodexConversationManager(tasks: taskManager, client: CodexAppServerClient())
+                let conversations = ConversationManager(tasks: taskManager, clients: ConversationClients(codex: CodexAppServerClient(), claude: ClaudeCodeClient()), settingsManager: settings)
                 result = try Self.value(await conversations.searchArchive(
                     query: request.requiredString("query"),
                     codexHomePath: request.arguments["codexHome"]?.string
@@ -3744,7 +4635,8 @@ final class StationAIBridgeRuntime {
                 let title = try request.requiredString("title")
                 let roots = try request.requiredStrings("roots")
                 let repositories = try request.repositorySpecs("repositories")
-                result = try Self.value(await taskManager.create(title: title, repositories: repositories, contextFolders: roots))
+                let provider = try request.arguments["provider"]?.string.map(ConversationProvider.parse) ?? settings.defaultConversationProvider
+                result = try Self.value(await taskManager.create(title: title, repositories: repositories, contextFolders: roots, provider: provider))
             case "task.get", "task.show":
                 let taskID = try request.requiredUUID("taskID")
                 result = try Self.value(taskManager.get(taskID))
@@ -3759,7 +4651,8 @@ final class StationAIBridgeRuntime {
             case "task.pr.create":
                 result = try Self.value(await taskManager.createPullRequests(
                     request.requiredUUID("taskID"),
-                    client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
+                    clients: conversationClients(),
+                    settingsManager: settings
                 ))
             case "task.pr.conflicts":
                 result = .object(["repositories": .array(try await taskManager.pullRequestConflictRepositories(request.requiredUUID("taskID")).map(BridgeValue.string))])
@@ -3770,7 +4663,7 @@ final class StationAIBridgeRuntime {
             case "task.pr.resolve":
                 result = try Self.value(await taskManager.resolvePullRequestConflicts(
                     request.requiredUUID("taskID"), action: request.requiredString("action"),
-                    client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
+                    clients: conversationClients()
                 ))
             case "task.progress.publish":
                 let rawType = try request.requiredString("type")
@@ -3808,6 +4701,11 @@ final class StationAIBridgeRuntime {
                     request.requiredStrings("repositoryPaths"),
                     to: request.requiredUUID("taskID")
                 ))
+            case "task.repository.replace":
+                result = try Self.value(await workspaces.replaceRepositories(
+                    request.requiredStrings("repositoryPaths"),
+                    on: request.requiredUUID("taskID")
+                ))
             case "task.repository.edit":
                 result = try Self.value(await taskManager.updateRepository(
                     request.requiredUUID("taskID"),
@@ -3817,9 +4715,9 @@ final class StationAIBridgeRuntime {
                     mergeTarget: request.arguments["mergeTarget"]?.string
                 ))
             case "task.repository.remove":
-                result = try Self.value(await taskManager.removeRepository(
-                    request.requiredUUID("taskID"),
-                    repositoryPath: request.requiredString("repositoryPath")
+                result = try Self.value(await workspaces.removeRepository(
+                    request.requiredString("repositoryPath"),
+                    from: request.requiredUUID("taskID")
                 ))
             case "task.prompt.save":
                 let status = try request.arguments["status"]?.string.map { value -> TaskStatus in
@@ -3863,13 +4761,24 @@ final class StationAIBridgeRuntime {
             case "workspace.suggest":
                 let parent = try request.requiredString("parent")
                 result = .object(["repositories": .array(try await workspaces.suggestedRepositories(parentPath: parent).map(BridgeValue.string))])
+            case "workspace.repositories.list":
+                let root = try settings.requireRepositoryRootFolder()
+                let repositories = try await workspaces.suggestedRepositories(parentPath: root.path)
+                result = .object([
+                    "root": .string(root.path),
+                    "repositories": .array(repositories.map(BridgeValue.string))
+                ])
             case "settings.get":
                 result = .object([
                     "defaultParentFolder": settings.defaultParentFolderPath.isEmpty ? .null : .string(settings.defaultParentFolderPath),
                     "defaultParentAvailable": .boolean(settings.defaultParentFolderURL != nil),
                     "lastSelectedRepositories": .array(settings.lastSelectedRepositories.map(BridgeValue.string)),
-                    "appearance": .string(settings.appearance)
+                    "appearance": .string(settings.appearance),
+                    "defaultProvider": .string(settings.defaultConversationProvider.rawValue)
                 ])
+            case "settings.set-default-provider":
+                try settings.setDefaultConversationProvider(request.requiredString("provider"))
+                result = .object(["defaultProvider": .string(settings.defaultConversationProvider.rawValue)])
             case "settings.set-appearance":
                 try settings.setAppearance(request.requiredString("appearance"))
                 result = .object(["appearance": .string(settings.appearance)])
@@ -3885,30 +4794,40 @@ final class StationAIBridgeRuntime {
                 result = .object(["lastSelectedRepositories": .array(settings.lastSelectedRepositories.map(BridgeValue.string))])
             case "conversation.history":
                 let taskID = try request.requiredUUID("taskID")
-                let codexClient = CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
-                _ = try await taskManager.reconcileLifecycleStatusOnOpen(taskID, client: codexClient)
-                let conversations = CodexConversationManager(
-                    tasks: taskManager,
-                    client: codexClient
-                )
+                let clients = conversationClients()
+                _ = try await taskManager.reconcileLifecycleStatusOnOpen(taskID, clients: clients)
+                let conversations = ConversationManager(tasks: taskManager, clients: clients, settingsManager: settings)
                 result = try Self.value(await conversations.history(taskID: taskID))
             case "conversation.models":
-                let codexClient = CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
-                let conversations = CodexConversationManager(tasks: taskManager, client: codexClient)
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = .object(["models": .array(try await conversations.models(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })])
+            case "conversation.stop":
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = .object(["interrupted": .boolean(try await conversations.interrupt(taskID: request.requiredUUID("taskID")))])
+            case "conversation.provider.get":
+                let task = try taskManager.taskModel(request.requiredUUID("taskID"))
+                result = .object([
+                    "provider": .string(task.conversationProvider.rawValue),
+                    "supportsGoals": .boolean(task.conversationProvider.supportsGoals)
+                ])
+            case "conversation.provider.set":
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings, preferences: preferences)
+                result = try Self.value(await conversations.setProvider(
+                    taskID: request.requiredUUID("taskID"),
+                    provider: ConversationProvider.parse(request.requiredString("provider"))
+                ))
+            case "conversation.provider.capabilities":
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = .array(try await conversations.providerCapabilities(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })
             case "conversation.goal":
-                let client = CodexAppServerClient(
-                    codexExecutableOverride: request.arguments["__codexExecutable"]?.string,
-                    codexHomeOverride: request.arguments["__codexHome"]?.string,
-                    goalFeatureEnabled: true
-                )
-                defer { client.shutdown() }
-                let conversations = CodexConversationManager(tasks: taskManager, client: client, preferences: preferences)
+                let clients = conversationClients(codexHome: request.arguments["__codexHome"]?.string, goalFeatureEnabled: true)
+                defer { clients.codex.shutdown() }
+                let conversations = ConversationManager(tasks: taskManager, clients: clients, settingsManager: settings, preferences: preferences)
                 let goal = try await conversations.goal(taskID: request.requiredUUID("taskID"), objective: request.arguments["objective"]?.string, action: request.arguments["action"]?.string ?? "get")
                 if let goal { result = try Self.value(goal) } else { result = .null }
             case "conversation.queue", "conversation.queue.list", "conversation.queue.retry", "conversation.queue.remove", "conversation.queue.steer", "conversation.steer":
                 let taskID = try request.requiredUUID("taskID")
-                let conversations = CodexConversationManager(tasks: taskManager, client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string))
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 switch request.command {
                 case "conversation.queue": result = try Self.value(conversations.queueMessage(taskID: taskID, text: request.requiredString("message")))
                 case "conversation.queue.list": result = .array(try conversations.queuedMessages(taskID: taskID).map { try Self.value($0) })
@@ -3934,33 +4853,27 @@ final class StationAIBridgeRuntime {
                 let taskID = try request.requiredUUID("taskID")
                 let itemID = try request.requiredString("itemID")
                 let answers = request.arguments["answers"]?.strings ?? []
-                let conversations = CodexConversationManager(
-                    tasks: taskManager,
-                    client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
-                )
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 let history = try await conversations.history(taskID: taskID)
                 guard let question = history.messages.first(where: { $0.id == itemID && $0.asyncQuestions != nil }) else {
-                    throw BridgeCommandError(code: "not_found", message: "That Codex question is not in this conversation.")
+                    throw BridgeCommandError(code: "not_found", message: "That question is not in this conversation.")
                 }
                 let answer = try await conversations.answerAsyncQuestion(taskID: taskID, question: question, answers: answers)
                 result = .object(["text": .string(answer.text), "queued": .boolean(answer.queued)])
             case "conversation.send":
                 let taskID = try request.requiredUUID("taskID")
                 let message = request.arguments["message"]?.string ?? ""
-                let modeValue = request.arguments["mode"]?.string ?? CodexConversationMode.code.rawValue
-                guard let mode = CodexConversationMode(rawValue: modeValue) else {
+                let modeValue = request.arguments["mode"]?.string ?? ConversationMode.code.rawValue
+                guard let mode = ConversationMode(rawValue: modeValue) else {
                     throw BridgeCommandError(
                         code: "invalid_argument",
                         message: "Unknown conversation mode '\(modeValue)'. Valid modes: default, plan."
                     )
                 }
-                let modelID = request.arguments["model"]?.string ?? CodexAppServerClient.modelID
+                let modelID = request.arguments["model"]?.string
                 let answers = try request.optionalStringArrays("answers")
                 let imageDataURLs = request.arguments["images"]?.strings ?? []
-                let conversations = CodexConversationManager(
-                    tasks: taskManager,
-                    client: CodexAppServerClient(codexExecutableOverride: request.arguments["__codexExecutable"]?.string)
-                )
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 let history = try await conversations.send(taskID: taskID, text: message, imageDataURLs: imageDataURLs, mode: mode, modelID: modelID, userInputAnswers: answers, onUpdate: { update in
                     if let payload = try? Self.value(update) {
                         eventHandler(BridgeEvent(requestID: request.id, type: update.type, payload: payload))

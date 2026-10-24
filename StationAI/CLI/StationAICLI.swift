@@ -28,6 +28,9 @@ enum StationAICLI {
         if let fixtureExecutable = ProcessInfo.processInfo.environment["STATIONAI_E2E_CODEX_EXECUTABLE"] {
             configuredRequest.arguments["__codexExecutable"] = .string(fixtureExecutable)
         }
+        if let fixtureExecutable = ProcessInfo.processInfo.environment["STATIONAI_E2E_CLAUDE_EXECUTABLE"] {
+            configuredRequest.arguments["__claudeExecutable"] = .string(fixtureExecutable)
+        }
 
         do {
             let response = try BridgeClient().send(configuredRequest) { event in
@@ -67,14 +70,14 @@ enum StationAICLI {
             case "list":
                 return BridgeRequest(command: "task.list")
             case "create":
-                let flags = try parseFlags(tail, valueFlags: ["--title", "--root", "--repo", "--branch", "--branch-from", "--merge-target"])
+                let flags = try parseFlags(tail, valueFlags: ["--title", "--root", "--repo", "--branch", "--branch-from", "--merge-target", "--provider"])
                 let title = try requiredFlag("--title", flags: flags).first!
                 let roots = flags["--root"] ?? []
                 let repositories = flags["--repo"] ?? []
                 let branches = try keyedOptions(flags["--branch"] ?? [])
                 let branchFrom = try keyedOptions(flags["--branch-from"] ?? [])
                 let mergeTargets = try keyedOptions(flags["--merge-target"] ?? [])
-                return BridgeRequest(command: "task.create", arguments: [
+                var createArguments: [String: BridgeValue] = [
                     "title": .string(title),
                     "roots": .array(roots.map(BridgeValue.string)),
                     "repositories": .array(repositories.map { path in
@@ -85,7 +88,9 @@ enum StationAICLI {
                             "mergeTarget": mergeTargets[path].map(BridgeValue.string) ?? .null,
                         ])
                     })
-                ])
+                ]
+                if let provider = flags["--provider"]?.first { createArguments["provider"] = .string(provider) }
+                return BridgeRequest(command: "task.create", arguments: createArguments)
             case "get", "show":
                 let id = try firstPositional(tail)
                 return BridgeRequest(command: "task.get", arguments: ["taskID": .string(id)])
@@ -156,13 +161,20 @@ enum StationAICLI {
                 let title = try requiredFlag("--title", flags: flags).first!
                 return BridgeRequest(command: "task.rename", arguments: ["taskID": .string(id), "title": .string(title)])
             case "repository":
-                guard tail.count >= 2 else { throw CLIError.usage("Use: stationai task repository add|add-batch|edit|remove <task-id> ...") }
+                guard tail.count >= 2 else { throw CLIError.usage("Use: stationai task repository add|add-batch|replace|edit|remove <task-id> ...") }
                 let id = tail[1]
                 switch tail[0] {
                 case "add-batch":
                     let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--repo"])
                     let repositories = try requiredFlag("--repo", flags: flags)
                     return BridgeRequest(command: "task.repository.add-batch", arguments: [
+                        "taskID": .string(id),
+                        "repositoryPaths": .array(repositories.map(BridgeValue.string))
+                    ])
+                case "replace":
+                    let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--repo"])
+                    let repositories = try requiredFlag("--repo", flags: flags)
+                    return BridgeRequest(command: "task.repository.replace", arguments: [
                         "taskID": .string(id),
                         "repositoryPaths": .array(repositories.map(BridgeValue.string))
                     ])
@@ -190,7 +202,7 @@ enum StationAICLI {
                         "mergeTarget": .string(mergeTarget)
                     ])
                 default:
-                    throw CLIError.usage("Use: stationai task repository add|add-batch|edit|remove <task-id> ...")
+                    throw CLIError.usage("Use: stationai task repository add|add-batch|replace|edit|remove <task-id> ...")
                 }
             case "prompt":
                 guard let id = tail.first else { throw CLIError.usage("Use: stationai task prompt <task-id> --text <prompt> [--status <status>] [--submitted true]") }
@@ -268,7 +280,12 @@ enum StationAICLI {
                 throw CLIError.usage("Unknown task operation '\(operation)'.")
             }
         case "workspace":
-            guard rest.first == "suggest" else { throw CLIError.usage("Use: stationai workspace suggest --parent <path>") }
+            if rest == ["repos", "list"] {
+                return BridgeRequest(command: "workspace.repositories.list")
+            }
+            guard rest.first == "suggest" else {
+                throw CLIError.usage("Use: stationai workspace repos list or workspace suggest --parent <path>")
+            }
             let flags = try parseFlags(Array(rest.dropFirst()), valueFlags: ["--parent"])
             return BridgeRequest(command: "workspace.suggest", arguments: [
                 "parent": .string(try requiredFlag("--parent", flags: flags).first!)
@@ -281,6 +298,9 @@ enum StationAICLI {
             case "set-appearance":
                 guard rest.count == 2 else { throw CLIError.usage("Use: stationai settings set-appearance <dark|light>") }
                 return BridgeRequest(command: "settings.set-appearance", arguments: ["appearance": .string(rest[1])])
+            case "set-default-provider":
+                guard rest.count == 2 else { throw CLIError.usage("Use: stationai settings set-default-provider <codex|claude>") }
+                return BridgeRequest(command: "settings.set-default-provider", arguments: ["provider": .string(rest[1])])
             case "set-parent":
                 guard rest.count == 2 else { throw CLIError.usage("Use: stationai settings set-parent <path>") }
                 return BridgeRequest(command: "settings.set-parent", arguments: ["path": .string(rest[1])])
@@ -298,6 +318,16 @@ enum StationAICLI {
             switch operation {
             case "history": return BridgeRequest(command: "conversation.history", arguments: ["taskID": .string(id)])
             case "models": return BridgeRequest(command: "conversation.models", arguments: ["taskID": .string(id)])
+            case "stop": return BridgeRequest(command: "conversation.stop", arguments: ["taskID": .string(id)])
+            case "provider":
+                switch Array(tail.dropFirst()) {
+                case []: return BridgeRequest(command: "conversation.provider.get", arguments: ["taskID": .string(id)])
+                case ["capabilities"]: return BridgeRequest(command: "conversation.provider.capabilities", arguments: ["taskID": .string(id)])
+                case let values where values.count == 2 && values[0] == "set":
+                    return BridgeRequest(command: "conversation.provider.set", arguments: ["taskID": .string(id), "provider": .string(values[1])])
+                default:
+                    throw CLIError.usage("Use: stationai conversation provider <task-id> [set <codex|claude>|capabilities]")
+                }
             case "goal":
                 guard tail.count >= 2 else { throw CLIError.usage("Use: stationai conversation goal <task-id> <get|set|pause|resume|clear> [--text <objective>]") }
                 let action = tail[1]
@@ -357,14 +387,16 @@ enum StationAICLI {
                     let mime = url.pathExtension.lowercased() == "jpg" || url.pathExtension.lowercased() == "jpeg" ? "image/jpeg" : "image/png"
                     return .string("data:\(mime);base64,\(data.base64EncodedString())")
                 }
-                return BridgeRequest(command: "conversation.send", arguments: [
+                var sendArguments: [String: BridgeValue] = [
                     "taskID": .string(id),
                     "message": .string(flags["--message"]?.first ?? ""),
                     "mode": .string(flags["--mode"]?.first ?? "default"),
-                    "model": .string(flags["--model"]?.first ?? "gpt-6-luna"),
                     "answers": .object(answers.mapValues { BridgeValue.array($0.map(BridgeValue.string)) }),
                     "images": .array(images)
-                ])
+                ]
+                // Without --model, the task's provider chooses its default model.
+                if let model = flags["--model"]?.first { sendArguments["model"] = .string(model) }
+                return BridgeRequest(command: "conversation.send", arguments: sendArguments)
             default: throw CLIError.usage("Unknown conversation operation '\(operation)'.")
             }
         default:
@@ -438,7 +470,7 @@ enum StationAICLI {
       stationai board list
       stationai archive search <query>
       stationai task list|get <task-id>
-      stationai task create --title <title> --root <path> [--root <path>...]
+      stationai task create --title <title> --root <path> [--root <path>...] [--provider <codex|claude>]
       stationai task create --title <title> --repo <path> [--repo <path>...] [--branch <repo-path>=<name>] [--branch-from <repo-path>=<ref>] [--merge-target <repo-path>=<local-branch>]
       stationai task move <task-id> Done
       stationai task move <task-id> Done --allow-unmerged
@@ -452,6 +484,7 @@ enum StationAICLI {
       stationai task rename <task-id> --title <title>
       stationai task repository add <task-id> --repo <path>
       stationai task repository add-batch <task-id> --repo <path> [--repo <path>...]
+      stationai task repository replace <task-id> --repo <path> [--repo <path>...]
       stationai task repository edit <task-id> --repo <path> --branch <name> --branch-from <ref> [--merge-target <ref>]
       stationai task repository remove <task-id> --repo <path>
       stationai task prompt <task-id> --text <prompt> [--status <status>] [--submitted true]
@@ -462,7 +495,8 @@ enum StationAICLI {
       stationai task delete <task-id>
       stationai task delete-check <task-id>
       stationai workspace suggest --parent <path>
-      stationai settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>
+      stationai workspace repos list
+      stationai settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>
       stationai conversation history <task-id>
       stationai conversation queue <task-id> --message <text>
       stationai conversation queue-list <task-id>
@@ -472,10 +506,13 @@ enum StationAICLI {
       stationai conversation steer <task-id> --message <text> [--image <path>]...
       stationai conversation answer-async <task-id> <item-id> --answer <text> [--answer <text>]...
       stationai conversation models <task-id>
+      stationai conversation stop <task-id>
+      stationai conversation provider <task-id> [set <codex|claude>|capabilities]
       stationai conversation goal <task-id> <get|set|pause|resume|clear> [--text <objective>]
       stationai conversation send <task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...]
 
     Results are JSON. Conversation send emits JSON event lines followed by a final response.
+    Conversation commands use the task's provider; tasks without one use Codex.
     """
 }
 
