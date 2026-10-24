@@ -300,16 +300,20 @@ final class CodexAppServerClient: ObservableObject {
 
     func availableModels(workspace: CodexWorkspaceContext) async throws -> [CodexModelOption] {
         try await ensureInitialized(workspace: workspace)
-        let response = try await request(method: "model/list", params: ["includeHidden": false])
-        let models = (response["data"] as? [[String: Any]] ?? []).compactMap { item -> CodexModelOption? in
-            guard let id = item["id"] as? String, !id.isEmpty else { return nil }
-            return CodexModelOption(
-                id: id,
-                name: item["displayName"] as? String ?? item["model"] as? String ?? id,
-                isDefault: item["isDefault"] as? Bool ?? false
-            )
+        for attempt in 0..<3 {
+            let response = try await request(method: "model/list", params: ["includeHidden": false])
+            let models = (response["data"] as? [[String: Any]] ?? []).compactMap { item -> CodexModelOption? in
+                guard let id = item["id"] as? String, !id.isEmpty else { return nil }
+                return CodexModelOption(
+                    id: id,
+                    name: item["displayName"] as? String ?? item["model"] as? String ?? id,
+                    isDefault: item["isDefault"] as? Bool ?? false
+                )
+            }
+            if !models.isEmpty { return models }
+            if attempt < 2 { try await Task.sleep(for: .milliseconds(200)) }
         }
-        return models.isEmpty ? [CodexModelOption(id: Self.modelID, name: "GPT-6 Luna", isDefault: true)] : models
+        return [CodexModelOption(id: Self.modelID, name: "GPT-6 Luna", isDefault: true)]
     }
 
     func interruptActiveTurn(threadID expectedThreadID: String) async throws -> Bool {

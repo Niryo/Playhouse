@@ -102,6 +102,7 @@ struct TaskConversationView: View {
     @State private var queuedMessages: [QueuedConversationMessage] = []
     @State private var isSubmittingLiveMessage = false
     @State private var userInputRequest: CodexUserInputRequest?
+    @State private var answeredBlockingQuestionAwaitingTurnEnd = false
     @State private var userInputAnswers: [String: [String]] = [:]
     @State private var userInputOther: [String: String] = [:]
     @State private var asyncQuestionAnswers: [String: String] = [:]
@@ -186,13 +187,7 @@ struct TaskConversationView: View {
     }
 
     private var currentActivity: CodexActivity? {
-        activities.enumerated()
-            .filter { $0.element.isActive }
-            .max { lhs, rhs in
-                let lhsStart = lhs.element.startedAt ?? .distantPast
-                let rhsStart = rhs.element.startedAt ?? .distantPast
-                return lhsStart == rhsStart ? lhs.offset < rhs.offset : lhsStart < rhsStart
-            }?.element
+        activities.last(where: \.isActive)
     }
 
     private var hasCompletedAssistantResponse: Bool {
@@ -269,6 +264,7 @@ struct TaskConversationView: View {
             } catch { errorMessage = "Couldn't load image: \(error.localizedDescription)" }
         }
         .task {
+            if !isReadOnly { refreshQueuedMessages() }
             if !isReadOnly {
                 _ = try? await BoardTaskManager(modelContext: modelContext)
                     .reconcileLifecycleStatusOnOpen(task.id, client: codexClient)
@@ -277,8 +273,10 @@ struct TaskConversationView: View {
                 userInputRequest = request
             }
             await loadConversation()
-            if !isReadOnly { refreshQueuedMessages() }
-            if !isReadOnly { await loadModels() }
+            if !isReadOnly {
+                refreshQueuedMessages()
+                await loadModels()
+            }
             if conflictResolutionRequested && !isReadOnly && !isResponding {
                 conflictResolutionAttempt = 1
                 sendMessage(overrideText: "The PR has conflicts. Fix them, commit, and push.")
@@ -287,6 +285,17 @@ struct TaskConversationView: View {
         .onChange(of: codexClient.isTurnActive) { _, isTurnActive in
             if !isTurnActive, !isReadOnly {
                 refreshQueuedMessages()
+                if answeredBlockingQuestionAwaitingTurnEnd {
+                    answeredBlockingQuestionAwaitingTurnEnd = false
+                    Task { @MainActor in
+                        await Task.yield()
+                        guard !isResponding else { return }
+                        let manager = BoardTaskManager(modelContext: modelContext)
+                        let outcome = try? await manager.finishConversationTurnOutcome(task.id)
+                        let finalStatus: TaskStatus = outcome == "completed" ? .review : .waitingResponse
+                        _ = try? await manager.setLifecycleStatus(task.id, to: finalStatus)
+                    }
+                }
             }
             let submittedTurnIsPending = task.pendingSubmittedPrompt != nil
                 && (task.status == .inProgress || task.status == .waitingResponse)
@@ -1442,6 +1451,7 @@ struct TaskConversationView: View {
                     .interpolation(.high)
                     .scaledToFit()
                     .frame(width: 20, height: 20)
+                    .accessibilityElement()
                     .accessibilityLabel("\(activity.title) agent icon")
                 VStack(alignment: .leading, spacing: 3) {
                     Text("\(activity.title) \(activity.timelineStatus)")
@@ -1474,7 +1484,7 @@ struct TaskConversationView: View {
         .buttonHoverPointer()
         .help("Open the read-only conversation for this agent")
         .buttonStyle(.plain)
-        .accessibilityLabel("\(activity.title) \(activity.timelineStatus)")
+        .accessibilityElement(children: .contain)
         .accessibilityValue([activity.detail, activity.durationLabel()].compactMap { $0 }.joined(separator: "\n"))
         .accessibilityIdentifier("codex-subagent-row-\(activity.childThreadID ?? activity.id)")
     }
@@ -1830,6 +1840,7 @@ struct TaskConversationView: View {
             }
         }
             .frame(maxWidth: 620, alignment: .trailing)
+            .accessibilityElement(children: .contain)
             .accessibilityIdentifier("user-message-\(message.id)")
     }
 
@@ -2067,9 +2078,13 @@ struct TaskConversationView: View {
                             .buttonHoverPointer().buttonStyle(.plain).help(activeGoal.status == "paused" ? "Resume goal" : "Pause goal")
                             .accessibilityLabel(activeGoal.status == "paused" ? "Resume goal" : "Pause goal")
                             .accessibilityIdentifier("goal-pause-resume-button")
-                        Button { isGoalExpanded.toggle() } label: { Image(systemName: isGoalExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.and.arrow.down.left") }
+                        Button { isGoalExpanded.toggle() } label: { Image(systemName: isGoalExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right") }
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
                             .buttonHoverPointer().buttonStyle(.plain).help(isGoalExpanded ? "Collapse goal" : "Expand goal")
-                            .accessibilityLabel(isGoalExpanded ? "Collapse goal" : "Expand goal").accessibilityIdentifier("goal-expand-button")
+                            .accessibilityLabel(isGoalExpanded ? "Collapse goal" : "Expand goal")
+                            .accessibilityValue(isGoalExpanded ? "Expanded" : "Collapsed")
+                            .accessibilityIdentifier("goal-expand-button")
                     }
                     .padding(.horizontal, 14).padding(.vertical, 10)
                     .background(Color.primary.opacity(0.10), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -2087,7 +2102,7 @@ struct TaskConversationView: View {
                     text: $draft,
                     height: $composerHeight,
                     isFocused: Binding(get: { isComposerFocused }, set: { isComposerFocused = $0 }),
-                    isEnabled: !isReadOnly && !isLoadingHistory,
+                    isEnabled: !isReadOnly,
                     accessibilityHelp: isReadOnly
                         ? "Archived conversation, read-only."
                          : (isResponding ? "Press Return to queue this follow-up. Press Command-Return to steer the active turn, or use a queued row's Steer action."
@@ -2136,7 +2151,7 @@ struct TaskConversationView: View {
                         scheduleDraftAutosave(newValue)
                     }
                     .disabled(isReadOnly || isLoadingHistory || isPreparingSubmittedMessage)
-                    .accessibilityIdentifier("message-composer")
+                    .accessibilityIdentifier("message-composer-scroll-view")
 
                 HStack(spacing: 12) {
                     Button { isShowingImagePicker = true } label: { Image(systemName: "paperclip") }
@@ -2210,19 +2225,35 @@ struct TaskConversationView: View {
 
                     Spacer(minLength: 0)
 
-                    Picker("Model", selection: $selectedModelID) {
-                        ForEach(modelOptions) { model in
-                            Text(model.name)
-                                .tag(model.id)
-                            .accessibilityIdentifier("model-option-\(model.id)")
+                    HStack(spacing: 4) {
+                        Menu {
+                            ForEach(modelOptions) { model in
+                                Button {
+                                    selectedModelID = model.id
+                                } label: {
+                                    if selectedModelID == model.id {
+                                        Label(model.name, systemImage: "checkmark")
+                                    } else {
+                                        Text(model.name)
+                                    }
+                                }
+                                .accessibilityIdentifier("model-option-\(model.id)")
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(selectedModelName)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                            }
                         }
+                        .menuStyle(.borderlessButton)
+                        .accessibilityLabel("Model: \(selectedModelName)")
+                        .accessibilityValue(selectedModelName)
+                        .accessibilityIdentifier("model-picker-menu")
                     }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel("Model: \(selectedModelName)")
-                    .accessibilityIdentifier("model-picker-menu")
 
                     if isResponding {
                         Button(action: pauseResponse) {
@@ -2373,6 +2404,16 @@ struct TaskConversationView: View {
             errorMessage = "Codex couldn't accept those answers. Please check the responses and try again."
             return
         }
+        if request.isBlocking {
+            answeredBlockingQuestionAwaitingTurnEnd = true
+            if !codexClient.isTurnActive(threadID: request.threadID), !isResponding {
+                answeredBlockingQuestionAwaitingTurnEnd = false
+                let manager = BoardTaskManager(modelContext: modelContext)
+                let outcome = try? await manager.finishConversationTurnOutcome(task.id)
+                let finalStatus: TaskStatus = outcome == "completed" ? .review : .waitingResponse
+                _ = try? await manager.setLifecycleStatus(task.id, to: finalStatus)
+            }
+        }
         userInputRequest = nil
         userInputAnswers = [:]
         userInputOther = [:]
@@ -2381,7 +2422,21 @@ struct TaskConversationView: View {
     private func loadConversation() async {
         isLoadingHistory = true
         errorMessage = nil
+        let draftAtLoadStart = draft
         defer { isLoadingHistory = false }
+
+        guard task.codexThreadID != nil else {
+            messages = []
+            activities = []
+            draft = task.pendingSubmittedPrompt == nil ? (task.savedPrompt ?? "") : ""
+            if !isReadOnly, task.pendingSubmittedPrompt == nil {
+                pendingImages = task.draftImageDataURLs.compactMap { dataURL in
+                    guard let image = Self.image(fromDataURL: dataURL) else { return nil }
+                    return PendingImage(dataURL: dataURL, image: image)
+                }
+            }
+            return
+        }
 
         do {
             let history = try await conversationManager.history(taskID: task.id) {
@@ -2424,8 +2479,10 @@ struct TaskConversationView: View {
                !submittedPrompt.isEmpty {
                 messages.append(CodexChatMessage(id: UUID().uuidString, role: .user, text: submittedPrompt))
             }
-            draft = promptWasSent || hasPendingSubmittedPrompt ? "" : (task.savedPrompt ?? "")
-            if !promptWasSent && !hasPendingSubmittedPrompt {
+            if draft == draftAtLoadStart {
+                draft = promptWasSent || hasPendingSubmittedPrompt ? "" : (task.savedPrompt ?? "")
+            }
+            if !promptWasSent && !hasPendingSubmittedPrompt && pendingImages.isEmpty {
                 pendingImages = task.draftImageDataURLs.compactMap { dataURL in
                     guard let comma = dataURL.firstIndex(of: ","),
                           let data = Data(base64Encoded: String(dataURL[dataURL.index(after: comma)...])),
@@ -3311,7 +3368,6 @@ private struct NativeChatEditor: NSViewRepresentable {
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.scrollerStyle = .overlay
-        scroll.setAccessibilityIdentifier("message-composer-scroll-view")
         let editor = ChatEditorTextView(frame: NSRect(x: 0, y: 0, width: 100, height: 28))
         editor.isRichText = false
         editor.allowsUndo = true
@@ -3413,7 +3469,12 @@ private final class ChatEditorScrollView: NSScrollView {
     }
 
     func documentHeightDidChange(_ documentHeight: CGFloat) {
-        let newHeight = min(240, max(28, ceil(documentHeight)))
+        let editor = documentView as? NSTextView
+        let font = editor?.font ?? NSFont.systemFont(ofSize: 14)
+        let lineHeight = editor?.layoutManager?.defaultLineHeight(for: font) ?? 17
+        let verticalInset = editor?.textContainerInset.height ?? 4
+        let maximumHeight = ceil(lineHeight * 12 + verticalInset * 2)
+        let newHeight = min(maximumHeight, max(28, ceil(documentHeight)))
         if viewportHeight != newHeight {
             viewportHeight = newHeight
             onHeightChange?(newHeight)

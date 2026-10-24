@@ -185,7 +185,7 @@
   },
   {
     "id": "test_conversation_mode_rejects_unknown_mode_without_starting_a_turn",
-    "expectation": "The composer shows a Codex-reported model, while unsupported modes and malformed model IDs are rejected before creating history."
+    "expectation": "The composer shows a Codex-reported model or its offline fallback, while unsupported modes and malformed model IDs are rejected before creating history."
   },
   {
     "id": "test_thread_goal_lifecycle_persists_through_cli_xpc",

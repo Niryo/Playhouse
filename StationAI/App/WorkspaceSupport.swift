@@ -1315,7 +1315,7 @@ struct FlowLayout: Layout {
 
 struct WorkspaceSettingsView: View {
     @AppStorage(WorkspaceSettings.defaultParentFolderKey, store: WorkspaceSettings.preferencesStore) private var defaultParentFolderPath = ""
-    @AppStorage(WorkspaceSettings.appearanceKey, store: WorkspaceSettings.preferencesStore) private var appearance = "dark"
+    @State private var appearance = WorkspaceSettings.preferencesStore.string(forKey: WorkspaceSettings.appearanceKey) ?? "dark"
     @State private var pickerError: String?
 
     private var parentFolderURL: URL? {
@@ -1330,6 +1330,7 @@ struct WorkspaceSettingsView: View {
                     set: { value in
                         do {
                             try WorkspaceSettingsManager().setAppearance(value)
+                            appearance = value
                         } catch {
                             pickerError = error.localizedDescription
                         }
@@ -1380,6 +1381,17 @@ struct WorkspaceSettingsView: View {
                     Text("Changing this setting affects suggestions for new tasks. It does not change the working folders saved on existing tasks.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
+            }
+        }
+        .task {
+            while !Task.isCancelled {
+                let preferences = WorkspaceSettings.preferencesStore
+                preferences.synchronize()
+                if let updatedAppearance = preferences.string(forKey: WorkspaceSettings.appearanceKey),
+                   updatedAppearance != appearance {
+                    appearance = updatedAppearance
+                }
+                try? await Task.sleep(for: .milliseconds(250))
             }
         }
         .formStyle(.grouped)

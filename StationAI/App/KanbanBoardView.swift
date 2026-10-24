@@ -69,6 +69,10 @@ struct KanbanBoardView: View {
                 lifecycleResetNotice = "Existing tasks were cleared. These dirty managed worktrees were kept:\n\n" + retained.joined(separator: "\n")
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .stationAIShowBoardSearch)) { _ in
+            withAnimation(.easeInOut(duration: 0.18)) { isShowingBoardSearch = true }
+            isBoardSearchFocused = true
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             checkReviewPullRequests()
         }
@@ -272,16 +276,6 @@ struct KanbanBoardView: View {
             }
         }
         .background(DragEndEventMonitor(draggedTaskID: $draggedTaskID))
-        .background {
-            Button("Search tasks") {
-                withAnimation(.easeInOut(duration: 0.18)) { isShowingBoardSearch = true }
-                isBoardSearchFocused = true
-            }
-            .keyboardShortcut("f", modifiers: .command)
-            .buttonHoverPointer()
-            .help("Search tasks (⌘F)")
-            .hidden()
-        }
         .overlay(alignment: .topTrailing) {
             if isShowingBoardSearch {
                 boardSearchBar
@@ -569,12 +563,15 @@ struct KanbanBoardView: View {
                     ProgressView().controlSize(.mini)
                 } else {
                     Text("PR").font(.system(size: 10, weight: .semibold))
+                            .frame(minWidth: 30, minHeight: 30)
                 }
             }
             .actionButtonHoverEmphasis()
             .buttonHoverPointer()
             .help("Create a pull request for each repository linked to this completed task")
             .disabled(taskCreatingPullRequests.contains(task.id))
+            .frame(width: 30, height: 30)
+            .contentShape(Rectangle())
             .accessibilityIdentifier("done-archive-create-pr-\(task.id.uuidString)")
         } else {
             HStack(spacing: 5) {
@@ -582,9 +579,12 @@ struct KanbanBoardView: View {
                     if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
                         Link("#\(number)", destination: url)
                             .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .frame(minWidth: 30, minHeight: 30)
                             .actionButtonHoverEmphasis()
                             .buttonHoverPointer()
                             .help("Open pull request #\(number) in your browser")
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
                             .accessibilityIdentifier("done-archive-pr-link-\(task.id.uuidString)-\(number)")
                     }
                 }
@@ -1231,12 +1231,15 @@ private struct TaskCardView: View {
                                 ProgressView().controlSize(.mini)
                             } else {
                                 Text("PR").font(.system(size: 10, weight: .semibold))
+                                    .frame(minWidth: 30, minHeight: 30)
                             }
                         }
                         .actionButtonHoverEmphasis(padding: 10)
                         .buttonHoverPointer()
                         .help("Create a pull request for each repository linked to this task")
                         .disabled(isCreatingPullRequests)
+                        .frame(width: 30, height: 30)
+                        .contentShape(Rectangle())
                         .accessibilityIdentifier("task-create-pr-\(task.id.uuidString)")
                     } else {
                         if isPullRequestMerged, let onMoveToDone {
@@ -1269,9 +1272,12 @@ private struct TaskCardView: View {
                                 if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
                                     Link("#\(number)", destination: url)
                                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                        .frame(minWidth: 30, minHeight: 30)
                                         .actionButtonHoverEmphasis(padding: 10)
                                         .buttonHoverPointer()
                                         .help("Open pull request #\(number) in your browser")
+                                        .frame(width: 30, height: 30)
+                                        .contentShape(Rectangle())
                                         .accessibilityIdentifier("task-pr-link-\(task.id.uuidString)-\(number)")
                                 }
                             }
