@@ -15,6 +15,9 @@
 		A10000000000000000000010 /* WorkspaceRootsEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000010 /* WorkspaceRootsEditor.swift */; };
 		A10000000000000000000006 /* TaskConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* TaskConversationView.swift */; };
 		A10000000000000000000007 /* CodexAppServerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* CodexAppServerClient.swift */; };
+		A10000000000000000000012 /* ConversationModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* ConversationModel.swift */; };
+		A10000000000000000000013 /* ClaudeCodeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* ClaudeCodeClient.swift */; };
+		A10000000000000000000014 /* ConversationTranscriptStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* ConversationTranscriptStore.swift */; };
 		A10000000000000000000008 /* WorkspaceSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* WorkspaceSupport.swift */; };
 		A10000000000000000000009 /* BridgeCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000B /* BridgeCore.swift */; };
 		A1000000000000000000000A /* BridgeContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* BridgeContract.swift */; };
@@ -46,6 +49,9 @@
 		A20000000000000000000006 /* StationAI.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = StationAI.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000008 /* TaskConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskConversationView.swift; sourceTree = "<group>"; };
 		A20000000000000000000009 /* CodexAppServerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexAppServerClient.swift; sourceTree = "<group>"; };
+		A20000000000000000000012 /* ConversationModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationModel.swift; sourceTree = "<group>"; };
+		A20000000000000000000013 /* ClaudeCodeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeCodeClient.swift; sourceTree = "<group>"; };
+		A20000000000000000000014 /* ConversationTranscriptStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTranscriptStore.swift; sourceTree = "<group>"; };
 		A2000000000000000000000A /* WorkspaceSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSupport.swift; sourceTree = "<group>"; };
 		A2000000000000000000000B /* BridgeCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeCore.swift; sourceTree = "<group>"; };
 		A2000000000000000000000C /* BridgeContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Bridge/BridgeContract.swift; sourceTree = "<group>"; };
@@ -127,6 +133,9 @@
 				A20000000000000000000010 /* WorkspaceRootsEditor.swift */,
 				A20000000000000000000008 /* TaskConversationView.swift */,
 				A20000000000000000000009 /* CodexAppServerClient.swift */,
+				A20000000000000000000012 /* ConversationModel.swift */,
+				A20000000000000000000013 /* ClaudeCodeClient.swift */,
+				A20000000000000000000014 /* ConversationTranscriptStore.swift */,
 				A2000000000000000000000A /* WorkspaceSupport.swift */,
 				A2000000000000000000000B /* BridgeCore.swift */,
 				A2000000000000000000000C /* BridgeContract.swift */,
@@ -317,6 +326,9 @@
 				"$(SRCROOT)/StationAI/App/BoardTask.swift",
 				"$(SRCROOT)/StationAI/App/WorkspaceSupport.swift",
 				"$(SRCROOT)/StationAI/App/CodexAppServerClient.swift",
+				"$(SRCROOT)/StationAI/App/ConversationModel.swift",
+				"$(SRCROOT)/StationAI/App/ClaudeCodeClient.swift",
+				"$(SRCROOT)/StationAI/App/ConversationTranscriptStore.swift",
 			);
 			name = "Build CLI and XPC service";
 			outputPaths = (
@@ -356,6 +368,9 @@
 				A10000000000000000000010 /* WorkspaceRootsEditor.swift in Sources */,
 				A10000000000000000000006 /* TaskConversationView.swift in Sources */,
 				A10000000000000000000007 /* CodexAppServerClient.swift in Sources */,
+				A10000000000000000000012 /* ConversationModel.swift in Sources */,
+				A10000000000000000000013 /* ClaudeCodeClient.swift in Sources */,
+				A10000000000000000000014 /* ConversationTranscriptStore.swift in Sources */,
 				A10000000000000000000008 /* WorkspaceSupport.swift in Sources */,
 				A10000000000000000000009 /* BridgeCore.swift in Sources */,
 				A1000000000000000000000A /* BridgeContract.swift in Sources */,

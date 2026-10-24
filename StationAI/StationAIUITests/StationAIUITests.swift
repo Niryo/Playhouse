@@ -1164,8 +1164,8 @@ final class StationAIUITests: XCTestCase {
             taskIDs.append(try XCTUnwrap(created?["id"] as? String))
         }
 
-        let isLiveIntegration = FileManager.default.fileExists(atPath: "/tmp/stationai-codex-live-ui-integration")
         if isLiveIntegration {
+            for taskID in taskIDs { try useLiveProvider(taskID: taskID) }
             let barrier = try RepositoryAllocationLockBarrier(dataDirectory: dataDirectory, repositoryURL: fixture.primary)
             var barrierReleased = false
             var processes: [RunningCLIProcess] = []
@@ -3420,7 +3420,6 @@ final class StationAIUITests: XCTestCase {
         let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
         XCTAssertEqual((history?["activities"] as? [Any])?.count, 0)
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
-        let isLiveIntegration = FileManager.default.fileExists(atPath: "/tmp/stationai-codex-live-ui-integration")
         if !isLiveIntegration {
             app.terminate()
             codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-title-success-wait").path
@@ -3586,6 +3585,7 @@ final class StationAIUITests: XCTestCase {
             openTask(named: "Blank message")
         }
         if isLiveIntegration {
+            try useLiveProvider(taskID: taskID)
             let livePrompt = "In stationai-primary.txt, append exactly the line `StationAI UI pause marker 6A20F1`. Then run a shell command that executes `sleep 90; printf PAUSE_TEST_FINISHED`. Do not modify any other files. Reply with a short summary after the command finishes."
             let savedPrompt = try runCLI(["task", "prompt", taskID, "--text", livePrompt])["result"] as? [String: Any]
             XCTAssertEqual(savedPrompt?["savedPrompt"] as? String, livePrompt)
@@ -3668,6 +3668,160 @@ final class StationAIUITests: XCTestCase {
             attachScreenshot(named: "Continued response completed in the conversation")
         }
         attachScreenshot(named: "Blank composer leaves send disabled")
+    }
+
+    // case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; the choice persists across fresh CLI/XPC reads and an app relaunch, unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC.
+    func test_conversation_provider_selection_persists_and_validates() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        launchApp(defaultParent: fixture.parent.path)
+        let settings = try XCTUnwrap(try runCLI(["settings", "get"])["result"] as? [String: Any])
+        XCTAssertEqual(settings["defaultProvider"] as? String, "codex", "Existing installs keep Codex as the default provider.")
+        let unknownDefault = try runCLI(["settings", "set-default-provider", "gemini"], expectedStatus: 2)
+        XCTAssertEqual((unknownDefault["error"] as? [String: Any])?["code"] as? String, "invalid_argument")
+        _ = try runCLI(["task", "create", "--title", "Unknown provider UI", "--root", fixture.primary.path, "--provider", "gemini"], expectedStatus: 2)
+
+        try createTaskFixture(title: "Provider choice UI", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Provider choice UI")
+        XCTAssertEqual(try taskRecord(id: taskID)?["conversationProvider"] as? String, "codex")
+        openTask(named: "Provider choice UI")
+        let providerMenu = element("conversation-provider-menu")
+        XCTAssertTrue(providerMenu.waitForExistence(timeout: 10), "The composer should offer a provider picker.")
+        XCTAssertTrue(waitUntil({ providerMenu.label.contains("Codex") && providerMenu.isEnabled }, timeout: 10))
+        XCTAssertTrue(app.staticTexts["Send a message to Codex · Luna."].waitForExistence(timeout: 10))
+
+        providerMenu.click()
+        let claudeChoice = app.menuItems["conversation-provider-claude"]
+        XCTAssertTrue(claudeChoice.waitForExistence(timeout: 5))
+        claudeChoice.click()
+        XCTAssertTrue(waitUntil({ providerMenu.label.contains("Claude") }, timeout: 10), "A task without a conversation switches immediately.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["conversationProvider"] as? String) == "claude" }, timeout: 10))
+        XCTAssertTrue(app.staticTexts["Send a message to Claude."].waitForExistence(timeout: 10), "The empty conversation names Claude.")
+        XCTAssertFalse(element("provider-boundary-claude").exists, "Switching before any conversation records no boundary.")
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        XCTAssertEqual((history["providerBoundaries"] as? [Any])?.count, 0)
+
+        let modeMenu = element("conversation-mode-menu")
+        modeMenu.click()
+        XCTAssertTrue(app.menuItems["Plan mode"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.menuItems["conversation-mode-goal"].exists, "Claude tasks hide Goal mode.")
+        app.typeKey(.escape, modifierFlags: [])
+        let goal = try runCLI(["conversation", "goal", taskID, "set", "--text", "Ship it"], expectedStatus: 1)
+        XCTAssertEqual((goal["error"] as? [String: Any])?["code"] as? String, "invalid_transition")
+        XCTAssertTrue(((goal["error"] as? [String: Any])?["message"] as? String ?? "").contains("Goals are available only in Codex conversations"))
+
+        element("back-to-board-button").click()
+        relaunchApp()
+        openTask(named: "Provider choice UI")
+        XCTAssertTrue(waitUntil({ self.element("conversation-provider-menu").label.contains("Claude") }, timeout: 10), "The provider choice persists across an app relaunch.")
+        XCTAssertTrue(app.staticTexts["Send a message to Claude."].waitForExistence(timeout: 10))
+        element("back-to-board-button").click()
+
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        let explicit = try XCTUnwrap(try runCLI(["task", "create", "--title", "Explicit Codex UI", "--root", fixture.primary.path, "--provider", "codex"])["result"] as? [String: Any])
+        XCTAssertEqual(explicit["conversationProvider"] as? String, "codex", "task create can choose a provider explicitly.")
+        openNewTaskConversation()
+        XCTAssertTrue(waitUntil({ self.element("conversation-provider-menu").label.contains("Claude") }, timeout: 10), "New tasks use the default provider from settings.")
+        closeConversationRepositoryPicker()
+        element("back-to-board-button").click()
+
+        try createTaskFixture(title: "Provider done UI", roots: [fixture.secondary.path])
+        let doneTaskID = try self.taskID(named: "Provider done UI")
+        _ = try runCLI(["conversation", "provider", doneTaskID, "set", "codex"])
+        openTask(named: "Provider done UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Provider done UI")
+        element("back-to-board-button").click()
+        moveTaskToDone("Provider done UI")
+        element("done-archive-button").click()
+        let archived = element("done-archive-task-\(doneTaskID)")
+        XCTAssertTrue(archived.waitForExistence(timeout: 10))
+        archived.click()
+        XCTAssertTrue(element("archived-conversation-read-only").waitForExistence(timeout: 10))
+        XCTAssertFalse(element("conversation-provider-menu").exists, "A Done task's read-only conversation offers no provider switch.")
+        let doneSwitch = try runCLI(["conversation", "provider", doneTaskID, "set", "claude"], expectedStatus: 2)
+        XCTAssertTrue(((doneSwitch["error"] as? [String: Any])?["message"] as? String ?? "").contains("Done tasks are closed"))
+        XCTAssertEqual(try taskRecord(id: doneTaskID)?["conversationProvider"] as? String, "codex")
+    }
+
+    // case-contract: test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary | After a completed Codex fixture turn, switching providers is rejected while a follow-up is queued or a turn is active, and the provider menu is disabled during the turn. A settled switch to Claude records a boundary after the last Codex reply that persists across fresh reads and an app relaunch, keeps the Codex thread, and keeps earlier replies labeled Codex; switching back before any Claude turn removes the empty boundary, and the next Codex turn completes in the same thread.
+    func test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary() throws {
+        let executablePath = try makeCodexFixture(emptyQuestions: false).path
+        codexFixtureExecutable = executablePath
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Provider switch UI", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Provider switch UI")
+        openTask(named: "Provider switch UI")
+        let providerMenu = element("conversation-provider-menu")
+        XCTAssertTrue(providerMenu.waitForExistence(timeout: 10))
+
+        let hold = URL(fileURLWithPath: executablePath + ".outcome-hold")
+        let active = URL(fileURLWithPath: executablePath + ".outcome-active")
+        let release = URL(fileURLWithPath: executablePath + ".outcome-release")
+        try? FileManager.default.removeItem(at: active)
+        try? FileManager.default.removeItem(at: release)
+        try Data().write(to: hold, options: .atomic)
+        defer {
+            try? "Release the held fixture turn.\n".write(to: release, atomically: true, encoding: .utf8)
+            _ = waitUntil({ !FileManager.default.fileExists(atPath: active.path) }, timeout: 10)
+            try? FileManager.default.removeItem(at: hold)
+            try? FileManager.default.removeItem(at: active)
+            try? FileManager.default.removeItem(at: release)
+        }
+        element("message-composer").click()
+        element("message-composer").typeText("Start with Codex.")
+        element("send-message-button").click()
+        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        app.buttons["Blue"].click()
+        element("ai-question-answer-token").click()
+        element("ai-question-answer-token").typeText("fixture-secret")
+        element("submit-ai-answers-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: active.path) }, timeout: 10), "The fixture turn should stay active.")
+        XCTAssertFalse(providerMenu.isEnabled, "The provider menu is disabled during an active turn.")
+        let blockedByTurn = try runCLI(["conversation", "provider", taskID, "set", "claude"], expectedStatus: 1)
+        XCTAssertEqual((blockedByTurn["error"] as? [String: Any])?["code"] as? String, "invalid_transition")
+        XCTAssertTrue(((blockedByTurn["error"] as? [String: Any])?["message"] as? String ?? "").contains("current turn"))
+        _ = try runCLI(["task", "outcome", taskID, "completed"])
+        try "Release the held fixture turn.\n".write(to: release, atomically: true, encoding: .utf8)
+        let codexReply = app.staticTexts["Answers received: Blue / fixture-secret."]
+        XCTAssertTrue(codexReply.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 10))
+        let codexThread = try XCTUnwrap(try taskRecord(id: taskID)?["codexThreadID"] as? String)
+
+        let queued = try XCTUnwrap(try runCLI(["conversation", "queue", taskID, "--message", "Queued before switching."])["result"] as? [String: Any])
+        let blockedByQueue = try runCLI(["conversation", "provider", taskID, "set", "claude"], expectedStatus: 1)
+        XCTAssertTrue(((blockedByQueue["error"] as? [String: Any])?["message"] as? String ?? "").contains("queued follow-ups"))
+        _ = try runCLI(["conversation", "queue-remove", taskID, try XCTUnwrap(queued["id"] as? String)])
+
+        XCTAssertTrue(waitUntil({ providerMenu.isEnabled }, timeout: 10), "The provider menu is enabled once the turn settles.")
+        providerMenu.click()
+        let claudeChoice = app.menuItems["conversation-provider-claude"]
+        XCTAssertTrue(claudeChoice.waitForExistence(timeout: 5))
+        claudeChoice.click()
+        let boundary = element("provider-boundary-claude")
+        XCTAssertTrue(boundary.waitForExistence(timeout: 10), "A settled switch shows a provider boundary.")
+        XCTAssertEqual(boundary.label, "Conversation switched to Claude")
+        XCTAssertGreaterThan(boundary.frame.minY, codexReply.frame.maxY, "The boundary follows the last Codex reply.")
+        XCTAssertTrue(app.staticTexts["Codex · Luna"].exists, "Earlier replies stay labeled Codex.")
+        let switched = try XCTUnwrap(try taskRecord(id: taskID))
+        XCTAssertEqual(switched["conversationProvider"] as? String, "claude")
+        XCTAssertEqual(switched["codexThreadID"] as? String, codexThread, "Switching keeps the Codex thread.")
+
+        element("back-to-board-button").click()
+        relaunchApp()
+        openTask(named: "Provider switch UI")
+        XCTAssertTrue(element("provider-boundary-claude").waitForExistence(timeout: 10), "The boundary persists across an app relaunch.")
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].exists)
+
+        let reopenedMenu = element("conversation-provider-menu")
+        XCTAssertTrue(waitUntil({ reopenedMenu.isEnabled }, timeout: 10))
+        reopenedMenu.click()
+        let codexChoice = app.menuItems["conversation-provider-codex"]
+        XCTAssertTrue(codexChoice.waitForExistence(timeout: 5))
+        codexChoice.click()
+        XCTAssertTrue(waitForDisappearance(element("provider-boundary-claude"), timeout: 10), "Returning before any Claude turn removes the empty boundary.")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Provider switch UI", prompt: "Continue with Codex.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["codexThreadID"] as? String, codexThread, "The next Codex turn completes in the same thread.")
+        XCTAssertFalse(element("provider-boundary-claude").exists)
+        XCTAssertFalse(element(containingAccessibilityText: "stationai-handoff-context").exists)
     }
 
     // case-contract: test_conversation_serializes_concurrent_sends | Two concurrent sends for the same task are serialized across the app and CLI/XPC paths against the local Codex app-server fixture; the second waits for the first, both complete on the persisted thread, the task remains In Progress while a send is active, and successful turns without outcome calls finish in Waiting Response.
@@ -5684,9 +5838,29 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "External Git commit clears the open changes sidebar")
     }
 
-    private var isLiveCodexIntegration: Bool {
-        ProcessInfo.processInfo.environment["STATIONAI_RUN_CODEX_INTEGRATION"] == "1"
-            || FileManager.default.fileExists(atPath: "/tmp/stationai-codex-live-ui-integration")
+    /// The real provider selected for opt-in live UI cases, or nil for the
+    /// deterministic fixture suite. The runner writes it to the marker file.
+    private var liveProvider: String? {
+        let environment = ProcessInfo.processInfo.environment
+        if let marker = try? String(contentsOfFile: "/tmp/stationai-live-ui-integration", encoding: .utf8) {
+            let provider = marker.trimmingCharacters(in: .whitespacesAndNewlines)
+            return provider.isEmpty ? "claude" : provider
+        }
+        if environment["STATIONAI_RUN_LIVE_INTEGRATION"] == "1" { return environment["STATIONAI_LIVE_PROVIDER"] ?? "claude" }
+        if environment["STATIONAI_RUN_CODEX_INTEGRATION"] == "1" { return "codex" }
+        return nil
+    }
+
+    private var isLiveIntegration: Bool { liveProvider != nil }
+
+    /// Live Codex cases use the guest's signed-in Codex home.
+    private var isLiveCodexIntegration: Bool { liveProvider == "codex" }
+
+    /// Points a live case's task at the selected real provider.
+    private func useLiveProvider(taskID: String) throws {
+        guard let liveProvider else { return }
+        let switched = try XCTUnwrap(try runCLI(["conversation", "provider", taskID, "set", liveProvider])["result"] as? [String: Any])
+        XCTAssertEqual(switched["conversationProvider"] as? String, liveProvider)
     }
 
     private func launchApp(defaultParent: String?, environmentOverrides: [String: String] = [:]) {

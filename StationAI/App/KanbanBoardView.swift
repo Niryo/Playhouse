@@ -5,6 +5,7 @@ import SwiftUI
 struct KanbanBoardView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var codexClient: CodexAppServerClient
+    @EnvironmentObject private var claudeClient: ClaudeCodeClient
     @Query(filter: #Predicate<BoardTask> { $0.statusRawValue != "Done" }, sort: \BoardTask.createdAt, order: .reverse) private var tasks: [BoardTask]
     @State private var isCreatingNewTask = false
     @State private var saveError: String?
@@ -37,6 +38,10 @@ struct KanbanBoardView: View {
     @State private var isShowingBoardSearch = false
     @State private var boardSearchText = ""
     @FocusState private var isBoardSearchFocused: Bool
+
+    private var conversationClients: ConversationClients {
+        ConversationClients(codex: codexClient, claude: claudeClient)
+    }
 
     var body: some View {
         Group {
@@ -316,7 +321,7 @@ struct KanbanBoardView: View {
             do {
                 try await Task.sleep(for: .milliseconds(250))
                 guard !Task.isCancelled else { return }
-                let manager = CodexConversationManager(tasks: BoardTaskManager(modelContext: modelContext), client: codexClient)
+                let manager = ConversationManager(tasks: BoardTaskManager(modelContext: modelContext), clients: conversationClients)
                 let records = try await manager.searchArchive(query: query)
                 guard !Task.isCancelled else { return }
                 archiveSearchResults = records.compactMap { try? BoardTaskManager(modelContext: modelContext).taskModel($0.id) }
@@ -645,7 +650,8 @@ struct KanbanBoardView: View {
                 let created = try await manager.create(
                     title: "Untitled task",
                     repositories: [],
-                    contextFolders: []
+                    contextFolders: [],
+                    provider: WorkspaceSettingsManager().defaultConversationProvider
                 )
                 let newTask = try manager.taskModel(created.id)
                 selectedTask = newTask
@@ -750,7 +756,7 @@ struct KanbanBoardView: View {
                 if !conflictRepositories.isEmpty {
                     throw BridgeCommandError(code: "conflicts_require_confirmation", message: "Resolve conflicts in the task worktree before creating pull requests.")
                 }
-                _ = try await manager.createPullRequests(task.id, client: codexClient)
+                _ = try await manager.createPullRequests(task.id, clients: conversationClients)
             } catch {
                 pullRequestError = error.localizedDescription
             }
@@ -1261,7 +1267,7 @@ private struct TaskCardView: View {
                                 }
                                 .actionButtonHoverEmphasis(padding: 10)
                                 .buttonHoverPointer()
-                                .help("Resolve pull request conflicts with Codex")
+                                .help("Resolve pull request conflicts with \(task.conversationProvider.displayName)")
                                 .accessibilityLabel("Resolve pull request conflicts")
                                 .accessibilityIdentifier("task-resolve-pr-conflicts-\(task.id.uuidString)")
                             }

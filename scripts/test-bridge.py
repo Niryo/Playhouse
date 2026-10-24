@@ -636,7 +636,7 @@ class StationAIBridgeTests(unittest.TestCase):
         task_write = next(
             event for event in self.diagnostic_events()
             if event.get("event") == "persistence.write.succeeded"
-            and "create(title:repositories:contextFolders:)" in event.get("operation", "")
+            and "create(title:repositories:contextFolders:" in event.get("operation", "")
         )
         self.assertEqual(task_write.get("entity"), "BoardTask")
         worktree_read = next(
@@ -2707,6 +2707,120 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIn("restarted", recovered_record["statusMessage"].lower())
         self.assertEqual(recovered_record["savedPrompt"], stale_prompt)
         self.assertIsNone(recovered_record.get("pendingSubmittedPrompt"))
+
+    # case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; the choice persists across fresh CLI/XPC reads and an app relaunch, unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC.
+    def test_conversation_provider_selection_persists_and_validates(self):
+        settings = self.assert_success(self.call_cli("settings", "get")[0])
+        self.assertEqual(settings["defaultProvider"], "codex", "Existing installs keep Codex as the default provider.")
+        codex_task = self.create_task("Provider default task")
+        self.assertEqual(codex_task["conversationProvider"], "codex")
+        provider = self.assert_success(self.call_cli("conversation", "provider", codex_task["id"])[0])
+        self.assertEqual(provider, {"provider": "codex", "supportsGoals": True})
+
+        unknown_default, _ = self.call_cli("settings", "set-default-provider", "gemini", expected_status=2)
+        self.assert_failure(unknown_default, "invalid_argument")
+        self.assertIn("Valid providers: codex, claude", unknown_default["error"]["message"])
+        changed = self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        self.assertEqual(changed["defaultProvider"], "claude")
+        self.assertEqual(self.assert_success(self.call_cli("settings", "get")[0])["defaultProvider"], "claude")
+        claude_task = self.create_task("Provider claude default task")
+        self.assertEqual(claude_task["conversationProvider"], "claude")
+        explicit, _ = self.call_cli("task", "create", "--title", "Explicit Codex task", "--root", self.primary, "--provider", "codex")
+        self.assertEqual(self.assert_success(explicit)["conversationProvider"], "codex")
+        unknown_create, _ = self.call_cli("task", "create", "--title", "Unknown provider task", "--root", self.primary, "--provider", "gemini", expected_status=2)
+        self.assert_failure(unknown_create, "invalid_argument")
+
+        unknown_switch, _ = self.call_cli("conversation", "provider", codex_task["id"], "set", "gemini", expected_status=2)
+        self.assert_failure(unknown_switch, "invalid_argument")
+        switched = self.assert_success(self.call_cli("conversation", "provider", codex_task["id"], "set", "claude")[0])
+        self.assertEqual(switched["conversationProvider"], "claude", "A task without a conversation switches immediately.")
+        self.assertIsNone(switched.get("codexThreadID"))
+        self.assertIsNone(switched.get("claudeSessionID"))
+        fresh = self.assert_success(self.call_cli("task", "get", codex_task["id"])[0])
+        self.assertEqual(fresh["conversationProvider"], "claude", "The provider choice persists across fresh CLI/XPC reads.")
+        self.assertEqual(
+            self.assert_success(self.call_cli("conversation", "provider", codex_task["id"])[0]),
+            {"provider": "claude", "supportsGoals": False},
+        )
+        history = self.assert_success(self.call_cli("conversation", "history", codex_task["id"])[0])
+        self.assertEqual(history["messages"], [])
+        self.assertEqual(history["providerBoundaries"], [], "Switching before any conversation records no boundary.")
+        transcript = self.data_directory / "conversation-transcripts" / f"{codex_task['id']}.json"
+        self.assertFalse(transcript.exists(), "No transcript is written before the first turn.")
+
+        goal_set, _ = self.call_cli("conversation", "goal", claude_task["id"], "set", "--text", "Ship it", expected_status=1)
+        self.assert_failure(goal_set, "invalid_transition")
+        self.assertIn("Goals are available only in Codex conversations", goal_set["error"]["message"])
+        goal_get = self.assert_success(self.call_cli("conversation", "goal", claude_task["id"], "get")[0])
+        self.assertIsNone(goal_get, "A Claude task reports no Goal.")
+
+        done_task = self.create_task("Provider done task", roots=[self.secondary])
+        self.assert_success(self.call_cli("conversation", "provider", done_task["id"], "set", "codex")[0])
+        self.complete_fixture_turn(done_task["id"])
+        self.assert_success(self.call_cli("task", "move", done_task["id"], "Done")[0])
+        done_switch, _ = self.call_cli("conversation", "provider", done_task["id"], "set", "claude", expected_status=2)
+        self.assert_failure(done_switch, "invalid_argument")
+        self.assertIn("Done tasks are closed", done_switch["error"]["message"])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", done_task["id"])[0])["conversationProvider"], "codex")
+
+    # case-contract: test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary | After a completed Codex fixture turn, switching providers is rejected while a follow-up is queued or a turn is active, and the provider menu is disabled during the turn. A settled switch to Claude records a boundary after the last Codex reply that persists across fresh reads and an app relaunch, keeps the Codex thread, and keeps earlier replies labeled Codex; switching back before any Claude turn removes the empty boundary, and the next Codex turn completes in the same thread.
+    def test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary(self):
+        task = self.create_task("Provider switch task")
+        self.complete_fixture_turn(task["id"], message="Start with Codex.")
+        fixture_environment = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture")}
+        before = self.assert_success(self.call_cli("conversation", "history", task["id"], extra_environment=fixture_environment)[0])
+        codex_thread = self.assert_success(self.call_cli("task", "get", task["id"])[0])["codexThreadID"]
+        self.assertTrue(codex_thread)
+        self.assertTrue(before["messages"])
+        self.assertTrue(all(message.get("provider") == "codex" for message in before["messages"]))
+
+        queued = self.assert_success(self.call_cli("conversation", "queue", task["id"], "--message", "Queued before switching.", extra_environment=fixture_environment)[0])
+        blocked_by_queue, _ = self.call_cli("conversation", "provider", task["id"], "set", "claude", expected_status=1, extra_environment=fixture_environment)
+        self.assert_failure(blocked_by_queue, "invalid_transition")
+        self.assertIn("queued follow-ups", blocked_by_queue["error"]["message"])
+        self.assert_success(self.call_cli("conversation", "queue-remove", task["id"], queued["id"], extra_environment=fixture_environment)[0])
+
+        process, executable, active, release = self.start_progress_fixture_turn(task["id"], "codex-fixture-hold-release")
+        try:
+            blocked_by_turn, _ = self.call_cli("conversation", "provider", task["id"], "set", "claude", expected_status=1, extra_environment=fixture_environment)
+            self.assert_failure(blocked_by_turn, "invalid_transition")
+            self.assertIn("current turn", blocked_by_turn["error"]["message"])
+            self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["conversationProvider"], "codex")
+            self.assert_success(self.call_cli("task", "outcome", task["id"], "completed")[0])
+        finally:
+            release.write_text("Release the active turn.\n", encoding="utf-8")
+            stdout, stderr = process.communicate(timeout=30)
+        self.assertEqual(process.returncode, 0, f"Held Codex turn failed: {stdout}; {stderr}")
+
+        switched = self.assert_success(self.call_cli("conversation", "provider", task["id"], "set", "claude", extra_environment=fixture_environment)[0])
+        self.assertEqual(switched["conversationProvider"], "claude")
+        self.assertEqual(switched["codexThreadID"], codex_thread, "Switching keeps the Codex thread for a later return.")
+        self.assertIsNone(switched.get("claudeSessionID"), "Claude starts its session on its first turn.")
+        history = self.assert_success(self.call_cli("conversation", "history", task["id"], extra_environment=fixture_environment)[0])
+        boundaries = history["providerBoundaries"]
+        self.assertEqual(len(boundaries), 1, history)
+        self.assertEqual(boundaries[0]["provider"], "claude")
+        self.assertEqual(boundaries[0]["afterMessageID"], history["messages"][-1]["id"], "The boundary follows the last Codex reply.")
+        self.assertEqual(history["messages"][-1]["role"], "assistant")
+        self.assertTrue(all(message.get("provider") == "codex" for message in history["messages"]), "Earlier replies stay labeled Codex.")
+        orders = [message["timelineOrder"] for message in history["messages"]]
+        self.assertEqual(orders, sorted(orders))
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["conversationProvider"], "claude")
+
+        returned = self.assert_success(self.call_cli("conversation", "provider", task["id"], "set", "codex", extra_environment=fixture_environment)[0])
+        self.assertEqual(returned["conversationProvider"], "codex")
+        returned_history = self.assert_success(self.call_cli("conversation", "history", task["id"], extra_environment=fixture_environment)[0])
+        self.assertEqual(returned_history["providerBoundaries"], [], "Returning before any Claude turn removes the empty boundary.")
+        self.complete_fixture_turn(task["id"], message="Continue with Codex.")
+        after = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(after["codexThreadID"], codex_thread, "The next Codex turn resumes the same thread.")
+        final_history = self.assert_success(self.call_cli("conversation", "history", task["id"], extra_environment=fixture_environment)[0])
+        self.assertEqual(final_history["providerBoundaries"], [])
+        self.assertIn("Continue with Codex.", [message["text"] for message in final_history["messages"] if message["role"] == "user"])
+        self.assertFalse(
+            any("<stationai-handoff-context>" in message["text"] for message in final_history["messages"]),
+            "Handoff context never appears in the visible transcript.",
+        )
 
     # case-contract: test_conversation_serializes_concurrent_sends | Two concurrent sends for the same task are serialized across the app and CLI/XPC paths against the local Codex app-server fixture; the second waits for the first, both complete on the persisted thread, the task remains In Progress while a send is active, and successful turns without outcome calls finish in Waiting Response.
     def test_conversation_serializes_concurrent_sends(self):
