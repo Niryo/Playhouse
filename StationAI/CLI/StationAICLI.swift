@@ -28,6 +28,9 @@ enum StationAICLI {
         if let fixtureExecutable = ProcessInfo.processInfo.environment["STATIONAI_E2E_CODEX_EXECUTABLE"] {
             configuredRequest.arguments["__codexExecutable"] = .string(fixtureExecutable)
         }
+        if let fixtureExecutable = ProcessInfo.processInfo.environment["STATIONAI_E2E_CLAUDE_EXECUTABLE"] {
+            configuredRequest.arguments["__claudeExecutable"] = .string(fixtureExecutable)
+        }
 
         do {
             let response = try BridgeClient().send(configuredRequest) { event in

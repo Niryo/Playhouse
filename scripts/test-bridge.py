@@ -1556,7 +1556,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(waiting["status"], "Waiting Response")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", blocked_id)[0])["status"], "Blocked")
 
-    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review.
+    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task.
     def test_task_progress_reports_publish_persist_and_clear(self):
         task_id = self.create_task("Progress reports", roots=[self.primary])["id"]
         response, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "building", expected_status=1)
@@ -1676,10 +1676,37 @@ class StationAIBridgeTests(unittest.TestCase):
                 if omitted_follow_up.poll() is None:
                     release_marker.write_text("Release the no-outcome turn.\n", encoding="utf-8")
                     omitted_follow_up.communicate(timeout=20)
+            # A model can write its outcome command as answer text instead of running
+            # it. The echo is hidden, and it counts only when it names this task.
+            for echoed_task_id, expected_status in [(str(uuid.uuid4()).upper(), "Waiting Response"), (task_id, "Review")]:
+                echoed_turn = subprocess.Popen(
+                    [str(self.cli), "conversation", "send", task_id, "--message", f"Echo the outcome command for {echoed_task_id}."],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment,
+                )
+                try:
+                    deadline = time.monotonic() + 10
+                    while not active_marker.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    self.assertTrue(active_marker.exists(), "The echoed-outcome fixture turn should become active.")
+                    release_marker.write_text("Release the echoed-outcome turn.\n", encoding="utf-8")
+                    echoed_stdout, echoed_stderr = echoed_turn.communicate(timeout=20)
+                    self.assertEqual(echoed_turn.returncode, 0, f"Echoed-outcome fixture conversation failed: {echoed_stdout}; {echoed_stderr}")
+                    echoed_events = [json.loads(line) for line in echoed_stdout.splitlines() if line.strip()]
+                    finals = [event["payload"]["text"] for event in echoed_events if event.get("type") == "assistant_final"]
+                    self.assertEqual(finals, ["Fixture answer with an echoed outcome."], "The streamed final answer must hide the echoed outcome command.")
+                    echoed_record, _ = self.call_cli("task", "get", task_id)
+                    self.assertEqual(self.assert_success(echoed_record)["status"], expected_status)
+                    echoed_history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)})[0])
+                    self.assertEqual(echoed_history["messages"][-1]["text"], "Fixture answer with an echoed outcome.")
+                    self.assertFalse(any("task outcome" in message["text"] for message in echoed_history["messages"]), "A fresh history read must hide the echoed outcome command.")
+                finally:
+                    if echoed_turn.poll() is None:
+                        release_marker.write_text("Release the echoed-outcome turn.\n", encoding="utf-8")
+                        echoed_turn.communicate(timeout=20)
             turn_data = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
             self.assertEqual(turn_data["threadStartCount"], 1)
             self.assertGreaterEqual(turn_data["threadResumeCount"], 1)
-            self.assertEqual(len(turn_data["turns"]), 3)
+            self.assertEqual(len(turn_data["turns"]), 5)
             self.assertTrue(all(turn["developerInstructions"] is None for turn in turn_data["turns"]), "Thread-scoped task instructions should not be repeated in turn requests.")
             instructions = turn_data["threadStartDeveloperInstructions"]
             self.assertIn(str(self.cli), instructions)
@@ -2787,6 +2814,66 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assert_failure(done_switch, "invalid_argument")
         self.assertIn("Done tasks are closed", done_switch["error"]["message"])
         self.assertEqual(self.assert_success(self.call_cli("task", "get", done_task["id"])[0])["conversationProvider"], "codex")
+
+    # case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its StationAI progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn without an outcome ends in Waiting Response. After switching to Codex, the first Codex prompt hands off the whole Claude answer and excludes the commentary of answered turns, while a turn that recorded only commentary hands off its last commentary instead.
+    def test_claude_answer_stays_final_around_outcome_report(self):
+        story = "BISCUIT-7 waited by the gate every evening. One night the boy finally came home."
+        story_answer = story + "\n\nThe story is above."
+        claude = self.data_directory / "claude-fixture-story"
+        codex = self.data_directory / "codex-fixture-handoff-success"
+        for source, executable in [("claude-code-fixture.py", claude), ("codex-app-server-fixture.py", codex)]:
+            shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / source, executable)
+            executable.chmod(0o755)
+        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
+            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        fixtures = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(claude), "STATIONAI_E2E_CODEX_EXECUTABLE": str(codex)}
+        created, _ = self.call_cli("task", "create", "--title", "Claude answer", "--root", self.primary, "--provider", "claude")
+        task_id = self.assert_success(created)["id"]
+
+        sent, events = self.call_cli("conversation", "send", task_id, "--message", "Tell me a very short dog story.", extra_environment=fixtures)
+        self.assert_success(sent)
+        self.assertEqual([event["payload"]["text"] for event in events if event["type"] == "assistant_final"], [story_answer])
+        progress = [event["payload"]["text"] for event in events if event["type"] == "assistant_progress"]
+        self.assertFalse(any("BISCUIT-7" in text for text in progress), f"The story must not stream as commentary: {progress}")
+        recorded = json.loads(Path(str(claude) + ".history").read_text(encoding="utf-8"))["turns"][-1]
+        self.assertEqual(len(recorded["reportCommands"]), 2, "The fixture should run StationAI's progress-clear and outcome commands.")
+        self.assertTrue(all('"ok":true' in command["output"] for command in recorded["reportCommands"]), recorded["reportCommands"])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Review")
+
+        sent, events = self.call_cli("conversation", "send", task_id, "--message", "Please inspect the workspace.", extra_environment=fixtures)
+        self.assert_success(sent)
+        self.assertEqual([event["payload"]["text"] for event in events if event["type"] == "assistant_final"], ["Inspection done: the workspace is ready."])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
+
+        sent, events = self.call_cli("conversation", "send", task_id, "--message", "Start the checks.", extra_environment=fixtures)
+        self.assert_success(sent)
+        self.assertEqual([event for event in events if event["type"] == "assistant_final"], [], "This turn records only commentary.")
+
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=fixtures)[0])
+        assistant = [(message["phase"], message["text"]) for message in history["messages"] if message["role"] == "assistant"]
+        self.assertEqual(assistant, [
+            ("final_answer", story_answer),
+            ("commentary", "I'll inspect the workspace first."),
+            ("final_answer", "Inspection done: the workspace is ready."),
+            ("commentary", "Starting the checks."),
+            ("commentary", "Checks are running; results will follow."),
+        ], "A fresh history read keeps the story as one final answer and the pre-tool text as commentary.")
+
+        self.assert_success(self.call_cli("conversation", "provider", task_id, "set", "codex")[0])
+        sent, _ = self.call_cli("conversation", "send", task_id, "--message", "Continue the story.", extra_environment=fixtures)
+        self.assert_success(sent)
+        handoff = json.loads(Path(str(codex) + ".history").read_text(encoding="utf-8"))["turns"][-1]["userMessage"]
+        self.assertIn("<stationai-handoff-context>", handoff)
+        self.assertIn(f"Claude: {story_answer}", handoff, "Codex must receive the whole Claude answer.")
+        self.assertIn("Claude: Inspection done: the workspace is ready.", handoff)
+        self.assertNotIn("I'll inspect the workspace first.", handoff, "Commentary of an answered turn stays with the provider that produced it.")
+        self.assertIn("Claude: Checks are running; results will follow.", handoff, "A turn without an answer hands off its last commentary.")
+        self.assertNotIn("Starting the checks.", handoff, "Only the unanswered turn's last commentary is handed off.")
+        self.assertTrue(handoff.endswith("Continue the story."))
 
     # case-contract: test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary | After a completed Codex fixture turn, switching providers is rejected while a follow-up is queued or a turn is active, and the provider menu is disabled during the turn. A settled switch to Claude records a boundary after the last Codex reply that persists across fresh reads and an app relaunch, keeps the Codex thread, and keeps earlier replies labeled Codex; switching back before any Claude turn removes the empty boundary, and the next Codex turn completes in the same thread.
     def test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary(self):

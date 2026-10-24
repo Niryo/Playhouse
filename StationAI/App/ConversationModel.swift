@@ -425,3 +425,46 @@ enum ConversationProcessEnvironment {
         }
     }
 }
+
+/// A provider executable override is honored only inside a directory that a
+/// StationAI test fixture owns, so the environment can't redirect real turns.
+enum ConversationProviderFixture {
+    static func ownedExecutable(_ path: String?, providerMarker: (name: String, value: String)) -> String? {
+        guard let path, FileManager.default.isExecutableFile(atPath: path) else { return nil }
+        let directory = URL(fileURLWithPath: path).deletingLastPathComponent()
+        let markers = [providerMarker, (".stationai-bridge-fixture", "StationAI bridge tests own this deterministic fixture (v1).\n")]
+        for (name, value) in markers {
+            if (try? String(contentsOf: directory.appendingPathComponent(name), encoding: .utf8)) == value { return path }
+        }
+        return nil
+    }
+}
+
+/// A model occasionally writes its final `stationai-cli task outcome` command as
+/// answer text instead of running it. A trailing echo of that command is removed
+/// from the visible answer and still counts as the turn's reported outcome.
+enum LeakedTurnOutcome {
+    private static let pattern: NSRegularExpression = {
+        let executable = NSRegularExpression.escapedPattern(for: TaskProgressReportInstructions.executableName)
+        let subcommand = TaskProgressReportInstructions.outcomeSubcommand
+            .split(separator: " ").map { NSRegularExpression.escapedPattern(for: String($0)) }.joined(separator: #"\s+"#)
+        return try! NSRegularExpression(pattern:
+            #"[\p{So}\x{FE0F}\s`]*\n[\p{So}\x{FE0F}\s`$>]*(?:'[^'\n]*|[^\s'`]*)"# + executable + #"'?\s+"# + subcommand
+            + #"\s+([0-9A-Fa-f-]{36})\s+(completed|waiting-response)[\s`.]*\z"#)
+    }()
+
+    static func split(_ text: String) -> (text: String, taskID: UUID?, outcome: String?) {
+        // The leading newline lets an answer that is only the echoed command match too.
+        let candidate = "\n" + text
+        guard let match = pattern.firstMatch(in: candidate, range: NSRange(candidate.startIndex..., in: candidate)),
+              let echo = Range(match.range, in: candidate),
+              let id = Range(match.range(at: 1), in: candidate),
+              let outcome = Range(match.range(at: 2), in: candidate) else {
+            return (text, nil, nil)
+        }
+        let visible = candidate[..<echo.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+        return (visible, UUID(uuidString: String(candidate[id])), String(candidate[outcome]))
+    }
+
+    static func visibleText(_ text: String) -> String { split(text).text }
+}

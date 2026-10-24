@@ -3925,6 +3925,7 @@ final class ConversationManager {
                 }
             }
             var finalMessageCount = 0
+            var leakedOutcome: String?
             if onTurnStarting != nil {
                 client.markTurnStarting(threadID: threadID)
                 onTurnStarting?()
@@ -3940,8 +3941,12 @@ final class ConversationManager {
                 workspace: workspace,
                 developerInstructions: TaskProgressReportInstructions.make(taskID: taskID),
                 onDelta: { delta in onUpdate(ConversationUpdate(type: "text_delta", text: delta)) },
-                onFinalMessage: { message in
-                    if let claudeTurnID {
+                onFinalMessage: { answer in
+                    let split = LeakedTurnOutcome.split(answer)
+                    if split.taskID == taskID { leakedOutcome = split.outcome }
+                    let message = split.text
+                    // An answer that was only the echo still replaces the streamed text.
+                    if let claudeTurnID, !message.isEmpty {
                         finalMessageCount += 1
                         self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, ConversationMessage(
                             id: "\(claudeTurnID)-final-\(finalMessageCount)", role: .assistant, text: message, phase: "final_answer"
@@ -4033,7 +4038,7 @@ final class ConversationManager {
             }
             phase = "worktree-finalization"
             phase = "review-status-persistence"
-            let reportedOutcome = try await tasks.finishConversationTurnOutcome(taskID)
+            let reportedOutcome = try await tasks.finishConversationTurnOutcome(taskID) ?? leakedOutcome
             let finalStatus: TaskStatus = reportedOutcome == "completed" ? .review : .waitingResponse
             _ = try await tasks.setLifecycleStatus(taskID, to: finalStatus)
         } catch {
@@ -4246,10 +4251,11 @@ final class StationAIBridgeRuntime {
             let workspaces = WorkspaceManager(taskManager: taskManager)
 
             let codexExecutable = request.arguments["__codexExecutable"]?.string
+            let claudeExecutable = request.arguments["__claudeExecutable"]?.string
             func conversationClients(codexHome: String? = nil, goalFeatureEnabled: Bool = false) -> ConversationClients {
                 ConversationClients(
                     codex: CodexAppServerClient(codexExecutableOverride: codexExecutable, codexHomeOverride: codexHome, goalFeatureEnabled: goalFeatureEnabled),
-                    claude: ClaudeCodeClient()
+                    claude: ClaudeCodeClient(executableOverride: claudeExecutable)
                 )
             }
 

@@ -98,9 +98,18 @@ enum ConversationHandoff {
     private static let characterLimit = 40_000
 
     static func context(for provider: ConversationProvider, messages: [ConversationMessage]) -> String? {
+        // A turn whose answer was only recorded as commentary still hands off its
+        // last commentary, so a misclassified answer is never silently dropped.
+        let answeredTurns = Set(messages.compactMap { $0.role == .assistant && $0.phase != "commentary" ? $0.turnID : nil })
+        let lastCommentaryIDs = Set(Dictionary(
+            messages.compactMap { message in
+                message.phase == "commentary" ? message.turnID.map { ($0, message.id) } : nil
+            },
+            uniquingKeysWith: { _, last in last }
+        ).filter { !answeredTurns.contains($0.key) }.values)
         let lines = messages.compactMap { message -> String? in
             let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty, message.phase != "commentary" else { return nil }
+            guard !text.isEmpty, message.phase != "commentary" || lastCommentaryIDs.contains(message.id) else { return nil }
             let speaker = message.role == .user ? "User" : (message.provider ?? .codex).displayName
             return "\(speaker): \(text)"
         }

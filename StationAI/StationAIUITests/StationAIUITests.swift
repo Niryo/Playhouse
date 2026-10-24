@@ -262,6 +262,7 @@ final class StationAIUITests: XCTestCase {
     private var cliURL: URL!
     private var serviceName: String!
     private var codexFixtureExecutable: String?
+    private var claudeFixtureExecutable: String?
     private var launchDefaultParent: String?
     private var launchWindowTitle: String?
     private var repositoryRoot: URL {
@@ -277,6 +278,7 @@ final class StationAIUITests: XCTestCase {
         }
         continueAfterFailure = false
         codexFixtureExecutable = nil
+        claudeFixtureExecutable = nil
         launchWindowTitle = nil
         fixture = try WorkspaceFixture.load()
         runDirectory = URL(fileURLWithPath: "/tmp/stationai-ui-test-data", isDirectory: true)
@@ -2014,7 +2016,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ lowestTask.exists && lowestTask.isHittable }, timeout: 10), "Vertical board scrolling should make lower backlog tasks reachable.")
     }
 
-    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review.
+    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task.
     func test_task_progress_reports_publish_persist_and_clear() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Progress reports", roots: [fixture.primary.path])
@@ -2193,6 +2195,23 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual((appOutcome["result"] as? [String: Any])?["outcome"] as? String, "completed")
         try "Release the composer turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 15), "An outcome reported with the provider's inherited environment should move the app-started turn to Review.")
+
+        // A model can write its outcome command as answer text instead of running
+        // it. The echo is hidden, and it counts only when it names this task.
+        let echoedAnswers = app.staticTexts.matching(NSPredicate(format: "label == %@", "Fixture answer with an echoed outcome."))
+        for (turnIndex, (echoedTaskID, expectedColumn)) in [(UUID().uuidString, "Waiting Response"), (taskID, "Review")].enumerated() {
+            XCTAssertTrue(waitUntil({ composer.isEnabled && composer.isHittable }, timeout: 15), "The composer should accept the echoed-outcome turn.")
+            composer.click()
+            composer.typeText("Echo the outcome command for \(echoedTaskID).")
+            element("send-message-button").click()
+            XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 15), "The echoed-outcome turn should hold the fixture turn open.")
+            try "Release the echoed-outcome turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+            XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == expectedColumn }, timeout: 15), "An echoed outcome for \(echoedTaskID) should leave the task in \(expectedColumn).")
+            XCTAssertTrue(waitUntil({ echoedAnswers.count == turnIndex + 1 }, timeout: 10), "The transcript should show this turn's answer without the echoed command.")
+            XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "task outcome")).count, 0, "The transcript must not show the echoed outcome command.")
+        }
+        relaunchApp()
+        assertTaskVisible("Progress reports", inColumn: "Review")
     }
 
     // case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; a staged completed outcome is discarded if its turn fails, leaving the task Blocked. The task card removes the report while lifecycle states remain Blocked or Waiting Response, and answering the question resumes the task successfully.
@@ -3883,6 +3902,86 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: taskID)?["codexThreadID"] as? String, codexThread, "The next Codex turn completes in the same thread.")
         XCTAssertFalse(element("provider-boundary-claude").exists)
         XCTAssertFalse(element(containingAccessibilityText: "stationai-handoff-context").exists)
+    }
+
+    // case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its StationAI progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn without an outcome ends in Waiting Response. After switching to Codex, the first Codex prompt hands off the whole Claude answer and excludes the commentary of answered turns, while a turn that recorded only commentary hands off its last commentary instead.
+    func test_claude_answer_stays_final_around_outcome_report() throws {
+        let claudeExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
+        let codexExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: claudeExecutable.path), "The prepared Claude Code fixture is missing or not executable.")
+        claudeFixtureExecutable = claudeExecutable.path
+        codexFixtureExecutable = codexExecutable.path
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: codexExecutable.path + ".history"))
+        launchApp(defaultParent: fixture.parent.path)
+        let created = try XCTUnwrap(try runCLI(["task", "create", "--title", "Claude answer UI", "--root", fixture.primary.path, "--provider", "claude"])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Claude answer UI")
+        let composer = element("message-composer")
+        let story = "BISCUIT-7 waited by the gate every evening. One night the boy finally came home."
+        func send(_ text: String) {
+            XCTAssertTrue(waitUntil({ composer.isEnabled && composer.isHittable }, timeout: 15), "The composer should accept a message.")
+            composer.click()
+            composer.typeText(text)
+            element("send-message-button").click()
+        }
+        func visibleTexts(containing text: String) -> XCUIElementQuery {
+            app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", text))
+        }
+        // The live turn shows every message inline; only once the turn settles does
+        // the transcript collapse commentary into Worked for.
+        func waitForSettledTurn() {
+            XCTAssertTrue(waitUntil({
+                self.element("codex-worked-duration").exists && !self.element("codex-working-duration").exists && composer.isEnabled
+            }, timeout: 20), "The turn should settle into its Worked for summary.")
+        }
+
+        send("Tell me a very short dog story.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 20), "Claude's reported outcome should move the task to Review.")
+        waitForSettledTurn()
+        XCTAssertTrue(visibleTexts(containing: story).firstMatch.exists, "The story should be the visible answer, not collapsed commentary.")
+        XCTAssertTrue(visibleTexts(containing: "The story is above.").firstMatch.exists, "The closing line belongs to the same answer.")
+        element("codex-activity-disclosure").click()
+        let activityDetails = element("codex-activity-details")
+        XCTAssertTrue(activityDetails.waitForExistence(timeout: 5), "Worked for should expand.")
+        XCTAssertEqual(activityDetails.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", story)).count, 0, "The story must not be inside Worked for.")
+        element("codex-activity-disclosure").click()
+
+        send("Please inspect the workspace.")
+        XCTAssertTrue(visibleTexts(containing: "Inspection done: the workspace is ready.").firstMatch.waitForExistence(timeout: 20))
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" }, timeout: 10), "A turn without an outcome should wait for the user.")
+        waitForSettledTurn()
+        XCTAssertEqual(visibleTexts(containing: "I'll inspect the workspace first.").count, 0, "Text before an ordinary tool stays collapsed commentary.")
+
+        send("Start the checks.")
+        XCTAssertTrue(visibleTexts(containing: "Start the checks.").firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({
+            !self.element("codex-working-duration").exists && composer.isEnabled
+        }, timeout: 20), "The commentary-only turn should finish.")
+
+        let providerMenu = element("conversation-provider-menu")
+        XCTAssertTrue(waitUntil({ providerMenu.isEnabled }, timeout: 10), "The provider menu is enabled once the turn settles.")
+        providerMenu.click()
+        let codexChoice = app.menuItems["conversation-provider-codex"]
+        XCTAssertTrue(codexChoice.waitForExistence(timeout: 5))
+        codexChoice.click()
+        XCTAssertTrue(element("provider-boundary-codex").waitForExistence(timeout: 10), "The switch shows a provider boundary.")
+        send("Continue the story.")
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 20), "The Codex turn should complete.")
+        let codexHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: codexExecutable.path + ".history"))) as? [String: Any])
+        let handoff = try XCTUnwrap((codexHistory["turns"] as? [[String: Any]])?
+            .compactMap { $0["userMessage"] as? String }
+            .last { $0.hasSuffix("Continue the story.") }, "The Codex fixture should record this task's handoff turn.")
+        XCTAssertTrue(handoff.contains("Claude: \(story)\n\nThe story is above."), "Codex must receive the whole Claude answer: \(handoff)")
+        XCTAssertTrue(handoff.contains("Claude: Inspection done: the workspace is ready."))
+        XCTAssertFalse(handoff.contains("I'll inspect the workspace first."), "Commentary of an answered turn stays with the provider that produced it.")
+        XCTAssertTrue(handoff.contains("Claude: Checks are running; results will follow."), "A turn without an answer hands off its last commentary.")
+        XCTAssertFalse(handoff.contains("Starting the checks."), "Only the unanswered turn's last commentary is handed off.")
+        XCTAssertEqual(visibleTexts(containing: "stationai-handoff-context").count, 0, "The handoff block stays hidden in the transcript.")
+
+        relaunchApp()
+        openTask(named: "Claude answer UI")
+        XCTAssertTrue(visibleTexts(containing: story).firstMatch.waitForExistence(timeout: 10), "The saved Claude answer should persist across a relaunch.")
+        XCTAssertTrue(element("provider-boundary-codex").exists)
     }
 
     // case-contract: test_conversation_serializes_concurrent_sends | Two concurrent sends for the same task are serialized across the app and CLI/XPC paths against the local Codex app-server fixture; the second waits for the first, both complete on the persisted thread, the task remains In Progress while a send is active, and successful turns without outcome calls finish in Waiting Response.
@@ -5943,6 +6042,9 @@ final class StationAIUITests: XCTestCase {
         if let codexFixtureExecutable {
             app.launchEnvironment["STATIONAI_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
         }
+        if let claudeFixtureExecutable {
+            app.launchEnvironment["STATIONAI_E2E_CLAUDE_EXECUTABLE"] = claudeFixtureExecutable
+        }
         for (key, value) in environmentOverrides {
             app.launchEnvironment[key] = value
         }
@@ -5980,6 +6082,9 @@ final class StationAIUITests: XCTestCase {
         if let codexFixtureExecutable {
             environment["STATIONAI_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
         }
+        if let claudeFixtureExecutable {
+            environment["STATIONAI_E2E_CLAUDE_EXECUTABLE"] = claudeFixtureExecutable
+        }
         environment.merge(environmentOverrides, uniquingKeysWith: { _, new in new })
         app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
         app.launchEnvironment = environment
@@ -6002,6 +6107,9 @@ final class StationAIUITests: XCTestCase {
         }
         if let codexFixtureExecutable {
             opener.arguments?.append(contentsOf: ["--env", "STATIONAI_E2E_CODEX_EXECUTABLE=\(codexFixtureExecutable)"])
+        }
+        if let claudeFixtureExecutable {
+            opener.arguments?.append(contentsOf: ["--env", "STATIONAI_E2E_CLAUDE_EXECUTABLE=\(claudeFixtureExecutable)"])
         }
         for (key, value) in environmentOverrides {
             opener.arguments?.append(contentsOf: ["--env", "\(key)=\(value)"])
@@ -6679,6 +6787,9 @@ final class StationAIUITests: XCTestCase {
         environment["STATIONAI_BRIDGE_SERVICE_NAME"] = serviceName
         if let codexFixtureExecutable {
             environment["STATIONAI_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
+        }
+        if let claudeFixtureExecutable {
+            environment["STATIONAI_E2E_CLAUDE_EXECUTABLE"] = claudeFixtureExecutable
         }
         environment.merge(extraEnvironment) { _, override in override }
         process.environment = environment

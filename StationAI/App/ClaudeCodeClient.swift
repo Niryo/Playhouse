@@ -94,6 +94,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         var resultError: Error?
     }
 
+    private let executableOverride: String?
     private let configDirectoryOverride: String?
     private let persistsSessions: Bool
     private let outputQueue = DispatchQueue(label: "com.stationai.claude.stdout")
@@ -115,6 +116,9 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     private var pendingQuestion: PendingQuestion?
     private var planWasPresented = false
     private var pendingAssistantText: (id: String, text: String)?
+    /// Set when the pending answer text was followed only by StationAI's outcome
+    /// call, so text Claude writes after that call extends the same answer.
+    private var pendingTextSpansOutcomeReport = false
     private var toolActivities: [String: ConversationActivity] = [:]
     private var subagentToolIDs = Set<String>()
     private var activityStartedAtUptime: [String: UInt64] = [:]
@@ -127,7 +131,11 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     private var actionRequestHandler: (() -> Void)?
     private var userInputHandler: ((ConversationUserInputRequest) async -> Void)?
 
-    init(configDirectoryOverride: String? = nil, persistsSessions: Bool = true) {
+    init(executableOverride: String? = nil, configDirectoryOverride: String? = nil, persistsSessions: Bool = true) {
+        self.executableOverride = ConversationProviderFixture.ownedExecutable(
+            executableOverride,
+            providerMarker: (".stationai-claude-fixture-owner", "StationAI test owns this Claude Code protocol fixture (v1).\n")
+        )
         self.configDirectoryOverride = configDirectoryOverride
         self.persistsSessions = persistsSessions
     }
@@ -146,7 +154,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     /// Claude Code creates a session on its first message, so a new session is
     /// only an ID that the first turn passes as `--session-id`.
     func startThread(workspace: ConversationWorkspaceContext, modelID: String, developerInstructions: String?) async throws -> String {
-        guard Self.findExecutable() != nil else { throw ClientError.cliNotFound }
+        guard executablePath != nil else { throw ClientError.cliNotFound }
         let sessionID = UUID().uuidString.lowercased()
         newSessionIDs.insert(sessionID)
         return sessionID
@@ -213,6 +221,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         wasLastTurnInterrupted = false
         planWasPresented = false
         pendingAssistantText = nil
+        pendingTextSpansOutcomeReport = false
         toolActivities.removeAll()
         subagentToolIDs.removeAll()
         activityStartedAtUptime.removeAll()
@@ -453,7 +462,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     }
 
     func makeAuxiliaryClient() -> ConversationProviderClient {
-        ClaudeCodeClient(configDirectoryOverride: configDirectoryOverride, persistsSessions: false)
+        ClaudeCodeClient(executableOverride: executableOverride, configDirectoryOverride: configDirectoryOverride, persistsSessions: false)
     }
 
     // MARK: - Process and protocol
@@ -469,7 +478,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         workspace: ConversationWorkspaceContext,
         _ query: (ClaudeCodeClient) async throws -> [String: Any]
     ) async throws -> MetadataResponse {
-        let client = ClaudeCodeClient(configDirectoryOverride: configDirectoryOverride, persistsSessions: false)
+        let client = ClaudeCodeClient(executableOverride: executableOverride, configDirectoryOverride: configDirectoryOverride, persistsSessions: false)
         defer { client.stopProcess() }
         let initialize = try await client.launchSession(
             sessionID: UUID().uuidString.lowercased(), resume: false, mode: .code, modelID: Self.defaultModelID,
@@ -486,7 +495,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         workspace: ConversationWorkspaceContext,
         developerInstructions: String?
     ) async throws -> [String: Any] {
-        guard let executable = Self.findExecutable() else { throw ClientError.cliNotFound }
+        guard let executable = executablePath else { throw ClientError.cliNotFound }
         var arguments = [
             "-p",
             "--input-format", "stream-json",
@@ -837,8 +846,16 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
                 guard parentToolID == nil, !planWasPresented,
                       let text = block["text"] as? String,
                       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                if let pending = pendingAssistantText, pendingTextSpansOutcomeReport {
+                    // Claude often answers, reports the outcome, then adds a closing
+                    // line; the answer must not be demoted to commentary.
+                    pendingAssistantText = (pending.id, pending.text + "\n\n" + text)
+                    pendingTextSpansOutcomeReport = false
+                    continue
+                }
                 if let pending = pendingAssistantText { emitProgress(id: pending.id, text: pending.text) }
                 pendingAssistantText = ("\(messageID)-\(index)", text)
+                pendingTextSpansOutcomeReport = false
             case "tool_use":
                 guard let toolID = block["id"] as? String, let name = block["name"] as? String else { continue }
                 if let parentToolID {
@@ -846,11 +863,17 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
                     continue
                 }
                 if name == "AskUserQuestion" || (name == "ExitPlanMode" && activeMode == .plan) { continue }
-                if let pending = pendingAssistantText {
+                let input = block["input"] as? [String: Any] ?? [:]
+                // StationAI's own progress and outcome reports are bookkeeping, not
+                // work, so they don't turn the answer written before them into commentary.
+                let report = Self.reportCommand(name: name, input: input)
+                if pendingAssistantText != nil, let report {
+                    if report == .outcome { pendingTextSpansOutcomeReport = true }
+                } else if let pending = pendingAssistantText {
                     emitProgress(id: pending.id, text: pending.text)
                     pendingAssistantText = nil
+                    pendingTextSpansOutcomeReport = false
                 }
-                let input = block["input"] as? [String: Any] ?? [:]
                 activityStartedAtUptime[toolID] = DispatchTime.now().uptimeNanoseconds
                 let activity = Self.activity(toolID: toolID, name: name, input: input, status: "inProgress", turnID: activeTurnID)
                 if activity.isSubagent { subagentToolIDs.insert(toolID) }
@@ -949,6 +972,11 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
 
     // MARK: - Mapping
 
+    static func reportCommand(name: String, input: [String: Any]) -> TaskProgressReportInstructions.ReportCommand? {
+        guard name == "Bash", let command = input["command"] as? String else { return nil }
+        return TaskProgressReportInstructions.reportCommand(in: command)
+    }
+
     static func activity(toolID: String, name: String, input: [String: Any], status: String, turnID: String?) -> ConversationActivity {
         func string(_ key: String) -> String? { (input[key] as? String).flatMap { $0.isEmpty ? nil : $0 } }
         switch name {
@@ -1011,6 +1039,8 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
             throw ClientError.unsupportedVersion(current)
         }
     }
+
+    private var executablePath: String? { executableOverride ?? Self.findExecutable() }
 
     static func findExecutable() -> String? {
         let home = NSHomeDirectory()

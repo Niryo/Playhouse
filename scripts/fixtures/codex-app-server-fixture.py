@@ -30,6 +30,18 @@ else:
 
 MARKDOWN_PLAN = '## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening'
 
+ECHOED_OUTCOME_PREFIX = "Echo the outcome command for "
+ECHOED_OUTCOME_ANSWER = "Fixture answer with an echoed outcome."
+
+
+def echoed_outcome_answer(user_message):
+    """Reproduces a model writing its final outcome command as answer text."""
+    if not user_message or not user_message.startswith(ECHOED_OUTCOME_PREFIX):
+        return None
+    task_id = user_message[len(ECHOED_OUTCOME_PREFIX):].strip().rstrip(".")
+    return f"{ECHOED_OUTCOME_ANSWER}\U0001F6E0\uFE0F\nstationai-cli task outcome {task_id} completed"
+
+
 def write(value):
     sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
     sys.stdout.flush()
@@ -827,6 +839,12 @@ def main():
                 if not was_released:
                     return 3
                 turn_status = "interrupted" if "-interrupted" in mode else ("failed" if "-failed" in mode else "completed")
+                echoed = echoed_outcome_answer(turn_message)
+                if echoed and turn_status == "completed":
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                        "threadId": THREAD_ID, "turnId": TURN_ID,
+                        "item": {"id": "item_stationai_echoed_outcome", "type": "agentMessage", "phase": "final_answer", "text": echoed},
+                    }})
                 turn_error = {"error": {"message": "Codex interrupted this turn." if turn_status == "interrupted" else "Codex failed this turn."}} if turn_status != "completed" else {}
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": "00000000-0000-0000-0000-000000000001",
@@ -950,9 +968,13 @@ def main():
                         {"type": "image", "url": image_url} for image_url in user_images
                     ]
                     if user_content:
+                        echoed = echoed_outcome_answer(user_message)
+                        assistant = {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."}
+                        if echoed:
+                            assistant.update(phase="final_answer", text=echoed)
                         contents.extend([
                             {"id": f"item_user_fixture_{index}", "type": "userMessage", "content": user_content},
-                            {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."},
+                            assistant,
                         ])
             else:
                 user_message = saved_history.get("userMessage") or (turn_message if answers else None)

@@ -85,6 +85,8 @@ for fixture in "${codex_fixtures[@]}"; do
   cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_path}"
   chmod 755 "${fixture_path}"
 done
+cp "${repository_root}/scripts/fixtures/claude-code-fixture.py" "${fixture_root}/claude-fixture-ui"
+chmod 755 "${fixture_root}/claude-fixture-ui"
 for fixture in subagent context-compaction tool-activity markdown async-question async-question-queued; do
   fixture_path="${fixture_root}/codex-fixture-${fixture}"
   xattr -d com.apple.quarantine "${fixture_path}" 2>/dev/null || true

@@ -116,7 +116,10 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     private var rejectedTurnKeys = Set<String>()
 
     init(codexExecutableOverride: String? = nil, codexHomeOverride: String? = nil, goalFeatureEnabled: Bool = false, goalRuntimeEnabled: Bool = false) {
-        self.codexExecutableOverride = Self.ownedTestFixtureExecutable(codexExecutableOverride)
+        self.codexExecutableOverride = ConversationProviderFixture.ownedExecutable(
+            codexExecutableOverride,
+            providerMarker: (".stationai-codex-fixture-owner", "StationAI test owns this Codex protocol fixture (v1).\n")
+        )
         self.codexHomeOverride = codexHomeOverride
         self.goalFeatureEnabled = goalFeatureEnabled
         self.goalRuntimeEnabled = goalRuntimeEnabled
@@ -1481,7 +1484,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             guard !text.isEmpty || !images.isEmpty else { return nil }
             return ConversationMessage(id: itemID, role: .user, text: text, imageDataURLs: images, turnID: entry["turnId"] as? String, provider: .codex)
         case "agentMessage", "plan":
-            let text = item["text"] as? String ?? ""
+            let text = LeakedTurnOutcome.visibleText(item["text"] as? String ?? "")
             let questions = type == "agentMessage" && item["delivery"] as? String == "async"
                 ? asyncQuestions(from: item) : nil
             guard !text.isEmpty || questions != nil else { return nil }
@@ -1581,20 +1584,6 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         return nil
     }
 
-    private static func ownedTestFixtureExecutable(_ path: String?) -> String? {
-        guard let path, FileManager.default.isExecutableFile(atPath: path) else { return nil }
-        let directory = URL(fileURLWithPath: path).deletingLastPathComponent()
-        let markerValues = [
-            (".stationai-codex-fixture-owner", "StationAI test owns this Codex protocol fixture (v1).\n"),
-            (".stationai-bridge-fixture", "StationAI bridge tests own this deterministic fixture (v1).\n"),
-        ]
-        for (name, value) in markerValues {
-            let marker = directory.appendingPathComponent(name)
-            if (try? String(contentsOf: marker, encoding: .utf8)) == value { return path }
-        }
-        return nil
-    }
-
     private static func expandedSearchPath(_ existingPath: String?) -> String {
         var paths = (existingPath ?? "").split(separator: ":").map(String.init)
         paths.append(contentsOf: ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin", "/usr/bin", "/bin"])
@@ -1603,19 +1592,33 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
 }
 
 enum TaskProgressReportInstructions {
+    static let executableName = "stationai-cli"
+    static let progressSubcommand = "task progress"
+    static let outcomeSubcommand = "task outcome"
+
+    enum ReportCommand { case progress, outcome }
+
+    /// Classifies a provider shell command as one of the reports these instructions request.
+    static func reportCommand(in shellCommand: String) -> ReportCommand? {
+        guard shellCommand.contains(executableName) else { return nil }
+        if shellCommand.contains(" \(outcomeSubcommand) ") { return .outcome }
+        if shellCommand.contains(" \(progressSubcommand) ") { return .progress }
+        return nil
+    }
+
     static func make(taskID: UUID) -> String {
         let executable = cliExecutableURL().path
         let quotedExecutable = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
         let id = taskID.uuidString
         return """
         Report your current work on the StationAI task board using the StationAI CLI. Publish at every phase change, when starting or finishing a substantial tool call, and at least every 30 seconds during long commands, builds, tests, waits, or investigation. Keep the report current while a tool runs; after it finishes, replace it with the next active action. During tests, identify the active suite/case and position when known (for example, "CLI/XPC 3/8: task progress persistence"); during other work, name the concrete action and useful target. Keep each detail to a short subtitle, ideally under 80 characters. Do not report every tiny edit. Use these commands for this task:
-        \(quotedExecutable) task progress publish \(id) --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail \"short detail\"]
-        \(quotedExecutable) task progress custom \(id) --label \"short label\" [--detail \"short detail\"]
-        \(quotedExecutable) task progress clear \(id)
+        \(quotedExecutable) \(progressSubcommand) publish \(id) --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail \"short detail\"]
+        \(quotedExecutable) \(progressSubcommand) custom \(id) --label \"short label\" [--detail \"short detail\"]
+        \(quotedExecutable) \(progressSubcommand) clear \(id)
         Progress reports are hidden from the conversation and shown on the task card. Keep details brief. Do not use lifecycle task status commands for progress.
 
         At the very end of every turn, make exactly one definitive outcome call using this task ID:
-        \(quotedExecutable) task outcome \(id) <completed|waiting-response>
+        \(quotedExecutable) \(outcomeSubcommand) \(id) <completed|waiting-response>
         Use completed only when all work for this turn is finished and no user decision or response is needed. If you need the user to answer, choose between options, provide missing information, or take another action before you can continue, use waiting-response. The outcome call must be your final CLI action for the turn. StationAI moves the task to Review only for completed. If you omit the outcome call, StationAI moves it to Waiting Response.
         """
     }
@@ -1624,10 +1627,10 @@ enum TaskProgressReportInstructions {
         let fileManager = FileManager.default
         var candidate = Bundle.main.bundleURL
         for _ in 0..<5 {
-            let cli = candidate.appendingPathComponent("Contents/MacOS/stationai-cli")
+            let cli = candidate.appendingPathComponent("Contents/MacOS/\(executableName)")
             if fileManager.isExecutableFile(atPath: cli.path) { return cli }
             candidate.deleteLastPathComponent()
         }
-        return Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/stationai-cli")
+        return Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/\(executableName)")
     }
 }

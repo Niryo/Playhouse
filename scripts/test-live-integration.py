@@ -599,6 +599,19 @@ def scenario_claude_capabilities(ws):
     return "native capability report"
 
 
+def scenario_claude_answer_survives_outcome_report(ws):
+    # Claude often answers, runs its outcome command, then adds a closing line.
+    # The answer written before that command must remain the turn's final answer
+    # (not commentary), because the cross-provider handoff carries only answers.
+    task_id = ws.create_task("Claude answer around outcome integration")["id"]
+    final, _ = ws.stream_turn(task_id, "Write a two-sentence story about a dog named BISCUIT-7. Use that exact name.")
+    turn_id = final["messages"][-1].get("turnID")
+    answers = [m for m in final["messages"] if m["role"] == "assistant" and m.get("turnID") == turn_id and m.get("phase") != "commentary"]
+    require(answers and "BISCUIT-7" in answers[-1]["text"], f"The story should be the final answer, not commentary: {final['messages']}")
+    require(ws.run_cli("task", "get", task_id)["status"] == "Review", "The story turn should report a completed outcome.")
+    return "answer before the outcome call stays final"
+
+
 # Codex-only scenarios.
 
 def scenario_codex_pinned_model(ws):
@@ -642,7 +655,7 @@ SHARED_SCENARIOS = [
     scenario_concurrent_auto_branch,
 ]
 UNIQUE_SCENARIOS = {
-    "claude": [scenario_claude_question_round_trip, scenario_claude_capabilities],
+    "claude": [scenario_claude_question_round_trip, scenario_claude_capabilities, scenario_claude_answer_survives_outcome_report],
     "codex": [scenario_codex_pinned_model],
 }
 

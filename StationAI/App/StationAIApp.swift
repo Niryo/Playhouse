@@ -25,7 +25,7 @@ struct StationAIApp: App {
             codexExecutableOverride: environment["STATIONAI_E2E_CODEX_EXECUTABLE"],
             goalRuntimeEnabled: true
         ))
-        _claudeClient = StateObject(wrappedValue: ClaudeCodeClient())
+        _claudeClient = StateObject(wrappedValue: ClaudeCodeClient(executableOverride: environment["STATIONAI_E2E_CLAUDE_EXECUTABLE"]))
         StationAIApplicationDelegate.terminationHandler = { [weak codex = _codexClient.wrappedValue, weak claude = _claudeClient.wrappedValue] in
             // Both runtimes drain within their own bounded deadlines.
             await codex?.prepareForApplicationTermination()
