@@ -99,17 +99,21 @@ enum StationAICLI {
                 ])
             case "pr":
                 guard tail.count >= 2 else {
-                    throw CLIError.usage("Use: stationai task pr create|conflicts|resolve <task-id> [action]")
+                    throw CLIError.usage("Use: stationai task pr create|conflicts|status|verify|resolve <task-id> [action]")
                 }
                 switch tail[0] {
                 case "create" where tail.count == 2:
                     return BridgeRequest(command: "task.pr.create", arguments: ["taskID": .string(tail[1])])
                 case "conflicts" where tail.count == 2:
                     return BridgeRequest(command: "task.pr.conflicts", arguments: ["taskID": .string(tail[1])])
+                case "status" where tail.count == 2:
+                    return BridgeRequest(command: "task.pr.status", arguments: ["taskID": .string(tail[1])])
+                case "verify" where tail.count == 2:
+                    return BridgeRequest(command: "task.pr.verify", arguments: ["taskID": .string(tail[1])])
                 case "resolve" where tail.count == 3:
                     return BridgeRequest(command: "task.pr.resolve", arguments: ["taskID": .string(tail[1]), "action": .string(tail[2])])
                 default:
-                    throw CLIError.usage("Use: stationai task pr create|conflicts|resolve <task-id> [resolve-and-push|resolve-only|keep]")
+                    throw CLIError.usage("Use: stationai task pr create|conflicts|status|verify|resolve <task-id> [resolve-and-push|resolve-only|keep]")
                 }
             case "progress":
                 guard let action = tail.first else { throw CLIError.usage("Use: stationai task progress publish|custom|clear <task-id> ...") }
@@ -190,7 +194,7 @@ enum StationAICLI {
                 }
             case "prompt":
                 guard let id = tail.first else { throw CLIError.usage("Use: stationai task prompt <task-id> --text <prompt> [--status <status>] [--submitted true]") }
-                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--text", "--status", "--submitted"])
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--text", "--status", "--submitted", "--image"])
                 let prompt = try requiredFlag("--text", flags: flags).first!
                 let status = flags["--status"]?.first
                 let submittedValue = flags["--submitted"]?.first
@@ -205,6 +209,16 @@ enum StationAICLI {
                     throw CLIError.usage("A submitted prompt requires nonblank text and --status \"In Progress\".")
                 }
                 var arguments: [String: BridgeValue] = ["taskID": .string(id), "prompt": .string(prompt)]
+                if let imagePaths = flags["--image"] {
+                    arguments["images"] = .array(try imagePaths.map { path in
+                        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+                        let mime: String
+                        if data.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]) { mime = "image/png" }
+                        else if data.starts(with: [255, 216, 255]) { mime = "image/jpeg" }
+                        else { throw CLIError.usage("Images must be PNG or JPEG files.") }
+                        return .string("data:\(mime);base64,\(data.base64EncodedString())")
+                    })
+                }
                 if let status { arguments["status"] = .string(status) }
                 if submitted { arguments["submitted"] = .boolean(true) }
                 return BridgeRequest(command: "task.prompt.save", arguments: arguments)
@@ -267,9 +281,6 @@ enum StationAICLI {
             case "set-appearance":
                 guard rest.count == 2 else { throw CLIError.usage("Use: stationai settings set-appearance <dark|light>") }
                 return BridgeRequest(command: "settings.set-appearance", arguments: ["appearance": .string(rest[1])])
-            case "set-pr-conflict-action":
-                guard rest.count == 2 else { throw CLIError.usage("Use: stationai settings set-pr-conflict-action <ask|resolve-and-push|resolve-only|keep>") }
-                return BridgeRequest(command: "settings.set-pr-conflict-action", arguments: ["action": .string(rest[1])])
             case "set-parent":
                 guard rest.count == 2 else { throw CLIError.usage("Use: stationai settings set-parent <path>") }
                 return BridgeRequest(command: "settings.set-parent", arguments: ["path": .string(rest[1])])
@@ -287,6 +298,14 @@ enum StationAICLI {
             switch operation {
             case "history": return BridgeRequest(command: "conversation.history", arguments: ["taskID": .string(id)])
             case "models": return BridgeRequest(command: "conversation.models", arguments: ["taskID": .string(id)])
+            case "goal":
+                guard tail.count >= 2 else { throw CLIError.usage("Use: stationai conversation goal <task-id> <get|set|pause|resume|clear> [--text <objective>]") }
+                let action = tail[1]
+                let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--text"])
+                var arguments: [String: BridgeValue] = ["taskID": .string(id), "action": .string(action)]
+                if let text = flags["--text"]?.first { arguments["objective"] = .string(text) }
+                if let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"] { arguments["__codexHome"] = .string(codexHome) }
+                return BridgeRequest(command: "conversation.goal", arguments: arguments)
             case "queue":
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message"])
                 return BridgeRequest(command: "conversation.queue", arguments: ["taskID": .string(id), "message": .string(flags["--message"]?.first ?? "")])
@@ -310,6 +329,13 @@ enum StationAICLI {
                     return .string("data:\(mime);base64,\(data.base64EncodedString())")
                 }
                 return BridgeRequest(command: "conversation.steer", arguments: ["taskID": .string(id), "message": .string(flags["--message"]?.first ?? ""), "images": .array(images)])
+            case "answer-async":
+                guard tail.count >= 2 else { throw CLIError.usage("Use: stationai conversation answer-async <task-id> <item-id> --answer <text> [--answer <text>]...") }
+                let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--answer"])
+                return BridgeRequest(command: "conversation.answer_async", arguments: [
+                    "taskID": .string(id), "itemID": .string(tail[1]),
+                    "answers": .array((flags["--answer"] ?? []).map(BridgeValue.string))
+                ])
             case "send":
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode", "--model", "--answer", "--image"])
                 var answers: [String: [String]] = [:]
@@ -417,6 +443,8 @@ enum StationAICLI {
       stationai task move <task-id> Done
       stationai task move <task-id> Done --allow-unmerged
       stationai task pr create <task-id>
+      stationai task pr status <task-id>
+      stationai task pr verify <task-id>
       stationai task progress publish <task-id> --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail <text>]
       stationai task progress custom <task-id> --label <label> [--detail <text>]
       stationai task progress clear <task-id>
@@ -442,7 +470,9 @@ enum StationAICLI {
       stationai conversation queue-remove <task-id> <message-id>
       stationai conversation queue-steer <task-id> <message-id>
       stationai conversation steer <task-id> --message <text> [--image <path>]...
+      stationai conversation answer-async <task-id> <item-id> --answer <text> [--answer <text>]...
       stationai conversation models <task-id>
+      stationai conversation goal <task-id> <get|set|pause|resume|clear> [--text <objective>]
       stationai conversation send <task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...]
 
     Results are JSON. Conversation send emits JSON event lines followed by a final response.

@@ -71,18 +71,18 @@ if [[ "$(cat "${fixture_root}/.stationai-bridge-fixture" 2>/dev/null || true)" !
   exit 1
 fi
 codex_fixtures=(
-  ui empty nonblocking slow plan-slow interrupted abort success
+  ui empty nonblocking slow plan-slow interrupted abort success goal-success
   title-success title-failure title-success-wait hold
   progress-hold-release progress-hold-release-failed progress-hold-release-interrupted
   progress-question success-wait store-write-success-wait concurrent-serial-success-wait
-  status-transition-ui nonblocking-slow subagent markdown steer-queue-serial-success-wait
+  status-transition-ui nonblocking-slow async-question async-question-queued subagent context-compaction tool-activity markdown steer-queue-serial-success-wait
 )
 for fixture in "${codex_fixtures[@]}"; do
   fixture_path="${fixture_root}/codex-fixture-${fixture}"
   cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_path}"
   chmod 755 "${fixture_path}"
 done
-for fixture in subagent markdown; do
+for fixture in subagent context-compaction tool-activity markdown async-question async-question-queued goal-success; do
   fixture_path="${fixture_root}/codex-fixture-${fixture}"
   xattr -d com.apple.quarantine "${fixture_path}" 2>/dev/null || true
   xattr -d com.apple.provenance "${fixture_path}" 2>/dev/null || true
