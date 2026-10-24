@@ -262,6 +262,7 @@ final class StationAIUITests: XCTestCase {
     private var cliURL: URL!
     private var serviceName: String!
     private var codexFixtureExecutable: String?
+    private var codexFixtureStateDirectory: URL?
     private var launchDefaultParent: String?
     private var launchWindowTitle: String?
     private var repositoryRoot: URL {
@@ -277,6 +278,7 @@ final class StationAIUITests: XCTestCase {
         }
         continueAfterFailure = false
         codexFixtureExecutable = nil
+        codexFixtureStateDirectory = nil
         launchWindowTitle = nil
         fixture = try WorkspaceFixture.load()
         runDirectory = URL(fileURLWithPath: "/tmp/stationai-ui-test-data", isDirectory: true)
@@ -618,7 +620,7 @@ final class StationAIUITests: XCTestCase {
 
     // case-contract: test_task_creation_reuses_existing_branch_worktree | A selected existing branch remains pending until task start, then reuses its exact existing worktree path.
     func test_task_creation_reuses_existing_branch_worktree() throws {
-        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success").path
         launchApp(defaultParent: fixture.parent.path)
         openNewTaskConversation()
         chooseRepositorySuggestion("primary")
@@ -3484,7 +3486,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Unsent task prompt is saved after returning to backlog")
     }
 
-    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline prompts persist as typed text, the composer expands beyond five lines, stops at its 12-line limit, and retains all lines while scrolling. Long saved drafts reopen intact and immediately expand before typing, including after restart, remain editable, grow for wrapped text, shrink when shortened, and show their own overflow scrollbar for earlier and later content. The CLI/XPC preserves a 15-line draft. Long submitted prompts persist through CLI/XPC, and the UI transcript shows a scrollbar for overflow with scrolling that reveals earlier and later content. Blank drafts cannot be sent or stored, sent prompts persist in conversation history through reload, and backing out immediately after send preserves the submitted prompt as a sent message while title generation is pending. The CLI rejects submitted-prompt saves unless they include nonblank text and In Progress status. The CLI/XPC and UI also recover a submitted prompt that has no Codex thread or active send reservation: the task becomes Blocked, the pending marker clears, and the prompt returns to the composer. Sending to an Untitled auto-branch task derives its branch from the prompt immediately while title generation runs in parallel. CLI/XPC and UI confirm the submitted prompt, worktree, Codex thread, and user turn start without waiting for title generation; Pause stays disabled only until the task turn becomes interruptible. Persistent diagnostics correlate title generation and application outcomes with the task and Codex thread, record failure or skip reasons, and exclude prompt and title text, including text echoed in server errors. Queued follow-ups persist with task and thread identity across fresh CLI/XPC reads, dispatch once after the next completed turn, and disappear from the queue after completion. During an active turn, Return queues a follow-up, queued rows offer Steer, and queued follow-ups persist across reopening. The obsolete footer Queue and Steer buttons are absent.
+    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the prompt while title generation runs in parallel; title generation uses its result or a prompt fallback, and does not delay starting the conversation. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
     func test_conversation_composer_rejects_blank_and_supports_live_turn_controls() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -3712,9 +3714,9 @@ final class StationAIUITests: XCTestCase {
             recoveryTaskCard.click()
             XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
             XCTAssertTrue(waitUntil({
-                ((try? self.taskRecord(id: recoveryTaskID)?["status"] as? String) ?? nil) == "Blocked"
+                ((try? self.taskRecord(id: recoveryTaskID)?["status"] as? String) ?? nil) == "Waiting Response"
                     && ((try? self.taskRecord(id: recoveryTaskID)?["pendingSubmittedPrompt"]) is NSNull || (try? self.taskRecord(id: recoveryTaskID)?["pendingSubmittedPrompt"]) == nil)
-            }, timeout: 10), "Reopening a task whose send never reached Codex should clear the pending marker and expose the interrupted state.")
+            }, timeout: 10), "Reopening a task whose send never reached Codex should clear the pending marker and leave the task ready to continue.")
             XCTAssertEqual(element("message-composer").value as? String, recoveryPrompt, "A stale submitted prompt should return to the composer for retry.")
             XCTAssertFalse(app.staticTexts[recoveryPrompt].exists, "A turn that never reached Codex should not be shown as a sent message.")
 
@@ -3864,6 +3866,506 @@ final class StationAIUITests: XCTestCase {
             attachScreenshot(named: "Continued response completed in the conversation")
         }
         attachScreenshot(named: "Blank composer leaves send disabled")
+    }
+
+    // case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with its indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy response-annotations payloads and annotation fields still restore their reply details.
+    func test_conversation_adds_ordered_text_annotations() throws {
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-goal-success").path
+        let fixtureStateDirectory = dataDirectory.appendingPathComponent("comment-goal-fixture-state", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixtureStateDirectory, withIntermediateDirectories: true)
+        codexFixtureStateDirectory = fixtureStateDirectory
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Comment source", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Comment source")
+        let sourceText = "Long response fixture input. A user message with selectable words. Literal # Response comments: stays visible. "
+            + String(repeating: "Additional context spans across multiple visual lines. ", count: 5)
+        _ = try runCLI([
+            "conversation", "send", taskID, "--message", sourceText,
+        ])
+        let legacyComment = "A detail from older saved history"
+        let legacyPayload = try JSONSerialization.data(withJSONObject: [[
+            "text": "legacy highlighted words", "annotation": legacyComment,
+            "source": ["messageId": "legacy-source", "blockID": 0, "startOffset": 0, "endOffset": 24],
+        ]])
+        let legacyPayloadText = try XCTUnwrap(String(data: legacyPayload, encoding: .utf8))
+        let legacyPrompt = "# Response annotations:\nThe following JSON contains comments on selected conversation text, in array order.\n"
+            + "<response-annotations>\(legacyPayloadText)</response-annotations>"
+        _ = try runCLI([
+            "conversation", "send", taskID, "--message", legacyPrompt,
+        ])
+        let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        let messages = try XCTUnwrap(history?["messages"] as? [[String: Any]])
+        let sourceMessage = try XCTUnwrap(messages.first { $0["role"] as? String == "user" })
+        let sourceID = try XCTUnwrap(sourceMessage["id"] as? String)
+        let assistantMessage = try XCTUnwrap(messages.first { $0["role"] as? String == "assistant" })
+        let assistantID = try XCTUnwrap(assistantMessage["id"] as? String)
+        XCTAssertFalse(try XCTUnwrap(assistantMessage["text"] as? String).isEmpty)
+        let userSelection = String(sourceText.prefix(10))
+        var assistantSelection = ""
+        openTask(named: "Comment source")
+        let seededHistory = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        let seededMessages = try XCTUnwrap(seededHistory?["messages"] as? [[String: Any]])
+        let seededLegacyMessage = try XCTUnwrap(seededMessages.first {
+            ($0["role"] as? String) == "assistant" && (($0["text"] as? String)?.contains("legacy highlighted words") ?? false)
+        })
+        let seededLegacyID = try XCTUnwrap(seededLegacyMessage["id"] as? String)
+        let seededLegacyResponse = element("assistant-message-\(seededLegacyID)")
+        let seededLegacyLink = seededLegacyResponse.descendants(matching: .textView).matching(
+            NSPredicate(format: "value CONTAINS %@", "Comment 1")
+        ).firstMatch
+        XCTAssertTrue(seededLegacyLink.waitForExistence(timeout: 5))
+        // Locate the rendered marker glyphs directly; accessibility text-view
+        // frames include font-dependent padding and do not match glyph positions.
+        let seededCommentHint = element("response-comment-hover-card")
+        let markerImage = try XCTUnwrap(seededLegacyLink.screenshot().image.cgImage(
+            forProposedRect: nil, context: nil, hints: nil
+        ))
+        let markerBitmap = NSBitmapImageRep(cgImage: markerImage)
+        var blueMinX = markerBitmap.pixelsWide
+        var blueMaxX = -1
+        var blueMinY = markerBitmap.pixelsHigh
+        var blueMaxY = -1
+        for x in 0..<markerBitmap.pixelsWide {
+            for y in 0..<markerBitmap.pixelsHigh {
+                guard let color = markerBitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                if color.blueComponent > 0.6 && color.blueComponent > color.redComponent + 0.25
+                    && color.blueComponent > color.greenComponent + 0.08 {
+                    blueMinX = min(blueMinX, x)
+                    blueMaxX = max(blueMaxX, x)
+                    blueMinY = min(blueMinY, y)
+                    blueMaxY = max(blueMaxY, y)
+                }
+            }
+        }
+        XCTAssertGreaterThan(blueMaxY - blueMinY, 3, "The screenshot should locate the rendered blue comment glyphs.")
+        let markerPixelsPerPointY = CGFloat(markerBitmap.pixelsHigh) / seededLegacyLink.frame.height
+        let markerPixelsPerPointX = CGFloat(markerBitmap.pixelsWide) / seededLegacyLink.frame.width
+        let visibleMarkerMidX = seededLegacyLink.frame.minX + CGFloat(blueMinX + blueMaxX) / 2 / markerPixelsPerPointX
+        let visibleMarkerTopY = seededLegacyLink.frame.minY + CGFloat(blueMinY) / markerPixelsPerPointY
+        let visibleMarkerBottomY = seededLegacyLink.frame.minY + CGFloat(blueMaxY + 1) / markerPixelsPerPointY
+        let seededMarkerPointX = min(0.99, max(0.01, (visibleMarkerMidX - seededLegacyLink.frame.minX) / seededLegacyLink.frame.width))
+        let seededMarkerPointY = min(0.99, max(0.01, ((visibleMarkerTopY + visibleMarkerBottomY) / 2 - seededLegacyLink.frame.minY) / seededLegacyLink.frame.height))
+        let seededMarkerCenter = seededLegacyLink.coordinate(
+            withNormalizedOffset: CGVector(dx: seededMarkerPointX, dy: seededMarkerPointY)
+        )
+        let markerScreenPoint = seededMarkerCenter.screenPoint
+        let offCommentCoordinate = seededLegacyLink.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5))
+        let offCommentPoint = offCommentCoordinate.screenPoint
+        func pointerIsNear(_ point: CGPoint) -> Bool {
+            guard let currentPoint = CGEvent(source: nil)?.location else { return false }
+            return hypot(currentPoint.x - point.x, currentPoint.y - point.y) <= 4
+        }
+        func waitForPointer(at point: CGPoint, timeout: TimeInterval) -> Date? {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if pointerIsNear(point) { return Date() }
+                Thread.sleep(forTimeInterval: 0.002)
+            }
+            return nil
+        }
+        let targetBundleIdentifier = try XCTUnwrap(Bundle(url: appBundle)?.bundleIdentifier)
+        let targetProcessID = try XCTUnwrap(
+            NSRunningApplication.runningApplications(withBundleIdentifier: targetBundleIdentifier).first?.processIdentifier
+        )
+        func visibleAppWindowIDs() -> Set<Int> {
+            let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                as? [[String: Any]] ?? []
+            return Set(windows.compactMap { window in
+                guard (window[kCGWindowOwnerPID as String] as? Int) == Int(targetProcessID) else { return nil }
+                return window[kCGWindowNumber as String] as? Int
+            })
+        }
+        offCommentCoordinate.hover()
+        XCTAssertTrue(pointerIsNear(offCommentPoint), "The timing probe must start with the pointer outside the link.")
+        XCTAssertFalse(pointerIsNear(markerScreenPoint))
+        let windowsBeforeHover = visibleAppWindowIDs()
+        let timingProbeFinished = DispatchSemaphore(value: 0)
+        var hoverStartedAt: Date?
+        var hintAppearedAt: Date?
+        DispatchQueue.global(qos: .userInitiated).async {
+            hoverStartedAt = waitForPointer(at: markerScreenPoint, timeout: 5)
+            if let hoverStartedAt {
+                let deadline = hoverStartedAt.addingTimeInterval(1)
+                while Date() < deadline {
+                    if !visibleAppWindowIDs().subtracting(windowsBeforeHover).isEmpty {
+                        hintAppearedAt = Date()
+                        break
+                    }
+                    Thread.sleep(forTimeInterval: 0.002)
+                }
+            }
+            timingProbeFinished.signal()
+        }
+        seededMarkerCenter.hover()
+        XCTAssertEqual(timingProbeFinished.wait(timeout: .now() + 5), .success)
+        let confirmedHoverStart = try XCTUnwrap(hoverStartedAt, "Native hover must reach the comment glyphs.")
+        let confirmedHintAppearance = try XCTUnwrap(hintAppearedAt, "The timing probe must observe the hint window.")
+        XCTAssertGreaterThanOrEqual(confirmedHintAppearance.timeIntervalSince(confirmedHoverStart), 0.19,
+                                    "The hint should wait about 200 ms after pointer entry.")
+        XCTAssertTrue(seededCommentHint.waitForExistence(timeout: 5),
+                      "A native pointer hover on the comment glyphs should open their hint.")
+        XCTAssertFalse(visibleAppWindowIDs().subtracting(windowsBeforeHover).isEmpty,
+                       "The visible hint should create a window detectable by the timing probe.")
+        attachScreenshot(named: "Focused seeded response comment hover popover")
+        XCTAssertTrue(seededCommentHint.label.contains("legacy highlighted words"))
+        XCTAssertTrue(seededCommentHint.label.contains(legacyComment))
+        let seededMarkerScreenCenterX = seededLegacyLink.frame.minX + seededLegacyLink.frame.width * seededMarkerPointX
+        XCTAssertLessThanOrEqual(seededCommentHint.frame.maxY, seededLegacyLink.frame.minY + 4,
+                                 "The comment hint should open above its anchor text.")
+        XCTAssertLessThanOrEqual(abs(seededCommentHint.frame.midX - seededMarkerScreenCenterX), 16,
+                                 "The comment hint should be horizontally aligned to the hovered comment label.")
+        offCommentCoordinate.hover()
+        XCTAssertTrue(waitUntil({ !seededCommentHint.exists }, timeout: 0.2), "The comment hint should close as soon as the pointer leaves its link.")
+        XCTAssertTrue(pointerIsNear(offCommentPoint), "The cancellation probe must start outside the link.")
+        XCTAssertFalse(pointerIsNear(markerScreenPoint))
+        let windowsBeforeBriefHover = visibleAppWindowIDs()
+        let cancellationProbeFinished = DispatchSemaphore(value: 0)
+        var cancelHoverStartedAt: Date?
+        var pointerLeftAt: Date?
+        var pointerWarpResult: CGError?
+        var hintWindowAfterExit = false
+        var pointerStayedOutside = false
+        DispatchQueue.global(qos: .userInitiated).async {
+            cancelHoverStartedAt = waitForPointer(at: markerScreenPoint, timeout: 5)
+            if cancelHoverStartedAt != nil {
+                Thread.sleep(forTimeInterval: 0.04)
+                pointerWarpResult = CGWarpMouseCursorPosition(offCommentPoint)
+                pointerLeftAt = Date()
+                Thread.sleep(forTimeInterval: 0.25)
+                pointerStayedOutside = pointerIsNear(offCommentPoint)
+                hintWindowAfterExit = !visibleAppWindowIDs().subtracting(windowsBeforeBriefHover).isEmpty
+            }
+            cancellationProbeFinished.signal()
+        }
+        seededMarkerCenter.hover()
+        XCTAssertEqual(cancellationProbeFinished.wait(timeout: .now() + 5), .success)
+        let confirmedBriefHoverStart = try XCTUnwrap(cancelHoverStartedAt, "Brief hover must reach the comment glyphs.")
+        let confirmedPointerExit = try XCTUnwrap(pointerLeftAt, "The pointer must leave the comment link.")
+        XCTAssertLessThan(confirmedPointerExit.timeIntervalSince(confirmedBriefHoverStart), 0.2,
+                          "The pointer must leave before the hover delay expires.")
+        XCTAssertEqual(pointerWarpResult, .success)
+        XCTAssertTrue(pointerStayedOutside, "The pointer should remain outside the comment after exit.")
+        XCTAssertFalse(hintWindowAfterExit, "A brief hover should not create a late hint window.")
+        XCTAssertFalse(seededCommentHint.exists, "A brief hover should not show a late hint after exit.")
+        let paddedHoverProbeYs = [seededLegacyLink.frame.minY + 2, seededLegacyLink.frame.maxY - 4]
+        XCTAssertLessThan(paddedHoverProbeYs[0], visibleMarkerTopY,
+                          "The upper probe should be in the transparent inset above blue text.")
+        XCTAssertGreaterThan(paddedHoverProbeYs[1], visibleMarkerBottomY,
+                             "The lower probe should be in the transparent inset below blue text.")
+        for edgeY in paddedHoverProbeYs {
+            XCTAssertTrue(seededLegacyLink.frame.minY < edgeY && edgeY < seededLegacyLink.frame.maxY,
+                          "The padded hover probe should remain inside the text view.")
+            seededMarkerCenter.withOffset(CGVector(dx: visibleMarkerMidX - markerScreenPoint.x,
+                                                   dy: edgeY - markerScreenPoint.y)).hover()
+            XCTAssertTrue(waitUntil({ seededCommentHint.exists }, timeout: 5),
+                          "The transparent text-view inset should trigger the comment hint.")
+            offCommentCoordinate.hover()
+            XCTAssertTrue(waitUntil({ !seededCommentHint.exists }, timeout: 0.2),
+                          "The comment hint should close after leaving its label.")
+        }
+
+        attachScreenshot(named: "Comment test conversation before hover")
+        let conversationHierarchy = XCTAttachment(string: app.debugDescription)
+        conversationHierarchy.name = "Comment test conversation accessibility hierarchy"
+        conversationHierarchy.lifetime = .keepAlways
+        add(conversationHierarchy)
+        let userView = element("user-message-\(sourceID)")
+        XCTAssertTrue(userView.waitForExistence(timeout: 10))
+        let transcriptScrollView = element("conversation-scroll-view")
+        for _ in 0..<4 where userView.frame.midY < transcriptScrollView.frame.minY + 20 {
+            transcriptScrollView.swipeDown()
+        }
+        XCTAssertTrue(userView.frame.midY > transcriptScrollView.frame.minY + 20,
+                      "The earlier user message should be visible before selecting its text.")
+        func selectPrefix(_ view: XCUIElement) {
+            view.click()
+            view.typeKey("a", modifierFlags: .command)
+            view.typeKey(.leftArrow, modifierFlags: [])
+            for _ in 0..<10 { view.typeKey(.rightArrow, modifierFlags: .shift) }
+        }
+        func selectAllText(_ view: XCUIElement) {
+            view.click()
+            view.typeKey("a", modifierFlags: .command)
+        }
+        let addComment = app.buttons.matching(NSPredicate(format: "label == %@", "Add comment")).firstMatch
+        selectAllText(userView)
+        XCTAssertTrue(addComment.waitForExistence(timeout: 5), "Selecting transcript text should expose Add comment.")
+        XCTAssertGreaterThan(userView.frame.height, 40, "The selected text should wrap across multiple lines.")
+        // Keep this diagnostic run focused on the response comment hover below.
+        XCTAssertLessThan(abs(addComment.frame.midX - userView.frame.midX), 70,
+                          "For a multiline selection, the floating hint should center over the selected lines.")
+        addComment.click()
+        let initialCommentField = element("comment-input-field")
+        XCTAssertTrue(initialCommentField.waitForExistence(timeout: 5))
+        XCTAssertLessThan(initialCommentField.frame.height, 40, "The comment entry should be a compact single-line field.")
+        XCTAssertLessThan(abs(initialCommentField.frame.midX - addComment.frame.midX), 250,
+                          "The compact comment field should stay beside the floating hint horizontally.")
+        XCTAssertLessThan(abs(initialCommentField.frame.midY - addComment.frame.midY), 200,
+                          "The compact comment field should stay beside the floating hint vertically.")
+        initialCommentField.typeText("Discard this comment")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertFalse(element("send-message-button").isEnabled, "Cancelling should leave no pending comment to submit.")
+
+        for (sourceView, comment, selectAll) in [
+            (userView, "Explain this phrase", false),
+            (element("assistant-message-\(assistantID)").descendants(matching: .textView).firstMatch,
+             String(repeating: "Please clarify this response in detail, including how each part connects to the question. ", count: 8), true),
+        ] {
+            XCTAssertTrue(sourceView.waitForExistence(timeout: 5))
+            let orangePixelsBefore = orangePixelCount(in: sourceView.screenshot())
+            if selectAll {
+                assistantSelection = (sourceView.value as? String ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                XCTAssertFalse(assistantSelection.isEmpty, "The assistant paragraph should expose its selectable text.")
+                selectAllText(sourceView)
+            } else {
+                selectPrefix(sourceView)
+            }
+            XCTAssertTrue(addComment.waitForExistence(timeout: 5))
+            addComment.click()
+            let field = element("comment-input-field")
+            XCTAssertTrue(field.waitForExistence(timeout: 5))
+            XCTAssertLessThan(field.frame.height, 40, "The comment input should stay compact.")
+            let submitComment = element("add-comment-button")
+            XCTAssertTrue(submitComment.exists, "The compact input should include its submit arrow.")
+            XCTAssertGreaterThan(darkPixelCount(in: submitComment), 3,
+                                 "The submit arrow should be dark and visible on its light circular control.")
+            XCTAssertGreaterThan(lightPixelCount(in: submitComment), 20,
+                                 "The submit control should retain a light circular background behind the arrow.")
+            field.typeText(comment)
+            if comment == "Explain this phrase" {
+                field.typeKey(.return, modifierFlags: [])
+                XCTAssertFalse(field.waitForExistence(timeout: 1), "Enter should add the comment and close the modal.")
+            } else {
+                element("add-comment-button").click()
+            }
+            XCTAssertTrue(element("send-message-button").isEnabled, "A comment without freeform text should enable sending.")
+            let expectedCountLabel = comment == "Explain this phrase" ? "1 comment" : "2 comments"
+            XCTAssertTrue(waitUntil({
+                self.accessibleLabelOrValue(of: self.element("pending-comment-count")).contains(expectedCountLabel)
+            }, timeout: 5), "The composer should indicate the number of pending comments.")
+            let orangePixelsAfter = orangePixelCount(in: sourceView.screenshot())
+            XCTAssertGreaterThan(orangePixelsAfter, orangePixelsBefore + 5, "The selected range should visibly render in orange.")
+            XCTAssertLessThan(orangePixelFillRatio(in: sourceView.screenshot()), 0.55,
+                              "Orange should cover the glyphs, not form a selection background marker.")
+        }
+        XCTAssertGreaterThan(orangePixelCount(in: userView.screenshot()), 5,
+                             "Adding a second comment should preserve the first orange comment highlight.")
+        let commentModeMenu = element("conversation-mode-menu")
+        commentModeMenu.click()
+        app.menuItems["conversation-mode-goal"].click()
+        XCTAssertTrue(commentModeMenu.label.contains("Goal"), "The composer should enter Goal mode before sending pending comments.")
+        let composer = app.textViews["message-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        composer.click()
+        composer.typeText("Keep this freeform follow-up.")
+        XCTAssertTrue((composer.value as? String ?? "").contains("Keep this freeform follow-up."),
+                      "The freeform follow-up should be present in the editable composer before sending.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ !self.element("conversation-mode-menu").label.contains("Goal") }, timeout: 5),
+                      "Sending pending comments should exit temporary Goal-entry mode.")
+        let goalQueryResponse = try runCLI(["conversation", "goal", taskID, "get"])
+        XCTAssertEqual(goalQueryResponse["ok"] as? Bool, true, "The Goal query should succeed: \(goalQueryResponse)")
+        let goalAfterCommentSubmission = goalQueryResponse["result"]
+        XCTAssertTrue(goalAfterCommentSubmission == nil || goalAfterCommentSubmission is NSNull,
+                      "Submitting pending comments in Goal mode should not create a Goal from the serialized comment payload. Response: \(goalQueryResponse)")
+        XCTAssertTrue(waitUntil({
+            ((try? self.taskRecord(id: taskID)?["savedPrompt"] as? String) ?? "").contains("Keep this freeform follow-up.")
+        }, timeout: 10))
+        let savedPrompt = try XCTUnwrap(taskRecord(id: taskID)?["savedPrompt"] as? String)
+        let firstComment = try XCTUnwrap(savedPrompt.range(of: "Explain this phrase"))
+        let secondComment = try XCTUnwrap(savedPrompt.range(of: "Please clarify this response in detail"))
+        XCTAssertLessThan(firstComment.lowerBound, secondComment.lowerBound, "Comments should be sent in the order they were added.")
+        XCTAssertTrue(savedPrompt.contains("\"messageId\":\"\(sourceID)\""))
+        XCTAssertTrue(savedPrompt.contains("\"messageId\":\"\(assistantID)\""))
+        XCTAssertTrue(savedPrompt.contains("\"startOffset\":0"))
+        XCTAssertTrue(savedPrompt.contains("\"endOffset\":10"))
+        XCTAssertTrue(savedPrompt.contains("\"text\":\"\(userSelection)\""))
+        XCTAssertTrue(savedPrompt.contains("\"text\":\"\(assistantSelection)\""))
+        XCTAssertTrue(savedPrompt.contains("\"comment\":\"Explain this phrase\""))
+        XCTAssertTrue(savedPrompt.contains("start a separate response line with :codex-annotation{index=\"N\"}"))
+        XCTAssertTrue(savedPrompt.contains("Do not combine comment responses on one line"))
+        XCTAssertTrue(waitUntil({
+            guard (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" else { return false }
+            guard let history = try? self.runCLI(["conversation", "history", taskID])["result"] as? [String: Any],
+                  let messages = history["messages"] as? [[String: Any]],
+                  let finalReply = messages.last(where: { ($0["role"] as? String) == "assistant" }) else { return false }
+            return (finalReply["text"] as? String ?? "").contains(":codex-annotation{index=\"1\"}")
+        }, timeout: 60), "The fixture turn should finish before reopening to verify persisted comments.")
+        app.terminate()
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Comment source")
+        let reloadedHistory = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        let reloadedMessages = try XCTUnwrap(reloadedHistory?["messages"] as? [[String: Any]])
+        let annotatedUserMessage = try XCTUnwrap(reloadedMessages.last { $0["role"] as? String == "user" })
+        let annotatedUserID = try XCTUnwrap(annotatedUserMessage["id"] as? String)
+        let annotatedAssistantMessage = try XCTUnwrap(reloadedMessages.last { $0["role"] as? String == "assistant" })
+        let annotatedAssistantID = try XCTUnwrap(annotatedAssistantMessage["id"] as? String)
+        let restoredLegacyAssistant = try XCTUnwrap(reloadedMessages.first {
+            ($0["role"] as? String) == "assistant" && (($0["text"] as? String)?.contains("legacy highlighted words") ?? false)
+        })
+        let restoredLegacyAssistantID = try XCTUnwrap(restoredLegacyAssistant["id"] as? String)
+        let restoredUserView = element("user-message-\(sourceID)")
+        let restoredAssistantView = element("assistant-message-\(assistantID)").descendants(matching: .textView).firstMatch
+        let renderedAnnotatedUserView = element("user-message-\(annotatedUserID)")
+        let renderedCommentResponse = element("assistant-message-\(annotatedAssistantID)")
+        let reloadedTranscript = element("conversation-scroll-view")
+        XCTAssertTrue(renderedCommentResponse.waitForExistence(timeout: 10),
+                      "The reloaded conversation should finish loading before scrolling through history.")
+        for _ in 0..<6 {
+            reloadedTranscript.swipeDown()
+        }
+        XCTAssertTrue(restoredUserView.waitForExistence(timeout: 10))
+        XCTAssertGreaterThanOrEqual(restoredUserView.frame.minY, reloadedTranscript.frame.minY + 8)
+        XCTAssertLessThan(restoredUserView.frame.minY, reloadedTranscript.frame.maxY - 40)
+        XCTAssertTrue((restoredUserView.value as? String ?? "").contains("Literal # Response comments: stays visible."),
+                      "Ordinary user text that resembles the comment heading should remain visible.")
+        XCTAssertGreaterThan(orangePixelCount(in: restoredUserView.screenshot()), 5, "Reloading history should restore the user's orange range.")
+        XCTAssertTrue(restoredAssistantView.waitForExistence(timeout: 10))
+        XCTAssertGreaterThanOrEqual(restoredAssistantView.frame.minY, reloadedTranscript.frame.minY + 8)
+        XCTAssertLessThan(restoredAssistantView.frame.minY, reloadedTranscript.frame.maxY - 40)
+        XCTAssertGreaterThan(orangePixelCount(in: restoredAssistantView.screenshot()), 5, "Reloading history should restore the assistant's orange range.")
+        let legacyResponse = element("assistant-message-\(restoredLegacyAssistantID)")
+        let legacyCommentLink = legacyResponse.descendants(matching: .textView).matching(
+            NSPredicate(format: "value CONTAINS %@", "Comment 1")
+        ).firstMatch
+        XCTAssertTrue(legacyCommentLink.waitForExistence(timeout: 5))
+        for _ in 0..<10 where legacyCommentLink.frame.maxY > reloadedTranscript.frame.maxY - 8 {
+            reloadedTranscript.scroll(byDeltaX: 0, deltaY: -80)
+        }
+        XCTAssertGreaterThanOrEqual(legacyCommentLink.frame.minY, reloadedTranscript.frame.minY + 8)
+        XCTAssertLessThanOrEqual(legacyCommentLink.frame.maxY, reloadedTranscript.frame.maxY - 8)
+        legacyCommentLink.coordinate(withNormalizedOffset: CGVector(dx: seededMarkerPointX, dy: 0.8)).hover()
+        XCTAssertTrue(element("response-comment-hover-card").waitForExistence(timeout: 5),
+                      "Older saved comment payloads should still restore reply details.")
+        XCTAssertTrue(element("response-comment-hover-card").label.contains("legacy highlighted words"))
+        XCTAssertTrue(element("response-comment-hover-card").label.contains(legacyComment))
+        XCTAssertTrue(renderedAnnotatedUserView.waitForExistence(timeout: 10))
+        XCTAssertTrue(renderedCommentResponse.waitForExistence(timeout: 10), "The comment reply should render after history reload.")
+        for _ in 0..<25 where renderedAnnotatedUserView.frame.maxY > reloadedTranscript.frame.maxY - 8 {
+            reloadedTranscript.scroll(byDeltaX: 0, deltaY: -100)
+        }
+        XCTAssertGreaterThanOrEqual(renderedAnnotatedUserView.frame.minY, reloadedTranscript.frame.minY + 8)
+        XCTAssertLessThanOrEqual(renderedAnnotatedUserView.frame.maxY, reloadedTranscript.frame.maxY - 8)
+        let renderedCommentText = (renderedAnnotatedUserView.value as? String) ?? ""
+        XCTAssertTrue(renderedCommentText.contains("Keep this freeform follow-up."), "Ordinary composer text should remain visible.")
+        XCTAssertFalse(renderedCommentText.contains("Response comments"), "Comment guidance should be hidden in the transcript.")
+        XCTAssertFalse(renderedCommentText.contains("<response-comments>"), "The comment payload should be hidden in the transcript.")
+        XCTAssertFalse(renderedCommentText.contains("Explain this phrase"), "Comment details should be hidden in the transcript.")
+        func revealReplyMarker(_ line: XCUIElement, verticalOffset: CGFloat) {
+            func markerY() -> CGFloat {
+                line.frame.minY + line.frame.height * verticalOffset
+            }
+            for _ in 0..<25 {
+                let viewport = reloadedTranscript.frame
+                let targetY = markerY()
+                if targetY < viewport.minY + 24 {
+                    reloadedTranscript.scroll(byDeltaX: 0, deltaY: min(80, viewport.minY + 24 - targetY))
+                } else if targetY > viewport.maxY - 24 {
+                    reloadedTranscript.scroll(byDeltaX: 0, deltaY: -min(80, targetY - viewport.maxY + 24))
+                } else {
+                    break
+                }
+            }
+            XCTAssertGreaterThanOrEqual(markerY(), reloadedTranscript.frame.minY + 16)
+            XCTAssertLessThanOrEqual(markerY(), reloadedTranscript.frame.maxY - 16)
+        }
+        let assistantResponseLines = renderedCommentResponse.descendants(matching: .textView).allElementsBoundByIndex
+            .compactMap { $0.value as? String }
+        XCTAssertEqual(assistantResponseLines.count, 2, "Each comment response should render on its own line.")
+        XCTAssertTrue(assistantResponseLines[0].hasPrefix("1. "), "The first response should begin with its numbered comment link.")
+        XCTAssertTrue(assistantResponseLines[1].hasPrefix("2. "), "The second response should begin with its numbered comment link.")
+        XCTAssertFalse(assistantResponseLines.joined(separator: "\n").contains(":codex-annotation"),
+                       "Protocol markers should be replaced by visible comment labels.")
+        let firstMarkerCenterX = "1.".size(withAttributes: [.font: NSFont.systemFont(ofSize: 16)]).width / 2
+        let firstResponseLine = renderedCommentResponse.descendants(matching: .textView).matching(
+            NSPredicate(format: "value BEGINSWITH %@", "1. ")
+        ).firstMatch
+        revealReplyMarker(firstResponseLine, verticalOffset: 0.5)
+        let markerPoint = firstResponseLine.coordinate(withNormalizedOffset: CGVector(
+            dx: max(0.01, firstMarkerCenterX / max(1, firstResponseLine.frame.width)), dy: 0.5
+        ))
+        markerPoint.hover()
+        let commentHint = element("response-comment-hover-card")
+        XCTAssertTrue(commentHint.waitForExistence(timeout: 5), "Hovering the first comment number should open its details hint.")
+        attachScreenshot(named: "First response comment hover popover")
+        XCTAssertGreaterThanOrEqual(commentHint.frame.width, 300, "The details hint should be wide enough to read both fields.")
+        XCTAssertLessThanOrEqual(commentHint.frame.width, 360, "The details hint should stay medium-sized.")
+        XCTAssertTrue(commentHint.label.contains(userSelection),
+                      "The hint should identify the highlighted text.")
+        XCTAssertTrue(commentHint.label.contains("Explain this phrase"),
+                         "The hint should show the user's comment.")
+        let firstOffComment = firstResponseLine.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5))
+        for _ in 0..<2 {
+            firstOffComment.hover()
+            XCTAssertTrue(waitUntil({ !commentHint.exists }, timeout: 1))
+            markerPoint.hover()
+            XCTAssertTrue(waitUntil({ commentHint.exists && commentHint.label.contains("Explain this phrase") }, timeout: 5),
+                          "The first comment link should reliably reopen after pointer reentry.")
+        }
+        let secondResponseLine = renderedCommentResponse.descendants(matching: .textView).matching(
+            NSPredicate(format: "value BEGINSWITH %@", "2. ")
+        ).firstMatch
+        XCTAssertGreaterThan(secondResponseLine.frame.height, 40,
+                             "The second response should wrap while its numbered link stays at the start.")
+        revealReplyMarker(secondResponseLine, verticalOffset: 0.03)
+        let screenFrame = try XCTUnwrap(NSScreen.main?.frame)
+        let screenImage = try XCTUnwrap(XCUIScreen.main.screenshot().image.cgImage(
+            forProposedRect: nil, context: nil, hints: nil
+        ))
+        let screenBitmap = NSBitmapImageRep(cgImage: screenImage)
+        let pixelsPerPointX = CGFloat(screenBitmap.pixelsWide) / screenFrame.width
+        let pixelsPerPointY = CGFloat(screenBitmap.pixelsHigh) / screenFrame.height
+        let visibleLine = secondResponseLine.frame.intersection(reloadedTranscript.frame)
+        XCTAssertFalse(visibleLine.isNull)
+        let pixelMinX = max(0, Int(visibleLine.minX * pixelsPerPointX))
+        let pixelMaxX = min(screenBitmap.pixelsWide - 1, Int(visibleLine.maxX * pixelsPerPointX))
+        let pixelMinY = max(0, Int(visibleLine.minY * pixelsPerPointY))
+        let pixelMaxY = min(screenBitmap.pixelsHigh - 1, Int(visibleLine.maxY * pixelsPerPointY))
+        var secondBlueMinX = screenBitmap.pixelsWide
+        var secondBlueMaxX = -1
+        var secondBlueMinY = screenBitmap.pixelsHigh
+        var secondBlueMaxY = -1
+        for x in pixelMinX...pixelMaxX {
+            for y in pixelMinY...pixelMaxY {
+                guard let color = screenBitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                if color.blueComponent > 0.6 && color.blueComponent > color.redComponent + 0.25
+                    && color.blueComponent > color.greenComponent + 0.08 {
+                    secondBlueMinX = min(secondBlueMinX, x)
+                    secondBlueMaxX = max(secondBlueMaxX, x)
+                    secondBlueMinY = min(secondBlueMinY, y)
+                    secondBlueMaxY = max(secondBlueMaxY, y)
+                }
+            }
+        }
+        XCTAssertGreaterThan(secondBlueMaxX, secondBlueMinX, "The visible wrapped reply should contain blue 2. glyphs.")
+        let secondMarkerX = CGFloat(secondBlueMinX + secondBlueMaxX) / 2 / pixelsPerPointX
+        let secondMarkerY = CGFloat(secondBlueMinY + secondBlueMaxY) / 2 / pixelsPerPointY
+        let secondMarkerOffset = CGVector(
+            dx: (secondMarkerX - secondResponseLine.frame.minX) / secondResponseLine.frame.width,
+            dy: (secondMarkerY - secondResponseLine.frame.minY) / secondResponseLine.frame.height
+        )
+        let secondMarkerPoint = secondResponseLine.coordinate(withNormalizedOffset: secondMarkerOffset)
+        secondMarkerPoint.hover()
+        XCTAssertTrue(waitUntil({ commentHint.exists && commentHint.label.contains("Please clarify this response") }, timeout: 5),
+                      "Hovering the second comment number should open its own details hint.")
+        attachScreenshot(named: "Second response comment hover popover")
+        XCTAssertLessThanOrEqual(commentHint.frame.height, 240, "Long comment details should remain within a medium-sized hint.")
+        XCTAssertTrue(commentHint.label.contains(String(assistantSelection.prefix(30))),
+                      "Long highlighted text should remain identifiable in the hint.")
+        XCTAssertTrue(commentHint.label.contains("Please clarify this response"),
+                      "Long comment details should remain identifiable when truncated.")
+        let offComment = secondResponseLine.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: secondMarkerOffset.dy))
+        for _ in 0..<2 {
+            offComment.hover()
+            XCTAssertTrue(waitUntil({ !commentHint.exists }, timeout: 1),
+                          "The hint should close before hovering another comment.")
+            secondMarkerPoint.hover()
+            XCTAssertTrue(waitUntil({ commentHint.exists && commentHint.label.contains("Please clarify this response") }, timeout: 5),
+                          "The second comment link should reliably reopen after pointer reentry.")
+        }
+        offComment.hover()
+        XCTAssertTrue(waitUntil({ !commentHint.exists }, timeout: 1))
     }
 
     // case-contract: test_conversation_serializes_concurrent_sends | Two concurrent sends for the same task are serialized across the app and CLI/XPC paths against the local Codex app-server fixture; the second waits for the first, both complete on the persisted thread, the task remains In Progress while a send is active, and successful turns without outcome calls finish in Waiting Response.
@@ -4833,7 +5335,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Conversation shows and opens a subagent")
     }
 
-    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode sends a planning turn; the first plan delta is visible before completion, and the completed plan item renders automatically as Markdown with visible spacing between distinct paragraphs and can be selected and copied as one complete text view, including after reopening, while CLI events and bridge history preserve the exact plan text as the latest assistant message. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics.
+    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics.
     func test_plan_mode_renders_markdown_in_conversation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -4861,11 +5363,61 @@ final class StationAIUITests: XCTestCase {
         planMode.click()
         XCTAssertTrue(modeMenu.label.contains("Plan mode"))
 
+        let taskID = try taskID(named: "Plan mode Markdown")
+        let emptyConversation = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        XCTAssertEqual((emptyConversation?["messages"] as? [[String: Any]])?.count ?? 0, 0, "The handoff availability check should start with an empty conversation.")
+        XCTAssertEqual(element("message-composer").value as? String ?? "", "")
+        let startImplementingInEmptyConversation = element("start-implementing-button")
+        XCTAssertTrue(startImplementingInEmptyConversation.waitForExistence(timeout: 5), "Plan mode should offer Start Implementing before any chat messages exist.")
+        XCTAssertTrue(startImplementingInEmptyConversation.isEnabled, "Start Implementing should be clickable with an empty conversation.")
+
+        modeMenu.click()
+        let goalComposerMode = app.menuItems["conversation-mode-goal"]
+        XCTAssertTrue(goalComposerMode.waitForExistence(timeout: 5))
+        goalComposerMode.click()
+        XCTAssertTrue(modeMenu.label.contains("Goal"), "The composer should enter Goal mode.")
+        XCTAssertTrue(startImplementingInEmptyConversation.exists, "Entering Goal mode should preserve the selected Plan mode and its handoff.")
+        XCTAssertTrue(startImplementingInEmptyConversation.isEnabled)
+        startImplementingInEmptyConversation.click()
+        XCTAssertTrue(waitUntil({ modeMenu.label.contains("Code mode") }, timeout: 5), "The empty-chat handoff should leave Goal composer mode and switch to Code.")
+        XCTAssertTrue(waitUntil({
+            let history = (try? runCLI(
+                ["conversation", "history", taskID],
+                extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": fixtureCopy.path]
+            )["result"] as? [String: Any])?["messages"] as? [[String: Any]] ?? []
+            return history.contains { $0["role"] as? String == "user" && $0["text"] as? String == "Start implementing the plan." }
+                && history.contains { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
+        }, timeout: 30), "Start Implementing should create a Code turn from an empty conversation.")
+        let initialFixtureData = try Data(contentsOf: URL(fileURLWithPath: fixtureCopy.path + ".history"))
+        let initialFixtureHistory = try XCTUnwrap(JSONSerialization.jsonObject(with: initialFixtureData) as? [String: Any])
+        let codeTurnsBeforeFollowup = (initialFixtureHistory["turns"] as? [[String: Any]] ?? []).count
         let composer = element("message-composer")
+        composer.click()
+        composer.typeText("Continue the implementation.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            let history = (try? runCLI(
+                ["conversation", "history", taskID],
+                extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": fixtureCopy.path]
+            )["result"] as? [String: Any])?["messages"] as? [[String: Any]] ?? []
+            let userIndex = history.lastIndex { $0["role"] as? String == "user" && $0["text"] as? String == "Continue the implementation." }
+            let finalIndex = history.lastIndex { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
+            let fixtureData = try? Data(contentsOf: URL(fileURLWithPath: fixtureCopy.path + ".history"))
+            let fixtureHistory = fixtureData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            let turns = fixtureHistory?["turns"] as? [[String: Any]] ?? []
+            return userIndex != nil && finalIndex != nil && finalIndex! > userIndex!
+                && turns.count > codeTurnsBeforeFollowup
+                && turns.last?["conversationMode"] as? String == "default"
+        }, timeout: 30), "A regular composer message after handoff should start a Code turn, even when Goal was selected first.")
+        modeMenu.click()
+        let planModeAfterGoal = app.menuItems["Plan mode"]
+        XCTAssertTrue(planModeAfterGoal.waitForExistence(timeout: 5))
+        planModeAfterGoal.click()
+        XCTAssertTrue(modeMenu.label.contains("Plan mode"), "Plan mode should be selectable again after the Code handoff.")
+
         composer.click()
         composer.typeText("Plan the task.")
         element("send-message-button").click()
-        let taskID = try taskID(named: "Plan mode Markdown")
         let markdownReply = "## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening"
         let assistantMarkdown = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", "Implementation plan"))
@@ -4877,11 +5429,32 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(assistantMarkdown.label.contains("Final verification"), "The rest of the plan should wait for the fixture release.")
         try Data().write(to: deltaRelease)
         XCTAssertTrue(waitUntil({ assistantMarkdown.label.contains("Final verification") }, timeout: 30), "The completed plan should replace the partial plan.")
+        try FileManager.default.removeItem(at: deltaHold)
+        XCTAssertTrue(modeMenu.label.contains("Plan mode"), "Plan mode should stay selected after a planning response completes.")
         XCTAssertFalse(assistantMarkdown.label.contains("<proposed_plan>"), "The plan should be shown automatically without its protocol wrapper.")
         XCTAssertFalse(assistantMarkdown.label.contains("</proposed_plan>"), "The closing protocol wrapper should not be visible.")
 
+        composer.click()
+        composer.typeText("Revise the plan to clarify the persistence step.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            let history = (try? runCLI(
+                ["conversation", "history", taskID],
+                extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": fixtureCopy.path]
+            )["result"] as? [String: Any])?["messages"] as? [[String: Any]] ?? []
+            let userIndex = history.firstIndex { $0["role"] as? String == "user" && $0["text"] as? String == "Revise the plan to clarify the persistence step." }
+            let finalIndex = history.lastIndex { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
+            let fixtureData = try? Data(contentsOf: URL(fileURLWithPath: fixtureCopy.path + ".history"))
+            let fixtureHistory = fixtureData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            let turns = fixtureHistory?["turns"] as? [[String: Any]] ?? []
+            return userIndex != nil && finalIndex != nil && finalIndex! > userIndex!
+                && turns.last?["conversationMode"] as? String == "plan"
+        }, timeout: 30), "A follow-up instruction should complete another plan turn.")
+        XCTAssertTrue(modeMenu.label.contains("Plan mode"), "A follow-up plan should leave Plan mode enabled.")
+
         element("back-to-board-button").click()
         openTask(named: "Plan mode Markdown")
+        XCTAssertTrue(element("conversation-mode-menu").label.contains("Plan mode"), "Reopening the task should preserve its planning mode.")
         let reloadedHistory = try runCLI(
             ["conversation", "history", taskID],
             extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": fixtureCopy.path]
@@ -4929,7 +5502,26 @@ final class StationAIUITests: XCTestCase {
             latestListItem.frame.maxY <= conversationScrollView.frame.maxY + 2
                 && latestListItem.frame.maxY > conversationScrollView.frame.minY
         }, timeout: 5), "Reopening a long conversation should position its final message in the visible viewport.")
-        attachScreenshot(named: "Plan mode response renders a structured Markdown plan")
+        let startImplementing = element("start-implementing-button")
+        XCTAssertTrue(startImplementing.waitForExistence(timeout: 5), "Plan mode should offer a dedicated implementation handoff.")
+        XCTAssertEqual(element("message-composer").value as? String ?? "", "", "The handoff should be available while the composer is empty.")
+        XCTAssertTrue(startImplementing.isEnabled, "Start Implementing should not require draft text.")
+        startImplementing.click()
+        XCTAssertTrue(waitUntil({ element("conversation-mode-menu").label.contains("Code mode") }, timeout: 5), "Starting implementation should switch the composer to Code mode.")
+        XCTAssertTrue(waitUntil({
+            let history = (try? runCLI(
+                ["conversation", "history", taskID],
+                extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": fixtureCopy.path]
+            )["result"] as? [String: Any])?["messages"] as? [[String: Any]] ?? []
+            let userIndex = history.firstIndex { $0["role"] as? String == "user" && $0["text"] as? String == "Start implementing the plan." }
+            let finalIndex = history.lastIndex { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" }
+            let fixtureData = try? Data(contentsOf: URL(fileURLWithPath: fixtureCopy.path + ".history"))
+            let fixtureHistory = fixtureData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            let turns = fixtureHistory?["turns"] as? [[String: Any]] ?? []
+            return userIndex != nil && finalIndex != nil && finalIndex! > userIndex!
+                && turns.last?["conversationMode"] as? String == "default"
+        }, timeout: 30), "The handoff should start an implementation turn with the plan context.")
+        attachScreenshot(named: "Plan mode stays active until implementation starts")
     }
 
     // case-contract: test_thread_goal_lifecycle_persists_through_cli_xpc | CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime.
@@ -5497,7 +6089,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(card.staticTexts["Answered"].exists)
     }
 
-    // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; reopening while a turn is still active recovers the stale task to Blocked with a reason. Interrupted outcomes persist Blocked across connections, and diagnostics identify the failed turn phase and store path; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
+    // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; clean and unexpected relaunch preserve the prompt and conversation and allow a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
     func test_codex_interrupted_turn_blocks_with_reason_and_can_retry() throws {
         _ = try runCLI(["task", "create", "--title", "Interrupted turn", "--root", fixture.primary.path])
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-interrupted").path
@@ -5551,8 +6143,10 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: interruptedID)?["savedPrompt"] as? String, queuedText, "The successfully retried follow-up should become the latest saved prompt.")
 
         _ = try runCLI(["task", "create", "--title", "Reopen active turn", "--root", fixture.primary.path])
-        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-hold").path
-        app.launchEnvironment["STATIONAI_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
+        let cleanRestartFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-hold").path
+        codexFixtureExecutable = cleanRestartFixtureExecutable
+        try? FileManager.default.removeItem(atPath: cleanRestartFixtureExecutable + ".hold-used")
+        app.launchEnvironment["STATIONAI_E2E_CODEX_EXECUTABLE"] = cleanRestartFixtureExecutable
         relaunchApp()
         openTask(named: "Reopen active turn")
         element("message-composer").click()
@@ -5566,14 +6160,101 @@ final class StationAIUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.05)
         }
         XCTAssertEqual(activeStatus, "In Progress")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: cleanRestartFixtureExecutable + ".hold-used") }, timeout: 10), "Codex should reach the deliberate held turn before the app closes.")
         attachScreenshot(named: "Task remains In Progress while the Codex turn is active")
 
         relaunchApp()
         openTask(named: "Reopen active turn")
         let recovered = try XCTUnwrap(taskRecord(named: "Reopen active turn"))
-        XCTAssertEqual(recovered["status"] as? String, "Blocked")
-        XCTAssertTrue((recovered["statusMessage"] as? String)?.localizedCaseInsensitiveContains("reopened before codex") == true)
-        attachScreenshot(named: "Reopening StationAI recovers a stale In Progress task as Blocked")
+        XCTAssertEqual(recovered["status"] as? String, "Waiting Response")
+        XCTAssertTrue((recovered["statusMessage"] as? String)?.localizedCaseInsensitiveContains("closed while this turn was running") == true)
+        XCTAssertTrue(app.staticTexts["Leave this turn active while StationAI closes."].waitForExistence(timeout: 10), "The visible transcript should restore the prompt after a clean quit.")
+        let interruptedHistory = try runCLI(["conversation", "history", try taskID(named: "Reopen active turn")])["result"] as? [String: Any]
+        XCTAssertTrue(
+            ((interruptedHistory?["messages"] as? [[String: Any]]) ?? []).contains {
+                $0["role"] as? String == "user" && $0["text"] as? String == "Leave this turn active while StationAI closes."
+            },
+            "The interrupted turn's prompt should remain in the saved conversation after a clean quit."
+        )
+        let shutdownEvents = try diagnosticEvents()
+        XCTAssertTrue(shutdownEvents.contains { $0["event"] as? String == "application.shutdown.started" })
+        XCTAssertTrue(shutdownEvents.contains {
+            $0["event"] as? String == "application.shutdown.turn_drained"
+                && $0["interruptAttempted"] as? String == "true"
+                && $0["drainTimedOut"] as? String == "true"
+        }, "Shutdown diagnostics should record the active turn interrupt and bounded drain result.")
+        let processShutdown = try XCTUnwrap(shutdownEvents.first { $0["event"] as? String == "codex.app_server.shutdown.finished" })
+        let terminationStatus = try XCTUnwrap(processShutdown["terminationStatus"] as? String, "Shutdown diagnostics must include a process termination result.")
+        XCTAssertNotEqual(terminationStatus, "still_running", "Shutdown diagnostics should confirm the Codex process exited.")
+        let shutdownRecords = shutdownEvents.filter { ($0["event"] as? String)?.contains("shutdown") == true }
+        XCTAssertFalse(
+            shutdownRecords.map { String(describing: $0) }.joined(separator: "\n").contains("Leave this turn active while StationAI closes."),
+            "Shutdown diagnostics must not contain the conversation prompt."
+        )
+        try completeCurrentTaskWithFixtureAnswers(
+            taskTitle: "Reopen active turn",
+            prompt: "Continue the saved work after relaunch.",
+            reportCompletedOutcome: false
+        )
+        XCTAssertEqual(try taskRecord(named: "Reopen active turn")?["status"] as? String, "Waiting Response")
+        attachScreenshot(named: "StationAI resumes the saved conversation after a clean quit")
+
+        let unexpectedTask = try XCTUnwrap(
+            (try runCLI(["task", "create", "--title", "Unexpected restart", "--root", fixture.primary.path])["result"] as? [String: Any])
+        )
+        let unexpectedTaskID = try XCTUnwrap(unexpectedTask["id"] as? String)
+        let unexpectedRestartFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-hold").path
+        codexFixtureExecutable = unexpectedRestartFixtureExecutable
+        try? FileManager.default.removeItem(atPath: unexpectedRestartFixtureExecutable + ".hold-used")
+        app.launchEnvironment["STATIONAI_E2E_CODEX_EXECUTABLE"] = unexpectedRestartFixtureExecutable
+        relaunchApp()
+        openTask(named: "Unexpected restart")
+        let unexpectedPrompt = "Keep this work available after an unexpected restart."
+        element("message-composer").click()
+        element("message-composer").typeText(unexpectedPrompt)
+        element("send-message-button").click()
+        let unexpectedDeadline = Date().addingTimeInterval(10)
+        var unexpectedStatus: String?
+        while Date() < unexpectedDeadline {
+            unexpectedStatus = try taskRecord(id: unexpectedTaskID)?["status"] as? String
+            if unexpectedStatus == "In Progress" { break }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        XCTAssertEqual(unexpectedStatus, "In Progress")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: unexpectedRestartFixtureExecutable + ".hold-used") }, timeout: 10), "Codex should reach the deliberate held turn before simulated process loss.")
+        let appBundleIdentifier = try XCTUnwrap(Bundle(url: appBundle)?.bundleIdentifier)
+        let appProcessID = try XCTUnwrap(
+            NSRunningApplication.runningApplications(withBundleIdentifier: appBundleIdentifier).first,
+            "The app process should be visible before simulating unexpected termination."
+        ).processIdentifier
+        XCTAssertGreaterThan(appProcessID, 0)
+        XCTAssertEqual(Darwin.kill(appProcessID, SIGKILL), 0, "The fixture app should be terminated without running its quit cleanup.")
+        XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 10), "StationAI should stop after the simulated unexpected termination.")
+
+        launchAppWithOpen()
+        waitForBoardOrAbortSuite()
+        openTask(named: "Unexpected restart")
+        let unexpectedlyRecovered = try XCTUnwrap(taskRecord(id: unexpectedTaskID))
+        XCTAssertEqual(unexpectedlyRecovered["status"] as? String, "Waiting Response")
+        XCTAssertTrue((unexpectedlyRecovered["statusMessage"] as? String)?.localizedCaseInsensitiveContains("restarted before codex") == true)
+        XCTAssertTrue(app.staticTexts[unexpectedPrompt].waitForExistence(timeout: 10), "The visible transcript should restore the prompt after unexpected termination.")
+        let unexpectedHistory = try runCLI(["conversation", "history", unexpectedTaskID])["result"] as? [String: Any]
+        XCTAssertTrue(
+            ((unexpectedHistory?["messages"] as? [[String: Any]]) ?? []).contains {
+                $0["role"] as? String == "user" && $0["text"] as? String == unexpectedPrompt
+            },
+            "The unexpected restart should preserve the last submitted message in conversation history."
+        )
+        try completeCurrentTaskWithFixtureAnswers(
+            taskTitle: "Unexpected restart",
+            prompt: "Continue after an unexpected restart.",
+            reportCompletedOutcome: false
+        )
+        XCTAssertEqual(try taskRecord(id: unexpectedTaskID)?["status"] as? String, "Waiting Response")
+        let abandonedFixtureRelease = URL(fileURLWithPath: unexpectedRestartFixtureExecutable + ".turn-release")
+        try Data("Clean up the fixture process after simulated app crash.\n".utf8).write(to: abandonedFixtureRelease, options: .atomic)
+        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: abandonedFixtureRelease.path) }, timeout: 5), "The fixture orphaned by SIGKILL should stop after cleanup release.")
+        attachScreenshot(named: "StationAI recovers and continues work after an unexpected restart")
     }
 
     // case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation. Diagnostics record inventory and file-read outcomes with paths and byte counts, without logging file contents.
@@ -5732,6 +6413,9 @@ final class StationAIUITests: XCTestCase {
         if let codexFixtureExecutable {
             app.launchEnvironment["STATIONAI_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
         }
+        if let codexFixtureStateDirectory {
+            app.launchEnvironment["STATIONAI_E2E_FIXTURE_STATE_DIRECTORY"] = codexFixtureStateDirectory.path
+        }
         for (key, value) in environmentOverrides {
             app.launchEnvironment[key] = value
         }
@@ -5769,6 +6453,9 @@ final class StationAIUITests: XCTestCase {
         if let codexFixtureExecutable {
             environment["STATIONAI_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
         }
+        if let codexFixtureStateDirectory {
+            environment["STATIONAI_E2E_FIXTURE_STATE_DIRECTORY"] = codexFixtureStateDirectory.path
+        }
         environment.merge(environmentOverrides, uniquingKeysWith: { _, new in new })
         app = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
         app.launchEnvironment = environment
@@ -5791,6 +6478,9 @@ final class StationAIUITests: XCTestCase {
         }
         if let codexFixtureExecutable {
             opener.arguments?.append(contentsOf: ["--env", "STATIONAI_E2E_CODEX_EXECUTABLE=\(codexFixtureExecutable)"])
+        }
+        if let codexFixtureStateDirectory {
+            opener.arguments?.append(contentsOf: ["--env", "STATIONAI_E2E_FIXTURE_STATE_DIRECTORY=\(codexFixtureStateDirectory.path)"])
         }
         for (key, value) in environmentOverrides {
             opener.arguments?.append(contentsOf: ["--env", "\(key)=\(value)"])
@@ -6069,7 +6759,11 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("task-view-title").waitForExistence(timeout: 10))
     }
 
-    private func completeCurrentTaskWithFixtureAnswers(taskTitle: String, prompt: String = "Complete this task.") throws {
+    private func completeCurrentTaskWithFixtureAnswers(
+        taskTitle: String,
+        prompt: String = "Complete this task.",
+        reportCompletedOutcome: Bool = true
+    ) throws {
         let taskID = try taskID(named: taskTitle)
         let executablePath = try XCTUnwrap(codexFixtureExecutable, "The task fixture has no Codex executable.")
         let hold = URL(fileURLWithPath: executablePath + ".outcome-hold")
@@ -6094,11 +6788,16 @@ final class StationAIUITests: XCTestCase {
         element("ai-question-answer-token").typeText("fixture-secret")
         element("submit-ai-answers-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: active.path) }, timeout: 10), "The fixture should hold after receiving answers so the task outcome can be reported.")
-        let outcome = try runCLI(["task", "outcome", taskID, "completed"])
-        XCTAssertEqual((outcome["result"] as? [String: Any])?["outcome"] as? String, "completed")
+        if reportCompletedOutcome {
+            let outcome = try runCLI(["task", "outcome", taskID, "completed"])
+            XCTAssertEqual((outcome["result"] as? [String: Any])?["outcome"] as? String, "completed")
+        }
         try "Release the answered fixture turn.\n".write(to: release, atomically: true, encoding: .utf8)
         XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
-        XCTAssertEqual(try taskRecord(named: taskTitle)?["status"] as? String, "Review")
+        XCTAssertEqual(
+            try taskRecord(named: taskTitle)?["status"] as? String,
+            reportCompletedOutcome ? "Review" : "Waiting Response"
+        )
     }
 
     private func assertTaskVisible(_ title: String, inColumn status: String) {
@@ -6512,6 +7211,9 @@ final class StationAIUITests: XCTestCase {
         if let codexFixtureExecutable {
             environment["STATIONAI_E2E_CODEX_EXECUTABLE"] = codexFixtureExecutable
         }
+        if let codexFixtureStateDirectory {
+            environment["STATIONAI_E2E_FIXTURE_STATE_DIRECTORY"] = codexFixtureStateDirectory.path
+        }
         environment.merge(extraEnvironment) { _, override in override }
         process.environment = environment
         let stdout = Pipe()
@@ -6654,6 +7356,78 @@ final class StationAIUITests: XCTestCase {
         let helpTag = app.descendants(matching: .helpTag)
             .matching(NSPredicate(format: "label == %@", expected)).firstMatch
         XCTAssertTrue(helpTag.waitForExistence(timeout: 8), "Expected the hovered control to show the help tag ‘\(expected)’." )
+    }
+
+    private func orangePixelCount(in screenshot: XCUIScreenshot) -> Int {
+        guard let image = screenshot.image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return 0 }
+        let bitmap = NSBitmapImageRep(cgImage: image)
+        var count = 0
+        for x in 0..<bitmap.pixelsWide {
+            for y in 0..<bitmap.pixelsHigh {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                let red = color.redComponent
+                let green = color.greenComponent
+                let blue = color.blueComponent
+                if red > 0.45 && red > green + 0.08 && green > blue + 0.08 { count += 1 }
+            }
+        }
+        return count
+    }
+
+    private func darkPixelCount(in element: XCUIElement) -> Int {
+        guard let image = element.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return 0 }
+        let bitmap = NSBitmapImageRep(cgImage: image)
+        var count = 0
+        for x in 0..<bitmap.pixelsWide {
+            for y in 0..<bitmap.pixelsHigh {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                if color.redComponent < 0.3 && color.greenComponent < 0.3 && color.blueComponent < 0.3 {
+                    count += 1
+                }
+            }
+        }
+        return count
+    }
+
+    private func lightPixelCount(in element: XCUIElement) -> Int {
+        guard let image = element.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return 0 }
+        let bitmap = NSBitmapImageRep(cgImage: image)
+        var count = 0
+        for x in 0..<bitmap.pixelsWide {
+            for y in 0..<bitmap.pixelsHigh {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                if color.redComponent > 0.68 && color.greenComponent > 0.68 && color.blueComponent > 0.68 {
+                    count += 1
+                }
+            }
+        }
+        return count
+    }
+
+    private func orangePixelFillRatio(in screenshot: XCUIScreenshot) -> Double {
+        guard let image = screenshot.image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return 0 }
+        let bitmap = NSBitmapImageRep(cgImage: image)
+        var count = 0
+        var minX = bitmap.pixelsWide
+        var maxX = 0
+        var minY = bitmap.pixelsHigh
+        var maxY = 0
+        for x in 0..<bitmap.pixelsWide {
+            for y in 0..<bitmap.pixelsHigh {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                let red = color.redComponent
+                let green = color.greenComponent
+                let blue = color.blueComponent
+                if red > 0.45 && red > green + 0.08 && green > blue + 0.08 {
+                    count += 1
+                    minX = min(minX, x); maxX = max(maxX, x)
+                    minY = min(minY, y); maxY = max(maxY, y)
+                }
+            }
+        }
+        guard count > 0 else { return 0 }
+        let area = max(1, (maxX - minX + 1) * (maxY - minY + 1))
+        return Double(count) / Double(area)
     }
 
     private func assertHoverEmphasis(for element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {

@@ -2205,8 +2205,8 @@ final class BoardTaskManager {
             guard let threadID = task.codexThreadID else {
                 if task.pendingSubmittedPrompt != nil, !(try hasConversationTurnReservation(id)) {
                     if task.status == .inProgress {
-                        task.status = .blocked
-                        task.statusMessage = "StationAI reopened before Codex started this turn. Review the prompt and retry."
+                        task.status = .waitingResponse
+                        task.statusMessage = "StationAI restarted before Codex started this turn. Your prompt is saved; review it and continue when ready."
                     }
                     task.pendingSubmittedPrompt = nil
                     try await saveTaskContext(taskID: id)
@@ -2222,13 +2222,13 @@ final class BoardTaskManager {
             let message: String
             switch task.status {
             case .inProgress:
-                message = "StationAI reopened before Codex reported that this turn finished. Review the conversation and send a prompt to retry."
+                message = "StationAI restarted before Codex reported that this turn finished. Your conversation is saved; review it and send a follow-up to continue."
             case .waitingResponse:
                 message = "StationAI reopened before the pending question was answered. Review the conversation and send a prompt to continue."
             default:
                 return BoardTaskRecord(task: task)
             }
-            task.status = .blocked
+            task.status = .waitingResponse
             task.statusMessage = message
             task.pendingSubmittedPrompt = nil
             clearProgressReport(task)
@@ -3545,6 +3545,8 @@ final class CodexConversationManager {
         onUserInput: @escaping (CodexUserInputRequest) async -> Void = { _ in }
     ) async throws -> CodexThreadHistory {
         _ = try settingsManager.requireRepositoryRootFolder()
+        client.beginConversationOperation()
+        defer { client.finishConversationOperation() }
         activeSendTaskIDs.insert(taskID)
         defer { activeSendTaskIDs.remove(taskID) }
         let history: CodexThreadHistory
@@ -3853,7 +3855,13 @@ final class CodexConversationManager {
             fields["phase"] = phase
             fields["storePath"] = StationAIDiagnostics.storeURL.path
             fields.merge(client.diagnosticFields()) { _, new in new }
-            _ = try? await tasks.setLifecycleStatus(taskID, to: .blocked, message: error.localizedDescription)
+            let shutdownMessage = "StationAI closed while this turn was running. Your conversation is saved; review it and send a follow-up to continue."
+            let shouldKeepResumable = client.isPreparingForApplicationTermination
+            _ = try? await tasks.setLifecycleStatus(
+                taskID,
+                to: shouldKeepResumable ? .waitingResponse : .blocked,
+                message: shouldKeepResumable ? shutdownMessage : error.localizedDescription
+            )
             StationAIDiagnostics.record("conversation.send.failed", fields: fields)
             throw error
         }
