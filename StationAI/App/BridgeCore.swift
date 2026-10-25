@@ -3303,6 +3303,69 @@ final class ConversationManager {
         return history
     }
 
+    /// Publishes an image produced by an agent as a durable assistant message.
+    /// This is StationAI-owned presentation state, so both provider runtimes use
+    /// the same transcript path.
+    func publishImage(taskID: UUID, path: String, caption: String = "") async throws -> ConversationMessage {
+        let task = try tasks.taskModel(taskID)
+        let url = URL(fileURLWithPath: path)
+        let data = try Data(contentsOf: url)
+        guard data.count <= 10_000_000 else {
+            throw BridgeCommandError(code: "invalid_argument", message: "The image must be smaller than 10 MB.")
+        }
+        let mime: String
+        switch url.pathExtension.lowercased() {
+        case "png": mime = "image/png"
+        case "jpg", "jpeg": mime = "image/jpeg"
+        default: throw BridgeCommandError(code: "invalid_argument", message: "Use a PNG or JPEG image.")
+        }
+        let image = "data:\(mime);base64,\(data.base64EncodedString())"
+        guard Self.isValidImageDataURL(image) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "The file is not a valid PNG or JPEG image.")
+        }
+        let existingHistory = try await history(taskID: taskID)
+        let provider = task.conversationProvider
+        let message = ConversationMessage(
+            id: UUID().uuidString.lowercased(), role: .assistant,
+            text: caption.trimmingCharacters(in: .whitespacesAndNewlines),
+            imageDataURLs: [image], phase: "agent_image",
+            timelineOrder: provider == .codex
+                ? (existingHistory.messages.compactMap(\.timelineOrder).max() ?? existingHistory.messages.count - 1) + 1
+                : nil,
+            provider: provider
+        )
+        let activeClaudeTurn = provider == .claude
+            && task.activeConversationID.map {
+                client(for: task).isTurnActive(threadID: $0)
+                    || client(for: task).isTurnActiveInProcess(threadID: $0)
+                    || ConversationSteerMailbox.activeTurnOwnerProcessID(threadID: $0) != nil
+            } == true
+        try transcripts.mutate(taskID) { transcript in
+            var segment = transcript.segments.last.flatMap { $0.provider == provider ? $0 : nil }
+            if segment == nil {
+                let created = ConversationTranscript.Segment(id: UUID().uuidString, provider: provider, startedAt: .now, handoffDelivered: true)
+                transcript.segments.append(created)
+                segment = created
+            }
+            guard let segment else { return }
+            if provider == .codex, let index = transcript.segments.firstIndex(where: { $0.id == segment.id }) {
+                let claimed = Set(transcript.segments.flatMap(\.codexTurnIDs))
+                let ids = Self.orderedTurnIDs(existingHistory.messages)
+                transcript.segments[index].codexTurnIDs += ids.filter { !claimed.contains($0) }
+            }
+            if activeClaudeTurn,
+               let index = transcript.turns.indices.last,
+               transcript.turns[index].segmentID == segment.id {
+                var attributed = message
+                attributed.turnID = transcript.turns[index].id
+                transcript.turns[index].messages.append(attributed)
+            } else {
+                transcript.turns.append(.init(id: "agent-image-\(message.id)", segmentID: segment.id, messages: [message]))
+            }
+        }
+        return message
+    }
+
     private func codexHistory(task: BoardTask, onActionRequest: @escaping () -> Void) async throws -> ConversationHistory? {
         guard let threadID = task.codexThreadID else { return nil }
         let taskID = task.id
@@ -3391,7 +3454,7 @@ final class ConversationManager {
         for turn in transcript.turns {
             let segment = transcript.segmentIndex(of: turn.segmentID) ?? segments.count
             for message in turn.messages {
-                elements.append((segment, localOrder, .message(message)))
+                elements.append((segment, message.timelineOrder ?? localOrder, .message(message)))
                 localOrder += 1
             }
         }
@@ -4798,6 +4861,13 @@ final class StationAIBridgeRuntime {
                 _ = try await taskManager.reconcileLifecycleStatusOnOpen(taskID, clients: clients)
                 let conversations = ConversationManager(tasks: taskManager, clients: clients, settingsManager: settings)
                 result = try Self.value(await conversations.history(taskID: taskID))
+            case "conversation.present-image":
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = try Self.value(await conversations.publishImage(
+                    taskID: request.requiredUUID("taskID"),
+                    path: request.requiredString("path"),
+                    caption: request.arguments["caption"]?.string ?? ""
+                ))
             case "conversation.models":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = .object(["models": .array(try await conversations.models(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })])

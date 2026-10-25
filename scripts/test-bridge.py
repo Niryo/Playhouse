@@ -3597,7 +3597,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(failure_items[failed_target_record["id"]]["state"], "needsAction")
         self.assertEqual(failure_items[later_record["id"]]["state"], "queued", "A failed targeted send must not drain later queued messages.")
 
-    # case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. Diagnostics record image MIME and encoded size without storing image payloads.
+    # case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads.
     def test_conversation_sends_image_attachments(self):
         task_id = self.create_task(title="Image conversation") ["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -3680,6 +3680,80 @@ class StationAIBridgeTests(unittest.TestCase):
         serialized_diagnostics = json.dumps(diagnostics)
         self.assertNotIn("data:image/png;base64,", serialized_diagnostics)
         self.assertNotIn(sent["images"][0], serialized_diagnostics)
+        published, _ = self.call_cli(
+            "conversation", "present-image", task_id, "--image", str(image), "--caption", "Agent screenshot",
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        published_message = self.assert_success(published)
+        self.assertEqual(published_message["role"], "assistant")
+        self.assertEqual(published_message["text"], "Agent screenshot")
+        self.assertTrue(published_message["imageDataURLs"][0].startswith("data:image/png;base64,"))
+        fresh_history, _ = self.call_cli(
+            "conversation", "history", task_id,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        saved_agent_image = self.assert_success(fresh_history)["messages"][-1]
+        self.assertEqual(saved_agent_image["id"], published_message["id"])
+        self.assertEqual(saved_agent_image["imageDataURLs"], published_message["imageDataURLs"])
+        thread_instructions = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["threadStartDeveloperInstructions"]
+        self.assertIn("conversation present-image", thread_instructions)
+        jpeg = self.data_directory / "agent-image.jpg"
+        subprocess.run(["sips", "-s", "format", "jpeg", str(image), "--out", str(jpeg)], check=True, capture_output=True)
+        published_jpeg, _ = self.call_cli(
+            "conversation", "present-image", task_id, "--image", str(jpeg), "--caption", "Agent JPEG screenshot",
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        jpeg_message = self.assert_success(published_jpeg)
+        self.assertTrue(jpeg_message["imageDataURLs"][0].startswith("data:image/jpeg;base64,"))
+        fresh_jpeg_history, _ = self.call_cli(
+            "conversation", "history", task_id,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        self.assertEqual(self.assert_success(fresh_jpeg_history)["messages"][-1]["imageDataURLs"], jpeg_message["imageDataURLs"])
+        invalid_image = self.data_directory / "invalid-agent-image.png"
+        invalid_image.write_bytes(b"not an image")
+        invalid_publish, _ = self.call_cli(
+            "conversation", "present-image", task_id, "--image", str(invalid_image),
+            expected_status=2, extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        self.assertEqual(invalid_publish.get("error", {}).get("code"), "invalid_argument")
+
+    # case-contract: test_claude_agent_image_published_during_active_turn | While a Claude Code turn is active in the app process, the agent's CLI/XPC image publication joins that active Claude transcript turn; after the provider finishes, history places the image before the later assistant answer, and reopening the conversation renders the exact published image.
+    def test_claude_agent_image_published_during_active_turn(self):
+        source = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / "claude-fixture-active-image"
+        shutil.copyfile(source, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
+            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        created, _ = self.call_cli("task", "create", "--title", "Claude active image", "--root", self.primary, "--provider", "claude")
+        task_id = self.assert_success(created)["id"]
+        image = self.data_directory / "active-agent-image.png"
+        image.write_bytes(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"))
+        environment = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        prompt = "Please publish-image-during-active-turn."
+        send = self.start_cli("conversation", "send", task_id, "--message", prompt, extra_environment=environment)
+        ready = Path(str(executable) + ".image-turn-ready")
+        release = Path(str(executable) + ".image-turn-release")
+        try:
+            deadline = time.monotonic() + 20
+            while not ready.exists() and send.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "Claude should hold the active turn before producing its answer.")
+            published, _ = self.call_cli(
+                "conversation", "present-image", task_id, "--image", str(image), "--caption", "During Claude turn",
+                extra_environment=environment,
+            )
+            image_message = self.assert_success(published)
+        finally:
+            release.write_text("Release Claude's turn.\n", encoding="utf-8")
+        self.finish_cli(send, ("conversation", "send", task_id, "--message", prompt), timeout=30)
+        history, _ = self.call_cli("conversation", "history", task_id, extra_environment=environment)
+        messages = self.assert_success(history)["messages"]
+        image_index = next(index for index, message in enumerate(messages) if message["id"] == image_message["id"])
+        answer_index = next(index for index, message in enumerate(messages) if message["text"] == "Claude answer after the image.")
+        self.assertLess(image_index, answer_index, "The image should precede Claude's later answer in transcript order.")
 
     # case-contract: test_conversation_rejects_invalid_image_attachments | Malformed image data is rejected with a visible composer error and an invalid_argument bridge response, without creating conversation history or advancing task status.
     def test_conversation_rejects_invalid_image_attachments(self):
