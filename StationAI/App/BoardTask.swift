@@ -89,6 +89,7 @@ final class BoardTask {
     var claudeSessionID: String?
     /// Nil for tasks created before provider selection; those use Codex.
     var conversationProviderRawValue: String?
+    var conversationEffortRawValue: String?
     var savedPrompt: String?
     var pendingSubmittedPrompt: String?
     var workspaceRootPathsData: Data?
@@ -134,6 +135,11 @@ final class BoardTask {
     var conversationProvider: ConversationProvider {
         get { conversationProviderRawValue.flatMap(ConversationProvider.init(rawValue:)) ?? .codex }
         set { conversationProviderRawValue = newValue.rawValue }
+    }
+
+    var conversationEffort: String {
+        get { conversationEffortRawValue ?? "medium" }
+        set { conversationEffortRawValue = newValue }
     }
 
     /// The native thread or session ID a provider uses for this task.
@@ -182,6 +188,7 @@ final class BoardTask {
         codexThreadID = nil
         claudeSessionID = nil
         conversationProviderRawValue = conversationProvider.rawValue
+        conversationEffortRawValue = "medium"
         savedPrompt = nil
         pendingSubmittedPrompt = nil
         workspaceRootPathsData = try? JSONEncoder().encode(workspaceRootPaths)

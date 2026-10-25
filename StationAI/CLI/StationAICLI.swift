@@ -318,6 +318,17 @@ enum StationAICLI {
             switch operation {
             case "history": return BridgeRequest(command: "conversation.history", arguments: ["taskID": .string(id)])
             case "models": return BridgeRequest(command: "conversation.models", arguments: ["taskID": .string(id)])
+            case "effort":
+                let effortArguments = Array(tail.dropFirst())
+                if effortArguments.isEmpty {
+                    return BridgeRequest(command: "conversation.effort.get", arguments: ["taskID": .string(id)])
+                }
+                if effortArguments.count == 2, effortArguments[0] == "set" {
+                    return BridgeRequest(command: "conversation.effort.set", arguments: [
+                        "taskID": .string(id), "effort": .string(effortArguments[1]),
+                    ])
+                }
+                throw CLIError.usage("Use: stationai conversation effort <task-id> [set <low|medium|high|xhigh>]")
             case "stop": return BridgeRequest(command: "conversation.stop", arguments: ["taskID": .string(id)])
             case "provider":
                 switch Array(tail.dropFirst()) {
@@ -506,6 +517,7 @@ enum StationAICLI {
       stationai conversation steer <task-id> --message <text> [--image <path>]...
       stationai conversation answer-async <task-id> <item-id> --answer <text> [--answer <text>]...
       stationai conversation models <task-id>
+      stationai conversation effort <task-id> [set <low|medium|high|xhigh>]
       stationai conversation stop <task-id>
       stationai conversation provider <task-id> [set <codex|claude>|capabilities]
       stationai conversation goal <task-id> <get|set|pause|resume|clear> [--text <objective>]

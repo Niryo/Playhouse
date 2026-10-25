@@ -193,7 +193,15 @@
   },
   {
     "id": "test_conversation_mode_rejects_unknown_mode_without_starting_a_turn",
-    "expectation": "The composer and empty-state prompt show the selected Codex-reported model and update when the user changes it, while unsupported modes and malformed model IDs are rejected before creating history."
+    "expectation": "The composer and empty-state prompt show the selected model and update on change. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available. The selected effort defaults to Medium, persists through fresh CLI/XPC reads and reopening the conversation, and rejects unsupported values without replacing the prior choice. Unsupported modes and malformed model IDs are rejected before creating history."
+  },
+  {
+    "id": "test_conversation_effort_dispatches_to_codex",
+    "expectation": "The selected effort persists through CLI/XPC reads and reaches Codex turn/start collaborationMode.settings.reasoningEffort; a model's advertised effort limit rejects unsupported requests before history is created. The UI selects Extra High and sends a Codex fixture turn whose recorded protocol value is xhigh."
+  },
+  {
+    "id": "test_conversation_effort_dispatches_to_claude",
+    "expectation": "The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh."
   },
   {
     "id": "test_thread_goal_lifecycle_persists_through_cli_xpc",

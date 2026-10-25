@@ -171,6 +171,8 @@ struct TaskConversationView: View {
     @State private var goalStatusUpdatedAt = Date.now
     @State private var modelOptions: [ConversationModelOption] = []
     @State private var selectedModelID = ""
+    @State private var selectedEffort: ConversationEffort = .medium
+    @State private var isModelPickerPresented = false
     @State private var providerBoundaries: [ConversationProviderBoundary] = []
     @State private var isSwitchingProvider = false
     @State private var providerNotice: String?
@@ -2637,19 +2639,79 @@ struct TaskConversationView: View {
 
                     providerMenu
 
-                    Picker("Model", selection: $selectedModelID) {
-                        ForEach(modelOptions) { model in
-                            Text(model.name)
-                                .tag(model.id)
-                            .accessibilityIdentifier("model-option-\(model.id)")
+                    Button {
+                        isModelPickerPresented.toggle()
+                    } label: {
+                        HStack(spacing: 7) {
+                            Text(selectedModelName)
+                            Text(selectedEffort.title).foregroundStyle(.secondary)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(.tertiary)
                         }
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.primary.opacity(0.82))
+                        .contentShape(Rectangle())
                     }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel("Model: \(selectedModelName)")
+                    .buttonStyle(.plain)
+                    .buttonHoverPointer()
+                    .help("Choose a model and reasoning effort")
+                    .accessibilityLabel("Model: \(selectedModelName), effort: \(selectedEffort.title)")
+                    .accessibilityValue(selectedModelName)
                     .accessibilityIdentifier("model-picker-menu")
+                    .popover(isPresented: $isModelPickerPresented, arrowEdge: .bottom) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(modelOptions) { model in
+                                Button {
+                                    selectModel(model)
+                                } label: {
+                                    HStack {
+                                        Text(model.name)
+                                        Spacer()
+                                        if selectedModelID == model.id {
+                                            Image(systemName: "checkmark")
+                                                .font(.system(size: 12, weight: .semibold))
+                                        }
+                                    }
+                                    .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .buttonHoverPointer()
+                                .help("Select \(model.name)")
+                                .accessibilityIdentifier("model-option-\(model.id)")
+                            }
+                            Divider().padding(.vertical, 8)
+                            Text(selectedEffort.title)
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(Color.accentColor)
+                                .accessibilityIdentifier("selected-model-effort")
+                            Slider(value: Binding(
+                                get: { Double(currentEffortChoices.firstIndex(of: selectedEffort) ?? 0) },
+                                set: { selectedEffort = currentEffortChoices[min(max(Int($0.rounded()), 0), currentEffortChoices.count - 1)] }
+                            ), in: 0...Double(max(currentEffortChoices.count - 1, 1)), step: 1)
+                            .tint(.accentColor)
+                            .overlay {
+                                HStack {
+                                    ForEach(currentEffortChoices.indices, id: \.self) { index in
+                                        Circle().fill(Color.primary.opacity(0.18)).frame(width: 6, height: 6)
+                                        if index < currentEffortChoices.count - 1 { Spacer(minLength: 0) }
+                                    }
+                                }
+                                .padding(.horizontal, 11)
+                                .allowsHitTesting(false)
+                            }
+                            .accessibilityLabel("Model effort")
+                            .accessibilityValue(selectedEffort.title)
+                            .accessibilityIdentifier("model-effort-slider")
+                        }
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 13)
+                        .frame(width: 320)
+                    }
+                    .onChange(of: selectedEffort) { _, effort in
+                        Task { try? await conversationManager.setEffort(taskID: task.id, effort: effort) }
+                    }
 
                     if isResponding {
                         Button(action: pauseResponse) {
@@ -2933,6 +2995,7 @@ struct TaskConversationView: View {
     }
 
     private func loadModels() async {
+        selectedEffort = (try? conversationManager.effort(taskID: task.id)) ?? .medium
         if modelOptions.isEmpty || !modelOptions.contains(where: { $0.id == selectedModelID }) {
             modelOptions = [ConversationModelOption(id: provider.defaultModelID, name: provider.defaultModelName, isDefault: true)]
             selectedModelID = provider.defaultModelID
@@ -2943,6 +3006,9 @@ struct TaskConversationView: View {
                let defaultModel = modelOptions.first(where: \.isDefault) ?? modelOptions.first {
                 selectedModelID = defaultModel.id
             }
+            if !currentEffortChoices.contains(selectedEffort) {
+                selectedEffort = currentEffortChoices.contains(.medium) ? .medium : currentEffortChoices[0]
+            }
         } catch {
             // Keep the last known model available when an offline or unauthenticated app-server cannot list models.
         }
@@ -2950,6 +3016,18 @@ struct TaskConversationView: View {
 
     private var selectedModelName: String {
         modelOptions.first(where: { $0.id == selectedModelID })?.name ?? selectedModelID
+    }
+
+    private var currentEffortChoices: [ConversationEffort] {
+        guard let supported = modelOptions.first(where: { $0.id == selectedModelID })?.supportedEfforts,
+              !supported.isEmpty else { return ConversationEffort.allCases }
+        return ConversationEffort.allCases.filter(supported.contains)
+    }
+
+    private func selectModel(_ model: ConversationModelOption) {
+        selectedModelID = model.id
+        guard !currentEffortChoices.contains(selectedEffort) else { return }
+        selectedEffort = currentEffortChoices.contains(.medium) ? .medium : currentEffortChoices[0]
     }
 
     private func sendMessage(overrideText: String? = nil) {
@@ -3058,6 +3136,7 @@ struct TaskConversationView: View {
                 return
             }
             do {
+                _ = try await conversationManager.setEffort(taskID: task.id, effort: selectedEffort)
                 _ = try await conversationManager.send(taskID: task.id, text: text, imageDataURLs: imageDataURLs, mode: conversationMode, modelID: selectedModelID.isEmpty ? nil : selectedModelID, statusBeforeSubmission: statusBeforeSubmission, onTurnStarting: {
                     isResponding = true
                 }, onUpdate: { update in

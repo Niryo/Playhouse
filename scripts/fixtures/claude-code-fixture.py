@@ -114,6 +114,7 @@ def main():
         "resumed": "--resume" in sys.argv,
         "cwd": os.getcwd(),
         "bridgeServiceName": os.environ.get("STATIONAI_BRIDGE_SERVICE_NAME"),
+        "effort": os.environ.get("CLAUDE_CODE_EFFORT_LEVEL"),
     }
     for line in sys.stdin:
         if not line.strip():

@@ -3632,14 +3632,16 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: longDraftTaskID)?["savedPrompt"] as? String) == nil }, timeout: 10))
         let composer = element("message-composer")
         let sendButton = element("send-message-button")
-        let modelPicker = app.popUpButtons.firstMatch
+        let modelPicker = element("model-picker-menu")
         XCTAssertTrue(composer.waitForExistence(timeout: 10))
         XCTAssertTrue(modelPicker.waitForExistence(timeout: 10), "The composer should show the selected model next to its send controls.")
         let modelTaskID = try taskID(named: "Blank message")
         let modelResult = try runCLI(["conversation", "models", modelTaskID])["result"] as? [String: Any]
         let availableModels = try XCTUnwrap(modelResult?["models"] as? [[String: Any]])
-        let selectedModelValue = (modelPicker.value as? String ?? modelPicker.label)
-            .split(separator: ":").last.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let modelLabel = modelPicker.value as? String ?? modelPicker.label
+        let selectedModelValue = modelLabel.components(separatedBy: ", effort:").first?
+            .replacingOccurrences(of: "Model: ", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? modelLabel
         XCTAssertTrue(availableModels.contains(where: {
             selectedModelValue.caseInsensitiveCompare($0["name"] as? String ?? "") == .orderedSame
                 || selectedModelValue.caseInsensitiveCompare($0["id"] as? String ?? "") == .orderedSame
@@ -6173,7 +6175,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(element("goal-clear-button").exists)
     }
 
-    // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer and empty-state prompt show the selected Codex-reported model and update when the user changes it, while unsupported modes and malformed model IDs are rejected before creating history.
+    // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer and empty-state prompt show the selected model and update on change. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available. The selected effort defaults to Medium, persists through fresh CLI/XPC reads and reopening the conversation, and rejects unsupported values without replacing the prior choice. Unsupported modes and malformed model IDs are rejected before creating history.
     func test_conversation_mode_rejects_unknown_mode_without_starting_a_turn() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Conversation modes", roots: [fixture.primary.path])
@@ -6183,11 +6185,14 @@ final class StationAIUITests: XCTestCase {
         let modelResult = try runCLI(["conversation", "models", taskID])["result"] as? [String: Any]
         let availableModels = try XCTUnwrap(modelResult?["models"] as? [[String: Any]])
         XCTAssertFalse(availableModels.isEmpty)
-        let modelPicker = app.popUpButtons.firstMatch
+        let modelPicker = element("model-picker-menu")
         XCTAssertTrue(modelPicker.waitForExistence(timeout: 5), "The composer should expose a model returned by Codex.")
+        XCTAssertTrue(modelPicker.label.contains("effort: Medium"), "The selected model effort should default to Medium.")
         func displayedModelValue() -> String {
             let rawValue = modelPicker.value as? String ?? modelPicker.label
-            return String(rawValue.split(separator: ":").last ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return rawValue.components(separatedBy: ", effort:").first?
+                .replacingOccurrences(of: "Model: ", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? rawValue
         }
         let selectedModel = try XCTUnwrap(availableModels.first { model in
             let displayedModel = displayedModelValue()
@@ -6202,23 +6207,75 @@ final class StationAIUITests: XCTestCase {
         let modelMenu = modelPicker
         XCTAssertTrue(displayedModelValue().caseInsensitiveCompare(selectedModelName) == .orderedSame
             || displayedModelValue().caseInsensitiveCompare(selectedModelID) == .orderedSame)
-        if let alternateModel = availableModels.first(where: { $0["id"] as? String != selectedModelID }) {
-            let alternateID = try XCTUnwrap(alternateModel["id"] as? String)
-            modelMenu.click()
-            let optionID = "model-option-\(alternateID)"
-            let modelOption = app.menuItems.matching(identifier: optionID).firstMatch
-            XCTAssertTrue(modelOption.waitForExistence(timeout: 5), "The model picker should list each model returned by Codex.")
-            modelOption.click()
-            let alternateName = alternateModel["name"] as? String ?? alternateID
+        let alternateModel = try XCTUnwrap(availableModels.first { $0["id"] as? String != selectedModelID }, "The Codex fixture should expose multiple models.")
+        let alternateID = try XCTUnwrap(alternateModel["id"] as? String)
+        modelMenu.click()
+        let optionID = "model-option-\(alternateID)"
+        let modelOption = app.buttons.matching(identifier: optionID).firstMatch
+        XCTAssertTrue(modelOption.waitForExistence(timeout: 5), "The model picker should list each model returned by Codex.")
+        modelOption.click()
+        let alternateName = alternateModel["name"] as? String ?? alternateID
+        XCTAssertTrue(waitUntil({
+            let displayedModel = displayedModelValue()
+            return displayedModel.caseInsensitiveCompare(alternateName) == .orderedSame
+                || displayedModel.caseInsensitiveCompare(alternateID) == .orderedSame
+        }, timeout: 5), "Choosing a model should update the composer selection.")
+        XCTAssertTrue(waitUntil({
+            emptyModelPrompt.label.contains(alternateName)
+        }, timeout: 5), "The empty-state prompt should react to model changes.")
+        let limitedModel = try XCTUnwrap(availableModels.first { $0["id"] as? String == "gpt-6-mini" })
+        XCTAssertEqual(limitedModel["supportedEfforts"] as? [String], ["low", "medium"])
+
+        modelPicker.click()
+        let effortSlider = element("model-effort-slider")
+        XCTAssertTrue(effortSlider.waitForExistence(timeout: 5), "The model popover should expose an effort slider.")
+        XCTAssertEqual(effortSlider.label, "Model effort")
+        XCTAssertEqual(effortSlider.value as? String, "Medium", "The slider should expose its selected effort accessibly.")
+        for (position, title) in [(0.0, "Low"), (1.0 / 3.0, "Medium"), (2.0 / 3.0, "High"), (1.0, "Extra High")] {
+            effortSlider.adjust(toNormalizedSliderPosition: position)
             XCTAssertTrue(waitUntil({
-                let displayedModel = displayedModelValue()
-                return displayedModel.caseInsensitiveCompare(alternateName) == .orderedSame
-                    || displayedModel.caseInsensitiveCompare(alternateID) == .orderedSame
-            }, timeout: 5), "Choosing a model should update the composer selection.")
-            XCTAssertTrue(waitUntil({
-                emptyModelPrompt.label.contains(alternateName)
-            }, timeout: 5), "The empty-state prompt should react to model changes.")
+                element("selected-model-effort").label == title
+                    && effortSlider.value as? String == title
+                    && modelPicker.label.contains("effort: \(title)")
+            }, timeout: 5), "Selecting \(title) should update the visible effort and slider value.")
         }
+        let limitedOption = app.buttons["model-option-gpt-6-mini"]
+        if !limitedOption.waitForExistence(timeout: 1) { modelPicker.click() }
+        XCTAssertTrue(limitedOption.waitForExistence(timeout: 5))
+        limitedOption.click()
+        XCTAssertTrue(waitUntil({
+            modelPicker.label.contains("GPT-6 Mini") && modelPicker.label.contains("effort: Medium")
+        }, timeout: 5), "Changing to a model with fewer supported efforts should clamp the saved selection.")
+        if !effortSlider.waitForExistence(timeout: 1) { modelPicker.click() }
+        effortSlider.adjust(toNormalizedSliderPosition: 1)
+        XCTAssertTrue(waitUntil({
+            effortSlider.value as? String == "Medium"
+                && element("selected-model-effort").label == "Medium"
+                && modelPicker.label.contains("effort: Medium")
+        }, timeout: 5), "The restricted slider must not select an unsupported High effort.")
+        let defaultOption = app.buttons["model-option-\(selectedModelID)"]
+        if !defaultOption.waitForExistence(timeout: 1) { modelPicker.click() }
+        XCTAssertTrue(defaultOption.waitForExistence(timeout: 5))
+        defaultOption.click()
+        XCTAssertTrue(waitUntil({ modelPicker.label.contains(selectedModelName) }, timeout: 5))
+        if !effortSlider.waitForExistence(timeout: 1) { modelPicker.click() }
+        effortSlider.adjust(toNormalizedSliderPosition: 2.0 / 3.0)
+        XCTAssertTrue(waitUntil({
+            element("selected-model-effort").label == "High" && modelPicker.label.contains("effort: High")
+        }, timeout: 5))
+        XCTAssertTrue(waitUntil({
+            guard let response = try? runCLI(["conversation", "effort", taskID]),
+                  let result = response["result"] as? [String: Any] else { return false }
+            return result["effort"] as? String == "high"
+        }, timeout: 5), "The selected effort should persist through a fresh CLI/XPC request.")
+        modelPicker.click()
+        element("back-to-board-button").click()
+        openTask(named: "Conversation modes")
+        let reopenedPicker = element("model-picker-menu")
+        XCTAssertTrue(reopenedPicker.waitForExistence(timeout: 5))
+        reopenedPicker.click()
+        XCTAssertTrue(waitUntil({ element("selected-model-effort").label == "High" }, timeout: 5), "Reopening the task should restore its effort selection.")
+        reopenedPicker.click()
 
         let modeMenu = element("conversation-mode-menu")
         XCTAssertTrue(modeMenu.waitForExistence(timeout: 10))
@@ -6245,6 +6302,76 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
         XCTAssertEqual((history?["activities"] as? [Any])?.count, 0)
         attachScreenshot(named: "Plan mode is visible in the conversation composer")
+    }
+
+    // case-contract: test_conversation_effort_dispatches_to_codex | The selected effort persists through CLI/XPC reads and reaches Codex turn/start collaborationMode.settings.reasoningEffort; a model's advertised effort limit rejects unsupported requests before history is created. The UI selects Extra High and sends a Codex fixture turn whose recorded protocol value is xhigh.
+    func test_conversation_effort_dispatches_to_codex() throws {
+        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
+        codexFixtureExecutable = executable.path
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: executable.path + ".history"))
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Codex effort UI", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Codex effort UI")
+        openTask(named: "Codex effort UI")
+        let picker = element("model-picker-menu")
+        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        picker.click()
+        let slider = element("model-effort-slider")
+        XCTAssertTrue(slider.waitForExistence(timeout: 5))
+        slider.adjust(toNormalizedSliderPosition: 1)
+        XCTAssertTrue(waitUntil({ element("selected-model-effort").label == "Extra High" }, timeout: 5))
+        picker.click()
+        let unsupported = try runCLI([
+            "conversation", "send", taskID, "--message", "Unsupported effort.", "--model", "gpt-6-mini"
+        ], expectedStatus: 2)
+        XCTAssertEqual((unsupported["error"] as? [String: Any])?["code"] as? String, "invalid_argument")
+        let emptyHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        XCTAssertEqual((emptyHistory["messages"] as? [Any])?.count, 0)
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText("Check Codex effort dispatch.")
+        element("send-message-button").click()
+        XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 15))
+        let historyURL = URL(fileURLWithPath: executable.path + ".history")
+        let history = try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any]
+        let turns = try XCTUnwrap(history?["turns"] as? [[String: Any]])
+        XCTAssertEqual(turns.last?["reasoningEffort"] as? String, "xhigh")
+        let effort = try XCTUnwrap(try runCLI(["conversation", "effort", taskID])["result"] as? [String: Any])
+        XCTAssertEqual(effort["effort"] as? String, "xhigh")
+    }
+
+    // case-contract: test_conversation_effort_dispatches_to_claude | The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
+    func test_conversation_effort_dispatches_to_claude() throws {
+        let executable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
+        claudeFixtureExecutable = executable.path
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: executable.path + ".history"))
+        launchApp(defaultParent: fixture.parent.path)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude effort UI", "--root", fixture.primary.path, "--provider", "claude"
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Claude effort UI")
+        let picker = element("model-picker-menu")
+        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        picker.click()
+        let slider = element("model-effort-slider")
+        XCTAssertTrue(slider.waitForExistence(timeout: 5))
+        slider.adjust(toNormalizedSliderPosition: 1)
+        XCTAssertTrue(waitUntil({ element("selected-model-effort").label == "Extra High" }, timeout: 5))
+        picker.click()
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText("Check Claude effort dispatch.")
+        element("send-message-button").click()
+        XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 15))
+        let historyURL = URL(fileURLWithPath: executable.path + ".history")
+        let history = try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any]
+        let turns = try XCTUnwrap(history?["turns"] as? [[String: Any]])
+        XCTAssertEqual(turns.last?["effort"] as? String, "xhigh")
+        let effort = try XCTUnwrap(try runCLI(["conversation", "effort", taskID])["result"] as? [String: Any])
+        XCTAssertEqual(effort["effort"] as? String, "xhigh")
     }
 
     // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode use the existing question path, move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome.

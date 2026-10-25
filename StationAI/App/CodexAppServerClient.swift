@@ -202,13 +202,31 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         let response = try await request(method: "model/list", params: ["includeHidden": false])
         let models = (response["data"] as? [[String: Any]] ?? []).compactMap { item -> ConversationModelOption? in
             guard let id = item["id"] as? String, !id.isEmpty else { return nil }
+            let supportedEfforts = (item["supportedReasoningEfforts"] as? [Any])?.compactMap { value -> ConversationEffort? in
+                let rawValue = (value as? String) ?? (value as? [String: Any])?["reasoningEffort"] as? String
+                guard let rawValue else { return nil }
+                return ConversationEffort(rawValue: rawValue)
+            }
             return ConversationModelOption(
                 id: id,
                 name: item["displayName"] as? String ?? item["model"] as? String ?? id,
-                isDefault: item["isDefault"] as? Bool ?? false
+                isDefault: item["isDefault"] as? Bool ?? false,
+                supportedEfforts: supportedEfforts?.isEmpty == false ? supportedEfforts : nil
             )
         }
         return models.isEmpty ? [ConversationModelOption(id: Self.modelID, name: "GPT-6 Luna", isDefault: true)] : models
+    }
+
+    func validateEffort(_ effort: ConversationEffort, modelID: String, workspace: ConversationWorkspaceContext) async throws {
+        guard let model = try await availableModels(workspace: workspace).first(where: { $0.id == modelID }),
+              let supportedEfforts = model.supportedEfforts,
+              !supportedEfforts.isEmpty else { return }
+        guard supportedEfforts.contains(effort) else {
+            throw BridgeCommandError(
+                code: "invalid_argument",
+                message: "Effort '\(effort.rawValue)' is not supported by model '\(modelID)'. Supported efforts: \(supportedEfforts.map(\.rawValue).joined(separator: ", "))."
+            )
+        }
     }
 
     func interruptActiveTurn(threadID expectedThreadID: String) async throws -> Bool {
@@ -417,6 +435,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         imageDataURLs: [String] = [],
         mode: ConversationMode,
         modelID: String,
+        effort: ConversationEffort,
         threadID: String,
         workspace: ConversationWorkspaceContext,
         developerInstructions: String? = nil,
@@ -489,7 +508,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                     "mode": mode.rawValue,
                     "settings": [
                         "model": modelID,
-                        "reasoningEffort": NSNull()
+                        "reasoningEffort": effort.rawValue
                     ]
                 ]
             ]

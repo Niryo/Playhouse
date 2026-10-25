@@ -130,10 +130,26 @@ enum ConversationMode: String, CaseIterable, Hashable {
     }
 }
 
+enum ConversationEffort: String, CaseIterable, Codable, Hashable, Identifiable, Sendable {
+    case low
+    case medium
+    case high
+    case xhigh
+
+    var id: String { rawValue }
+    var title: String { rawValue == "xhigh" ? "Extra High" : rawValue.capitalized }
+    var sliderPosition: Double { Double(Self.allCases.firstIndex(of: self) ?? 1) }
+
+    static func from(sliderPosition: Double) -> ConversationEffort {
+        allCases[min(max(Int(sliderPosition.rounded()), 0), allCases.count - 1)]
+    }
+}
+
 struct ConversationModelOption: Codable, Identifiable, Hashable {
     let id: String
     let name: String
     let isDefault: Bool
+    var supportedEfforts: [ConversationEffort]? = nil
 }
 
 /// A divider shown where a task's conversation moved to another provider.
@@ -157,11 +173,13 @@ protocol ConversationProviderClient: AnyObject {
     func diagnosticFields(_ additionalFields: [String: String]) -> [String: String]
     func startThread(workspace: ConversationWorkspaceContext, modelID: String, developerInstructions: String?) async throws -> String
     func availableModels(workspace: ConversationWorkspaceContext) async throws -> [ConversationModelOption]
+    func validateEffort(_ effort: ConversationEffort, modelID: String, workspace: ConversationWorkspaceContext) async throws
     func sendMessage(
         _ text: String,
         imageDataURLs: [String],
         mode: ConversationMode,
         modelID: String,
+        effort: ConversationEffort,
         threadID: String,
         workspace: ConversationWorkspaceContext,
         developerInstructions: String?,
@@ -197,6 +215,8 @@ protocol ConversationProviderClient: AnyObject {
 }
 
 extension ConversationProviderClient {
+    func validateEffort(_ effort: ConversationEffort, modelID: String, workspace: ConversationWorkspaceContext) async throws {}
+
     func diagnosticFields() -> [String: String] { diagnosticFields([:]) }
 
     func sendMessage(
@@ -204,6 +224,7 @@ extension ConversationProviderClient {
         imageDataURLs: [String] = [],
         mode: ConversationMode,
         modelID: String,
+        effort: ConversationEffort = .medium,
         threadID: String,
         workspace: ConversationWorkspaceContext,
         developerInstructions: String? = nil,
@@ -211,7 +232,7 @@ extension ConversationProviderClient {
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void = { _ in }
     ) async throws {
         try await sendMessage(
-            text, imageDataURLs: imageDataURLs, mode: mode, modelID: modelID, threadID: threadID,
+            text, imageDataURLs: imageDataURLs, mode: mode, modelID: modelID, effort: effort, threadID: threadID,
             workspace: workspace, developerInstructions: developerInstructions,
             onDelta: { _ in }, onFinalMessage: onFinalMessage, onActivity: { _ in }, onDiff: { _ in },
             onHistory: { _ in }, onActionRequest: {}, onUserInput: onUserInput,

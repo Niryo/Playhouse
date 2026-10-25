@@ -667,6 +667,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let codexThreadID: String?
     let claudeSessionID: String?
     let conversationProvider: String
+    let conversationEffort: String
     let savedPrompt: String?
     let pendingSubmittedPrompt: String?
     let workspaceRoots: [String]
@@ -686,6 +687,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         codexThreadID = task.codexThreadID
         claudeSessionID = task.claudeSessionID
         conversationProvider = task.conversationProvider.rawValue
+        conversationEffort = task.conversationEffort
         savedPrompt = task.savedPrompt
         pendingSubmittedPrompt = task.pendingSubmittedPrompt
         workspaceRoots = task.workspaceRootPaths
@@ -2443,6 +2445,21 @@ final class BoardTaskManager {
         }
     }
 
+    func setConversationEffort(_ id: UUID, effort: ConversationEffort) async throws -> BoardTaskRecord {
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            let previous = task.conversationEffortRawValue
+            task.conversationEffort = effort.rawValue
+            do {
+                try await saveTaskContext(taskID: id)
+            } catch {
+                task.conversationEffortRawValue = previous
+                throw error
+            }
+            return BoardTaskRecord(task: task)
+        }
+    }
+
     func setWorkspaceRoots(_ id: UUID, roots: [String]) async throws -> BoardTaskRecord {
         let initialTask = try requireTask(id)
         let initialRepositories = initialTask.repositoryWorktrees
@@ -3586,6 +3603,14 @@ final class ConversationManager {
         return models
     }
 
+    func effort(taskID: UUID) throws -> ConversationEffort {
+        ConversationEffort(rawValue: try tasks.taskModel(taskID).conversationEffort) ?? .medium
+    }
+
+    func setEffort(taskID: UUID, effort: ConversationEffort) async throws -> BoardTaskRecord {
+        try await tasks.setConversationEffort(taskID, effort: effort)
+    }
+
     // MARK: - Providers
 
     /// Detected native capabilities, so switching can show what differs. StationAI
@@ -4134,8 +4159,6 @@ final class ConversationManager {
         guard imageDataURLs.count <= 8, imageDataURLs.allSatisfy(Self.isValidImageDataURL) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
         }
-        try tasks.prepareConversationTurnOutcome(taskID)
-        defer { tasks.clearConversationTurnOutcome(taskID) }
         var task = try tasks.taskModel(taskID)
         let provider = task.conversationProvider
         let client = clients.client(for: provider)
@@ -4143,6 +4166,15 @@ final class ConversationManager {
         guard Self.isValidModelID(modelID) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, digits, dots, underscores, and hyphens.")
         }
+        guard task.status != .done else {
+            throw StationAIManagerError.invalidTransition("Done tasks are closed. Create a new task for follow-up work.")
+        }
+        let availableRoots = task.workspaceRootPaths.compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
+        let validationWorkspace = try ConversationWorkspaceContext(roots: availableRoots)
+        let effort = ConversationEffort(rawValue: task.conversationEffort) ?? .medium
+        try await client.validateEffort(effort, modelID: modelID, workspace: validationWorkspace)
+        try tasks.prepareConversationTurnOutcome(taskID)
+        defer { tasks.clearConversationTurnOutcome(taskID) }
         var persistedThreadID = task.activeConversationID
         StationAIDiagnostics.record("conversation.send.started", fields: client.diagnosticFields([
             "taskID": taskID.uuidString,
@@ -4154,9 +4186,6 @@ final class ConversationManager {
             if let threadID = persistedThreadID {
                 client.clearTurnStarting(threadID: threadID)
             }
-        }
-        guard task.status != .done else {
-            throw StationAIManagerError.invalidTransition("Done tasks are closed. Create a new task for follow-up work.")
         }
         let repositoryRoot = try settingsManager.requireRepositoryRootFolder()
         let shouldGenerateTitle = !normalizedText.isEmpty && ["Untitled task", "Generating title…"].contains(task.title)
@@ -4291,6 +4320,7 @@ final class ConversationManager {
                 imageDataURLs: imageDataURLs,
                 mode: mode,
                 modelID: modelID,
+                effort: effort,
                 threadID: threadID,
                 workspace: workspace,
                 developerInstructions: TaskThreadDeveloperInstructions.make(
@@ -4801,6 +4831,17 @@ final class StationAIBridgeRuntime {
             case "conversation.models":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = .object(["models": .array(try await conversations.models(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })])
+            case "conversation.effort.get":
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = .object(["effort": .string(try conversations.effort(taskID: request.requiredUUID("taskID")).rawValue)])
+            case "conversation.effort.set":
+                let taskID = try request.requiredUUID("taskID")
+                guard let effort = ConversationEffort(rawValue: try request.requiredString("effort")) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Effort must be one of: low, medium, high, xhigh.")
+                }
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                let task = try await conversations.setEffort(taskID: taskID, effort: effort)
+                result = try Self.value(task)
             case "conversation.stop":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = .object(["interrupted": .boolean(try await conversations.interrupt(taskID: request.requiredUUID("taskID")))])

@@ -4102,13 +4102,19 @@ class StationAIBridgeTests(unittest.TestCase):
                              for event in plan_diagnostics))
         self.assertNotIn(markdown_reply, json.dumps(plan_diagnostics))
 
-    # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer and empty-state prompt show the selected Codex-reported model and update when the user changes it, while unsupported modes and malformed model IDs are rejected before creating history.
+    # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer and empty-state prompt show the selected model and update on change. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available. The selected effort defaults to Medium, persists through fresh CLI/XPC reads and reopening the conversation, and rejects unsupported values without replacing the prior choice. Unsupported modes and malformed model IDs are rejected before creating history.
     def test_conversation_mode_rejects_unknown_mode_without_starting_a_turn(self):
         task_id = self.create_task(title="Conversation mode validation")["id"]
         response, _ = self.call_cli("conversation", "models", task_id)
         models = self.assert_success(response)["models"]
         self.assertTrue(models)
         self.assertTrue(all(model.get("id") and model.get("name") for model in models))
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "effort", task_id)[0])["effort"], "medium")
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "effort", task_id, "set", "xhigh")[0])["conversationEffort"], "xhigh")
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "effort", task_id)[0])["effort"], "xhigh")
+        invalid_effort, _ = self.call_cli("conversation", "effort", task_id, "set", "ultra", expected_status=2)
+        self.assert_failure(invalid_effort, "invalid_argument")
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "effort", task_id)[0])["effort"], "xhigh")
         response, _ = self.call_cli(
             "conversation", "send", task_id, "--message", "Hello", "--mode", "unsupported", expected_status=2
         )
@@ -4122,6 +4128,52 @@ class StationAIBridgeTests(unittest.TestCase):
         history, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(history)["messages"], [])
         self.assertEqual(self.assert_success(history)["activities"], [])
+
+
+    # case-contract: test_conversation_effort_dispatches_to_codex | The selected effort persists through CLI/XPC reads and reaches Codex turn/start collaborationMode.settings.reasoningEffort; a model's advertised effort limit rejects unsupported requests before history is created. The UI selects Extra High and sends a Codex fixture turn whose recorded protocol value is xhigh.
+    def test_conversation_effort_dispatches_to_codex(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-effort-success"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        task_id = self.create_task(title="Codex effort dispatch")["id"]
+        models = self.assert_success(self.call_cli("conversation", "models", task_id, extra_environment=environment)[0])["models"]
+        limited_model = next(model for model in models if model["id"] == "gpt-6-mini")
+        self.assertEqual(limited_model["supportedEfforts"], ["low", "medium"])
+        self.assert_success(self.call_cli("conversation", "effort", task_id, "set", "xhigh")[0])
+        unsupported, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Unsupported effort.", "--model", "gpt-6-mini",
+            expected_status=2, extra_environment=environment
+        )
+        self.assert_failure(unsupported, "invalid_argument")
+        self.assertIn("not supported by model 'gpt-6-mini'", unsupported["error"]["message"])
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "history", task_id)[0])["messages"], [])
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Check Codex effort.", extra_environment=environment)[0])
+        history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        self.assertEqual(history["turns"][-1]["reasoningEffort"], "xhigh")
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "effort", task_id)[0])["effort"], "xhigh")
+
+    # case-contract: test_conversation_effort_dispatches_to_claude | The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
+    def test_conversation_effort_dispatches_to_claude(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / "claude-fixture-effort"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
+            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        created, _ = self.call_cli("task", "create", "--title", "Claude effort dispatch", "--root", self.primary, "--provider", "claude")
+        task_id = self.assert_success(created)["id"]
+        self.assert_success(self.call_cli("conversation", "effort", task_id, "set", "xhigh")[0])
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Check Claude effort.", extra_environment=environment)[0])
+        history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        self.assertEqual(history["turns"][-1]["effort"], "xhigh")
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "effort", task_id)[0])["effort"], "xhigh")
 
     # case-contract: test_thread_goal_lifecycle_persists_through_cli_xpc | CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime.
     def test_thread_goal_lifecycle_persists_through_cli_xpc(self):
