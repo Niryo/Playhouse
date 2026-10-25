@@ -5200,7 +5200,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 10))
     }
 
-    // case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads.
+    // case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a transcript attachment opens the original image in a large viewer, which can be closed to return to the conversation.
 
     func test_conversation_sends_image_attachments() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
@@ -5345,6 +5345,16 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
         XCTAssertTrue(element("user-message-item_user_fixture_1").waitForExistence(timeout: 10), "History reload should leave the pasted attachment in the conversation.")
         XCTAssertTrue(app.images["user-message-item_user_fixture_1"].waitForExistence(timeout: 10), "Conversation history should render the pasted image itself.")
+        let transcriptImage = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-image-")).firstMatch
+        XCTAssertTrue(transcriptImage.waitForExistence(timeout: 5))
+        let thumbnailFrame = transcriptImage.frame
+        transcriptImage.click()
+        let fullSizeImage = app.images["chat-image-full-size"]
+        XCTAssertTrue(fullSizeImage.waitForExistence(timeout: 5), "Clicking a transcript attachment should open the original image in the large viewer.")
+        XCTAssertEqual(fullSizeImage.label, "Full-size attached image")
+        XCTAssertGreaterThan(fullSizeImage.frame.width, thumbnailFrame.width, "The viewer should display the image larger than its transcript thumbnail.")
+        element("close-chat-image-viewer").click()
+        XCTAssertFalse(element("chat-image-full-size").exists, "Closing the image viewer should return to the conversation.")
         let pastedTurnData = try Data(contentsOf: URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history"))
         let pastedTurn = try XCTUnwrap(JSONSerialization.jsonObject(with: pastedTurnData) as? [String: Any])
         XCTAssertTrue(pastedTurn["userMessage"] is NSNull, "The fixture should receive no text for the pasted image-only turn.")
@@ -5366,7 +5376,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Chat sends picker text-and-image and pasted image-only messages")
     }
 
-    // case-contract: test_claude_agent_image_published_during_active_turn | While a Claude Code turn is active in the app process, the agent's CLI/XPC image publication joins that active Claude transcript turn; after the provider finishes, history places the image before the later assistant answer, and reopening the conversation renders the exact published image.
+    // case-contract: test_claude_agent_image_published_during_active_turn | While a Claude Code turn is active in the app process, the agent's CLI/XPC image publication joins that active Claude transcript turn; after the provider finishes, history places the image before the later assistant answer, and reopening the conversation renders the exact published image. This active-turn attribution is Claude-specific: Codex history is composed from ordered timeline entries, so published images are standalone assistant messages verified for persistence and rendering in test_conversation_sends_image_attachments.
     func test_claude_agent_image_published_during_active_turn() throws {
         let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
@@ -6238,8 +6248,16 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(element("goal-clear-button").exists)
     }
 
-    // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer and empty-state prompt show the selected Codex-reported model and update when the user changes it, while unsupported modes and malformed model IDs are rejected before creating history.
+    // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | Codex and Claude model lists persist across fresh CLI/XPC requests. The CLI verifies the cache remains after a failed model lookup for an unavailable workspace. The visible Claude case seeds a Cached Claude Model option distinct from the provider result, shows it before replacing it with the real Default model list, and verifies the refreshed list is persisted. When the owned provider executable is unavailable, the cached Offline Cached Claude option remains visible and persisted. The Codex composer and empty-state prompt track model selection; unsupported modes and malformed model IDs are rejected before creating history.
     func test_conversation_mode_rejects_unknown_mode_without_starting_a_turn() throws {
+        let claudeSource = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
+        let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-model-cache")
+        try FileManager.default.copyItem(at: claudeSource, to: claudeExecutable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claudeExecutable.path)
+        let claudeOwnerMarker = dataDirectory.appendingPathComponent(".stationai-claude-fixture-owner")
+        let claudeOwnerValue = "StationAI test owns this Claude Code protocol fixture (v1).\n"
+        try Data(claudeOwnerValue.utf8).write(to: claudeOwnerMarker)
+        claudeFixtureExecutable = claudeExecutable.path
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Conversation modes", roots: [fixture.primary.path])
         openTask(named: "Conversation modes")
@@ -6310,6 +6328,48 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
         XCTAssertEqual((history?["activities"] as? [Any])?.count, 0)
         attachScreenshot(named: "Plan mode is visible in the conversation composer")
+
+        let claudeTask = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude cached models", "--root", fixture.primary.path, "--provider", "claude"
+        ])["result"] as? [String: Any])
+        let claudeTaskID = try XCTUnwrap(claudeTask["id"] as? String)
+        let seededClaudeModels = try XCTUnwrap((try runCLI(["conversation", "models", claudeTaskID])["result"] as? [String: Any])?["models"] as? [[String: Any]])
+        XCTAssertEqual(seededClaudeModels.first?["name"] as? String, "Default")
+        let staleCachedModels: [[String: Any]] = [["id": "cached-model", "name": "Cached Claude Model", "isDefault": false]]
+        let staleCacheData = try JSONSerialization.data(withJSONObject: staleCachedModels)
+        let testPreferences = try XCTUnwrap(UserDefaults(suiteName: preferencesSuiteName))
+        testPreferences.set(staleCacheData, forKey: "conversation.models.cache.claude")
+        let persistedClaudeModels = try XCTUnwrap((try runCLI(["conversation", "models", claudeTaskID, "--cached"])["result"] as? [String: Any])?["models"] as? [[String: Any]])
+        XCTAssertEqual(persistedClaudeModels.first?["name"] as? String, "Cached Claude Model", "A fresh XPC request should read the seeded real preferences cache.")
+        element("back-to-board-button").click()
+        openTask(named: "Claude cached models")
+        let claudePicker = app.popUpButtons.firstMatch
+        XCTAssertTrue(claudePicker.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitUntil({
+            (claudePicker.value as? String ?? claudePicker.label).contains("Cached Claude Model")
+        }, timeout: 5), "The distinct cached Claude option should render before server discovery completes.")
+        XCTAssertTrue(waitUntil({
+            (claudePicker.value as? String ?? claudePicker.label).contains("Default")
+        }, timeout: 15), "Real Claude discovery should replace the seeded cache with its current model list.")
+        let refreshedClaudeCache = try XCTUnwrap((try runCLI(["conversation", "models", claudeTaskID, "--cached"])["result"] as? [String: Any])?["models"] as? [[String: Any]])
+        XCTAssertEqual(refreshedClaudeCache.first?["name"] as? String, "Default", "The real provider refresh should replace the stale persisted cache.")
+
+        XCTAssertEqual(try String(contentsOf: claudeOwnerMarker, encoding: .utf8), claudeOwnerValue, "Only remove the test-owned executable after verifying its ownership marker.")
+        try FileManager.default.removeItem(at: claudeExecutable)
+        let offlineTask = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude cached offline", "--root", fixture.primary.path, "--provider", "claude"
+        ])["result"] as? [String: Any])
+        let offlineTaskID = try XCTUnwrap(offlineTask["id"] as? String)
+        let offlineModels: [[String: Any]] = [["id": "offline-cached-model", "name": "Offline Cached Claude", "isDefault": true]]
+        testPreferences.set(try JSONSerialization.data(withJSONObject: offlineModels), forKey: "conversation.models.cache.claude")
+        element("back-to-board-button").click()
+        openTask(named: "Claude cached offline")
+        let offlinePicker = app.popUpButtons.firstMatch
+        XCTAssertTrue(waitUntil({
+            (offlinePicker.value as? String ?? offlinePicker.label).contains("Offline Cached Claude")
+        }, timeout: 5), "A failed provider launch should leave the cached Claude choice visible.")
+        let retainedOfflineCache = try XCTUnwrap((try runCLI(["conversation", "models", offlineTaskID, "--cached"])["result"] as? [String: Any])?["models"] as? [[String: Any]])
+        XCTAssertEqual(retainedOfflineCache.first?["name"] as? String, "Offline Cached Claude")
     }
 
     // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode use the existing question path, move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome.
