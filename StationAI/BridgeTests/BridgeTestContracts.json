@@ -193,7 +193,11 @@
   },
   {
     "id": "test_conversation_mode_rejects_unknown_mode_without_starting_a_turn",
-    "expectation": "The composer and empty-state prompt show the selected model and update on change. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available. The selected effort defaults to Medium, persists through fresh CLI/XPC reads and reopening the conversation, and rejects unsupported values without replacing the prior choice. Unsupported modes and malformed model IDs are rejected before creating history."
+    "expectation": "The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. The selected effort defaults to Medium, persists through fresh CLI/XPC reads and reopening the conversation, and rejects unsupported values without replacing the prior choice. Unsupported modes and malformed model IDs are rejected before creating history."
+  },
+  {
+    "id": "test_conversation_models_keep_newest_version_per_family",
+    "expectation": "The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Alias-only Claude entries are omitted. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control."
   },
   {
     "id": "test_conversation_effort_dispatches_to_codex",
@@ -201,7 +205,7 @@
   },
   {
     "id": "test_conversation_effort_dispatches_to_claude",
-    "expectation": "The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh."
+    "expectation": "Claude's model picker omits Default and aliases, showing Opus 5.5 as the concrete latest choice. The Claude composer retains native Default dispatch until a model is explicitly selected. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh."
   },
   {
     "id": "test_thread_goal_lifecycle_persists_through_cli_xpc",

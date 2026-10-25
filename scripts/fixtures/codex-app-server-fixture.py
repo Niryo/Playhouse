@@ -254,6 +254,8 @@ def main():
                  "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]},
                 {"id": "gpt-6-mini", "displayName": "GPT-6 Mini", "isDefault": False,
                  "supportedReasoningEfforts": ["low", "medium"]},
+                {"id": "gpt-5.6-luna", "displayName": "GPT-5.6 Luna", "isDefault": False,
+                 "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]},
             ]}})
         elif "-goal" in mode and message.get("method") == "thread/goal/get":
             goal = json.loads(goal_path.read_text(encoding="utf-8")) if goal_path.is_file() else None

@@ -4102,7 +4102,7 @@ class StationAIBridgeTests(unittest.TestCase):
                              for event in plan_diagnostics))
         self.assertNotIn(markdown_reply, json.dumps(plan_diagnostics))
 
-    # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer and empty-state prompt show the selected model and update on change. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available. The selected effort defaults to Medium, persists through fresh CLI/XPC reads and reopening the conversation, and rejects unsupported values without replacing the prior choice. Unsupported modes and malformed model IDs are rejected before creating history.
+    # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. The selected effort defaults to Medium, persists through fresh CLI/XPC reads and reopening the conversation, and rejects unsupported values without replacing the prior choice. Unsupported modes and malformed model IDs are rejected before creating history.
     def test_conversation_mode_rejects_unknown_mode_without_starting_a_turn(self):
         task_id = self.create_task(title="Conversation mode validation")["id"]
         response, _ = self.call_cli("conversation", "models", task_id)
@@ -4129,6 +4129,48 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(history)["messages"], [])
         self.assertEqual(self.assert_success(history)["activities"], [])
 
+
+    # case-contract: test_conversation_models_keep_newest_version_per_family | The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Alias-only Claude entries are omitted. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control.
+    def test_conversation_models_keep_newest_version_per_family(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-model-versions"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        task_id = self.create_task(title="Model versions")["id"]
+        models = self.assert_success(self.call_cli("conversation", "models", task_id, extra_environment=environment)[0])["models"]
+        self.assertEqual([model["id"] for model in models], ["gpt-6-luna", "gpt-6-sol", "gpt-6-mini"])
+        self.assertNotIn("gpt-5.6-luna", [model["id"] for model in models])
+
+        # The same shared filter removes Claude's Default/Opus aliases and collapses dated duplicates.
+        claude_fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        claude_executable = self.data_directory / "claude-fixture-model-versions"
+        shutil.copyfile(claude_fixture, claude_executable)
+        claude_executable.chmod(0o755)
+        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
+            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        claude_environment = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(claude_executable)}
+        created, _ = self.call_cli("task", "create", "--title", "Claude model versions", "--root", self.primary, "--provider", "claude")
+        claude_task_id = self.assert_success(created)["id"]
+        claude_models = self.assert_success(
+            self.call_cli("conversation", "models", claude_task_id, extra_environment=claude_environment)[0]
+        )["models"]
+        self.assertEqual(
+            [model["id"] for model in claude_models],
+            ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-6"],
+        )
+        aliases_fixture = self.data_directory / "claude-fixture-model-versions-aliases-only"
+        shutil.copyfile(claude_fixture, aliases_fixture)
+        aliases_fixture.chmod(0o755)
+        aliases_only = self.assert_success(self.call_cli(
+            "conversation", "models", claude_task_id,
+            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(aliases_fixture)},
+        )[0])["models"]
+        self.assertEqual(aliases_only, [], "Claude aliases should not be exposed without a concrete versioned choice.")
 
     # case-contract: test_conversation_effort_dispatches_to_codex | The selected effort persists through CLI/XPC reads and reaches Codex turn/start collaborationMode.settings.reasoningEffort; a model's advertised effort limit rejects unsupported requests before history is created. The UI selects Extra High and sends a Codex fixture turn whose recorded protocol value is xhigh.
     def test_conversation_effort_dispatches_to_codex(self):
@@ -4157,7 +4199,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(history["turns"][-1]["reasoningEffort"], "xhigh")
         self.assertEqual(self.assert_success(self.call_cli("conversation", "effort", task_id)[0])["effort"], "xhigh")
 
-    # case-contract: test_conversation_effort_dispatches_to_claude | The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
+    # case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 as the concrete latest choice. The Claude composer retains native Default dispatch until a model is explicitly selected. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
     def test_conversation_effort_dispatches_to_claude(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-effort"
@@ -4173,6 +4215,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Check Claude effort.", extra_environment=environment)[0])
         history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
         self.assertEqual(history["turns"][-1]["effort"], "xhigh")
+        self.assertNotIn("--model", history["turns"][-1]["arguments"])
         self.assertEqual(self.assert_success(self.call_cli("conversation", "effort", task_id)[0])["effort"], "xhigh")
 
     # case-contract: test_thread_goal_lifecycle_persists_through_cli_xpc | CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime.

@@ -123,8 +123,23 @@ def main():
         if message.get("type") == "control_request":
             request = message.get("request", {})
             if request.get("subtype") == "initialize":
+                models = [
+                    {"value": "default", "displayName": "Default"},
+                    {"value": "opus", "displayName": "Opus"},
+                    {"value": "claude-opus-4-8", "displayName": "Opus 4.8"},
+                    {"value": "claude-opus-5-5", "displayName": "Opus 5.5"},
+                    {"value": "claude-opus-5-5-20251001", "displayName": "Opus 5.5 (2025-10-01)"},
+                    {"value": "sonnet", "displayName": "Sonnet"},
+                    {"value": "claude-sonnet-4-6", "displayName": "Sonnet 4.6"},
+                    {"value": "claude-sonnet-5-5", "displayName": "Sonnet 5.5"},
+                    {"value": "haiku", "displayName": "Haiku"},
+                    {"value": "claude-haiku-4-5-20251001", "displayName": "Haiku 4.5"},
+                    {"value": "claude-haiku-4-6", "displayName": "Haiku 4.6"},
+                ]
+                if os.environ.get("STATIONAI_CLAUDE_MODEL_LIST") == "aliases-only" or "aliases-only" in Path(sys.argv[0]).name:
+                    models = models[:2] + models[5:6] + models[8:9]
                 response = {"claude_code_version": "2.1.308 (Claude Code fixture)",
-                            "models": [{"value": "default", "displayName": "Default"}],
+                            "models": models,
                             "commands": [], "agents": []}
             elif request.get("subtype") == "mcp_status":
                 response = {"mcpServers": []}

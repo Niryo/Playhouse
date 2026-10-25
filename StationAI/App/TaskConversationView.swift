@@ -172,6 +172,8 @@ struct TaskConversationView: View {
     @State private var modelOptions: [ConversationModelOption] = []
     @State private var selectedModelID = ""
     @State private var selectedEffort: ConversationEffort = .medium
+    @State private var pickerModelID = ""
+    @State private var pickerEffort: ConversationEffort = .medium
     @State private var isModelPickerPresented = false
     @State private var providerBoundaries: [ConversationProviderBoundary] = []
     @State private var isSwitchingProvider = false
@@ -2640,7 +2642,14 @@ struct TaskConversationView: View {
                     providerMenu
 
                     Button {
-                        isModelPickerPresented.toggle()
+                        if isModelPickerPresented {
+                            commitModelPickerSelection()
+                            isModelPickerPresented = false
+                        } else {
+                            pickerModelID = selectedModelID
+                            pickerEffort = selectedEffort
+                            isModelPickerPresented = true
+                        }
                     } label: {
                         HStack(spacing: 7) {
                             Text(selectedModelName)
@@ -2659,16 +2668,24 @@ struct TaskConversationView: View {
                     .accessibilityLabel("Model: \(selectedModelName), effort: \(selectedEffort.title)")
                     .accessibilityValue(selectedModelName)
                     .accessibilityIdentifier("model-picker-menu")
-                    .popover(isPresented: $isModelPickerPresented, arrowEdge: .bottom) {
+                    .popover(isPresented: Binding(
+                        get: { isModelPickerPresented },
+                        set: { isPresented in
+                            if !isPresented && isModelPickerPresented {
+                                commitModelPickerSelection()
+                            }
+                            isModelPickerPresented = isPresented
+                        }
+                    ), arrowEdge: .top) {
                         VStack(alignment: .leading, spacing: 0) {
                             ForEach(modelOptions) { model in
                                 Button {
-                                    selectModel(model)
+                                    selectPickerModel(model)
                                 } label: {
                                     HStack {
                                         Text(model.name)
                                         Spacer()
-                                        if selectedModelID == model.id {
+                                        if pickerModelID == model.id || (pickerModelID.isEmpty && model.isDefault) {
                                             Image(systemName: "checkmark")
                                                 .font(.system(size: 12, weight: .semibold))
                                         }
@@ -2682,35 +2699,35 @@ struct TaskConversationView: View {
                                 .accessibilityIdentifier("model-option-\(model.id)")
                             }
                             Divider().padding(.vertical, 8)
-                            Text(selectedEffort.title)
+                            Text(pickerEffort.title)
                                 .font(.system(size: 14, weight: .medium))
                                 .foregroundStyle(Color.accentColor)
                                 .accessibilityIdentifier("selected-model-effort")
-                            Slider(value: Binding(
-                                get: { Double(currentEffortChoices.firstIndex(of: selectedEffort) ?? 0) },
-                                set: { selectedEffort = currentEffortChoices[min(max(Int($0.rounded()), 0), currentEffortChoices.count - 1)] }
-                            ), in: 0...Double(max(currentEffortChoices.count - 1, 1)), step: 1)
-                            .tint(.accentColor)
-                            .overlay {
-                                HStack {
-                                    ForEach(currentEffortChoices.indices, id: \.self) { index in
-                                        Circle().fill(Color.primary.opacity(0.18)).frame(width: 6, height: 6)
-                                        if index < currentEffortChoices.count - 1 { Spacer(minLength: 0) }
+                            EffortStepSlider(selection: $pickerEffort, choices: pickerEffortChoices)
+                                // The native slider knob is translucent on macOS 26, so it is drawn by EffortStepSlider
+                                // and the native Slider serves only as the accessibility representation.
+                                .accessibilityRepresentation {
+                                    if pickerEffortChoices.count > 1 {
+                                        Slider(value: Binding(
+                                            get: { Double(pickerEffortChoices.firstIndex(of: pickerEffort) ?? 0) },
+                                            set: { pickerEffort = pickerEffortChoices[min(max(Int($0.rounded()), 0), pickerEffortChoices.count - 1)] }
+                                        ), in: 0...Double(pickerEffortChoices.count - 1), step: 1)
+                                        .accessibilityLabel("Model effort")
+                                        .accessibilityValue(pickerEffort.title)
+                                        .accessibilityIdentifier("model-effort-slider")
+                                        .focusEffectDisabled()
+                                    } else {
+                                        Text(pickerEffort.title)
+                                            .accessibilityElement()
+                                            .accessibilityLabel("Model effort")
+                                            .accessibilityValue(pickerEffort.title)
+                                            .accessibilityIdentifier("model-effort-slider")
                                     }
                                 }
-                                .padding(.horizontal, 11)
-                                .allowsHitTesting(false)
-                            }
-                            .accessibilityLabel("Model effort")
-                            .accessibilityValue(selectedEffort.title)
-                            .accessibilityIdentifier("model-effort-slider")
                         }
                         .padding(.horizontal, 18)
                         .padding(.vertical, 13)
                         .frame(width: 320)
-                    }
-                    .onChange(of: selectedEffort) { _, effort in
-                        Task { try? await conversationManager.setEffort(taskID: task.id, effort: effort) }
                     }
 
                     if isResponding {
@@ -2996,18 +3013,15 @@ struct TaskConversationView: View {
 
     private func loadModels() async {
         selectedEffort = (try? conversationManager.effort(taskID: task.id)) ?? .medium
-        if modelOptions.isEmpty || !modelOptions.contains(where: { $0.id == selectedModelID }) {
-            modelOptions = [ConversationModelOption(id: provider.defaultModelID, name: provider.defaultModelName, isDefault: true)]
-            selectedModelID = provider.defaultModelID
-        }
         do {
             modelOptions = try await conversationManager.models(taskID: task.id)
-            if !modelOptions.contains(where: { $0.id == selectedModelID }),
-               let defaultModel = modelOptions.first(where: \.isDefault) ?? modelOptions.first {
-                selectedModelID = defaultModel.id
+            if !selectedModelID.isEmpty && !modelOptions.contains(where: { $0.id == selectedModelID }) {
+                selectedModelID = ""
             }
             if !currentEffortChoices.contains(selectedEffort) {
                 selectedEffort = currentEffortChoices.contains(.medium) ? .medium : currentEffortChoices[0]
+                // Persist the clamp so the CLI and sends read the same effort the composer shows.
+                _ = try? await conversationManager.setEffort(taskID: task.id, effort: selectedEffort)
             }
         } catch {
             // Keep the last known model available when an offline or unauthenticated app-server cannot list models.
@@ -3015,19 +3029,45 @@ struct TaskConversationView: View {
     }
 
     private var selectedModelName: String {
-        modelOptions.first(where: { $0.id == selectedModelID })?.name ?? selectedModelID
+        guard !selectedModelID.isEmpty else {
+            return modelOptions.first(where: \.isDefault)?.name ?? provider.defaultModelName
+        }
+        return modelName(for: selectedModelID)
+    }
+
+    private var pickerEffortChoices: [ConversationEffort] {
+        effortChoices(for: pickerModelID)
     }
 
     private var currentEffortChoices: [ConversationEffort] {
-        guard let supported = modelOptions.first(where: { $0.id == selectedModelID })?.supportedEfforts,
+        effortChoices(for: selectedModelID)
+    }
+
+    private func effortChoices(for modelID: String) -> [ConversationEffort] {
+        let model = modelID.isEmpty
+            ? modelOptions.first(where: \.isDefault)
+            : modelOptions.first(where: { $0.id == modelID })
+        guard let supported = model?.supportedEfforts,
               !supported.isEmpty else { return ConversationEffort.allCases }
         return ConversationEffort.allCases.filter(supported.contains)
     }
 
-    private func selectModel(_ model: ConversationModelOption) {
-        selectedModelID = model.id
-        guard !currentEffortChoices.contains(selectedEffort) else { return }
-        selectedEffort = currentEffortChoices.contains(.medium) ? .medium : currentEffortChoices[0]
+    private func modelName(for modelID: String) -> String {
+        modelOptions.first(where: { $0.id == modelID })?.name ?? modelID
+    }
+
+    private func selectPickerModel(_ model: ConversationModelOption) {
+        pickerModelID = model.id
+        guard !pickerEffortChoices.contains(pickerEffort) else { return }
+        pickerEffort = pickerEffortChoices.contains(.medium) ? .medium : pickerEffortChoices[0]
+    }
+
+    private func commitModelPickerSelection() {
+        let effortChanged = selectedEffort != pickerEffort
+        selectedModelID = pickerModelID
+        selectedEffort = pickerEffort
+        guard effortChanged else { return }
+        Task { try? await conversationManager.setEffort(taskID: task.id, effort: pickerEffort) }
     }
 
     private func sendMessage(overrideText: String? = nil) {
@@ -4462,5 +4502,61 @@ private struct SelectableAnnotationText: NSViewRepresentable {
             bounds.origin.y += view.textContainerOrigin.y
             onSelection(range, text, bounds)
         }
+    }
+}
+
+/// A discrete effort slider whose knob is an opaque white disc, so it stays solid over any track or popover background.
+private struct EffortStepSlider: View {
+    @Binding var selection: ConversationEffort
+    let choices: [ConversationEffort]
+
+    private let knobDiameter: CGFloat = 20
+    private let trackHeight: CGFloat = 6
+
+    private var selectedIndex: Int { choices.firstIndex(of: selection) ?? 0 }
+    private var stepCount: Int { max(choices.count - 1, 1) }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let travel = max(proxy.size.width - knobDiameter, 1)
+            let knobX = travel * CGFloat(selectedIndex) / CGFloat(stepCount)
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.primary.opacity(0.2))
+                    .frame(height: trackHeight)
+                Capsule()
+                    .fill(Color.accentColor)
+                    .frame(width: knobX + knobDiameter / 2, height: trackHeight)
+                ForEach(choices.indices, id: \.self) { index in
+                    Circle()
+                        .fill(Color.primary.opacity(0.35))
+                        .frame(width: 4, height: 4)
+                        .offset(x: travel * CGFloat(index) / CGFloat(stepCount) + knobDiameter / 2 - 2)
+                }
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: knobDiameter, height: knobDiameter)
+                    .offset(x: knobX)
+            }
+            .frame(width: proxy.size.width, height: knobDiameter, alignment: .leading)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                guard !choices.isEmpty else { return }
+                let fraction = (value.location.x - knobDiameter / 2) / travel
+                let index = min(Int((min(max(fraction, 0), 1) * CGFloat(stepCount)).rounded()), choices.count - 1)
+                selection = choices[index]
+            })
+        }
+        .frame(height: knobDiameter)
+        .focusable()
+        .focusEffectDisabled()
+        .onKeyPress(.leftArrow) { moveSelection(by: -1) }
+        .onKeyPress(.rightArrow) { moveSelection(by: 1) }
+    }
+
+    private func moveSelection(by delta: Int) -> KeyPress.Result {
+        guard !choices.isEmpty else { return .ignored }
+        selection = choices[min(max(selectedIndex + delta, 0), choices.count - 1)]
+        return .handled
     }
 }

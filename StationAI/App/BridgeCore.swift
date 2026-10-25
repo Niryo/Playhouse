@@ -3593,7 +3593,7 @@ final class ConversationManager {
         let workspace = try ConversationWorkspaceContext(roots: task.workspaceRootPaths.map {
             URL(fileURLWithPath: $0, isDirectory: true)
         })
-        let models = try await client(for: task).availableModels(workspace: workspace)
+        let models = try await client(for: task).availableModels(workspace: workspace).newestVersionPerFamily()
         StationAIDiagnostics.record("conversation.models.read.succeeded", fields: [
             "taskID": taskID.uuidString,
             "provider": task.conversationProvider.rawValue,
