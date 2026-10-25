@@ -6173,8 +6173,16 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(element("goal-clear-button").exists)
     }
 
-    // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer and empty-state prompt show the selected Codex-reported model and update when the user changes it, while unsupported modes and malformed model IDs are rejected before creating history.
+    // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | Codex and Claude model lists persist across fresh CLI/XPC requests. The CLI verifies the cache remains after a failed model lookup for an unavailable workspace. The visible Claude case seeds a Cached Claude Model option distinct from the provider result, shows it before replacing it with the real Default model list, and verifies the refreshed list is persisted. When the owned provider executable is unavailable, the cached Offline Cached Claude option remains visible and persisted. The Codex composer and empty-state prompt track model selection; unsupported modes and malformed model IDs are rejected before creating history.
     func test_conversation_mode_rejects_unknown_mode_without_starting_a_turn() throws {
+        let claudeSource = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
+        let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-model-cache")
+        try FileManager.default.copyItem(at: claudeSource, to: claudeExecutable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claudeExecutable.path)
+        let claudeOwnerMarker = dataDirectory.appendingPathComponent(".stationai-claude-fixture-owner")
+        let claudeOwnerValue = "StationAI test owns this Claude Code protocol fixture (v1).\n"
+        try Data(claudeOwnerValue.utf8).write(to: claudeOwnerMarker)
+        claudeFixtureExecutable = claudeExecutable.path
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Conversation modes", roots: [fixture.primary.path])
         openTask(named: "Conversation modes")
@@ -6245,6 +6253,48 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
         XCTAssertEqual((history?["activities"] as? [Any])?.count, 0)
         attachScreenshot(named: "Plan mode is visible in the conversation composer")
+
+        let claudeTask = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude cached models", "--root", fixture.primary.path, "--provider", "claude"
+        ])["result"] as? [String: Any])
+        let claudeTaskID = try XCTUnwrap(claudeTask["id"] as? String)
+        let seededClaudeModels = try XCTUnwrap((try runCLI(["conversation", "models", claudeTaskID])["result"] as? [String: Any])?["models"] as? [[String: Any]])
+        XCTAssertEqual(seededClaudeModels.first?["name"] as? String, "Default")
+        let staleCachedModels: [[String: Any]] = [["id": "cached-model", "name": "Cached Claude Model", "isDefault": false]]
+        let staleCacheData = try JSONSerialization.data(withJSONObject: staleCachedModels)
+        let testPreferences = try XCTUnwrap(UserDefaults(suiteName: preferencesSuiteName))
+        testPreferences.set(staleCacheData, forKey: "conversation.models.cache.claude")
+        let persistedClaudeModels = try XCTUnwrap((try runCLI(["conversation", "models", claudeTaskID, "--cached"])["result"] as? [String: Any])?["models"] as? [[String: Any]])
+        XCTAssertEqual(persistedClaudeModels.first?["name"] as? String, "Cached Claude Model", "A fresh XPC request should read the seeded real preferences cache.")
+        element("back-to-board-button").click()
+        openTask(named: "Claude cached models")
+        let claudePicker = app.popUpButtons.firstMatch
+        XCTAssertTrue(claudePicker.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitUntil({
+            (claudePicker.value as? String ?? claudePicker.label).contains("Cached Claude Model")
+        }, timeout: 5), "The distinct cached Claude option should render before server discovery completes.")
+        XCTAssertTrue(waitUntil({
+            (claudePicker.value as? String ?? claudePicker.label).contains("Default")
+        }, timeout: 15), "Real Claude discovery should replace the seeded cache with its current model list.")
+        let refreshedClaudeCache = try XCTUnwrap((try runCLI(["conversation", "models", claudeTaskID, "--cached"])["result"] as? [String: Any])?["models"] as? [[String: Any]])
+        XCTAssertEqual(refreshedClaudeCache.first?["name"] as? String, "Default", "The real provider refresh should replace the stale persisted cache.")
+
+        XCTAssertEqual(try String(contentsOf: claudeOwnerMarker, encoding: .utf8), claudeOwnerValue, "Only remove the test-owned executable after verifying its ownership marker.")
+        try FileManager.default.removeItem(at: claudeExecutable)
+        let offlineTask = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude cached offline", "--root", fixture.primary.path, "--provider", "claude"
+        ])["result"] as? [String: Any])
+        let offlineTaskID = try XCTUnwrap(offlineTask["id"] as? String)
+        let offlineModels: [[String: Any]] = [["id": "offline-cached-model", "name": "Offline Cached Claude", "isDefault": true]]
+        testPreferences.set(try JSONSerialization.data(withJSONObject: offlineModels), forKey: "conversation.models.cache.claude")
+        element("back-to-board-button").click()
+        openTask(named: "Claude cached offline")
+        let offlinePicker = app.popUpButtons.firstMatch
+        XCTAssertTrue(waitUntil({
+            (offlinePicker.value as? String ?? offlinePicker.label).contains("Offline Cached Claude")
+        }, timeout: 5), "A failed provider launch should leave the cached Claude choice visible.")
+        let retainedOfflineCache = try XCTUnwrap((try runCLI(["conversation", "models", offlineTaskID, "--cached"])["result"] as? [String: Any])?["models"] as? [[String: Any]])
+        XCTAssertEqual(retainedOfflineCache.first?["name"] as? String, "Offline Cached Claude")
     }
 
     // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode use the existing question path, move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome.

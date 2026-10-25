@@ -2933,6 +2933,13 @@ struct TaskConversationView: View {
     }
 
     private func loadModels() async {
+        if let cachedModels = try? conversationManager.cachedModels(taskID: task.id), !cachedModels.isEmpty {
+            modelOptions = cachedModels
+            if !modelOptions.contains(where: { $0.id == selectedModelID }),
+               let defaultModel = modelOptions.first(where: \.isDefault) ?? modelOptions.first {
+                selectedModelID = defaultModel.id
+            }
+        }
         if modelOptions.isEmpty || !modelOptions.contains(where: { $0.id == selectedModelID }) {
             modelOptions = [ConversationModelOption(id: provider.defaultModelID, name: provider.defaultModelName, isDefault: true)]
             selectedModelID = provider.defaultModelID
