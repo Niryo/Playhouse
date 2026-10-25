@@ -317,6 +317,18 @@ enum StationAICLI {
             guard let id = tail.first else { throw CLIError.usage("A task ID is required.") }
             switch operation {
             case "history": return BridgeRequest(command: "conversation.history", arguments: ["taskID": .string(id)])
+            case "present-image":
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--image", "--caption"])
+                guard let path = flags["--image"]?.first, !path.isEmpty else {
+                    throw CLIError.usage("Use: stationai conversation present-image <task-id> --image <path> [--caption <text>]")
+                }
+                let url = URL(fileURLWithPath: path)
+                let data = try Data(contentsOf: url)
+                guard data.count <= 10_000_000 else { throw CLIError.usage("The image must be smaller than 10 MB.") }
+                return BridgeRequest(command: "conversation.present-image", arguments: [
+                    "taskID": .string(id), "path": .string(path),
+                    "caption": .string(flags["--caption"]?.first ?? "")
+                ])
             case "models":
                 switch Array(tail.dropFirst()) {
                 case []: return BridgeRequest(command: "conversation.models", arguments: ["taskID": .string(id)])
@@ -503,6 +515,7 @@ enum StationAICLI {
       stationai workspace repos list
       stationai settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>
       stationai conversation history <task-id>
+      stationai conversation present-image <task-id> --image <path> [--caption <text>]
       stationai conversation queue <task-id> --message <text>
       stationai conversation queue-list <task-id>
       stationai conversation queue-retry <task-id> <message-id>

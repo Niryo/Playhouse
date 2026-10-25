@@ -1,6 +1,6 @@
 # Open Attached Chat Images at Full Size
 
-Task: `181BB1BF-3F10-416C-984B-1E6009069A47`  
+Task: `181BB1BF-3F10-416C-984B-1E6009069A47`
 Client date: 2026-10-24
 
 ## Observed timeline

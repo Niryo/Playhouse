@@ -2042,18 +2042,24 @@ struct TaskConversationView: View {
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("assistant-provider-\(message.id)")
 
-            assistantMarkdownContent(displayText, messageID: message.id, responseAnnotations: responseAnnotations)
-            .font(.system(size: 16, weight: .regular))
-            .foregroundStyle(WorkspaceTheme.conversationText)
-            .padding(.horizontal, 15)
-            .padding(.vertical, 11)
-            .background(
-                WorkspaceTheme.panelBackground,
-                in: RoundedRectangle(cornerRadius: 17, style: .continuous)
-            )
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel(displayText.isEmpty ? "Waiting for \(provider.displayName) response" : String(Self.markdownAttributedText(displayText).characters))
-            .accessibilityIdentifier("assistant-message-\(message.id)")
+            ForEach(Array(message.imageDataURLs.enumerated()), id: \.offset) { index, dataURL in
+                if let image = Self.image(fromDataURL: dataURL) {
+                    Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 520, maxHeight: 420)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
+                }
+            }
+            if !displayText.isEmpty {
+                assistantMarkdownContent(displayText, messageID: message.id, responseAnnotations: responseAnnotations)
+                    .font(.system(size: 16, weight: .regular))
+                    .foregroundStyle(WorkspaceTheme.conversationText)
+                    .padding(.horizontal, 15)
+                    .padding(.vertical, 11)
+                    .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel(String(Self.markdownAttributedText(displayText).characters))
+                    .accessibilityIdentifier("assistant-message-\(message.id)")
+            }
         }
         .frame(maxWidth: 620, alignment: .leading)
     }

@@ -5200,7 +5200,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 10))
     }
 
-    // case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a transcript attachment opens the original image in a large viewer, which can be closed to return to the conversation.
+    // case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a transcript attachment opens the original image in a large viewer, which can be closed to return to the conversation.
 
     func test_conversation_sends_image_attachments() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
@@ -5245,6 +5245,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
         let pickedTurnData = try Data(contentsOf: URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history"))
         let pickedTurn = try XCTUnwrap(JSONSerialization.jsonObject(with: pickedTurnData) as? [String: Any])
+        XCTAssertTrue((pickedTurn["threadStartDeveloperInstructions"] as? String)?.contains("conversation present-image") == true, "The agent should receive instructions for publishing images into chat.")
         XCTAssertEqual(pickedTurn["userMessage"] as? String, "What is shown in this screenshot?")
         XCTAssertEqual((pickedTurn["images"] as? [String])?.count, 1, "The fixture should receive the picker image alongside the text prompt.")
         let pickedImage = try XCTUnwrap((pickedTurn["images"] as? [String])?.first)
@@ -5284,6 +5285,23 @@ final class StationAIUITests: XCTestCase {
         let refreshedUserMessages = (refreshedHistory?["messages"] as? [[String: Any]] ?? []).filter { $0["role"] as? String == "user" }
         XCTAssertEqual(refreshedUserMessages.first?["imageDataURLs"] as? [String], [pickedImage], "A fresh XPC history read should retain the earlier image after a later turn.")
 
+        let agentCaption = "Agent generated screenshot"
+        let agentImage = try runCLI(["conversation", "present-image", try taskID(named: "Image conversation"), "--image", image.path, "--caption", agentCaption])["result"] as? [String: Any]
+        XCTAssertEqual(agentImage?["role"] as? String, "assistant")
+        XCTAssertEqual(agentImage?["text"] as? String, agentCaption)
+        XCTAssertEqual((agentImage?["imageDataURLs"] as? [String])?.first?.hasPrefix("data:image/png;base64,"), true)
+        let agentImageID = try XCTUnwrap(agentImage?["id"] as? String)
+        let agentJPEG = dataDirectory.appendingPathComponent("agent-chat-image.jpg")
+        try bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.8])!.write(to: agentJPEG)
+        let agentJPEGMessage = try runCLI(["conversation", "present-image", try taskID(named: "Image conversation"), "--image", agentJPEG.path, "--caption", "Agent JPEG screenshot"])["result"] as? [String: Any]
+        XCTAssertEqual((agentJPEGMessage?["imageDataURLs"] as? [String])?.first?.hasPrefix("data:image/jpeg;base64,"), true)
+        let agentJPEGID = try XCTUnwrap(agentJPEGMessage?["id"] as? String)
+
+        element("back-to-board-button").click()
+        openTask(named: "Image conversation")
+        XCTAssertTrue(app.staticTexts[agentCaption].waitForExistence(timeout: 10), "The agent image caption should appear as an assistant message after reopening.")
+        XCTAssertTrue(app.images["chat-image-\(agentImageID)-0"].waitForExistence(timeout: 10), "The specific agent-published image should render in its assistant message after reopening.")
+        XCTAssertTrue(app.images["chat-image-\(agentJPEGID)-0"].waitForExistence(timeout: 10), "The specific agent-published JPEG should render in its assistant message after reopening.")
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
         try FileManager.default.removeItem(at: URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history"))
@@ -5356,6 +5374,53 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(serializedImageDiagnostics.contains(pickedImage))
         XCTAssertFalse(serializedImageDiagnostics.contains(pastedImage))
         attachScreenshot(named: "Chat sends picker text-and-image and pasted image-only messages")
+    }
+
+    // case-contract: test_claude_agent_image_published_during_active_turn | While a Claude Code turn is active in the app process, the agent's CLI/XPC image publication joins that active Claude transcript turn; after the provider finishes, history places the image before the later assistant answer, and reopening the conversation renders the exact published image. This active-turn attribution is Claude-specific: Codex history is composed from ordered timeline entries, so published images are standalone assistant messages verified for persistence and rendering in test_conversation_sends_image_attachments.
+    func test_claude_agent_image_published_during_active_turn() throws {
+        let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-active-image")
+        try FileManager.default.copyItem(at: source, to: executable)
+        claudeFixtureExecutable = executable.path
+        try Data("StationAI test owns this Claude Code protocol fixture (v1).\n".utf8)
+            .write(to: dataDirectory.appendingPathComponent(".stationai-claude-fixture-owner"))
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: executable.path + ".history"))
+        let ready = URL(fileURLWithPath: executable.path + ".image-turn-ready")
+        let release = URL(fileURLWithPath: executable.path + ".image-turn-release")
+        try? FileManager.default.removeItem(at: ready)
+        try? FileManager.default.removeItem(at: release)
+        launchApp(defaultParent: fixture.parent.path)
+        let created = try runCLI([
+            "task", "create", "--title", "Claude active image", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any]
+        let taskID = try XCTUnwrap(created?["id"] as? String)
+        openTask(named: "Claude active image")
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText("Please publish-image-during-active-turn.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15), "The Claude fixture should hold the app-owned turn before answering.")
+
+        let image = dataDirectory.appendingPathComponent("active-agent-image.png")
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        try bitmap.representation(using: .png, properties: [:])!.write(to: image)
+        let published = try runCLI([
+            "conversation", "present-image", taskID, "--image", image.path, "--caption", "During Claude turn",
+        ])["result"] as? [String: Any]
+        let imageID = try XCTUnwrap(published?["id"] as? String)
+        try Data("Release Claude's turn.\n".utf8).write(to: release)
+        XCTAssertTrue(app.staticTexts["Claude answer after the image."].waitForExistence(timeout: 20))
+
+        let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        let messages = try XCTUnwrap(history?["messages"] as? [[String: Any]])
+        let imageIndex = try XCTUnwrap(messages.firstIndex { $0["id"] as? String == imageID })
+        let answerIndex = try XCTUnwrap(messages.firstIndex { $0["text"] as? String == "Claude answer after the image." })
+        XCTAssertLessThan(imageIndex, answerIndex, "The active-turn image should precede Claude's answer in the durable transcript.")
+        element("back-to-board-button").click()
+        openTask(named: "Claude active image")
+        XCTAssertTrue(app.images["chat-image-\(imageID)-0"].waitForExistence(timeout: 10), "Reopening the Claude conversation should render the exact published image.")
     }
 
     // case-contract: test_conversation_rejects_invalid_image_attachments | Malformed image data is rejected with a visible composer error and an invalid_argument bridge response, without creating conversation history or advancing task status.

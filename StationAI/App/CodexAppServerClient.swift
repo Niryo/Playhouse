@@ -1608,6 +1608,9 @@ enum TaskThreadDeveloperInstructions {
         \(quotedExecutable) task progress custom \(id) --label \"short label\" [--detail \"short detail\"]
         \(quotedExecutable) task progress clear \(id)
         Progress reports are hidden from the conversation and shown on the task card. Keep details brief. Do not use lifecycle task status commands for progress.
+        To show the user an image you created (such as a screenshot or chart), publish it into this task's chat with:
+        \(quotedExecutable) conversation present-image \(id) --image <path> [--caption "short caption"]
+        This adds a durable assistant image message to the chat. Use PNG or JPEG files smaller than 10 MB.
 
         Repository context for this task:
         - Selected repositories (source identity): \(repositories.isEmpty ? "none" : repositories.map(\.repositoryPath).joined(separator: ", "))
