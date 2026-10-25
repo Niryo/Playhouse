@@ -317,7 +317,12 @@ enum StationAICLI {
             guard let id = tail.first else { throw CLIError.usage("A task ID is required.") }
             switch operation {
             case "history": return BridgeRequest(command: "conversation.history", arguments: ["taskID": .string(id)])
-            case "models": return BridgeRequest(command: "conversation.models", arguments: ["taskID": .string(id)])
+            case "models":
+                switch Array(tail.dropFirst()) {
+                case []: return BridgeRequest(command: "conversation.models", arguments: ["taskID": .string(id)])
+                case ["--cached"]: return BridgeRequest(command: "conversation.models.cached", arguments: ["taskID": .string(id)])
+                default: throw CLIError.usage("Use: stationai conversation models <task-id> [--cached]")
+                }
             case "stop": return BridgeRequest(command: "conversation.stop", arguments: ["taskID": .string(id)])
             case "provider":
                 switch Array(tail.dropFirst()) {
@@ -506,6 +511,7 @@ enum StationAICLI {
       stationai conversation steer <task-id> --message <text> [--image <path>]...
       stationai conversation answer-async <task-id> <item-id> --answer <text> [--answer <text>]...
       stationai conversation models <task-id>
+      stationai conversation models <task-id> --cached
       stationai conversation stop <task-id>
       stationai conversation provider <task-id> [set <codex|claude>|capabilities]
       stationai conversation goal <task-id> <get|set|pause|resume|clear> [--text <objective>]
@@ -513,6 +519,7 @@ enum StationAICLI {
 
     Results are JSON. Conversation send emits JSON event lines followed by a final response.
     Conversation commands use the task's provider; tasks without one use Codex.
+    Conversation models --cached reads the last saved list without contacting the provider.
     """
 }
 

@@ -4102,13 +4102,54 @@ class StationAIBridgeTests(unittest.TestCase):
                              for event in plan_diagnostics))
         self.assertNotIn(markdown_reply, json.dumps(plan_diagnostics))
 
-    # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer and empty-state prompt show the selected Codex-reported model and update when the user changes it, while unsupported modes and malformed model IDs are rejected before creating history.
+    # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | Codex and Claude model lists persist across fresh CLI/XPC requests. The CLI verifies the cache remains after a failed model lookup for an unavailable workspace. The visible Claude case seeds a Cached Claude Model option distinct from the provider result, shows it before replacing it with the real Default model list, and verifies the refreshed list is persisted. When the owned provider executable is unavailable, the cached Offline Cached Claude option remains visible and persisted. The Codex composer and empty-state prompt track model selection; unsupported modes and malformed model IDs are rejected before creating history.
     def test_conversation_mode_rejects_unknown_mode_without_starting_a_turn(self):
         task_id = self.create_task(title="Conversation mode validation")["id"]
         response, _ = self.call_cli("conversation", "models", task_id)
         models = self.assert_success(response)["models"]
         self.assertTrue(models)
         self.assertTrue(all(model.get("id") and model.get("name") for model in models))
+        cached, _ = self.call_cli("conversation", "models", task_id, "--cached")
+        self.assertEqual(self.assert_success(cached)["models"], models, "A fresh XPC request should read the persisted Codex model cache.")
+
+        claude = self.data_directory / "claude-fixture-model-list"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", claude)
+        claude.chmod(0o755)
+        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
+            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        claude_environment = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(claude)}
+        claude_task, _ = self.call_cli("task", "create", "--title", "Claude model cache", "--root", self.primary, "--provider", "claude")
+        claude_task_id = self.assert_success(claude_task)["id"]
+        first_claude_models, _ = self.call_cli("conversation", "models", claude_task_id, extra_environment=claude_environment)
+        first_claude_models = self.assert_success(first_claude_models)["models"]
+        self.assertEqual(first_claude_models[0]["name"], "Default")
+        cached_claude_models, _ = self.call_cli("conversation", "models", claude_task_id, "--cached")
+        self.assertEqual(self.assert_success(cached_claude_models)["models"], first_claude_models)
+        refreshed_claude_models, _ = self.call_cli("conversation", "models", claude_task_id, extra_environment=claude_environment)
+        refreshed_claude_models = self.assert_success(refreshed_claude_models)["models"]
+        self.assertEqual(refreshed_claude_models[0]["name"], "Default")
+        persisted_claude_models, _ = self.call_cli("conversation", "models", claude_task_id, "--cached")
+        self.assertEqual(self.assert_success(persisted_claude_models)["models"], refreshed_claude_models)
+
+        unavailable_root = self.data_directory / "claude-model-cache-unavailable-root"
+        unavailable_root.mkdir()
+        root_owner_marker = unavailable_root / ".stationai-test-owner"
+        root_owner_value = "StationAI model cache test owns this workspace root.\n"
+        root_owner_marker.write_text(root_owner_value, encoding="utf-8")
+        unavailable_task, _ = self.call_cli(
+            "task", "create", "--title", "Unavailable Claude model root", "--root", unavailable_root, "--provider", "claude"
+        )
+        unavailable_task_id = self.assert_success(unavailable_task)["id"]
+        initial_unavailable_models, _ = self.call_cli("conversation", "models", unavailable_task_id, extra_environment=claude_environment)
+        initial_unavailable_models = self.assert_success(initial_unavailable_models)["models"]
+        self.assertEqual(initial_unavailable_models, refreshed_claude_models)
+        self.assertEqual(root_owner_marker.read_text(encoding="utf-8"), root_owner_value)
+        shutil.rmtree(unavailable_root)
+        failed_refresh, _ = self.call_cli("conversation", "models", unavailable_task_id, expected_status=1, extra_environment=claude_environment)
+        self.assertFalse(failed_refresh.get("ok"), "An unavailable workspace must fail discovery instead of clearing cached models.")
+        retained_after_failure, _ = self.call_cli("conversation", "models", unavailable_task_id, "--cached")
+        self.assertEqual(self.assert_success(retained_after_failure)["models"], initial_unavailable_models)
         response, _ = self.call_cli(
             "conversation", "send", task_id, "--message", "Hello", "--mode", "unsupported", expected_status=2
         )

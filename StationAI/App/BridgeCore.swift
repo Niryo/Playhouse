@@ -3570,6 +3570,18 @@ final class ConversationManager {
         return []
     }
 
+    private func modelCacheKey(for provider: ConversationProvider) -> String {
+        "conversation.models.cache.\(provider.rawValue)"
+    }
+
+    func cachedModels(taskID: UUID) throws -> [ConversationModelOption] {
+        let task = try tasks.taskModel(taskID)
+        guard let data = preferences.data(forKey: modelCacheKey(for: task.conversationProvider)),
+              let models = try? JSONDecoder().decode([ConversationModelOption].self, from: data),
+              !models.isEmpty else { return [] }
+        return models
+    }
+
     func models(taskID: UUID) async throws -> [ConversationModelOption] {
         StationAIDiagnostics.record("conversation.models.read.started", fields: ["taskID": taskID.uuidString])
         let task = try tasks.taskModel(taskID)
@@ -3577,6 +3589,9 @@ final class ConversationManager {
             URL(fileURLWithPath: $0, isDirectory: true)
         })
         let models = try await client(for: task).availableModels(workspace: workspace)
+        if let data = try? JSONEncoder().encode(models) {
+            preferences.set(data, forKey: modelCacheKey(for: task.conversationProvider))
+        }
         StationAIDiagnostics.record("conversation.models.read.succeeded", fields: [
             "taskID": taskID.uuidString,
             "provider": task.conversationProvider.rawValue,
@@ -4801,6 +4816,9 @@ final class StationAIBridgeRuntime {
             case "conversation.models":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = .object(["models": .array(try await conversations.models(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })])
+            case "conversation.models.cached":
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = .object(["models": .array(try conversations.cachedModels(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })])
             case "conversation.stop":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = .object(["interrupted": .boolean(try await conversations.interrupt(taskID: request.requiredUUID("taskID")))])
