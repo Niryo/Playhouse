@@ -2739,17 +2739,17 @@ struct TaskConversationView: View {
                         .accessibilityIdentifier("ai-question-answer-\(question.id)")
                     } else {
                         ForEach(question.options) { option in
+                            let isSelected = (userInputAnswers[question.id] ?? []).first == option.label
                             Button {
-                                var selected = userInputAnswers[question.id] ?? []
-                                if selected.contains(option.label) { selected.removeAll { $0 == option.label } }
-                                else { selected.append(option.label) }
-                                userInputAnswers[question.id] = selected
+                                userInputAnswers[question.id] = [option.label]
                             } label: {
-                                Label(option.label, systemImage: (userInputAnswers[question.id] ?? []).contains(option.label) ? "checkmark.circle.fill" : "circle")
+                                Label(option.label, systemImage: isSelected ? "largecircle.fill.circle" : "circle")
                             }
                             .buttonHoverPointer()
                             .help("Select answer: \(option.label)")
                             .buttonStyle(.plain)
+                            .accessibilityIdentifier("ai-question-option-\(question.id)-\(option.label)")
+                            .accessibilityValue(isSelected ? "selected" : "not selected")
                         }
                         if question.allowsOther {
                             TextField("Other answer", text: Binding(
