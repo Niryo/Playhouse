@@ -159,6 +159,7 @@ struct TaskConversationView: View {
     @State private var draftNeedsAutosave = false
     @State private var pendingImages: [PendingImage] = []
     @State private var isShowingImagePicker = false
+    @State private var selectedChatImage: NSImage?
     @State private var isGeneratingTitle = false
     @State private var conversationMode: ConversationMode = .code
     @State private var isEnteringGoal = false
@@ -424,6 +425,28 @@ struct TaskConversationView: View {
                 .frame(minWidth: 420, idealWidth: 560, maxWidth: 720, minHeight: 260)
                 .padding(12)
                 .accessibilityIdentifier("ai-question-confirmation-sheet")
+        }
+        .sheet(isPresented: Binding(
+            get: { selectedChatImage != nil },
+            set: { if !$0 { selectedChatImage = nil } }
+        )) {
+            if let selectedChatImage {
+                VStack(alignment: .trailing, spacing: 8) {
+                    Button("Close") { self.selectedChatImage = nil }
+                        .keyboardShortcut(.cancelAction)
+                        .accessibilityIdentifier("close-chat-image-viewer")
+                        .buttonHoverPointer()
+                        .help("Close the full-size image")
+                    Image(nsImage: selectedChatImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .accessibilityLabel("Full-size attached image")
+                        .accessibilityIdentifier("chat-image-full-size")
+                }
+                .padding(16)
+                .frame(minWidth: 600, minHeight: 420)
+            }
         }
         .fileImporter(isPresented: $isShowingImagePicker, allowedContentTypes: [.image], allowsMultipleSelection: true) { result in
             do {
@@ -2023,18 +2046,24 @@ struct TaskConversationView: View {
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("assistant-provider-\(message.id)")
 
-            assistantMarkdownContent(displayText, messageID: message.id, responseAnnotations: responseAnnotations)
-            .font(.system(size: 16, weight: .regular))
-            .foregroundStyle(WorkspaceTheme.conversationText)
-            .padding(.horizontal, 15)
-            .padding(.vertical, 11)
-            .background(
-                WorkspaceTheme.panelBackground,
-                in: RoundedRectangle(cornerRadius: 17, style: .continuous)
-            )
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel(displayText.isEmpty ? "Waiting for \(provider.displayName) response" : String(Self.markdownAttributedText(displayText).characters))
-            .accessibilityIdentifier("assistant-message-\(message.id)")
+            ForEach(Array(message.imageDataURLs.enumerated()), id: \.offset) { index, dataURL in
+                if let image = Self.image(fromDataURL: dataURL) {
+                    Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 520, maxHeight: 420)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
+                }
+            }
+            if !displayText.isEmpty {
+                assistantMarkdownContent(displayText, messageID: message.id, responseAnnotations: responseAnnotations)
+                    .font(.system(size: 16, weight: .regular))
+                    .foregroundStyle(WorkspaceTheme.conversationText)
+                    .padding(.horizontal, 15)
+                    .padding(.vertical, 11)
+                    .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel(String(Self.markdownAttributedText(displayText).characters))
+                    .accessibilityIdentifier("assistant-message-\(message.id)")
+            }
         }
         .frame(maxWidth: 620, alignment: .leading)
     }
@@ -2043,9 +2072,15 @@ struct TaskConversationView: View {
         VStack(alignment: .trailing, spacing: 8) {
             ForEach(Array(message.imageDataURLs.enumerated()), id: \.offset) { index, dataURL in
                 if let image = Self.image(fromDataURL: dataURL) {
-                    Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 260, maxHeight: 220)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
+                    Button { selectedChatImage = image } label: {
+                        Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 260, maxHeight: 220)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Open attached image")
+                    .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
+                    .buttonHoverPointer()
+                    .help("Open image at full size")
                 }
             }
             let visibleText = Self.displayableUserText(message.text)
@@ -2818,17 +2853,17 @@ struct TaskConversationView: View {
                         .accessibilityIdentifier("ai-question-answer-\(question.id)")
                     } else {
                         ForEach(question.options) { option in
+                            let isSelected = (userInputAnswers[question.id] ?? []).first == option.label
                             Button {
-                                var selected = userInputAnswers[question.id] ?? []
-                                if selected.contains(option.label) { selected.removeAll { $0 == option.label } }
-                                else { selected.append(option.label) }
-                                userInputAnswers[question.id] = selected
+                                userInputAnswers[question.id] = [option.label]
                             } label: {
-                                Label(option.label, systemImage: (userInputAnswers[question.id] ?? []).contains(option.label) ? "checkmark.circle.fill" : "circle")
+                                Label(option.label, systemImage: isSelected ? "largecircle.fill.circle" : "circle")
                             }
                             .buttonHoverPointer()
                             .help("Select answer: \(option.label)")
                             .buttonStyle(.plain)
+                            .accessibilityIdentifier("ai-question-option-\(question.id)-\(option.label)")
+                            .accessibilityValue(isSelected ? "selected" : "not selected")
                         }
                         if question.allowsOther {
                             TextField("Other answer", text: Binding(
@@ -3013,6 +3048,9 @@ struct TaskConversationView: View {
 
     private func loadModels() async {
         selectedEffort = (try? conversationManager.effort(taskID: task.id)) ?? .medium
+        if let cachedModels = try? conversationManager.cachedModels(taskID: task.id), !cachedModels.isEmpty {
+            modelOptions = cachedModels.newestVersionPerFamily()
+        }
         do {
             modelOptions = try await conversationManager.models(taskID: task.id)
             if !selectedModelID.isEmpty && !modelOptions.contains(where: { $0.id == selectedModelID }) {

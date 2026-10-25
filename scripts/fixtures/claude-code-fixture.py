@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 STORY = "BISCUIT-7 waited by the gate every evening. One night the boy finally came home."
@@ -70,7 +71,17 @@ def run_tool(tool_id, name, tool_input, command=None):
 
 def respond(user_text, instructions):
     commands = []
-    if user_text.startswith("Write a concise task title"):
+    if "publish-image-during-active-turn" in user_text.lower():
+        ready = Path(str(sys.argv[0]) + ".image-turn-ready")
+        release = Path(str(sys.argv[0]) + ".image-turn-release")
+        ready.write_text("Claude turn is active.\n", encoding="utf-8")
+        deadline = time.monotonic() + 60
+        while not release.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not release.exists():
+            raise TimeoutError("Timed out waiting for the agent image publication test.")
+        text("msg_image_order", "Claude answer after the image.")
+    elif user_text.startswith("Write a concise task title"):
         if "title-failure" not in sys.argv[0]:
             text("msg_title", "Generated Claude title")
     elif "<response-comments>" in user_text:

@@ -3597,7 +3597,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(failure_items[failed_target_record["id"]]["state"], "needsAction")
         self.assertEqual(failure_items[later_record["id"]]["state"], "queued", "A failed targeted send must not drain later queued messages.")
 
-    # case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. Diagnostics record image MIME and encoded size without storing image payloads.
+    # case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a transcript attachment opens the original image in a large viewer, which can be closed to return to the conversation.
     def test_conversation_sends_image_attachments(self):
         task_id = self.create_task(title="Image conversation") ["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -3680,6 +3680,80 @@ class StationAIBridgeTests(unittest.TestCase):
         serialized_diagnostics = json.dumps(diagnostics)
         self.assertNotIn("data:image/png;base64,", serialized_diagnostics)
         self.assertNotIn(sent["images"][0], serialized_diagnostics)
+        published, _ = self.call_cli(
+            "conversation", "present-image", task_id, "--image", str(image), "--caption", "Agent screenshot",
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        published_message = self.assert_success(published)
+        self.assertEqual(published_message["role"], "assistant")
+        self.assertEqual(published_message["text"], "Agent screenshot")
+        self.assertTrue(published_message["imageDataURLs"][0].startswith("data:image/png;base64,"))
+        fresh_history, _ = self.call_cli(
+            "conversation", "history", task_id,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        saved_agent_image = self.assert_success(fresh_history)["messages"][-1]
+        self.assertEqual(saved_agent_image["id"], published_message["id"])
+        self.assertEqual(saved_agent_image["imageDataURLs"], published_message["imageDataURLs"])
+        thread_instructions = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["threadStartDeveloperInstructions"]
+        self.assertIn("conversation present-image", thread_instructions)
+        jpeg = self.data_directory / "agent-image.jpg"
+        subprocess.run(["sips", "-s", "format", "jpeg", str(image), "--out", str(jpeg)], check=True, capture_output=True)
+        published_jpeg, _ = self.call_cli(
+            "conversation", "present-image", task_id, "--image", str(jpeg), "--caption", "Agent JPEG screenshot",
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        jpeg_message = self.assert_success(published_jpeg)
+        self.assertTrue(jpeg_message["imageDataURLs"][0].startswith("data:image/jpeg;base64,"))
+        fresh_jpeg_history, _ = self.call_cli(
+            "conversation", "history", task_id,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        self.assertEqual(self.assert_success(fresh_jpeg_history)["messages"][-1]["imageDataURLs"], jpeg_message["imageDataURLs"])
+        invalid_image = self.data_directory / "invalid-agent-image.png"
+        invalid_image.write_bytes(b"not an image")
+        invalid_publish, _ = self.call_cli(
+            "conversation", "present-image", task_id, "--image", str(invalid_image),
+            expected_status=2, extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+        )
+        self.assertEqual(invalid_publish.get("error", {}).get("code"), "invalid_argument")
+
+    # case-contract: test_claude_agent_image_published_during_active_turn | While a Claude Code turn is active in the app process, the agent's CLI/XPC image publication joins that active Claude transcript turn; after the provider finishes, history places the image before the later assistant answer, and reopening the conversation renders the exact published image. This active-turn attribution is Claude-specific: Codex history is composed from ordered timeline entries, so published images are standalone assistant messages verified for persistence and rendering in test_conversation_sends_image_attachments.
+    def test_claude_agent_image_published_during_active_turn(self):
+        source = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / "claude-fixture-active-image"
+        shutil.copyfile(source, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
+            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        created, _ = self.call_cli("task", "create", "--title", "Claude active image", "--root", self.primary, "--provider", "claude")
+        task_id = self.assert_success(created)["id"]
+        image = self.data_directory / "active-agent-image.png"
+        image.write_bytes(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"))
+        environment = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        prompt = "Please publish-image-during-active-turn."
+        send = self.start_cli("conversation", "send", task_id, "--message", prompt, extra_environment=environment)
+        ready = Path(str(executable) + ".image-turn-ready")
+        release = Path(str(executable) + ".image-turn-release")
+        try:
+            deadline = time.monotonic() + 20
+            while not ready.exists() and send.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "Claude should hold the active turn before producing its answer.")
+            published, _ = self.call_cli(
+                "conversation", "present-image", task_id, "--image", str(image), "--caption", "During Claude turn",
+                extra_environment=environment,
+            )
+            image_message = self.assert_success(published)
+        finally:
+            release.write_text("Release Claude's turn.\n", encoding="utf-8")
+        self.finish_cli(send, ("conversation", "send", task_id, "--message", prompt), timeout=30)
+        history, _ = self.call_cli("conversation", "history", task_id, extra_environment=environment)
+        messages = self.assert_success(history)["messages"]
+        image_index = next(index for index, message in enumerate(messages) if message["id"] == image_message["id"])
+        answer_index = next(index for index, message in enumerate(messages) if message["text"] == "Claude answer after the image.")
+        self.assertLess(image_index, answer_index, "The image should precede Claude's later answer in transcript order.")
 
     # case-contract: test_conversation_rejects_invalid_image_attachments | Malformed image data is rejected with a visible composer error and an invalid_argument bridge response, without creating conversation history or advancing task status.
     def test_conversation_rejects_invalid_image_attachments(self):
@@ -4102,7 +4176,7 @@ class StationAIBridgeTests(unittest.TestCase):
                              for event in plan_diagnostics))
         self.assertNotIn(markdown_reply, json.dumps(plan_diagnostics))
 
-    # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. The selected effort defaults to Medium, persists through fresh CLI/XPC reads and reopening the conversation, and rejects unsupported values without replacing the prior choice. Unsupported modes and malformed model IDs are rejected before creating history.
+    # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. The selected effort defaults to Medium, persists through fresh CLI/XPC reads and reopening the conversation, and rejects unsupported values without replacing the prior choice. The Codex composer updates after model selection; unsupported modes and malformed model IDs are rejected before creating history.
     def test_conversation_mode_rejects_unknown_mode_without_starting_a_turn(self):
         task_id = self.create_task(title="Conversation mode validation")["id"]
         response, _ = self.call_cli("conversation", "models", task_id)
@@ -4115,6 +4189,7 @@ class StationAIBridgeTests(unittest.TestCase):
         invalid_effort, _ = self.call_cli("conversation", "effort", task_id, "set", "ultra", expected_status=2)
         self.assert_failure(invalid_effort, "invalid_argument")
         self.assertEqual(self.assert_success(self.call_cli("conversation", "effort", task_id)[0])["effort"], "xhigh")
+
         response, _ = self.call_cli(
             "conversation", "send", task_id, "--message", "Hello", "--mode", "unsupported", expected_status=2
         )
@@ -4129,6 +4204,62 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(history)["messages"], [])
         self.assertEqual(self.assert_success(history)["activities"], [])
 
+
+    # case-contract: test_conversation_models_cache_and_refresh | Codex and Claude filtered model lists persist across fresh CLI/XPC requests; an unavailable workspace fails refresh without clearing the previous cache. The visible Claude picker shows the seeded cached option before replacing it with the filtered versioned provider list, and retains an offline cached option when the provider executable is unavailable.
+    def test_conversation_models_cache_and_refresh(self):
+        codex_fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        codex_executable = self.data_directory / "codex-fixture-model-cache"
+        shutil.copyfile(codex_fixture, codex_executable)
+        codex_executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        codex_environment = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(codex_executable)}
+        task_id = self.create_task(title="Codex model cache")["id"]
+        response, _ = self.call_cli("conversation", "models", task_id, extra_environment=codex_environment)
+        models = self.assert_success(response)["models"]
+        cached, _ = self.call_cli("conversation", "models", task_id, "--cached")
+        self.assertEqual(self.assert_success(cached)["models"], models, "A fresh XPC request should read the persisted Codex model cache.")
+
+        claude = self.data_directory / "claude-fixture-model-list"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", claude)
+        claude.chmod(0o755)
+        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
+            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        claude_environment = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(claude)}
+        claude_task, _ = self.call_cli("task", "create", "--title", "Claude model cache", "--root", self.primary, "--provider", "claude")
+        claude_task_id = self.assert_success(claude_task)["id"]
+        first_claude_models, _ = self.call_cli("conversation", "models", claude_task_id, extra_environment=claude_environment)
+        first_claude_models = self.assert_success(first_claude_models)["models"]
+        self.assertEqual([model["id"] for model in first_claude_models], ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-6"])
+        self.assertNotIn("default", [model["id"] for model in first_claude_models])
+        cached_claude_models, _ = self.call_cli("conversation", "models", claude_task_id, "--cached")
+        self.assertEqual(self.assert_success(cached_claude_models)["models"], first_claude_models)
+        refreshed_claude_models, _ = self.call_cli("conversation", "models", claude_task_id, extra_environment=claude_environment)
+        refreshed_claude_models = self.assert_success(refreshed_claude_models)["models"]
+        self.assertEqual([model["id"] for model in refreshed_claude_models], ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-6"])
+        persisted_claude_models, _ = self.call_cli("conversation", "models", claude_task_id, "--cached")
+        self.assertEqual(self.assert_success(persisted_claude_models)["models"], refreshed_claude_models)
+
+        unavailable_root = self.data_directory / "claude-model-cache-unavailable-root"
+        unavailable_root.mkdir()
+        root_owner_marker = unavailable_root / ".stationai-test-owner"
+        root_owner_value = "StationAI model cache test owns this workspace root.\n"
+        root_owner_marker.write_text(root_owner_value, encoding="utf-8")
+        unavailable_task, _ = self.call_cli(
+            "task", "create", "--title", "Unavailable Claude model root", "--root", unavailable_root, "--provider", "claude"
+        )
+        unavailable_task_id = self.assert_success(unavailable_task)["id"]
+        initial_unavailable_models, _ = self.call_cli("conversation", "models", unavailable_task_id, extra_environment=claude_environment)
+        initial_unavailable_models = self.assert_success(initial_unavailable_models)["models"]
+        self.assertEqual(initial_unavailable_models, refreshed_claude_models)
+        self.assertEqual(root_owner_marker.read_text(encoding="utf-8"), root_owner_value)
+        shutil.rmtree(unavailable_root)
+        failed_refresh, _ = self.call_cli("conversation", "models", unavailable_task_id, expected_status=1, extra_environment=claude_environment)
+        self.assertFalse(failed_refresh.get("ok"), "An unavailable workspace must fail discovery instead of clearing cached models.")
+        retained_after_failure, _ = self.call_cli("conversation", "models", unavailable_task_id, "--cached")
+        self.assertEqual(self.assert_success(retained_after_failure)["models"], initial_unavailable_models)
 
     # case-contract: test_conversation_models_keep_newest_version_per_family | The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Alias-only Claude entries are omitted. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control.
     def test_conversation_models_keep_newest_version_per_family(self):
