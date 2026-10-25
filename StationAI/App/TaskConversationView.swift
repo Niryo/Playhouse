@@ -159,6 +159,7 @@ struct TaskConversationView: View {
     @State private var draftNeedsAutosave = false
     @State private var pendingImages: [PendingImage] = []
     @State private var isShowingImagePicker = false
+    @State private var selectedChatImage: NSImage?
     @State private var isGeneratingTitle = false
     @State private var conversationMode: ConversationMode = .code
     @State private var isEnteringGoal = false
@@ -420,6 +421,28 @@ struct TaskConversationView: View {
                 .frame(minWidth: 420, idealWidth: 560, maxWidth: 720, minHeight: 260)
                 .padding(12)
                 .accessibilityIdentifier("ai-question-confirmation-sheet")
+        }
+        .sheet(isPresented: Binding(
+            get: { selectedChatImage != nil },
+            set: { if !$0 { selectedChatImage = nil } }
+        )) {
+            if let selectedChatImage {
+                VStack(alignment: .trailing, spacing: 8) {
+                    Button("Close") { self.selectedChatImage = nil }
+                        .keyboardShortcut(.cancelAction)
+                        .accessibilityIdentifier("close-chat-image-viewer")
+                        .buttonHoverPointer()
+                        .help("Close the full-size image")
+                    Image(nsImage: selectedChatImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .accessibilityLabel("Full-size attached image")
+                        .accessibilityIdentifier("chat-image-full-size")
+                }
+                .padding(16)
+                .frame(minWidth: 600, minHeight: 420)
+            }
         }
         .fileImporter(isPresented: $isShowingImagePicker, allowedContentTypes: [.image], allowsMultipleSelection: true) { result in
             do {
@@ -2039,9 +2062,15 @@ struct TaskConversationView: View {
         VStack(alignment: .trailing, spacing: 8) {
             ForEach(Array(message.imageDataURLs.enumerated()), id: \.offset) { index, dataURL in
                 if let image = Self.image(fromDataURL: dataURL) {
-                    Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 260, maxHeight: 220)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
+                    Button { selectedChatImage = image } label: {
+                        Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 260, maxHeight: 220)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Open attached image")
+                    .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
+                    .buttonHoverPointer()
+                    .help("Open image at full size")
                 }
             }
             let visibleText = Self.displayableUserText(message.text)
