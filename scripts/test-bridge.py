@@ -2935,7 +2935,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(recovered_record["savedPrompt"], stale_prompt)
         self.assertIsNone(recovered_record.get("pendingSubmittedPrompt"))
 
-    # case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; the choice persists across fresh CLI/XPC reads and an app relaunch, unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC.
+    # case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC.
     def test_conversation_provider_selection_persists_and_validates(self):
         settings = self.assert_success(self.call_cli("settings", "get")[0])
         self.assertEqual(settings["defaultProvider"], "codex", "Existing installs keep Codex as the default provider.")
@@ -2943,6 +2943,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(codex_task["conversationProvider"], "codex")
         provider = self.assert_success(self.call_cli("conversation", "provider", codex_task["id"])[0])
         self.assertEqual(provider, {"provider": "codex", "supportsGoals": True})
+        self.assert_success(self.call_cli("conversation", "model", codex_task["id"], "set", "codex-choice")[0])
 
         unknown_default, _ = self.call_cli("settings", "set-default-provider", "gemini", expected_status=2)
         self.assert_failure(unknown_default, "invalid_argument")
@@ -2961,6 +2962,12 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assert_failure(unknown_switch, "invalid_argument")
         switched = self.assert_success(self.call_cli("conversation", "provider", codex_task["id"], "set", "claude")[0])
         self.assertEqual(switched["conversationProvider"], "claude", "A task without a conversation switches immediately.")
+        self.assertIsNone(self.assert_success(self.call_cli("conversation", "model", codex_task["id"])[0])["modelID"], "Claude must not inherit the Codex model selection.")
+        self.assert_success(self.call_cli("conversation", "model", codex_task["id"], "set", "claude-choice")[0])
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "provider", codex_task["id"], "set", "codex")[0])["conversationProvider"], "codex")
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "model", codex_task["id"])[0])["modelID"], "codex-choice")
+        self.assert_success(self.call_cli("conversation", "provider", codex_task["id"], "set", "claude")[0])
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "model", codex_task["id"])[0])["modelID"], "claude-choice")
         self.assertIsNone(switched.get("codexThreadID"))
         self.assertIsNone(switched.get("claudeSessionID"))
         fresh = self.assert_success(self.call_cli("task", "get", codex_task["id"])[0])
@@ -4176,13 +4183,20 @@ class StationAIBridgeTests(unittest.TestCase):
                              for event in plan_diagnostics))
         self.assertNotIn(markdown_reply, json.dumps(plan_diagnostics))
 
-    # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. The selected effort defaults to Medium, persists through fresh CLI/XPC reads and reopening the conversation, and rejects unsupported values without replacing the prior choice. The Codex composer updates after model selection; unsupported modes and malformed model IDs are rejected before creating history.
+    # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. The selected model and effort persist through fresh CLI/XPC reads and reopening the conversation; malformed saved model IDs and unsupported efforts are rejected without replacing prior choices. The Codex composer updates after model selection; unsupported modes and malformed model IDs are rejected before creating history.
     def test_conversation_mode_rejects_unknown_mode_without_starting_a_turn(self):
         task_id = self.create_task(title="Conversation mode validation")["id"]
         response, _ = self.call_cli("conversation", "models", task_id)
         models = self.assert_success(response)["models"]
         self.assertTrue(models)
         self.assertTrue(all(model.get("id") and model.get("name") for model in models))
+        self.assertIsNone(self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"])
+        selected_model_id = models[0]["id"]
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "model", task_id, "set", selected_model_id)[0])["conversationModelID"], selected_model_id)
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"], selected_model_id)
+        invalid_model, _ = self.call_cli("conversation", "model", task_id, "set", "bad model!", expected_status=2)
+        self.assert_failure(invalid_model, "invalid_argument")
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"], selected_model_id)
         self.assertEqual(self.assert_success(self.call_cli("conversation", "effort", task_id)[0])["effort"], "medium")
         self.assertEqual(self.assert_success(self.call_cli("conversation", "effort", task_id, "set", "xhigh")[0])["conversationEffort"], "xhigh")
         self.assertEqual(self.assert_success(self.call_cli("conversation", "effort", task_id)[0])["effort"], "xhigh")

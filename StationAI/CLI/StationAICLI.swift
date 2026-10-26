@@ -346,6 +346,17 @@ enum StationAICLI {
                     ])
                 }
                 throw CLIError.usage("Use: stationai conversation effort <task-id> [set <low|medium|high|xhigh>]")
+            case "model":
+                let modelArguments = Array(tail.dropFirst())
+                if modelArguments.isEmpty {
+                    return BridgeRequest(command: "conversation.model.get", arguments: ["taskID": .string(id)])
+                }
+                if modelArguments.count == 2, modelArguments[0] == "set" {
+                    return BridgeRequest(command: "conversation.model.set", arguments: [
+                        "taskID": .string(id), "modelID": .string(modelArguments[1]),
+                    ])
+                }
+                throw CLIError.usage("Use: stationai conversation model <task-id> [set <model-id>]")
             case "stop": return BridgeRequest(command: "conversation.stop", arguments: ["taskID": .string(id)])
             case "provider":
                 switch Array(tail.dropFirst()) {
@@ -536,6 +547,7 @@ enum StationAICLI {
       stationai conversation answer-async <task-id> <item-id> --answer <text> [--answer <text>]...
       stationai conversation models <task-id>
       stationai conversation effort <task-id> [set <low|medium|high|xhigh>]
+      stationai conversation model <task-id> [set <model-id>]
       stationai conversation models <task-id> --cached
       stationai conversation stop <task-id>
       stationai conversation provider <task-id> [set <codex|claude>|capabilities]
