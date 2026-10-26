@@ -337,16 +337,6 @@ struct TaskConversationView: View {
         !activities.isEmpty || !progressMessages.isEmpty || isResponding || completedResponseDuration != nil || hasCompletedAssistantResponse
     }
 
-    private var currentActivity: ConversationActivity? {
-        activities.enumerated()
-            .filter { $0.element.isActive }
-            .max { lhs, rhs in
-                let lhsStart = lhs.element.startedAt ?? .distantPast
-                let rhsStart = rhs.element.startedAt ?? .distantPast
-                return lhsStart == rhsStart ? lhs.offset < rhs.offset : lhsStart < rhsStart
-            }?.element
-    }
-
     private var hasCompletedAssistantResponse: Bool {
         guard let latestUserIndex = messages.lastIndex(where: { $0.role == .user }) else {
             return messages.contains { $0.role == .assistant && $0.phase == "final_answer" }
@@ -1067,9 +1057,6 @@ struct TaskConversationView: View {
                         .lineLimit(3)
                         .accessibilityIdentifier("task-status-message")
                 }
-                if isResponding {
-                    currentActivityIndicator
-                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -1079,39 +1066,6 @@ struct TaskConversationView: View {
         .padding(.vertical, 15)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(WorkspaceTheme.windowBackground.opacity(0.96))
-    }
-
-    private var currentActivityIndicator: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { timeline in
-            HStack(spacing: 7) {
-                Circle()
-                    .fill(Color.accentColor)
-                    .frame(width: 6, height: 6)
-                if let currentActivity {
-                    Text(currentActivity.title)
-                        .font(.system(size: 11, weight: .medium))
-                        .lineLimit(1)
-                        .accessibilityIdentifier("current-activity-title")
-                    Spacer(minLength: 4)
-                    if currentActivity.startedAt != nil {
-                        Text(currentActivity.durationLabel(at: timeline.date) ?? "Running · 0 ms")
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .accessibilityValue(currentActivity.durationLabel(at: timeline.date) ?? "Running · 0 ms")
-                            .accessibilityIdentifier("current-activity-duration")
-                    }
-                } else {
-                    Text("Thinking")
-                        .font(.system(size: 11, weight: .medium))
-                        .accessibilityIdentifier("current-activity-title")
-                    Spacer(minLength: 4)
-                }
-            }
-            .foregroundStyle(Color.accentColor)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("current-activity-indicator")
-        }
     }
 
     private var repositoryBadges: some View {
