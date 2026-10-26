@@ -90,6 +90,7 @@ final class BoardTask {
     /// Nil for tasks created before provider selection; those use Codex.
     var conversationProviderRawValue: String?
     var conversationEffortRawValue: String?
+    // Retained for one-time migration to the global provider model preference.
     var conversationModelIDsData: Data?
     var savedPrompt: String?
     var pendingSubmittedPrompt: String?

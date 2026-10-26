@@ -668,7 +668,6 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let claudeSessionID: String?
     let conversationProvider: String
     let conversationEffort: String
-    let conversationModelID: String?
     let savedPrompt: String?
     let pendingSubmittedPrompt: String?
     let workspaceRoots: [String]
@@ -689,7 +688,6 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         claudeSessionID = task.claudeSessionID
         conversationProvider = task.conversationProvider.rawValue
         conversationEffort = task.conversationEffort
-        conversationModelID = task.conversationModelID
         savedPrompt = task.savedPrompt
         pendingSubmittedPrompt = task.pendingSubmittedPrompt
         workspaceRoots = task.workspaceRootPaths
@@ -2465,21 +2463,6 @@ final class BoardTaskManager {
         }
     }
 
-    func setConversationModel(_ id: UUID, modelID: String?) async throws -> BoardTaskRecord {
-        try await withTaskOperationLock(id) {
-            let task = try requireTask(id)
-            let previous = task.conversationModelID
-            task.conversationModelID = modelID
-            do {
-                try await saveTaskContext(taskID: id)
-            } catch {
-                task.conversationModelID = previous
-                throw error
-            }
-            return BoardTaskRecord(task: task)
-        }
-    }
-
     func setWorkspaceRoots(_ id: UUID, roots: [String]) async throws -> BoardTaskRecord {
         let initialTask = try requireTask(id)
         let initialRepositories = initialTask.repositoryWorktrees
@@ -3678,6 +3661,10 @@ final class ConversationManager {
         "conversation.models.cache.\(provider.rawValue)"
     }
 
+    private func selectedModelKey(for provider: ConversationProvider) -> String {
+        "conversation.model.selected.\(provider.rawValue)"
+    }
+
     func cachedModels(taskID: UUID) throws -> [ConversationModelOption] {
         let task = try tasks.taskModel(taskID)
         return try cachedModels(provider: task.conversationProvider)
@@ -3719,15 +3706,27 @@ final class ConversationManager {
     }
 
     func modelID(taskID: UUID) throws -> String? {
-        try tasks.taskModel(taskID).conversationModelID
+        let task = try tasks.taskModel(taskID)
+        let key = selectedModelKey(for: task.conversationProvider)
+        if let selectedModelID = preferences.string(forKey: key) {
+            return selectedModelID
+        }
+
+        // One-time migration from the previous per-task preference.
+        if let legacyModelID = task.conversationModelID {
+            preferences.set(legacyModelID, forKey: key)
+            return legacyModelID
+        }
+        return nil
     }
 
     func setEffort(taskID: UUID, effort: ConversationEffort) async throws -> BoardTaskRecord {
         try await tasks.setConversationEffort(taskID, effort: effort)
     }
 
-    func setModelID(taskID: UUID, modelID: String?) async throws -> BoardTaskRecord {
-        try await tasks.setConversationModel(taskID, modelID: modelID)
+    func setModelID(taskID: UUID, modelID: String) throws {
+        let task = try tasks.taskModel(taskID)
+        preferences.set(modelID, forKey: selectedModelKey(for: task.conversationProvider))
     }
 
     // MARK: - Providers
@@ -4416,6 +4415,9 @@ final class ConversationManager {
             // new native thread: Codex can't list a thread that has no turns yet.
             phase = "transcript-segment"
             let segment = try await prepareSegment(task: try tasks.taskModel(taskID))
+            let sessionRecoveryContext = provider == .claude
+                ? ConversationHandoff.context(for: .claude, messages: try await history(taskID: taskID).messages)
+                : nil
             phase = "thread-start"
             let threadID: String
             if let existing = task.activeConversationID {
@@ -4460,6 +4462,7 @@ final class ConversationManager {
                 effort: effort,
                 threadID: threadID,
                 workspace: workspace,
+                sessionRecoveryContext: sessionRecoveryContext,
                 developerInstructions: TaskThreadDeveloperInstructions.make(
                     taskID: taskID,
                     repositories: task.repositoryWorktrees,
@@ -4805,7 +4808,7 @@ final class StationAIBridgeRuntime {
             func conversationClients(codexHome: String? = nil, goalFeatureEnabled: Bool = false) -> ConversationClients {
                 ConversationClients(
                     codex: CodexAppServerClient(codexExecutableOverride: codexExecutable, codexHomeOverride: codexHome, goalFeatureEnabled: goalFeatureEnabled),
-                    claude: ClaudeCodeClient(executableOverride: claudeExecutable)
+                    claude: ClaudeCodeClient.sharedPrimaryClient(executableOverride: claudeExecutable)
                 )
             }
 
@@ -5010,7 +5013,7 @@ final class StationAIBridgeRuntime {
                 let task = try await conversations.setEffort(taskID: taskID, effort: effort)
                 result = try Self.value(task)
             case "conversation.model.get":
-                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings, preferences: preferences)
                 result = .object(["modelID": try conversations.modelID(taskID: request.requiredUUID("taskID")).map(BridgeValue.string) ?? .null])
             case "conversation.model.set":
                 let taskID = try request.requiredUUID("taskID")
@@ -5018,8 +5021,9 @@ final class StationAIBridgeRuntime {
                 guard ConversationManager.isValidModelID(modelID) else {
                     throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, numbers, periods, underscores, or hyphens.")
                 }
-                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
-                result = try Self.value(await conversations.setModelID(taskID: taskID, modelID: modelID))
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings, preferences: preferences)
+                try conversations.setModelID(taskID: taskID, modelID: modelID)
+                result = .object(["modelID": .string(modelID)])
             case "conversation.models.cached":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings, preferences: preferences)
                 result = .object(["models": .array(try conversations.cachedModels(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })])

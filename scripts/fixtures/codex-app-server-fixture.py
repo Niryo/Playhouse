@@ -1081,6 +1081,13 @@ def main():
                     {"id": "item_stationai_compaction", "type": "contextCompaction", "payload": {"opaque": "COMPACTION_OPAQUE_SENTINEL"}},
                     {"id": "item_stationai_final", "type": "agentMessage", "phase": "final_answer", "text": "Context compaction completed."},
                 ]
+            if "-long-history-" in mode:
+                contents = []
+                for index in range(1, 61):
+                    contents.extend([
+                        {"id": f"item_long_history_user_{index}", "type": "userMessage", "content": [{"type": "text", "text": f"Long history user {index:02d}."}]},
+                        {"id": f"item_long_history_assistant_{index}", "type": "agentMessage", "phase": "final_answer", "text": f"Long history assistant {index:02d}."},
+                    ])
             if mode.endswith("-tool-activity"):
                 contents.extend([
                     {"id": "item_fixture_mcp_call", "type": "mcpToolCall", "server": "fixture-server", "tool": "lookup", "status": "completed", "arguments": {"token": "RAW_ARGUMENT_SECRET"}, "result": {"content": [{"type": "text", "text": "RAW_RESULT_SECRET"}]}},
@@ -1100,7 +1107,10 @@ def main():
                 turn_id = TURN_ID
                 saved_turns = saved_history.get("messages") or saved_history.get("turns") or []
                 if saved_turns:
-                    turn_id = saved_turns[min(index // 2, len(saved_turns) - 1)]["turnID"]
+                    turn_index = min(index // 2, len(saved_turns) - 1)
+                    turn_id = saved_turns[turn_index]["turnID"]
+                    if turn_index == 1:
+                        item["createdAt"] = "2026-10-26T12:34:00Z"
                 data.append({"item": item, "turnId": turn_id})
             write({"jsonrpc": "2.0", "id": message["id"], "result": {
                 "data": data,

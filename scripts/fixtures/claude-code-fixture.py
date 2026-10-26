@@ -71,7 +71,19 @@ def run_tool(tool_id, name, tool_input, command=None):
 
 def respond(user_text, instructions):
     commands = []
-    if "publish-image-during-active-turn" in user_text.lower():
+    if "hold-claude-turn-for-concurrency" in user_text.lower():
+        ready = Path(str(sys.argv[0]) + ".concurrent-turn-ready")
+        release = Path(str(sys.argv[0]) + ".concurrent-turn-release")
+        ready.write_text("Claude turn is active.\n", encoding="utf-8")
+        deadline = time.monotonic() + 60
+        while not release.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not release.exists():
+            raise TimeoutError("Timed out waiting for the concurrent Claude turn test.")
+        if "fail-after-hold" in user_text.lower():
+            raise RuntimeError("Claude fixture failed after releasing the held turn.")
+        text("msg_concurrent", SIMPLE_ANSWER)
+    elif "publish-image-during-active-turn" in user_text.lower():
         ready = Path(str(sys.argv[0]) + ".image-turn-ready")
         release = Path(str(sys.argv[0]) + ".image-turn-release")
         ready.write_text("Claude turn is active.\n", encoding="utf-8")
@@ -92,6 +104,8 @@ def respond(user_text, instructions):
             for index, item in enumerate(comments)
         )
         text("msg_comments", answer)
+    elif user_text.rstrip().endswith("What happened earlier?"):
+        text("msg_recovered", SIMPLE_ANSWER)
     elif "story" in user_text.lower():
         text("msg_story", STORY)
         progress_clear = report_command(instructions, " task progress clear ")
@@ -134,6 +148,12 @@ def main():
         if message.get("type") == "control_request":
             request = message.get("request", {})
             if request.get("subtype") == "initialize":
+                missing_resume = Path(str(sys.argv[0]) + ".missing-resume")
+                if "--resume" in sys.argv and missing_resume.exists():
+                    missing_resume.unlink()
+                    write({"type": "result", "subtype": "error", "is_error": True,
+                           "result": "No conversation found with session ID"})
+                    return 1
                 models = [
                     {"value": "default", "displayName": "Default"},
                     {"value": "opus", "displayName": "Opus"},
