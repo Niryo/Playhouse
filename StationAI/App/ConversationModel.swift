@@ -271,6 +271,7 @@ protocol ConversationProviderClient: AnyObject {
         effort: ConversationEffort,
         threadID: String,
         workspace: ConversationWorkspaceContext,
+        sessionRecoveryContext: String?,
         developerInstructions: String?,
         onDelta: @escaping (String) -> Void,
         onFinalMessage: @escaping (String) -> Void,
@@ -316,13 +317,14 @@ extension ConversationProviderClient {
         effort: ConversationEffort = .medium,
         threadID: String,
         workspace: ConversationWorkspaceContext,
+        sessionRecoveryContext: String? = nil,
         developerInstructions: String? = nil,
         onFinalMessage: @escaping (String) -> Void,
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void = { _ in }
     ) async throws {
         try await sendMessage(
             text, imageDataURLs: imageDataURLs, mode: mode, modelID: modelID, effort: effort, threadID: threadID,
-            workspace: workspace, developerInstructions: developerInstructions,
+            workspace: workspace, sessionRecoveryContext: sessionRecoveryContext, developerInstructions: developerInstructions,
             onDelta: { _ in }, onFinalMessage: onFinalMessage, onActivity: { _ in }, onDiff: { _ in },
             onHistory: { _ in }, onActionRequest: {}, onUserInput: onUserInput,
             onSteerMessage: { _, _ in }, onProgressMessage: { _ in }

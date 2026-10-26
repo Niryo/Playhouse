@@ -4179,6 +4179,78 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("provider-boundary-codex").exists)
     }
 
+    // case-contract: test_claude_resume_recovers_visible_history | After a Claude turn and StationAI restart, if Claude cannot find its native resumed session, the retried fresh session receives the prior visible conversation from StationAI's persisted transcript together with the new prompt. Claude completes the turn, and fresh CLI/XPC history and the visible UI retain both turns. A normal Claude resume continues using the native session without receiving duplicate handoff context.
+    func test_claude_resume_recovers_visible_history() throws {
+        let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-resume-recovery")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path), "The prepared Claude Code fixture is missing or not executable.")
+        try FileManager.default.copyItem(at: source, to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let owner = dataDirectory.appendingPathComponent(".stationai-claude-fixture-owner")
+        let ownerContents = "StationAI test owns this Claude Code protocol fixture (v1).\n"
+        if FileManager.default.fileExists(atPath: owner.path) {
+            XCTAssertEqual(try String(contentsOf: owner, encoding: .utf8), ownerContents)
+        } else {
+            try Data(ownerContents.utf8).write(to: owner)
+        }
+        claudeFixtureExecutable = executable.path
+        launchApp(defaultParent: fixture.parent.path)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude resume recovery UI", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Claude resume recovery UI")
+        let composer = element("message-composer")
+        func send(_ text: String) {
+            XCTAssertTrue(waitUntil({ composer.isEnabled && composer.isHittable }, timeout: 15), "The composer should accept a message.")
+            composer.click()
+            composer.typeText(text)
+            element("send-message-button").click()
+        }
+        let story = "BISCUIT-7 waited by the gate every evening. One night the boy finally came home."
+        send("Tell me a very short dog story.")
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", story)).firstMatch.waitForExistence(timeout: 20))
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 20))
+        send("Please inspect the workspace.")
+        XCTAssertTrue(app.staticTexts["Inspection done: the workspace is ready."].waitForExistence(timeout: 20))
+        XCTAssertTrue(waitUntil({ composer.isEnabled }, timeout: 20), "The normal resumed Claude turn should finish.")
+        let fixtureHistoryURL = URL(fileURLWithPath: executable.path + ".history")
+        var fixtureHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureHistoryURL)) as? [String: Any])
+        var fixtureTurns = try XCTUnwrap(fixtureHistory["turns"] as? [[String: Any]])
+        XCTAssertEqual(fixtureTurns.count, 2)
+        XCTAssertTrue(fixtureTurns[1]["resumed"] as? Bool == true)
+        XCTAssertFalse((fixtureTurns[1]["userText"] as? String ?? "").contains("<stationai-handoff-context>"))
+
+        relaunchApp()
+        openTask(named: "Claude resume recovery UI")
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", story)).firstMatch.waitForExistence(timeout: 10), "The first Claude answer should restore from StationAI's persisted transcript.")
+        XCTAssertTrue(app.staticTexts["Please inspect the workspace."].waitForExistence(timeout: 10), "The previous user prompt should remain in the reopened transcript.")
+        XCTAssertTrue(app.staticTexts["Inspection done: the workspace is ready."].waitForExistence(timeout: 10), "The second Claude answer should also restore from StationAI's persisted transcript.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: executable.path + ".missing-resume"))
+        try Data("StationAI test owns this missing-session trigger.\n".utf8).write(to: URL(fileURLWithPath: executable.path + ".missing-resume"))
+
+        send("What happened earlier?")
+        XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 20), "Claude should complete after rebuilding its session from saved history.")
+        fixtureHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureHistoryURL)) as? [String: Any])
+        fixtureTurns = try XCTUnwrap(fixtureHistory["turns"] as? [[String: Any]])
+        let recoveredTurn = try XCTUnwrap(fixtureTurns.last)
+        XCTAssertFalse(recoveredTurn["resumed"] as? Bool ?? true, "A missing native session should retry as a new Claude session.")
+        let recoveryPrompt = try XCTUnwrap(recoveredTurn["userText"] as? String)
+        XCTAssertTrue(recoveryPrompt.contains("<stationai-handoff-context>"))
+        XCTAssertTrue(recoveryPrompt.contains("User: Tell me a very short dog story."))
+        XCTAssertTrue(recoveryPrompt.contains("Claude: \(story)"))
+        XCTAssertTrue(recoveryPrompt.contains("User: Please inspect the workspace."))
+        XCTAssertTrue(recoveryPrompt.contains("Claude: Inspection done: the workspace is ready."))
+        XCTAssertTrue(recoveryPrompt.hasSuffix("What happened earlier?"))
+
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let messages = try XCTUnwrap(history["messages"] as? [[String: Any]])
+        let texts = messages.compactMap { $0["text"] as? String }
+        XCTAssertTrue(texts.contains("Tell me a very short dog story."))
+        XCTAssertTrue(texts.contains("What happened earlier?"))
+        XCTAssertTrue(texts.contains("OK."))
+    }
+
     // case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details.
     func test_conversation_adds_ordered_text_annotations() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-goal-success").path

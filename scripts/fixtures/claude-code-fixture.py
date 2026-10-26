@@ -92,6 +92,8 @@ def respond(user_text, instructions):
             for index, item in enumerate(comments)
         )
         text("msg_comments", answer)
+    elif user_text.rstrip().endswith("What happened earlier?"):
+        text("msg_recovered", SIMPLE_ANSWER)
     elif "story" in user_text.lower():
         text("msg_story", STORY)
         progress_clear = report_command(instructions, " task progress clear ")
@@ -134,6 +136,12 @@ def main():
         if message.get("type") == "control_request":
             request = message.get("request", {})
             if request.get("subtype") == "initialize":
+                missing_resume = Path(str(sys.argv[0]) + ".missing-resume")
+                if "--resume" in sys.argv and missing_resume.exists():
+                    missing_resume.unlink()
+                    write({"type": "result", "subtype": "error", "is_error": True,
+                           "result": "No conversation found with session ID"})
+                    return 1
                 models = [
                     {"value": "default", "displayName": "Default"},
                     {"value": "opus", "displayName": "Opus"},

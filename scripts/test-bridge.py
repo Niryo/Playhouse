@@ -3057,6 +3057,75 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertNotIn("Starting the checks.", handoff, "Only the unanswered turn's last commentary is handed off.")
         self.assertTrue(handoff.endswith("Continue the story."))
 
+    # case-contract: test_claude_resume_recovers_visible_history | After a Claude turn and StationAI restart, if Claude cannot find its native resumed session, the retried fresh session receives the prior visible conversation from StationAI's persisted transcript together with the new prompt. Claude completes the turn, and fresh CLI/XPC history and the visible UI retain both turns. A normal Claude resume continues using the native session without receiving duplicate handoff context.
+    def test_claude_resume_recovers_visible_history(self):
+        claude = self.data_directory / "claude-fixture-resume-recovery"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", claude)
+        claude.chmod(0o755)
+        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
+            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        fixtures = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(claude)}
+        task = self.create_task("Claude session recovery", roots=[self.primary])
+        self.assert_success(self.call_cli("conversation", "provider", task["id"], "set", "claude")[0])
+        first, _ = self.call_cli("conversation", "send", task["id"], "--message", "Tell me a very short dog story.", extra_environment=fixtures)
+        self.assert_success(first)
+        second, _ = self.call_cli("conversation", "send", task["id"], "--message", "Please inspect the workspace.", extra_environment=fixtures)
+        self.assert_success(second)
+
+        fixture_history_path = Path(str(claude) + ".history")
+        normal_resume = json.loads(fixture_history_path.read_text(encoding="utf-8"))["turns"][-1]
+        self.assertTrue(normal_resume["resumed"], normal_resume)
+        self.assertNotIn("<stationai-handoff-context>", normal_resume["userText"], "A working native resume must not receive duplicate transcript context.")
+
+        send_started = [
+            event for event in self.diagnostic_events()
+            if event.get("event") == "conversation.send.started" and event.get("taskID") == task["id"]
+        ][-1]
+        bridge_pid = int(send_started["clientPID"])
+        try:
+            os.kill(bridge_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        service_exit_deadline = time.monotonic() + 5
+        while time.monotonic() < service_exit_deadline:
+            try:
+                os.kill(bridge_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("The isolated bridge service should exit before recovery after restart.")
+        restarted_task, _ = self.call_cli("task", "get", task["id"])
+        self.assertEqual(self.assert_success(restarted_task)["conversationProvider"], "claude")
+
+        # The test owns this fixture executable and its sidecar before arming the failure.
+        owner = self.data_directory / ".stationai-claude-fixture-owner"
+        self.assertEqual(owner.read_text(encoding="utf-8"), "StationAI test owns this Claude Code protocol fixture (v1).\n")
+        Path(str(claude) + ".missing-resume").write_text("StationAI test owns this missing-session trigger.\n", encoding="utf-8")
+        recovered, events = self.call_cli(
+            "conversation", "send", task["id"], "--message", "What happened earlier?", extra_environment=fixtures
+        )
+        self.assert_success(recovered)
+        self.assertIn("OK.", [event["payload"]["text"] for event in events if event["type"] == "assistant_final"])
+
+        recovered_turn = json.loads(fixture_history_path.read_text(encoding="utf-8"))["turns"][-1]
+        self.assertFalse(recovered_turn["resumed"], "A missing native session should be replaced by a fresh Claude session.")
+        prompt = recovered_turn["userText"]
+        self.assertIn("<stationai-handoff-context>", prompt)
+        self.assertIn("User: Tell me a very short dog story.", prompt)
+        self.assertIn("Claude: BISCUIT-7 waited by the gate every evening.", prompt)
+        self.assertIn("User: Please inspect the workspace.", prompt)
+        self.assertIn("Claude: Inspection done: the workspace is ready.", prompt)
+        self.assertTrue(prompt.endswith("What happened earlier?"))
+
+        history = self.assert_success(self.call_cli("conversation", "history", task["id"], extra_environment=fixtures)[0])
+        visible = [message["text"] for message in history["messages"]]
+        self.assertIn("Tell me a very short dog story.", visible)
+        self.assertIn("BISCUIT-7 waited by the gate every evening. One night the boy finally came home.\n\nThe story is above.", visible)
+        self.assertIn("What happened earlier?", visible)
+        self.assertIn("OK.", visible)
+
     # case-contract: test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary | After a completed Codex fixture turn, switching providers is rejected while a follow-up is queued or a turn is active, and the provider menu is disabled during the turn. A settled switch to Claude records a boundary after the last Codex reply that persists across fresh reads and an app relaunch, keeps the Codex thread, and keeps earlier replies labeled Codex; switching back before any Claude turn removes the empty boundary, and the next Codex turn completes in the same thread.
     def test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary(self):
         task = self.create_task("Provider switch task")
