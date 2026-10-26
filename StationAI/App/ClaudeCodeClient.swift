@@ -200,6 +200,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         effort: ConversationEffort,
         threadID: String,
         workspace: ConversationWorkspaceContext,
+        sessionRecoveryContext: String? = nil,
         developerInstructions: String? = nil,
         onDelta: @escaping (String) -> Void,
         onFinalMessage: @escaping (String) -> Void,
@@ -257,6 +258,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         }
 
         let isNewSession = newSessionIDs.contains(sessionID)
+        var providerPrompt = text
         var initialize: [String: Any]
         do {
             initialize = try await launchSession(
@@ -265,8 +267,15 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
                 workspace: workspace, developerInstructions: developerInstructions
             )
         } catch ClientError.sessionNotFound {
-            // A session ID is persisted before its first turn; if that turn never
-            // reached Claude Code, create the session now under the same ID.
+            // A new session ID may have been persisted before its first turn
+            // reached Claude Code. A missing resumed session needs the visible
+            // StationAI transcript so Claude does not silently lose its context.
+            if !isNewSession {
+                providerPrompt = ConversationHandoff.prompt(
+                    ConversationHandoff.stripContext(from: text),
+                    context: sessionRecoveryContext
+                )
+            }
             stopProcess()
             initialize = try await launchSession(
                 sessionID: sessionID, resume: false, mode: mode, modelID: modelID,
@@ -282,7 +291,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         activeTurnID = turnID
         turnCompletion = TurnCompletion()
         pendingCommandUUIDs = [userMessageID]
-        try writeUserMessage(text: text, imageDataURLs: imageDataURLs, uuid: userMessageID, priority: nil)
+        try writeUserMessage(text: providerPrompt, imageDataURLs: imageDataURLs, uuid: userMessageID, priority: nil)
         isTurnActive = true
         Self.processActiveSessionIDs.insert(sessionID)
         ConversationSteerMailbox.publishActiveTurn(threadID: sessionID, turnID: turnID)

@@ -55,6 +55,7 @@ enum ConversationRole: String, Codable, Equatable {
 struct ConversationMessage: Codable, Identifiable, Equatable {
     let id: String
     let role: ConversationRole
+    var createdAt: Date?
     var text: String
     var imageDataURLs: [String]
     var phase: String?
@@ -65,9 +66,10 @@ struct ConversationMessage: Codable, Identifiable, Equatable {
     /// Nil for transcripts saved before StationAI supported more than Codex.
     var provider: ConversationProvider?
 
-    init(id: String, role: ConversationRole, text: String, imageDataURLs: [String] = [], phase: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil, asyncQuestions: [ConversationAsyncQuestion]? = nil, provider: ConversationProvider? = nil) {
+    init(id: String, role: ConversationRole, text: String, imageDataURLs: [String] = [], phase: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil, asyncQuestions: [ConversationAsyncQuestion]? = nil, provider: ConversationProvider? = nil, createdAt: Date? = .now) {
         self.id = id
         self.role = role
+        self.createdAt = createdAt
         self.text = text
         self.imageDataURLs = imageDataURLs
         self.phase = phase
@@ -77,11 +79,12 @@ struct ConversationMessage: Codable, Identifiable, Equatable {
         self.provider = provider
     }
 
-    private enum CodingKeys: String, CodingKey { case id, role, text, imageDataURLs, phase, turnID, timelineOrder, asyncQuestions, provider }
+    private enum CodingKeys: String, CodingKey { case id, role, createdAt, text, imageDataURLs, phase, turnID, timelineOrder, asyncQuestions, provider }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
         role = try container.decode(ConversationRole.self, forKey: .role)
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt)
         text = try container.decode(String.self, forKey: .text)
         imageDataURLs = try container.decodeIfPresent([String].self, forKey: .imageDataURLs) ?? []
         phase = try container.decodeIfPresent(String.self, forKey: .phase)
@@ -271,6 +274,7 @@ protocol ConversationProviderClient: AnyObject {
         effort: ConversationEffort,
         threadID: String,
         workspace: ConversationWorkspaceContext,
+        sessionRecoveryContext: String?,
         developerInstructions: String?,
         onDelta: @escaping (String) -> Void,
         onFinalMessage: @escaping (String) -> Void,
@@ -316,13 +320,14 @@ extension ConversationProviderClient {
         effort: ConversationEffort = .medium,
         threadID: String,
         workspace: ConversationWorkspaceContext,
+        sessionRecoveryContext: String? = nil,
         developerInstructions: String? = nil,
         onFinalMessage: @escaping (String) -> Void,
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void = { _ in }
     ) async throws {
         try await sendMessage(
             text, imageDataURLs: imageDataURLs, mode: mode, modelID: modelID, effort: effort, threadID: threadID,
-            workspace: workspace, developerInstructions: developerInstructions,
+            workspace: workspace, sessionRecoveryContext: sessionRecoveryContext, developerInstructions: developerInstructions,
             onDelta: { _ in }, onFinalMessage: onFinalMessage, onActivity: { _ in }, onDiff: { _ in },
             onHistory: { _ in }, onActionRequest: {}, onUserInput: onUserInput,
             onSteerMessage: { _, _ in }, onProgressMessage: { _ in }

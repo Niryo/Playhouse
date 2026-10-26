@@ -337,16 +337,6 @@ struct TaskConversationView: View {
         !activities.isEmpty || !progressMessages.isEmpty || isResponding || completedResponseDuration != nil || hasCompletedAssistantResponse
     }
 
-    private var currentActivity: ConversationActivity? {
-        activities.enumerated()
-            .filter { $0.element.isActive }
-            .max { lhs, rhs in
-                let lhsStart = lhs.element.startedAt ?? .distantPast
-                let rhsStart = rhs.element.startedAt ?? .distantPast
-                return lhsStart == rhsStart ? lhs.offset < rhs.offset : lhsStart < rhsStart
-            }?.element
-    }
-
     private var hasCompletedAssistantResponse: Bool {
         guard let latestUserIndex = messages.lastIndex(where: { $0.role == .user }) else {
             return messages.contains { $0.role == .assistant && $0.phase == "final_answer" }
@@ -1067,63 +1057,15 @@ struct TaskConversationView: View {
                         .lineLimit(3)
                         .accessibilityIdentifier("task-status-message")
                 }
-                if isResponding {
-                    currentActivityIndicator
-                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
             Spacer(minLength: 0)
-
-            Button {
-                isShowingWorkspaceEditor = true
-            } label: {
-                Label("Folders", systemImage: "folder")
-                    .font(.system(size: 12, weight: .medium))
-            }
-            .buttonHoverPointer()
-            .buttonStyle(.bordered)
-            .help("Edit working folders for this task")
-            .accessibilityIdentifier("edit-workspace-roots-button")
-            .disabled(isReadOnly)
         }
         .padding(.horizontal, 26)
         .padding(.vertical, 15)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(WorkspaceTheme.windowBackground.opacity(0.96))
-    }
-
-    private var currentActivityIndicator: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { timeline in
-            HStack(spacing: 7) {
-                Circle()
-                    .fill(Color.accentColor)
-                    .frame(width: 6, height: 6)
-                if let currentActivity {
-                    Text(currentActivity.title)
-                        .font(.system(size: 11, weight: .medium))
-                        .lineLimit(1)
-                        .accessibilityIdentifier("current-activity-title")
-                    Spacer(minLength: 4)
-                    if currentActivity.startedAt != nil {
-                        Text(currentActivity.durationLabel(at: timeline.date) ?? "Running · 0 ms")
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .accessibilityValue(currentActivity.durationLabel(at: timeline.date) ?? "Running · 0 ms")
-                            .accessibilityIdentifier("current-activity-duration")
-                    }
-                } else {
-                    Text("Thinking")
-                        .font(.system(size: 11, weight: .medium))
-                        .accessibilityIdentifier("current-activity-title")
-                    Spacer(minLength: 4)
-                }
-            }
-            .foregroundStyle(Color.accentColor)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("current-activity-indicator")
-        }
     }
 
     private var repositoryBadges: some View {
@@ -2064,6 +2006,12 @@ struct TaskConversationView: View {
                     .accessibilityLabel(String(Self.markdownAttributedText(displayText).characters))
                     .accessibilityIdentifier("assistant-message-\(message.id)")
             }
+            if let createdAt = message.createdAt {
+                Text(createdAt, format: .dateTime.hour().minute())
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityIdentifier("message-time-\(message.id)")
+            }
         }
         .frame(maxWidth: 620, alignment: .leading)
     }
@@ -2099,6 +2047,12 @@ struct TaskConversationView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 16).padding(.vertical, 11)
                     .background(WorkspaceTheme.accent, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+            }
+            if let createdAt = message.createdAt {
+                Text(createdAt, format: .dateTime.hour().minute())
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityIdentifier("message-time-\(message.id)")
             }
         }
             .frame(maxWidth: 620, alignment: .trailing)
@@ -3058,15 +3012,13 @@ struct TaskConversationView: View {
     }
 
     private func loadModels() async {
+        selectedModelID = (try? conversationManager.modelID(taskID: task.id)) ?? ""
         selectedEffort = (try? conversationManager.effort(taskID: task.id)) ?? .medium
         if let cachedModels = try? conversationManager.cachedModels(taskID: task.id), !cachedModels.isEmpty {
             modelOptions = cachedModels.newestVersionPerFamily()
         }
         do {
             modelOptions = try await conversationManager.models(taskID: task.id)
-            if !selectedModelID.isEmpty && !modelOptions.contains(where: { $0.id == selectedModelID }) {
-                selectedModelID = ""
-            }
             if !currentEffortChoices.contains(selectedEffort) {
                 selectedEffort = currentEffortChoices.contains(.medium) ? .medium : currentEffortChoices[0]
                 // Persist the clamp so the CLI and sends read the same effort the composer shows.
@@ -3115,6 +3067,7 @@ struct TaskConversationView: View {
         let effortChanged = selectedEffort != pickerEffort
         selectedModelID = pickerModelID
         selectedEffort = pickerEffort
+        Task { try? conversationManager.setModelID(taskID: task.id, modelID: pickerModelID) }
         guard effortChanged else { return }
         Task { try? await conversationManager.setEffort(taskID: task.id, effort: pickerEffort) }
     }
