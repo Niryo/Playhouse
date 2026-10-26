@@ -2356,18 +2356,29 @@ struct TaskConversationView: View {
                 ScrollView(.horizontal) {
                     HStack(spacing: 8) {
                         ForEach(pendingImages) { attachment in
-                            Image(nsImage: attachment.image).resizable().scaledToFill()
-                                .frame(width: 64, height: 52).clipShape(RoundedRectangle(cornerRadius: 8))
-                                .overlay(alignment: .topTrailing) {
-                                    Button {
-                                        pendingImages.removeAll { $0.id == attachment.id }
-                                        persistDraftImages()
-                                    } label: {
-                                        Image(systemName: "xmark.circle.fill").foregroundStyle(.white, .black.opacity(0.7))
-                                    }
-                                    .buttonHoverPointer()
-                                    .help("Remove image").buttonStyle(.plain).accessibilityLabel("Remove image")
+                            ZStack(alignment: .topTrailing) {
+                                Button { selectedChatImage = attachment.image } label: {
+                                    Image(nsImage: attachment.image).resizable().scaledToFill()
+                                        .frame(width: 64, height: 52)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
                                 }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Open attached image")
+                                .accessibilityIdentifier("pending-chat-image-\(attachment.id)")
+                                .buttonHoverPointer()
+                                .help("Open image at full size")
+
+                                Button {
+                                    pendingImages.removeAll { $0.id == attachment.id }
+                                    persistDraftImages()
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill").foregroundStyle(.white, .black.opacity(0.7))
+                                }
+                                .buttonHoverPointer()
+                                .help("Remove image")
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Remove image")
+                            }
                         }
                     }
                 }.accessibilityIdentifier("pending-chat-images")
