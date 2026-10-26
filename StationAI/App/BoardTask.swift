@@ -90,6 +90,7 @@ final class BoardTask {
     /// Nil for tasks created before provider selection; those use Codex.
     var conversationProviderRawValue: String?
     var conversationEffortRawValue: String?
+    var conversationModelIDsData: Data?
     var savedPrompt: String?
     var pendingSubmittedPrompt: String?
     var workspaceRootPathsData: Data?
@@ -142,6 +143,19 @@ final class BoardTask {
         set { conversationEffortRawValue = newValue }
     }
 
+    var conversationModelID: String? {
+        get {
+            guard let conversationModelIDsData,
+                  let modelIDs = try? JSONDecoder().decode([String: String].self, from: conversationModelIDsData) else { return nil }
+            return modelIDs[conversationProvider.rawValue]
+        }
+        set {
+            var modelIDs = (try? conversationModelIDsData.map { try JSONDecoder().decode([String: String].self, from: $0) }) ?? [:]
+            modelIDs[conversationProvider.rawValue] = newValue
+            conversationModelIDsData = try? JSONEncoder().encode(modelIDs)
+        }
+    }
+
     /// The native thread or session ID a provider uses for this task.
     func conversationID(for provider: ConversationProvider) -> String? {
         switch provider {
@@ -189,6 +203,7 @@ final class BoardTask {
         claudeSessionID = nil
         conversationProviderRawValue = conversationProvider.rawValue
         conversationEffortRawValue = "medium"
+        conversationModelIDsData = nil
         savedPrompt = nil
         pendingSubmittedPrompt = nil
         workspaceRootPathsData = try? JSONEncoder().encode(workspaceRootPaths)

@@ -3927,7 +3927,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Blank composer leaves send disabled")
     }
 
-    // case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; the choice persists across fresh CLI/XPC reads and an app relaunch, unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC.
+    // case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC.
     func test_conversation_provider_selection_persists_and_validates() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -3945,6 +3945,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(providerMenu.waitForExistence(timeout: 10), "The composer should offer a provider picker.")
         XCTAssertTrue(waitUntil({ providerMenu.label.contains("Codex") && providerMenu.isEnabled }, timeout: 10))
         XCTAssertTrue(app.staticTexts["Send a message to Codex · Luna."].waitForExistence(timeout: 10))
+        _ = try runCLI(["conversation", "model", taskID, "set", "codex-choice"])
 
         providerMenu.click()
         let claudeChoice = app.menuItems["conversation-provider-claude"]
@@ -3952,8 +3953,25 @@ final class StationAIUITests: XCTestCase {
         claudeChoice.click()
         XCTAssertTrue(waitUntil({ providerMenu.label.contains("Claude") }, timeout: 10), "A task without a conversation switches immediately.")
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["conversationProvider"] as? String) == "claude" }, timeout: 10))
+        let claudeModelBeforeSelection = try runCLI(["conversation", "model", taskID])
+        XCTAssertEqual((claudeModelBeforeSelection["result"] as? [String: Any])?["modelID"] as? String, nil, "Claude must not inherit the Codex model selection.")
+        _ = try runCLI(["conversation", "model", taskID, "set", "claude-choice"])
         XCTAssertTrue(app.staticTexts["Send a message to Claude."].waitForExistence(timeout: 10), "The empty conversation names Claude.")
         XCTAssertFalse(element("provider-boundary-claude").exists, "Switching before any conversation records no boundary.")
+        providerMenu.click()
+        XCTAssertTrue(app.menuItems["conversation-provider-codex"].waitForExistence(timeout: 5))
+        app.menuItems["conversation-provider-codex"].click()
+        XCTAssertTrue(waitUntil({ providerMenu.label.contains("Codex") }, timeout: 10))
+        let switchedCodexModelPicker = element("model-picker-menu")
+        XCTAssertTrue(waitUntil({ switchedCodexModelPicker.label.contains("codex-choice") }, timeout: 10), "Switching back to Codex should restore its visible model selection.")
+        XCTAssertEqual((try runCLI(["conversation", "model", taskID])["result"] as? [String: Any])?["modelID"] as? String, "codex-choice")
+        providerMenu.click()
+        XCTAssertTrue(app.menuItems["conversation-provider-claude"].waitForExistence(timeout: 5))
+        app.menuItems["conversation-provider-claude"].click()
+        XCTAssertTrue(waitUntil({ providerMenu.label.contains("Claude") }, timeout: 10))
+        let switchedClaudeModelPicker = element("model-picker-menu")
+        XCTAssertTrue(waitUntil({ switchedClaudeModelPicker.label.contains("claude-choice") }, timeout: 10), "Switching back to Claude should restore its visible model selection.")
+        XCTAssertEqual((try runCLI(["conversation", "model", taskID])["result"] as? [String: Any])?["modelID"] as? String, "claude-choice")
         let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
         XCTAssertEqual((history["providerBoundaries"] as? [Any])?.count, 0)
 
@@ -6284,7 +6302,7 @@ final class StationAIUITests: XCTestCase {
         claudePicker.click()
     }
 
-    // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. The selected effort defaults to Medium, persists through fresh CLI/XPC reads and reopening the conversation, and rejects unsupported values without replacing the prior choice. The Codex composer updates after model selection; unsupported modes and malformed model IDs are rejected before creating history.
+    // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. The selected model and effort persist through fresh CLI/XPC reads and reopening the conversation; malformed saved model IDs and unsupported efforts are rejected without replacing prior choices. The Codex composer updates after model selection; unsupported modes and malformed model IDs are rejected before creating history.
     func test_conversation_mode_rejects_unknown_mode_without_starting_a_turn() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -6429,6 +6447,22 @@ final class StationAIUITests: XCTestCase {
         reopenedPicker.click()
         XCTAssertTrue(waitUntil({ element("selected-model-effort").label == "High" }, timeout: 5), "Reopening the task should restore its effort selection.")
         reopenedPicker.click()
+
+        let alternateOptionAfterReopen = app.buttons["model-option-\(alternateID)"]
+        reopenedPicker.click()
+        XCTAssertTrue(alternateOptionAfterReopen.waitForExistence(timeout: 5))
+        alternateOptionAfterReopen.click()
+        reopenedPicker.click()
+        XCTAssertTrue(waitUntil({ modelPicker.label.contains(alternateName) }, timeout: 5))
+        XCTAssertTrue(waitUntil({
+            guard let result = try? runCLI(["conversation", "model", taskID])["result"] as? [String: Any] else { return false }
+            return result["modelID"] as? String == alternateID
+        }, timeout: 5), "The committed model should persist through a fresh CLI/XPC request.")
+        element("back-to-board-button").click()
+        openTask(named: "Conversation modes")
+        let restoredModelPicker = element("model-picker-menu")
+        XCTAssertTrue(restoredModelPicker.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitUntil({ restoredModelPicker.label.contains(alternateName) }, timeout: 5), "Reopening the task should restore the last selected model.")
 
         let modeMenu = element("conversation-mode-menu")
         XCTAssertTrue(modeMenu.waitForExistence(timeout: 10))

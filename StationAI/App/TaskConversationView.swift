@@ -3046,15 +3046,13 @@ struct TaskConversationView: View {
     }
 
     private func loadModels() async {
+        selectedModelID = (try? conversationManager.modelID(taskID: task.id)) ?? ""
         selectedEffort = (try? conversationManager.effort(taskID: task.id)) ?? .medium
         if let cachedModels = try? conversationManager.cachedModels(taskID: task.id), !cachedModels.isEmpty {
             modelOptions = cachedModels.newestVersionPerFamily()
         }
         do {
             modelOptions = try await conversationManager.models(taskID: task.id)
-            if !selectedModelID.isEmpty && !modelOptions.contains(where: { $0.id == selectedModelID }) {
-                selectedModelID = ""
-            }
             if !currentEffortChoices.contains(selectedEffort) {
                 selectedEffort = currentEffortChoices.contains(.medium) ? .medium : currentEffortChoices[0]
                 // Persist the clamp so the CLI and sends read the same effort the composer shows.
@@ -3103,6 +3101,7 @@ struct TaskConversationView: View {
         let effortChanged = selectedEffort != pickerEffort
         selectedModelID = pickerModelID
         selectedEffort = pickerEffort
+        Task { try? await conversationManager.setModelID(taskID: task.id, modelID: pickerModelID) }
         guard effortChanged else { return }
         Task { try? await conversationManager.setEffort(taskID: task.id, effort: pickerEffort) }
     }
