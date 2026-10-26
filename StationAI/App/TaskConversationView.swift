@@ -1458,10 +1458,11 @@ struct TaskConversationView: View {
                         }
                     }
 
-                    if isDisplayingActiveResponse {
-                        ForEach(activeSubagents) { activity in
-                            subagentTimelineRow(activity)
-                        }
+                    if let activeProcess {
+                        activityRow(activeProcess)
+                    }
+                    ForEach(activeSubagents) { activity in
+                        subagentTimelineRow(activity)
                     }
                     ForEach(activities.filter { $0.isContextCompaction && $0.timelineOrder == nil }) { activity in
                         contextCompactionTimelineRow(activity)
@@ -1520,7 +1521,21 @@ struct TaskConversationView: View {
     }
 
     private var activeSubagents: [ConversationActivity] {
-        activities.filter { $0.isSubagent && ["inprogress", "running"].contains($0.status.lowercased()) }
+        activities.filter { $0.isSubagent && $0.isActive }
+    }
+
+    /// Keep the latest live non-agent operation in the conversation timeline.
+    /// Earlier live operations remain available in the expanded activity list.
+    private var activeProcess: ConversationActivity? {
+        activities
+            .filter { !$0.isSubagent && !$0.isContextCompaction && $0.isActive }
+            .enumerated()
+            .max { left, right in
+                let leftOrder = left.element.timelineOrder ?? left.offset
+                let rightOrder = right.element.timelineOrder ?? right.offset
+                return leftOrder < rightOrder
+            }?
+            .element
     }
 
     private var activityList: some View {
@@ -1562,16 +1577,20 @@ struct TaskConversationView: View {
                                 .accessibilityIdentifier("codex-progress-message-\(message.id)")
                         }
                     }
-                    ForEach(activities.filter { !$0.isSubagent && !$0.isContextCompaction }) { activity in
+                    let activeIDsOutside = Set(activeSubagents.map(\.id) + [activeProcess?.id].compactMap { $0 })
+                    ForEach(activities.filter {
+                        !$0.isSubagent && !$0.isContextCompaction && !activeIDsOutside.contains($0.id)
+                    }) { activity in
                         activityRow(activity)
                     }
                     let agentActivities = activities.filter(\.isSubagent)
-                    if !isDisplayingActiveResponse && !agentActivities.isEmpty {
+                    let completedAgentActivities = agentActivities.filter { !$0.isActive }
+                    if !completedAgentActivities.isEmpty {
                         Text("Agents used")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.secondary)
                             .padding(.top, 4)
-                        ForEach(agentActivities) { activity in
+                        ForEach(completedAgentActivities) { activity in
                             subagentTimelineRow(activity)
                         }
                     }
