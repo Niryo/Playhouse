@@ -130,10 +130,115 @@ enum ConversationMode: String, CaseIterable, Hashable {
     }
 }
 
+enum ConversationEffort: String, CaseIterable, Codable, Hashable, Identifiable, Sendable {
+    case low
+    case medium
+    case high
+    case xhigh
+
+    var id: String { rawValue }
+    var title: String { rawValue == "xhigh" ? "Extra High" : rawValue.capitalized }
+    var sliderPosition: Double { Double(Self.allCases.firstIndex(of: self) ?? 1) }
+
+    static func from(sliderPosition: Double) -> ConversationEffort {
+        allCases[min(max(Int(sliderPosition.rounded()), 0), allCases.count - 1)]
+    }
+}
+
 struct ConversationModelOption: Codable, Identifiable, Hashable {
     let id: String
     let name: String
     let isDefault: Bool
+    var supportedEfforts: [ConversationEffort]? = nil
+}
+
+extension Array where Element == ConversationModelOption {
+    /// Keeps the newest concrete model in each family and drops aliases superseded by a versioned model.
+    func newestVersionPerFamily() -> [ConversationModelOption] {
+        let visibleModels = filter { $0.id.caseInsensitiveCompare("default") != .orderedSame }
+        var newestVersions: [String: VersionedModel] = [:]
+        for model in visibleModels {
+            guard let version = ModelVersion(id: model.id) else { continue }
+            guard let current = newestVersions[version.family] else {
+                newestVersions[version.family] = VersionedModel(id: model.id, version: version)
+                continue
+            }
+            if version.isPreferred(over: current.version, id: model.id, otherID: current.id) {
+                newestVersions[version.family] = VersionedModel(id: model.id, version: version)
+            }
+        }
+        var retainedFamilies = Set<String>()
+        return visibleModels.filter { model in
+            let family = ModelVersion.familyName(for: model.id)
+            if let newest = newestVersions[family] {
+                guard model.id == newest.id else { return false }
+                return retainedFamilies.insert(family).inserted
+            }
+            guard !ModelVersion.isAlias(model.id) else { return false }
+            return retainedFamilies.insert(family).inserted
+        }
+    }
+}
+
+private struct VersionedModel {
+    let id: String
+    let version: ModelVersion
+}
+
+/// A model ID split into its family name and numeric version, such as `gpt-sol` and `[6, 1]` for `gpt-6.1-sol`.
+private struct ModelVersion {
+    let family: String
+    let numbers: [Int]
+    let snapshotDate: Int?
+
+    var isSnapshot: Bool { snapshotDate != nil }
+
+    init?(id: String) {
+        var familyTokens: [String] = []
+        var numbers: [Int] = []
+        var snapshotDate: Int?
+        for token in id.lowercased().split(separator: "-") {
+            // Eight-digit date stamps such as `20251001` identify a snapshot, not a version.
+            if token.count == 8, token.allSatisfy({ $0.isASCII && $0.isNumber }) {
+                snapshotDate = Int(token)
+                continue
+            }
+            let parts = token.split(separator: ".", omittingEmptySubsequences: false).map { Int($0) }
+            if !parts.isEmpty, parts.allSatisfy({ $0 != nil }) {
+                numbers += parts.compactMap { $0 }
+            } else {
+                familyTokens.append(String(token))
+            }
+        }
+        guard !numbers.isEmpty else { return nil }
+        if familyTokens.first == "claude" { familyTokens.removeFirst() }
+        self.family = familyTokens.joined(separator: "-")
+        self.numbers = numbers
+        self.snapshotDate = snapshotDate
+    }
+
+    static func familyName(for id: String) -> String {
+        guard let version = ModelVersion(id: id) else {
+            let tokens = id.lowercased().split(separator: "-").map(String.init)
+            return tokens.first == "claude" ? tokens.dropFirst().joined(separator: "-") : tokens.joined(separator: "-")
+        }
+        return version.family
+    }
+
+    static func isAlias(_ id: String) -> Bool {
+        let normalizedID = id.lowercased().hasPrefix("claude-") ? String(id.dropFirst("claude-".count)).lowercased() : id.lowercased()
+        return ["opus", "sonnet", "haiku", "default"].contains(normalizedID)
+    }
+
+    func isPreferred(over other: ModelVersion, id: String, otherID: String) -> Bool {
+        if numbers != other.numbers { return other.numbers.lexicographicallyPrecedes(numbers) }
+        switch (snapshotDate, other.snapshotDate) {
+        case (nil, .some): return true
+        case (.some, nil): return false
+        case let (.some(date), .some(otherDate)) where date != otherDate: return date > otherDate
+        default: return id.localizedStandardCompare(otherID) == .orderedAscending
+        }
+    }
 }
 
 /// A divider shown where a task's conversation moved to another provider.
@@ -157,11 +262,13 @@ protocol ConversationProviderClient: AnyObject {
     func diagnosticFields(_ additionalFields: [String: String]) -> [String: String]
     func startThread(workspace: ConversationWorkspaceContext, modelID: String, developerInstructions: String?) async throws -> String
     func availableModels(workspace: ConversationWorkspaceContext) async throws -> [ConversationModelOption]
+    func validateEffort(_ effort: ConversationEffort, modelID: String, workspace: ConversationWorkspaceContext) async throws
     func sendMessage(
         _ text: String,
         imageDataURLs: [String],
         mode: ConversationMode,
         modelID: String,
+        effort: ConversationEffort,
         threadID: String,
         workspace: ConversationWorkspaceContext,
         developerInstructions: String?,
@@ -197,6 +304,8 @@ protocol ConversationProviderClient: AnyObject {
 }
 
 extension ConversationProviderClient {
+    func validateEffort(_ effort: ConversationEffort, modelID: String, workspace: ConversationWorkspaceContext) async throws {}
+
     func diagnosticFields() -> [String: String] { diagnosticFields([:]) }
 
     func sendMessage(
@@ -204,6 +313,7 @@ extension ConversationProviderClient {
         imageDataURLs: [String] = [],
         mode: ConversationMode,
         modelID: String,
+        effort: ConversationEffort = .medium,
         threadID: String,
         workspace: ConversationWorkspaceContext,
         developerInstructions: String? = nil,
@@ -211,7 +321,7 @@ extension ConversationProviderClient {
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void = { _ in }
     ) async throws {
         try await sendMessage(
-            text, imageDataURLs: imageDataURLs, mode: mode, modelID: modelID, threadID: threadID,
+            text, imageDataURLs: imageDataURLs, mode: mode, modelID: modelID, effort: effort, threadID: threadID,
             workspace: workspace, developerInstructions: developerInstructions,
             onDelta: { _ in }, onFinalMessage: onFinalMessage, onActivity: { _ in }, onDiff: { _ in },
             onHistory: { _ in }, onActionRequest: {}, onUserInput: onUserInput,

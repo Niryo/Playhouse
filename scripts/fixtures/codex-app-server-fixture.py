@@ -248,8 +248,14 @@ def main():
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"serverInfo": {"name": "stationai-fixture", "version": "1"}}})
         elif message.get("method") == "model/list":
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"data": [
-                {"id": "gpt-6-luna", "displayName": "GPT-6 Luna", "isDefault": True},
-                {"id": "gpt-6-sol", "displayName": "GPT-6 Sol", "isDefault": False},
+                {"id": "gpt-6-luna", "displayName": "GPT-6 Luna", "isDefault": True,
+                 "supportedReasoningEfforts": [{"reasoningEffort": level} for level in ["low", "medium", "high", "xhigh"]]},
+                {"id": "gpt-6-sol", "displayName": "GPT-6 Sol", "isDefault": False,
+                 "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]},
+                {"id": "gpt-6-mini", "displayName": "GPT-6 Mini", "isDefault": False,
+                 "supportedReasoningEfforts": ["low", "medium"]},
+                {"id": "gpt-5.6-luna", "displayName": "GPT-5.6 Luna", "isDefault": False,
+                 "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]},
             ]}})
         elif "-goal" in mode and message.get("method") == "thread/goal/get":
             goal = json.loads(goal_path.read_text(encoding="utf-8")) if goal_path.is_file() else None
@@ -374,6 +380,7 @@ def main():
                 "images": [item.get("url") for item in image_inputs],
                 "imageInputs": image_inputs,
                 "conversationMode": message.get("params", {}).get("collaborationMode", {}).get("mode"),
+                "reasoningEffort": message.get("params", {}).get("collaborationMode", {}).get("settings", {}).get("reasoningEffort"),
                 "developerInstructions": message.get("params", {}).get("collaborationMode", {}).get("settings", {}).get("developerInstructions"),
                 "cwd": message.get("params", {}).get("cwd"),
                 "runtimeWorkspaceRoots": message.get("params", {}).get("runtimeWorkspaceRoots", []),

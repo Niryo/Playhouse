@@ -3632,14 +3632,16 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: longDraftTaskID)?["savedPrompt"] as? String) == nil }, timeout: 10))
         let composer = element("message-composer")
         let sendButton = element("send-message-button")
-        let modelPicker = app.popUpButtons.firstMatch
+        let modelPicker = element("model-picker-menu")
         XCTAssertTrue(composer.waitForExistence(timeout: 10))
         XCTAssertTrue(modelPicker.waitForExistence(timeout: 10), "The composer should show the selected model next to its send controls.")
         let modelTaskID = try taskID(named: "Blank message")
         let modelResult = try runCLI(["conversation", "models", modelTaskID])["result"] as? [String: Any]
         let availableModels = try XCTUnwrap(modelResult?["models"] as? [[String: Any]])
-        let selectedModelValue = (modelPicker.value as? String ?? modelPicker.label)
-            .split(separator: ":").last.map(String.init)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let modelLabel = modelPicker.value as? String ?? modelPicker.label
+        let selectedModelValue = modelLabel.components(separatedBy: ", effort:").first?
+            .replacingOccurrences(of: "Model: ", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? modelLabel
         XCTAssertTrue(availableModels.contains(where: {
             selectedModelValue.caseInsensitiveCompare($0["name"] as? String ?? "") == .orderedSame
                 || selectedModelValue.caseInsensitiveCompare($0["id"] as? String ?? "") == .orderedSame
@@ -6248,16 +6250,67 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(element("goal-clear-button").exists)
     }
 
-    // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | Codex and Claude model lists persist across fresh CLI/XPC requests. The CLI verifies the cache remains after a failed model lookup for an unavailable workspace. The visible Claude case seeds a Cached Claude Model option distinct from the provider result, shows it before replacing it with the real Default model list, and verifies the refreshed list is persisted. When the owned provider executable is unavailable, the cached Offline Cached Claude option remains visible and persisted. The Codex composer and empty-state prompt track model selection; unsupported modes and malformed model IDs are rejected before creating history.
+    // case-contract: test_conversation_models_keep_newest_version_per_family | The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Alias-only Claude entries are omitted. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control.
+    func test_conversation_models_keep_newest_version_per_family() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Model versions", roots: [fixture.primary.path])
+        openTask(named: "Model versions")
+
+        let taskID = try taskID(named: "Model versions")
+        let modelResult = try runCLI(["conversation", "models", taskID])["result"] as? [String: Any]
+        let cliModelIDs = try XCTUnwrap(modelResult?["models"] as? [[String: Any]]).compactMap { $0["id"] as? String }
+        XCTAssertFalse(cliModelIDs.contains("gpt-5.6-luna"), "The CLI model list should omit the superseded GPT-5.6 Luna model.")
+        XCTAssertFalse(cliModelIDs.contains("default"), "The default pseudo-model should not appear in the selectable list.")
+
+        let modelPicker = element("model-picker-menu")
+        XCTAssertTrue(modelPicker.waitForExistence(timeout: 5), "The composer should expose the model picker.")
+        modelPicker.click()
+        let optionIDs = { self.app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "model-option-")).allElementsBoundByIndex.compactMap(\.identifier) }
+        XCTAssertTrue(waitUntil({
+            Set(optionIDs()) == Set(cliModelIDs.map { "model-option-\($0)" })
+        }, timeout: 5), "The picker should list exactly the CLI model list: \(cliModelIDs).")
+        XCTAssertLessThan(app.buttons["model-option-gpt-6-luna"].frame.midY, modelPicker.frame.minY,
+            "The model popover should appear above the composer control.")
+        XCTAssertTrue(app.buttons["model-option-gpt-6-luna"].exists, "The newer GPT-6 Luna model should remain in the picker.")
+        XCTAssertTrue(app.buttons["model-option-gpt-6-sol"].exists, "Other families should remain in the picker.")
+        XCTAssertTrue(app.buttons["model-option-gpt-6-mini"].exists, "Other families should remain in the picker.")
+        XCTAssertFalse(app.buttons["model-option-gpt-5.6-luna"].exists, "The older GPT-5.6 Luna model should be hidden from the picker.")
+        XCTAssertFalse(app.buttons["model-option-default"].exists, "The default pseudo-model should not appear in the picker.")
+        modelPicker.click()
+
+        let claudeExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
+        let aliasesExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui-aliases-only")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: claudeExecutable.path))
+        try? FileManager.default.removeItem(at: aliasesExecutable)
+        try FileManager.default.copyItem(at: claudeExecutable, to: aliasesExecutable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: aliasesExecutable.path)
+        app.terminate()
+        claudeFixtureExecutable = aliasesExecutable.path
+        launchApp(defaultParent: fixture.parent.path)
+        let claudeTask = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Alias-only Claude models", "--root", fixture.primary.path, "--provider", "claude"
+        ])["result"] as? [String: Any])
+        let claudeTaskID = try XCTUnwrap(claudeTask["id"] as? String)
+        openTask(named: "Alias-only Claude models")
+        let claudeModels = try XCTUnwrap(try runCLI(
+            ["conversation", "models", claudeTaskID],
+            extraEnvironment: ["STATIONAI_E2E_CLAUDE_EXECUTABLE": aliasesExecutable.path]
+        )["result"] as? [String: Any])
+        XCTAssertTrue((claudeModels["models"] as? [[String: Any]])?.isEmpty == true,
+            "The alias-only Claude fixture should not expose unversioned aliases.")
+        let claudePicker = element("model-picker-menu")
+        claudePicker.click()
+        XCTAssertFalse(app.buttons["model-option-default"].exists)
+        XCTAssertFalse(app.buttons["model-option-opus"].exists)
+        XCTAssertFalse(app.buttons["model-option-sonnet"].exists)
+        XCTAssertFalse(app.buttons["model-option-haiku"].exists)
+        claudePicker.click()
+    }
+
+    // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. The selected effort defaults to Medium, persists through fresh CLI/XPC reads and reopening the conversation, and rejects unsupported values without replacing the prior choice. The Codex composer updates after model selection; unsupported modes and malformed model IDs are rejected before creating history.
     func test_conversation_mode_rejects_unknown_mode_without_starting_a_turn() throws {
-        let claudeSource = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
-        let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-model-cache")
-        try FileManager.default.copyItem(at: claudeSource, to: claudeExecutable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claudeExecutable.path)
-        let claudeOwnerMarker = dataDirectory.appendingPathComponent(".stationai-claude-fixture-owner")
-        let claudeOwnerValue = "StationAI test owns this Claude Code protocol fixture (v1).\n"
-        try Data(claudeOwnerValue.utf8).write(to: claudeOwnerMarker)
-        claudeFixtureExecutable = claudeExecutable.path
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Conversation modes", roots: [fixture.primary.path])
         openTask(named: "Conversation modes")
@@ -6266,11 +6319,14 @@ final class StationAIUITests: XCTestCase {
         let modelResult = try runCLI(["conversation", "models", taskID])["result"] as? [String: Any]
         let availableModels = try XCTUnwrap(modelResult?["models"] as? [[String: Any]])
         XCTAssertFalse(availableModels.isEmpty)
-        let modelPicker = app.popUpButtons.firstMatch
+        let modelPicker = element("model-picker-menu")
         XCTAssertTrue(modelPicker.waitForExistence(timeout: 5), "The composer should expose a model returned by Codex.")
+        XCTAssertTrue(modelPicker.label.contains("effort: Medium"), "The selected model effort should default to Medium.")
         func displayedModelValue() -> String {
             let rawValue = modelPicker.value as? String ?? modelPicker.label
-            return String(rawValue.split(separator: ":").last ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return rawValue.components(separatedBy: ", effort:").first?
+                .replacingOccurrences(of: "Model: ", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? rawValue
         }
         let selectedModel = try XCTUnwrap(availableModels.first { model in
             let displayedModel = displayedModelValue()
@@ -6279,29 +6335,124 @@ final class StationAIUITests: XCTestCase {
         }, "The composer should expose a model returned by Codex.")
         let selectedModelName = try XCTUnwrap(selectedModel["name"] as? String)
         let selectedModelID = try XCTUnwrap(selectedModel["id"] as? String)
-        let emptyModelPrompt = modelPrompt()
-        XCTAssertTrue(emptyModelPrompt.waitForExistence(timeout: 5))
-        XCTAssertTrue(emptyModelPrompt.label.contains(selectedModelName), "The empty-state prompt should show the active model.")
         let modelMenu = modelPicker
         XCTAssertTrue(displayedModelValue().caseInsensitiveCompare(selectedModelName) == .orderedSame
             || displayedModelValue().caseInsensitiveCompare(selectedModelID) == .orderedSame)
-        if let alternateModel = availableModels.first(where: { $0["id"] as? String != selectedModelID }) {
-            let alternateID = try XCTUnwrap(alternateModel["id"] as? String)
-            modelMenu.click()
-            let optionID = "model-option-\(alternateID)"
-            let modelOption = app.menuItems.matching(identifier: optionID).firstMatch
-            XCTAssertTrue(modelOption.waitForExistence(timeout: 5), "The model picker should list each model returned by Codex.")
-            modelOption.click()
-            let alternateName = alternateModel["name"] as? String ?? alternateID
+        let alternateModel = try XCTUnwrap(availableModels.first { $0["id"] as? String != selectedModelID }, "The Codex fixture should expose multiple models.")
+        let alternateID = try XCTUnwrap(alternateModel["id"] as? String)
+        modelMenu.click()
+        let optionID = "model-option-\(alternateID)"
+        let modelOption = app.buttons.matching(identifier: optionID).firstMatch
+        XCTAssertTrue(modelOption.waitForExistence(timeout: 5), "The model picker should list each model returned by Codex.")
+        modelOption.click()
+        let alternateName = alternateModel["name"] as? String ?? alternateID
+        XCTAssertTrue(displayedModelValue().caseInsensitiveCompare(selectedModelName) == .orderedSame
+            || displayedModelValue().caseInsensitiveCompare(selectedModelID) == .orderedSame,
+            "The composer model label should stay committed while the picker is open.")
+        modelPicker.click()
+        XCTAssertTrue(waitUntil({
+            let displayedModel = displayedModelValue()
+            return displayedModel.caseInsensitiveCompare(alternateName) == .orderedSame
+                || displayedModel.caseInsensitiveCompare(alternateID) == .orderedSame
+        }, timeout: 5), "Choosing a model should update the composer selection.")
+        let limitedModel = try XCTUnwrap(availableModels.first { $0["id"] as? String == "gpt-6-mini" })
+        XCTAssertEqual(limitedModel["supportedEfforts"] as? [String], ["low", "medium"])
+
+        modelPicker.click()
+        let effortSlider = element("model-effort-slider")
+        XCTAssertTrue(effortSlider.waitForExistence(timeout: 5), "The model popover should expose an effort slider.")
+        XCTAssertEqual(effortSlider.label, "Model effort")
+        XCTAssertEqual(effortSlider.value as? String, "Medium", "The slider should expose its selected effort accessibly.")
+        assertPixel(effortSlider.screenshot().image, normalizedX: 0.34, normalizedY: 0.5, rgb: (255, 255, 255), accuracy: 30)
+        assertTrackThickness(effortSlider.screenshot().image)
+        effortSlider.coordinate(withNormalizedOffset: CGVector(dx: 0.34, dy: 0.5)).click()
+        assertNoBlueFocusOutline(in: effortSlider.screenshot().image)
+        for (position, title) in [(0.0, "Low"), (1.0 / 3.0, "Medium"), (2.0 / 3.0, "High"), (1.0, "Extra High")] {
+            effortSlider.adjust(toNormalizedSliderPosition: position)
             XCTAssertTrue(waitUntil({
-                let displayedModel = displayedModelValue()
-                return displayedModel.caseInsensitiveCompare(alternateName) == .orderedSame
-                    || displayedModel.caseInsensitiveCompare(alternateID) == .orderedSame
-            }, timeout: 5), "Choosing a model should update the composer selection.")
-            XCTAssertTrue(waitUntil({
-                emptyModelPrompt.label.contains(alternateName)
-            }, timeout: 5), "The empty-state prompt should react to model changes.")
+                element("selected-model-effort").label == title
+                    && effortSlider.value as? String == title
+                    && modelPicker.label.contains("effort: Medium")
+            }, timeout: 5), "Selecting \(title) should update the visible effort and slider value.")
         }
+        // The accessibility adjust above drives the native representation, so also drive the visible knob directly.
+        effortSlider.coordinate(withNormalizedOffset: CGVector(dx: 0.0, dy: 0.5)).click()
+        XCTAssertTrue(waitUntil({
+            element("selected-model-effort").label == "Low" && effortSlider.value as? String == "Low"
+        }, timeout: 5), "Clicking the start of the visible effort track should select Low.")
+        effortSlider.coordinate(withNormalizedOffset: CGVector(dx: 2.0 / 3.0, dy: 0.5)).click()
+        XCTAssertTrue(waitUntil({
+            element("selected-model-effort").label == "High" && effortSlider.value as? String == "High"
+        }, timeout: 5), "Clicking two-thirds along the visible effort track should select High.")
+        let dragStart = effortSlider.coordinate(withNormalizedOffset: CGVector(dx: 0.34, dy: 0.5))
+        let dragEnd = effortSlider.coordinate(withNormalizedOffset: CGVector(dx: 0.67, dy: 0.5))
+        dragStart.press(forDuration: 0.1, thenDragTo: dragEnd)
+        XCTAssertTrue(waitUntil({
+            element("selected-model-effort").label == "High" && effortSlider.value as? String == "High"
+        }, timeout: 5), "Dragging the visible knob should move the effort selection.")
+        app.typeKey(.rightArrow, modifierFlags: [])
+        XCTAssertTrue(waitUntil({
+            element("selected-model-effort").label == "Extra High" && effortSlider.value as? String == "Extra High"
+        }, timeout: 5), "The right arrow key should step the visible effort slider to Extra High.")
+        XCTAssertTrue(modelPicker.label.contains("effort: Medium"), "The composer effort should stay committed while the picker is open.")
+        let savedEffortBeforeDismissal = try XCTUnwrap(try runCLI(["conversation", "effort", taskID])["result"] as? [String: Any])
+        XCTAssertEqual(savedEffortBeforeDismissal["effort"] as? String, "medium", "Effort changes should not persist before the picker is dismissed.")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ !effortSlider.isHittable }, timeout: 5), "Escape should dismiss the model popover.")
+        XCTAssertTrue(waitUntil({ modelPicker.label.contains("effort: Extra High") }, timeout: 5), "Dismissing the picker should apply the staged effort.")
+        XCTAssertTrue(waitUntil({
+            guard let result = try? runCLI(["conversation", "effort", taskID])["result"] as? [String: Any] else { return false }
+            return result["effort"] as? String == "xhigh"
+        }, timeout: 5), "Effort changes should persist after the picker is dismissed.")
+        let limitedOption = app.buttons["model-option-gpt-6-mini"]
+        modelPicker.click()
+        XCTAssertTrue(limitedOption.waitForExistence(timeout: 5))
+        limitedOption.click()
+        XCTAssertTrue(modelPicker.label.contains(alternateName) && modelPicker.label.contains("effort: Extra High"),
+            "The composer should retain its committed model and effort while a restricted model is being previewed.")
+        XCTAssertEqual(element("selected-model-effort").label, "Medium", "The staged selection should clamp to the model's supported effort.")
+        modelPicker.click()
+        XCTAssertTrue(waitUntil({
+            modelPicker.label.contains("GPT-6 Mini") && modelPicker.label.contains("effort: Medium")
+        }, timeout: 5), "Dismissing after changing to a restricted model should apply its clamped effort.")
+        XCTAssertTrue(waitUntil({
+            guard let result = try? runCLI(["conversation", "effort", taskID])["result"] as? [String: Any] else { return false }
+            return result["effort"] as? String == "medium"
+        }, timeout: 5), "The clamped effort should persist after the picker is dismissed.")
+        modelPicker.click()
+        XCTAssertTrue(effortSlider.waitForExistence(timeout: 5))
+        effortSlider.adjust(toNormalizedSliderPosition: 1)
+        XCTAssertTrue(waitUntil({
+            effortSlider.value as? String == "Medium"
+                && element("selected-model-effort").label == "Medium"
+                && modelPicker.label.contains("effort: Medium")
+        }, timeout: 5), "The restricted slider must not select an unsupported High effort.")
+        let defaultOption = app.buttons["model-option-\(selectedModelID)"]
+        XCTAssertTrue(defaultOption.waitForExistence(timeout: 5))
+        defaultOption.click()
+        XCTAssertTrue(modelPicker.label.contains("GPT-6 Mini"), "The model label should remain committed until picker dismissal.")
+        modelPicker.click()
+        XCTAssertTrue(waitUntil({ modelPicker.label.contains(selectedModelName) }, timeout: 5))
+        modelPicker.click()
+        XCTAssertTrue(effortSlider.waitForExistence(timeout: 5))
+        effortSlider.adjust(toNormalizedSliderPosition: 2.0 / 3.0)
+        XCTAssertTrue(waitUntil({
+            element("selected-model-effort").label == "High" && modelPicker.label.contains("effort: Medium")
+        }, timeout: 5))
+        modelPicker.click()
+        XCTAssertTrue(waitUntil({ modelPicker.label.contains("effort: High") }, timeout: 5))
+        XCTAssertTrue(waitUntil({
+            guard let response = try? runCLI(["conversation", "effort", taskID]),
+                  let result = response["result"] as? [String: Any] else { return false }
+            return result["effort"] as? String == "high"
+        }, timeout: 5), "The selected effort should persist through a fresh CLI/XPC request.")
+        element("back-to-board-button").click()
+        openTask(named: "Conversation modes")
+        let reopenedPicker = element("model-picker-menu")
+        XCTAssertTrue(reopenedPicker.waitForExistence(timeout: 5))
+        reopenedPicker.click()
+        XCTAssertTrue(waitUntil({ element("selected-model-effort").label == "High" }, timeout: 5), "Reopening the task should restore its effort selection.")
+        reopenedPicker.click()
 
         let modeMenu = element("conversation-mode-menu")
         XCTAssertTrue(modeMenu.waitForExistence(timeout: 10))
@@ -6329,12 +6480,28 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual((history?["activities"] as? [Any])?.count, 0)
         attachScreenshot(named: "Plan mode is visible in the conversation composer")
 
+
+    }
+
+
+    // case-contract: test_conversation_models_cache_and_refresh | Codex and Claude filtered model lists persist across fresh CLI/XPC requests; an unavailable workspace fails refresh without clearing the previous cache. The visible Claude picker shows the seeded cached option before replacing it with the filtered versioned provider list, and retains an offline cached option when the provider executable is unavailable.
+    func test_conversation_models_cache_and_refresh() throws {
+        let claudeSource = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
+        let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-model-cache")
+        try FileManager.default.copyItem(at: claudeSource, to: claudeExecutable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claudeExecutable.path)
+        let claudeOwnerMarker = dataDirectory.appendingPathComponent(".stationai-claude-fixture-owner")
+        let claudeOwnerValue = "StationAI test owns this Claude Code protocol fixture (v1).\n"
+        try Data(claudeOwnerValue.utf8).write(to: claudeOwnerMarker)
+        claudeFixtureExecutable = claudeExecutable.path
+        launchApp(defaultParent: fixture.parent.path)
         let claudeTask = try XCTUnwrap(try runCLI([
             "task", "create", "--title", "Claude cached models", "--root", fixture.primary.path, "--provider", "claude"
         ])["result"] as? [String: Any])
         let claudeTaskID = try XCTUnwrap(claudeTask["id"] as? String)
         let seededClaudeModels = try XCTUnwrap((try runCLI(["conversation", "models", claudeTaskID])["result"] as? [String: Any])?["models"] as? [[String: Any]])
-        XCTAssertEqual(seededClaudeModels.first?["name"] as? String, "Default")
+        XCTAssertEqual(seededClaudeModels.compactMap { $0["id"] as? String }, ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-6"])
+        XCTAssertFalse(seededClaudeModels.contains { $0["id"] as? String == "default" })
         let staleCachedModels: [[String: Any]] = [["id": "cached-model", "name": "Cached Claude Model", "isDefault": false]]
         let staleCacheData = try JSONSerialization.data(withJSONObject: staleCachedModels)
         let testPreferences = try XCTUnwrap(UserDefaults(suiteName: preferencesSuiteName))
@@ -6343,16 +6510,19 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(persistedClaudeModels.first?["name"] as? String, "Cached Claude Model", "A fresh XPC request should read the seeded real preferences cache.")
         element("back-to-board-button").click()
         openTask(named: "Claude cached models")
-        let claudePicker = app.popUpButtons.firstMatch
+        let claudePicker = element("model-picker-menu")
         XCTAssertTrue(claudePicker.waitForExistence(timeout: 5))
+        claudePicker.click()
+        XCTAssertTrue(app.buttons["model-option-cached-model"].waitForExistence(timeout: 5), "The distinct cached Claude option should render before server discovery completes.")
         XCTAssertTrue(waitUntil({
-            (claudePicker.value as? String ?? claudePicker.label).contains("Cached Claude Model")
-        }, timeout: 5), "The distinct cached Claude option should render before server discovery completes.")
-        XCTAssertTrue(waitUntil({
-            (claudePicker.value as? String ?? claudePicker.label).contains("Default")
-        }, timeout: 15), "Real Claude discovery should replace the seeded cache with its current model list.")
+            app.buttons["model-option-claude-opus-5-5"].exists
+        }, timeout: 15), "Real Claude discovery should replace the seeded cache with its filtered versioned models.")
+        XCTAssertTrue(waitUntil({ !app.buttons["model-option-cached-model"].exists }, timeout: 5),
+            "The stale cached option should disappear after provider refresh.")
+        XCTAssertFalse(app.buttons["model-option-default"].exists)
+        claudePicker.click()
         let refreshedClaudeCache = try XCTUnwrap((try runCLI(["conversation", "models", claudeTaskID, "--cached"])["result"] as? [String: Any])?["models"] as? [[String: Any]])
-        XCTAssertEqual(refreshedClaudeCache.first?["name"] as? String, "Default", "The real provider refresh should replace the stale persisted cache.")
+        XCTAssertEqual(refreshedClaudeCache.compactMap { $0["id"] as? String }, ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-6"], "The real provider refresh should replace the stale persisted cache.")
 
         XCTAssertEqual(try String(contentsOf: claudeOwnerMarker, encoding: .utf8), claudeOwnerValue, "Only remove the test-owned executable after verifying its ownership marker.")
         try FileManager.default.removeItem(at: claudeExecutable)
@@ -6364,12 +6534,89 @@ final class StationAIUITests: XCTestCase {
         testPreferences.set(try JSONSerialization.data(withJSONObject: offlineModels), forKey: "conversation.models.cache.claude")
         element("back-to-board-button").click()
         openTask(named: "Claude cached offline")
-        let offlinePicker = app.popUpButtons.firstMatch
-        XCTAssertTrue(waitUntil({
-            (offlinePicker.value as? String ?? offlinePicker.label).contains("Offline Cached Claude")
-        }, timeout: 5), "A failed provider launch should leave the cached Claude choice visible.")
+        let offlinePicker = element("model-picker-menu")
+        XCTAssertTrue(offlinePicker.waitForExistence(timeout: 5))
+        offlinePicker.click()
+        XCTAssertTrue(app.buttons["model-option-offline-cached-model"].waitForExistence(timeout: 5),
+            "A failed provider launch should leave the cached Claude choice visible.")
         let retainedOfflineCache = try XCTUnwrap((try runCLI(["conversation", "models", offlineTaskID, "--cached"])["result"] as? [String: Any])?["models"] as? [[String: Any]])
         XCTAssertEqual(retainedOfflineCache.first?["name"] as? String, "Offline Cached Claude")
+    }
+
+    // case-contract: test_conversation_effort_dispatches_to_codex | The selected effort persists through CLI/XPC reads and reaches Codex turn/start collaborationMode.settings.reasoningEffort; a model's advertised effort limit rejects unsupported requests before history is created. The UI selects Extra High and sends a Codex fixture turn whose recorded protocol value is xhigh.
+    func test_conversation_effort_dispatches_to_codex() throws {
+        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
+        codexFixtureExecutable = executable.path
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: executable.path + ".history"))
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Codex effort UI", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Codex effort UI")
+        openTask(named: "Codex effort UI")
+        let picker = element("model-picker-menu")
+        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        picker.click()
+        let slider = element("model-effort-slider")
+        XCTAssertTrue(slider.waitForExistence(timeout: 5))
+        slider.adjust(toNormalizedSliderPosition: 1)
+        XCTAssertTrue(waitUntil({ element("selected-model-effort").label == "Extra High" }, timeout: 5))
+        picker.click()
+        let unsupported = try runCLI([
+            "conversation", "send", taskID, "--message", "Unsupported effort.", "--model", "gpt-6-mini"
+        ], expectedStatus: 2)
+        XCTAssertEqual((unsupported["error"] as? [String: Any])?["code"] as? String, "invalid_argument")
+        let emptyHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        XCTAssertEqual((emptyHistory["messages"] as? [Any])?.count, 0)
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText("Check Codex effort dispatch.")
+        element("send-message-button").click()
+        XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 15))
+        let historyURL = URL(fileURLWithPath: executable.path + ".history")
+        let history = try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any]
+        let turns = try XCTUnwrap(history?["turns"] as? [[String: Any]])
+        XCTAssertEqual(turns.last?["reasoningEffort"] as? String, "xhigh")
+        let effort = try XCTUnwrap(try runCLI(["conversation", "effort", taskID])["result"] as? [String: Any])
+        XCTAssertEqual(effort["effort"] as? String, "xhigh")
+    }
+
+    // case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 as the concrete latest choice. The Claude composer retains native Default dispatch until a model is explicitly selected. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
+    func test_conversation_effort_dispatches_to_claude() throws {
+        let executable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
+        claudeFixtureExecutable = executable.path
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: executable.path + ".history"))
+        launchApp(defaultParent: fixture.parent.path)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude effort UI", "--root", fixture.primary.path, "--provider", "claude"
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Claude effort UI")
+        let picker = element("model-picker-menu")
+        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        picker.click()
+        XCTAssertFalse(app.buttons["model-option-default"].exists, "The Claude Default pseudo-model should not appear in the menu.")
+        XCTAssertFalse(app.buttons["model-option-opus"].exists, "The versioned Opus model should replace its alias.")
+        XCTAssertTrue(app.buttons["model-option-claude-opus-5-5"].exists, "The latest concrete Opus model should remain selectable.")
+        attachScreenshot(named: "Claude model list shows only versioned model families")
+        let slider = element("model-effort-slider")
+        XCTAssertTrue(slider.waitForExistence(timeout: 5))
+        slider.adjust(toNormalizedSliderPosition: 1)
+        XCTAssertTrue(waitUntil({ element("selected-model-effort").label == "Extra High" }, timeout: 5))
+        picker.click()
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText("Check Claude effort dispatch.")
+        element("send-message-button").click()
+        XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 15))
+        let historyURL = URL(fileURLWithPath: executable.path + ".history")
+        let history = try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any]
+        let turns = try XCTUnwrap(history?["turns"] as? [[String: Any]])
+        XCTAssertEqual(turns.last?["effort"] as? String, "xhigh")
+        let arguments = try XCTUnwrap(turns.last?["arguments"] as? [String])
+        XCTAssertFalse(arguments.contains("--model"), "An untouched Claude model choice should preserve Claude Code's configured default.")
+        let effort = try XCTUnwrap(try runCLI(["conversation", "effort", taskID])["result"] as? [String: Any])
+        XCTAssertEqual(effort["effort"] as? String, "xhigh")
     }
 
     // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode use the existing question path, move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome.
@@ -7419,6 +7666,48 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(Int((color.redComponent * 255).rounded()), expected.0, accuracy: accuracy, file: file, line: line)
         XCTAssertEqual(Int((color.greenComponent * 255).rounded()), expected.1, accuracy: accuracy, file: file, line: line)
         XCTAssertEqual(Int((color.blueComponent * 255).rounded()), expected.2, accuracy: accuracy, file: file, line: line)
+    }
+
+    private func assertTrackThickness(_ image: NSImage, file: StaticString = #filePath, line: UInt = #line) {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            XCTFail("Could not read effort slider pixels.", file: file, line: line)
+            return
+        }
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        let x = min(cgImage.width - 1, max(0, Int(CGFloat(cgImage.width) * 0.10)))
+        var accentRows = 0
+        for y in 0..<cgImage.height {
+            guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+            if color.blueComponent > 0.55 && color.blueComponent > color.redComponent * 1.2 {
+                accentRows += 1
+            }
+        }
+        let fraction = Double(accentRows) / Double(cgImage.height)
+        XCTAssertGreaterThanOrEqual(fraction, 0.23,
+            "The 6-point effort track should remain visibly thicker than the previous 4-point track (blue-pixel fraction: \(fraction)).",
+            file: file, line: line)
+    }
+
+    private func assertNoBlueFocusOutline(in image: NSImage, file: StaticString = #filePath, line: UInt = #line) {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            XCTFail("Could not read effort slider pixels.", file: file, line: line)
+            return
+        }
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        let edgePoints: [(CGFloat, CGFloat)] = (1...9).map { (CGFloat($0) / 10, 0.04) }
+            + (1...9).map { (CGFloat($0) / 10, 0.96) }
+            + (1...9).map { (0.025, CGFloat($0) / 10) }
+            + (1...9).map { (0.975, CGFloat($0) / 10) }
+        var bluePixels = 0
+        for (normalizedX, normalizedY) in edgePoints {
+            let x = min(cgImage.width - 1, max(0, Int(CGFloat(cgImage.width) * normalizedX)))
+            let y = min(cgImage.height - 1, max(0, Int(CGFloat(cgImage.height) * normalizedY)))
+            guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+            if color.blueComponent > 0.55 && color.blueComponent > color.redComponent * 1.4 {
+                bluePixels += 1
+            }
+        }
+        XCTAssertEqual(bluePixels, 0, "The focused effort slider should not draw a blue focus border.", file: file, line: line)
     }
 
     private func assertContainsRedForeground(in element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {

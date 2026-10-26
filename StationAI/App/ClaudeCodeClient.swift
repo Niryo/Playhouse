@@ -197,6 +197,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         imageDataURLs: [String] = [],
         mode: ConversationMode,
         modelID: String,
+        effort: ConversationEffort,
         threadID: String,
         workspace: ConversationWorkspaceContext,
         developerInstructions: String? = nil,
@@ -260,6 +261,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         do {
             initialize = try await launchSession(
                 sessionID: sessionID, resume: !isNewSession, mode: mode, modelID: modelID,
+                effort: effort,
                 workspace: workspace, developerInstructions: developerInstructions
             )
         } catch ClientError.sessionNotFound {
@@ -268,6 +270,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
             stopProcess()
             initialize = try await launchSession(
                 sessionID: sessionID, resume: false, mode: mode, modelID: modelID,
+                effort: effort,
                 workspace: workspace, developerInstructions: developerInstructions
             )
         }
@@ -482,6 +485,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         defer { client.stopProcess() }
         let initialize = try await client.launchSession(
             sessionID: UUID().uuidString.lowercased(), resume: false, mode: .code, modelID: Self.defaultModelID,
+            effort: nil,
             workspace: workspace, developerInstructions: nil
         )
         return MetadataResponse(initialize: initialize, extra: try await query(client))
@@ -492,6 +496,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         resume: Bool,
         mode: ConversationMode,
         modelID: String,
+        effort: ConversationEffort?,
         workspace: ConversationWorkspaceContext,
         developerInstructions: String?
     ) async throws -> [String: Any] {
@@ -526,6 +531,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         environment["USER"] = environment["USER"] ?? NSUserName()
         environment["LOGNAME"] = environment["LOGNAME"] ?? NSUserName()
         if let configDirectoryOverride { environment["CLAUDE_CONFIG_DIR"] = configDirectoryOverride }
+        if let effort { environment["CLAUDE_CODE_EFFORT_LEVEL"] = effort.rawValue }
         // The CLI is a child of StationAI, not an IDE integration or nested session.
         environment.removeValue(forKey: "CLAUDECODE")
         environment.removeValue(forKey: "CLAUDE_CODE_ENTRYPOINT")

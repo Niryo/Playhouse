@@ -197,7 +197,7 @@
   },
   {
     "id": "test_conversation_mode_rejects_unknown_mode_without_starting_a_turn",
-    "expectation": "Codex and Claude model lists persist across fresh CLI/XPC requests. The CLI verifies the cache remains after a failed model lookup for an unavailable workspace. The visible Claude case seeds a Cached Claude Model option distinct from the provider result, shows it before replacing it with the real Default model list, and verifies the refreshed list is persisted. When the owned provider executable is unavailable, the cached Offline Cached Claude option remains visible and persisted. The Codex composer and empty-state prompt track model selection; unsupported modes and malformed model IDs are rejected before creating history."
+    "expectation": "The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. The selected effort defaults to Medium, persists through fresh CLI/XPC reads and reopening the conversation, and rejects unsupported values without replacing the prior choice. The Codex composer updates after model selection; unsupported modes and malformed model IDs are rejected before creating history."
   },
   {
     "id": "test_thread_goal_lifecycle_persists_through_cli_xpc",
@@ -270,5 +270,21 @@
   {
     "id": "test_claude_answer_stays_final_around_outcome_report",
     "expectation": "Against the Claude Code protocol fixture, the answer Claude writes before running its StationAI progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn without an outcome ends in Waiting Response. After switching to Codex, the first Codex prompt hands off the whole Claude answer and excludes the commentary of answered turns, while a turn that recorded only commentary hands off its last commentary instead."
+  },
+  {
+    "id": "test_conversation_models_keep_newest_version_per_family",
+    "expectation": "The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Alias-only Claude entries are omitted. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control."
+  },
+  {
+    "id": "test_conversation_effort_dispatches_to_codex",
+    "expectation": "The selected effort persists through CLI/XPC reads and reaches Codex turn/start collaborationMode.settings.reasoningEffort; a model's advertised effort limit rejects unsupported requests before history is created. The UI selects Extra High and sends a Codex fixture turn whose recorded protocol value is xhigh."
+  },
+  {
+    "id": "test_conversation_effort_dispatches_to_claude",
+    "expectation": "Claude's model picker omits Default and aliases, showing Opus 5.5 as the concrete latest choice. The Claude composer retains native Default dispatch until a model is explicitly selected. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh."
+  },
+  {
+    "id": "test_conversation_models_cache_and_refresh",
+    "expectation": "Codex and Claude filtered model lists persist across fresh CLI/XPC requests; an unavailable workspace fails refresh without clearing the previous cache. The visible Claude picker shows the seeded cached option before replacing it with the filtered versioned provider list, and retains an offline cached option when the provider executable is unavailable."
   }
 ]
