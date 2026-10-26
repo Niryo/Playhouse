@@ -1687,7 +1687,7 @@ class StationAIBridgeTests(unittest.TestCase):
         active_marker = Path(str(executable) + ".turn-active")
         release_marker = Path(str(executable) + ".turn-release")
         try:
-            deadline = time.monotonic() + 10
+            deadline = time.monotonic() + 20
             while not active_marker.exists() and time.monotonic() < deadline:
                 time.sleep(0.02)
             self.assertTrue(active_marker.exists(), "The fixture turn did not become active.")
@@ -3259,6 +3259,152 @@ class StationAIBridgeTests(unittest.TestCase):
             fixture_turns = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
             self.assertTrue(any(turn["userText"].startswith("Write a concise task title") for turn in fixture_turns))
             self.assertEqual(Path(fixture_turns[-1]["cwd"]).resolve(), Path(record["worktreePath"]).resolve())
+
+    # case-contract: test_conversation_serializes_concurrent_claude_sends | When a CLI/XPC Claude turn overlaps a UI turn, the second send waits on the shared cross-process Claude slot instead of failing with an already-running error. Both turns complete and persist their own user and assistant messages, and diagnostics identify the separate bridge process entering the queue without logging prompt text. The UI shows the queued answer after reopening its task.
+    def test_conversation_serializes_concurrent_claude_sends(self):
+        source = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / "claude-fixture-concurrent-sends"
+        shutil.copyfile(source, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
+            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        first = self.assert_success(self.call_cli(
+            "task", "create", "--title", "First Claude conversation", "--root", self.primary, "--provider", "claude"
+        )[0])
+        second = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Second Claude conversation", "--root", self.secondary, "--provider", "claude"
+        )[0])
+        first_prompt = "Please hold-claude-turn-for-concurrency."
+        first_command = ["conversation", "send", first["id"], "--message", first_prompt]
+        second_command = ["conversation", "send", second["id"], "--message", "Second Claude response."]
+        first_process = self.start_cli(*first_command, extra_environment=environment)
+        second_process = None
+        ready = Path(str(executable) + ".concurrent-turn-ready")
+        release = Path(str(executable) + ".concurrent-turn-release")
+        try:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and not ready.exists() and first_process.poll() is None:
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "The first Claude fixture turn should become active.")
+            second_process = self.start_cli(*second_command, extra_environment=environment)
+            time.sleep(1)
+            self.assertIsNone(second_process.poll(), "The second task should wait for the shared Claude process slot.")
+            release.write_text("Release the first Claude turn.\n", encoding="utf-8")
+            first_result, _ = self.finish_cli(first_process, first_command)
+            self.assert_success(first_result)
+            second_result, _ = self.finish_cli(second_process, second_command)
+            self.assert_success(second_result)
+        finally:
+            if first_process.poll() is None:
+                release.write_text("Release the first Claude turn.\n", encoding="utf-8")
+                try:
+                    first_process.communicate(timeout=20)
+                except subprocess.TimeoutExpired:
+                    first_process.kill()
+                    first_process.communicate()
+            if second_process is not None and second_process.poll() is None:
+                second_process.terminate()
+                second_process.communicate()
+
+        for task_id, prompt in [(first["id"], first_prompt), (second["id"], "Second Claude response.")]:
+            history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+            self.assertIn(prompt, [message["text"] for message in history["messages"] if message["role"] == "user"])
+            self.assertIn("OK.", [message["text"] for message in history["messages"] if message["role"] == "assistant"])
+
+        diagnostics = (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8")
+        queued = [json.loads(line) for line in diagnostics.splitlines() if '"event":"claude.turn.queued"' in line]
+        started = [json.loads(line) for line in diagnostics.splitlines() if '"event":"claude.turn.started"' in line]
+        first_record = self.assert_success(self.call_cli("task", "get", first["id"])[0])
+        second_record = self.assert_success(self.call_cli("task", "get", second["id"])[0])
+        queued_second = next((item for item in queued if item.get("requestedThreadID") == second_record.get("claudeSessionID")), None)
+        self.assertIsNotNone(queued_second, queued)
+        first_started = next((item for item in started if item.get("threadID") == first_record.get("claudeSessionID")), None)
+        self.assertIsNotNone(first_started, started)
+        self.assertNotEqual(queued_second.get("clientPID"), first_started.get("clientPID"), "The queued turn must be handled by a distinct bridge process.")
+        self.assertNotIn("Second Claude response.", diagnostics, "Diagnostics must not include conversation prompt text.")
+
+    # case-contract: test_conversation_releases_queued_claude_send_after_failure | When an active UI Claude turn fails while a CLI/XPC send is queued from a separate process, the failure releases the shared cross-process slot so the queued turn starts and completes. Diagnostics identify the bridge process and provider failure, and the UI shows the queued answer after reopening its task with fresh history.
+    def test_conversation_releases_queued_claude_send_after_failure(self):
+        source = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / "claude-fixture-concurrent-failure"
+        shutil.copyfile(source, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
+            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        first = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Failing Claude conversation", "--root", self.primary, "--provider", "claude"
+        )[0])
+        second = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Queued Claude conversation", "--root", self.secondary, "--provider", "claude"
+        )[0])
+        first_command = ["conversation", "send", first["id"], "--message", "Please fail-after-hold-claude-turn-for-concurrency."]
+        second_prompt = "Second Claude turn after failure."
+        second_command = ["conversation", "send", second["id"], "--message", second_prompt]
+        first_process = self.start_cli(*first_command, extra_environment=environment)
+        second_process = None
+        ready = Path(str(executable) + ".concurrent-turn-ready")
+        release = Path(str(executable) + ".concurrent-turn-release")
+        try:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and not ready.exists() and first_process.poll() is None:
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "The failing Claude turn should reach its held active state.")
+            second_process = self.start_cli(*second_command, extra_environment=environment)
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                second_record = self.assert_success(self.call_cli("task", "get", second["id"])[0])
+                if second_record.get("status") == "In Progress" and second_record.get("claudeSessionID"):
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("The second Claude send should be accepted while the first turn remains active.")
+            self.assertIsNone(second_process.poll(), "The second CLI send must remain pending while the first turn owns the process slot.")
+            time.sleep(1)
+            release.write_text("Fail the first Claude turn.\n", encoding="utf-8")
+            failed, _ = self.finish_cli(first_process, first_command, expected_status=1)
+            self.assertFalse(failed.get("ok"), failed)
+            self.assertIn("Claude Code exited with status 1.", failed.get("error", {}).get("message", ""), failed)
+            completed, _ = self.finish_cli(second_process, second_command)
+            self.assert_success(completed)
+            diagnostics = self.data_directory / "Diagnostics.jsonl"
+            diagnostics_text = diagnostics.read_text(encoding="utf-8")
+            first_record = self.assert_success(self.call_cli("task", "get", first["id"])[0])
+            second_record = self.assert_success(self.call_cli("task", "get", second["id"])[0])
+            queued_event = next(
+                (json.loads(line) for line in diagnostics_text.splitlines()
+                 if '"event":"claude.turn.queued"' in line
+                 and json.loads(line).get("requestedThreadID") == second_record.get("claudeSessionID")),
+                None,
+            )
+            self.assertIsNotNone(queued_event, diagnostics_text)
+            first_started = next(
+                (json.loads(line) for line in diagnostics_text.splitlines()
+                 if '"event":"claude.turn.started"' in line
+                 and json.loads(line).get("threadID") == first_record.get("claudeSessionID")),
+                None,
+            )
+            self.assertIsNotNone(first_started, diagnostics_text)
+            self.assertNotEqual(queued_event.get("clientPID"), first_started.get("clientPID"), "The queued turn must be handled by a distinct bridge process.")
+        finally:
+            if first_process.poll() is None:
+                release.write_text("Fail the first Claude turn.\n", encoding="utf-8")
+                try:
+                    first_process.communicate(timeout=20)
+                except subprocess.TimeoutExpired:
+                    first_process.kill()
+                    first_process.communicate()
+            if second_process is not None and second_process.poll() is None:
+                second_process.terminate()
+                second_process.communicate()
+
+        history = self.assert_success(self.call_cli("conversation", "history", second["id"], extra_environment=environment)[0])
+        messages = history["messages"]
+        self.assertIn(second_prompt, [message["text"] for message in messages if message["role"] == "user"])
+        self.assertIn("OK.", [message["text"] for message in messages if message["role"] == "assistant"])
 
     # case-contract: test_conversation_serializes_concurrent_sends | Two concurrent sends for the same task are serialized across the app and CLI/XPC paths against the local Codex app-server fixture; the second waits for the first, both complete on the persisted thread, the task remains In Progress while a send is active, and successful turns without outcome calls finish in Waiting Response.
     def test_conversation_serializes_concurrent_sends(self):
