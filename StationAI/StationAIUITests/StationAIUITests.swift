@@ -5834,6 +5834,52 @@ final class StationAIUITests: XCTestCase {
         XCTAssertLessThan(reloaded.frame.minY, app.staticTexts["Context compaction completed."].frame.minY)
     }
 
+    // case-contract: test_conversation_loads_newest_messages_before_older_history | A 120-message conversation initially presents its newest 40 messages; scrolling to the top reveals older messages in batches without losing the newest messages or changing order. CLI/XPC history remains complete and ordered across fresh reads.
+    func test_conversation_loads_newest_messages_before_older_history() throws {
+        let fixtureCopy = WorkspaceFixture.root.appendingPathComponent("codex-fixture-long-history-success")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureCopy.path), "The UI runner must prepare the long-history fixture before launch.")
+        codexFixtureExecutable = fixtureCopy.path
+        launchApp(defaultParent: fixture.primary.path)
+        try createTaskFixture(title: "Long conversation history", roots: [fixture.primary.path])
+        openTask(named: "Long conversation history")
+
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText("Create a long history.")
+        element("send-message-button").click()
+
+        let latest = app.staticTexts["Long history assistant 60."]
+        let oldest = app.staticTexts["Long history user 01."]
+        XCTAssertTrue(latest.waitForExistence(timeout: 20), "The conversation should open at its newest message.")
+        let scrollView = element("conversation-scroll-view")
+        XCTAssertEqual(scrollView.value as? String, "Showing latest 40 of 120 messages", "The initial transcript window should contain exactly the newest 40 messages.")
+        XCTAssertFalse(oldest.exists, "Older messages should not be rendered in the initial message window.")
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID(named: "Long conversation history")])["result"] as? [String: Any])
+        XCTAssertEqual((history["messages"] as? [[String: Any]])?.count, 120, "The CLI should retain complete history while the UI renders a recent window.")
+
+        let intermediate = app.staticTexts["Long history user 21."]
+        for _ in 0..<8 where (scrollView.value as? String) != "Showing latest 80 of 120 messages" {
+            scrollView.swipeDown()
+        }
+        XCTAssertEqual(scrollView.value as? String, "Showing latest 80 of 120 messages", "Reaching the top should reveal one older batch at a time.")
+        XCTAssertTrue(intermediate.exists, "The first older batch should include message 21.")
+        XCTAssertFalse(oldest.exists, "The first older batch should not yet include the oldest message.")
+
+        for _ in 0..<8 where !oldest.exists {
+            scrollView.swipeDown()
+        }
+        XCTAssertTrue(oldest.waitForExistence(timeout: 10), "Scrolling to the top should reveal the oldest message in an earlier batch.")
+        XCTAssertEqual(scrollView.value as? String, "Showing latest 120 of 120 messages")
+        let firstAssistant = app.staticTexts["Long history assistant 01."]
+        XCTAssertTrue(firstAssistant.exists)
+        XCTAssertLessThan(oldest.frame.minY, firstAssistant.frame.minY, "Older messages should retain chronological order after batches are inserted.")
+        for _ in 0..<8 where !latest.isHittable {
+            scrollView.swipeUp()
+        }
+        XCTAssertTrue(latest.isHittable, "Loading earlier messages should preserve and return to the newest content.")
+    }
+
     // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs.
     func test_conversation_shows_subagent_delegation() throws {
         let fixtureRoot = WorkspaceFixture.root

@@ -4176,6 +4176,32 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertLess(user["timelineOrder"], reloaded_rows[0]["timelineOrder"])
         self.assertLess(reloaded_rows[0]["timelineOrder"], assistant["timelineOrder"])
 
+    # case-contract: test_conversation_loads_newest_messages_before_older_history | A 120-message conversation initially presents its newest 40 messages; scrolling to the top reveals older messages in batches without losing the newest messages or changing order. CLI/XPC history remains complete and ordered across fresh reads.
+    def test_conversation_loads_newest_messages_before_older_history(self):
+        task_id = self.create_task(title="Long conversation history")["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-long-history-success"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable), "STATIONAI_FIXTURE_WORKSPACE": str(self.primary)}
+        sent, _ = self.call_cli("conversation", "send", task_id, "--message", "Create a long history.", extra_environment=env)
+        self.assert_success(sent)
+        history_response, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        messages = self.assert_success(history_response)["messages"]
+        self.assertEqual(len(messages), 120)
+        self.assertEqual(messages[0]["text"], "Long history user 01.")
+        self.assertEqual(messages[-1]["text"], "Long history assistant 60.")
+        self.assertEqual(
+            [message["text"] for message in messages[:4]],
+            ["Long history user 01.", "Long history assistant 01.", "Long history user 02.", "Long history assistant 02."],
+        )
+        fresh_response, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        fresh_messages = self.assert_success(fresh_response)["messages"]
+        self.assertEqual([message["text"] for message in fresh_messages], [message["text"] for message in messages])
+
     # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs.
     def test_conversation_shows_subagent_delegation(self):
         task_id = self.create_task(title="Subagent delegation")["id"]
