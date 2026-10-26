@@ -13,6 +13,7 @@ Every turn is recorded in `<executable>.history` for test assertions.
 
 import json
 import os
+import select
 import subprocess
 import sys
 import time
@@ -71,7 +72,53 @@ def run_tool(tool_id, name, tool_input, command=None):
 
 def respond(user_text, instructions):
     commands = []
-    if "publish-image-during-active-turn" in user_text.lower():
+    if "hold until stopped" in user_text.lower() or "hold-until-stopped" in user_text.lower():
+        ready = Path(str(sys.argv[0]) + ".interrupt-ready")
+        ready.write_text("The Claude fixture turn is active and waiting for an interrupt.\n", encoding="utf-8")
+        deadline = time.monotonic() + 30
+        received_interrupt = False
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([sys.stdin], [], [], 0.02)
+            if not readable:
+                continue
+            control = json.loads(sys.stdin.readline())
+            if control.get("type") != "control_request" or control.get("request", {}).get("subtype") != "interrupt":
+                continue
+            received_interrupt = True
+            Path(str(sys.argv[0]) + ".interrupt-received").write_text("control interrupt\n", encoding="utf-8")
+            interrupt_release = Path(str(sys.argv[0]) + ".interrupt-release")
+            if Path(sys.argv[0]).name.endswith("-hold-reject-interrupt"):
+                reject = Path(str(sys.argv[0]) + ".interrupt-reject")
+                reject_deadline = time.monotonic() + 15
+                while not reject.exists() and time.monotonic() < reject_deadline:
+                    time.sleep(0.02)
+                reject.unlink(missing_ok=True)
+                write({"type": "control_response", "response": {
+                    "subtype": "error", "request_id": control.get("request_id"),
+                    "error": "Fixture rejected the interrupt while the turn remains active.",
+                }})
+                ack_deadline = time.monotonic() + 15
+                while not interrupt_release.exists() and time.monotonic() < ack_deadline:
+                    time.sleep(0.02)
+                interrupt_release.unlink(missing_ok=True)
+                text("msg_after_rejected_interrupt", "The turn completed after Stop was rejected.")
+                write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+                break
+            ack_deadline = time.monotonic() + 15
+            while not interrupt_release.exists() and time.monotonic() < ack_deadline:
+                time.sleep(0.02)
+            interrupt_release.unlink(missing_ok=True)
+            write({"type": "control_response", "response": {
+                "subtype": "success", "request_id": control.get("request_id"), "response": {},
+            }})
+            write({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                   "result": "Claude interrupted this turn."})
+            break
+        ready.unlink(missing_ok=True)
+        if not received_interrupt:
+            raise TimeoutError("Timed out waiting for Claude interrupt.")
+        commands.append({"interruptReceived": True})
+    elif "publish-image-during-active-turn" in user_text.lower():
         ready = Path(str(sys.argv[0]) + ".image-turn-ready")
         release = Path(str(sys.argv[0]) + ".image-turn-release")
         ready.write_text("Claude turn is active.\n", encoding="utf-8")
