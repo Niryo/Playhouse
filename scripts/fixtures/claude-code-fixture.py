@@ -13,6 +13,7 @@ Every turn is recorded in `<executable>.history` for test assertions.
 
 import json
 import os
+import select
 import subprocess
 import sys
 import time
@@ -111,6 +112,64 @@ def respond(user_text, instructions):
         write({"type": "control_request", "request_id": "question-request-1", "request": {
             "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
         }})
+    elif "hold until stopped" in user_text.lower() or "hold-until-stopped" in user_text.lower():
+        ready = Path(str(sys.argv[0]) + ".interrupt-ready")
+        ready.write_text("The Claude fixture turn is active and waiting for an interrupt.\n", encoding="utf-8")
+        deadline = time.monotonic() + 30
+        received_interrupt = False
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([sys.stdin], [], [], 0.02)
+            if not readable:
+                continue
+            control = json.loads(sys.stdin.readline())
+            if control.get("type") != "control_request" or control.get("request", {}).get("subtype") != "interrupt":
+                continue
+            received_interrupt = True
+            Path(str(sys.argv[0]) + ".interrupt-received").write_text("control interrupt\n", encoding="utf-8")
+            interrupt_release = Path(str(sys.argv[0]) + ".interrupt-release")
+            if Path(sys.argv[0]).name.endswith("-hold-reject-interrupt"):
+                reject = Path(str(sys.argv[0]) + ".interrupt-reject")
+                reject_deadline = time.monotonic() + 15
+                while not reject.exists() and time.monotonic() < reject_deadline:
+                    time.sleep(0.02)
+                reject.unlink(missing_ok=True)
+                write({"type": "control_response", "response": {
+                    "subtype": "error", "request_id": control.get("request_id"),
+                    "error": "Fixture rejected the interrupt while the turn remains active.",
+                }})
+                ack_deadline = time.monotonic() + 15
+                while not interrupt_release.exists() and time.monotonic() < ack_deadline:
+                    time.sleep(0.02)
+                interrupt_release.unlink(missing_ok=True)
+                text("msg_after_rejected_interrupt", "The turn completed after Stop was rejected.")
+                write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+                break
+            ack_deadline = time.monotonic() + 15
+            while not interrupt_release.exists() and time.monotonic() < ack_deadline:
+                time.sleep(0.02)
+            interrupt_release.unlink(missing_ok=True)
+            write({"type": "control_response", "response": {
+                "subtype": "success", "request_id": control.get("request_id"), "response": {},
+            }})
+            write({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                   "result": "Claude interrupted this turn."})
+            break
+        ready.unlink(missing_ok=True)
+        if not received_interrupt:
+            raise TimeoutError("Timed out waiting for Claude interrupt.")
+        commands.append({"interruptReceived": True})
+    elif "hold-claude-turn-for-concurrency" in user_text.lower():
+        ready = Path(str(sys.argv[0]) + ".concurrent-turn-ready")
+        release = Path(str(sys.argv[0]) + ".concurrent-turn-release")
+        ready.write_text("Claude turn is active.\n", encoding="utf-8")
+        deadline = time.monotonic() + 60
+        while not release.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not release.exists():
+            raise TimeoutError("Timed out waiting for the concurrent Claude turn test.")
+        if "fail-after-hold" in user_text.lower():
+            raise RuntimeError("Claude fixture failed after releasing the held turn.")
+        text("msg_concurrent", SIMPLE_ANSWER)
     elif "publish-image-during-active-turn" in user_text.lower():
         ready = Path(str(sys.argv[0]) + ".image-turn-ready")
         release = Path(str(sys.argv[0]) + ".image-turn-release")
@@ -132,6 +191,8 @@ def respond(user_text, instructions):
             for index, item in enumerate(comments)
         )
         text("msg_comments", answer)
+    elif user_text.rstrip().endswith("What happened earlier?"):
+        text("msg_recovered", SIMPLE_ANSWER)
     elif "story" in user_text.lower():
         text("msg_story", STORY)
         progress_clear = report_command(instructions, " task progress clear ")
@@ -173,6 +234,12 @@ def main():
         if message.get("type") == "control_request":
             request = message.get("request", {})
             if request.get("subtype") == "initialize":
+                missing_resume = Path(str(sys.argv[0]) + ".missing-resume")
+                if "--resume" in sys.argv and missing_resume.exists():
+                    missing_resume.unlink()
+                    write({"type": "result", "subtype": "error", "is_error": True,
+                           "result": "No conversation found with session ID"})
+                    return 1
                 models = [
                     {"value": "default", "displayName": "Default"},
                     {"value": "opus", "displayName": "Opus"},

@@ -78,6 +78,7 @@ final class BoardTask {
     var id: UUID
     var title: String
     var statusRawValue: String
+    var lifecycleRevision: Int = 0
     var statusMessage: String?
     var progressTypeRawValue: String?
     var progressLabel: String?
@@ -90,6 +91,8 @@ final class BoardTask {
     /// Nil for tasks created before provider selection; those use Codex.
     var conversationProviderRawValue: String?
     var conversationEffortRawValue: String?
+    // Retained for one-time migration to the global provider model preference.
+    var conversationModelIDsData: Data?
     var savedPrompt: String?
     var pendingSubmittedPrompt: String?
     var workspaceRootPathsData: Data?
@@ -142,6 +145,19 @@ final class BoardTask {
         set { conversationEffortRawValue = newValue }
     }
 
+    var conversationModelID: String? {
+        get {
+            guard let conversationModelIDsData,
+                  let modelIDs = try? JSONDecoder().decode([String: String].self, from: conversationModelIDsData) else { return nil }
+            return modelIDs[conversationProvider.rawValue]
+        }
+        set {
+            var modelIDs = (try? conversationModelIDsData.map { try JSONDecoder().decode([String: String].self, from: $0) }) ?? [:]
+            modelIDs[conversationProvider.rawValue] = newValue
+            conversationModelIDsData = try? JSONEncoder().encode(modelIDs)
+        }
+    }
+
     /// The native thread or session ID a provider uses for this task.
     func conversationID(for provider: ConversationProvider) -> String? {
         switch provider {
@@ -166,6 +182,7 @@ final class BoardTask {
                 inProgressStartedAt = nil
             }
             statusRawValue = newValue.rawValue
+            lifecycleRevision += 1
             if newValue == .inProgress { inProgressStartedAt = .now }
         }
     }
@@ -189,6 +206,7 @@ final class BoardTask {
         claudeSessionID = nil
         conversationProviderRawValue = conversationProvider.rawValue
         conversationEffortRawValue = "medium"
+        conversationModelIDsData = nil
         savedPrompt = nil
         pendingSubmittedPrompt = nil
         workspaceRootPathsData = try? JSONEncoder().encode(workspaceRootPaths)

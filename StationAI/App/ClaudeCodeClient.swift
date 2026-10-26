@@ -2,6 +2,86 @@ import Combine
 import Darwin
 import Foundation
 
+/// Serializes sends through one Claude client. Primary app and bridge runtimes
+/// reuse a client; auxiliary clients own independent one-shot processes.
+private actor ClaudeTurnGate {
+    private let lockURL: URL?
+    private var isOccupied = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var fileDescriptor: Int32?
+
+    init(lockURL: URL?) {
+        self.lockURL = lockURL
+    }
+
+    func acquire() async throws -> Bool {
+        let wasQueued = isOccupied
+        if wasQueued {
+            await withCheckedContinuation { waiters.append($0) }
+        } else {
+            isOccupied = true
+        }
+        do {
+            let (descriptor, waitedForProcess) = try await acquireProcessLock()
+            fileDescriptor = descriptor
+            return wasQueued || waitedForProcess
+        } catch {
+            if waiters.isEmpty {
+                isOccupied = false
+            } else {
+                waiters.removeFirst().resume()
+            }
+            throw error
+        }
+    }
+
+    func release() {
+        if let fileDescriptor, fileDescriptor >= 0 {
+            var lock = flock()
+            lock.l_type = Int16(F_UNLCK)
+            lock.l_whence = Int16(SEEK_SET)
+            _ = Darwin.fcntl(fileDescriptor, F_SETLK, &lock)
+            _ = Darwin.close(fileDescriptor)
+            self.fileDescriptor = nil
+        }
+        if waiters.isEmpty {
+            isOccupied = false
+        } else {
+            waiters.removeFirst().resume()
+        }
+    }
+
+    private func acquireProcessLock() async throws -> (Int32, Bool) {
+        guard let lockURL else { return (-1, false) }
+        let url = lockURL
+        return try await Task.detached(priority: .utility) {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let descriptor = Darwin.open(url.path, O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR)
+            guard descriptor >= 0 else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            }
+            var lock = flock()
+            lock.l_type = Int16(F_WRLCK)
+            lock.l_whence = Int16(SEEK_SET)
+            var waited = false
+            while Darwin.fcntl(descriptor, F_SETLK, &lock) != 0 {
+                if errno == EACCES || errno == EAGAIN {
+                    waited = true
+                    usleep(50_000)
+                    continue
+                }
+                let code = errno
+                _ = Darwin.close(descriptor)
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+            }
+            return (descriptor, waited)
+        }.value
+    }
+}
+
 /// Native capabilities a provider reports for a workspace, shown when a task
 /// switches providers. StationAI reads each provider's own configuration and
 /// never copies settings or credentials between them.
@@ -41,6 +121,8 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     let provider = ConversationProvider.claude
     private static var processActiveSessionIDs = Set<String>()
     private static var activeClientsBySessionID: [String: ClaudeCodeClient] = [:]
+    private static var sharedPrimaryClients: [String: ClaudeCodeClient] = [:]
+    private let turnGate: ClaudeTurnGate
 
     @Published private(set) var isTurnActive = false
     @Published private(set) var activeThreadID: String?
@@ -131,7 +213,24 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     private var actionRequestHandler: (() -> Void)?
     private var userInputHandler: ((ConversationUserInputRequest) async -> Void)?
 
-    init(executableOverride: String? = nil, configDirectoryOverride: String? = nil, persistsSessions: Bool = true) {
+    static func sharedPrimaryClient(executableOverride: String?) -> ClaudeCodeClient {
+        let key = executableOverride.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? "__default__"
+        if let client = sharedPrimaryClients[key] { return client }
+        let client = ClaudeCodeClient(executableOverride: executableOverride, usesSharedProcessSlot: true)
+        sharedPrimaryClients[key] = client
+        return client
+    }
+
+    init(
+        executableOverride: String? = nil,
+        configDirectoryOverride: String? = nil,
+        persistsSessions: Bool = true,
+        usesSharedProcessSlot: Bool = false
+    ) {
+        let lockURL = usesSharedProcessSlot
+            ? StationAIDiagnostics.storeURL.deletingLastPathComponent().appendingPathComponent("claude-primary-turn.lock")
+            : nil
+        turnGate = ClaudeTurnGate(lockURL: lockURL)
         self.executableOverride = ConversationProviderFixture.ownedExecutable(
             executableOverride,
             providerMarker: (".stationai-claude-fixture-owner", "StationAI test owns this Claude Code protocol fixture (v1).\n")
@@ -200,6 +299,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         effort: ConversationEffort,
         threadID: String,
         workspace: ConversationWorkspaceContext,
+        sessionRecoveryContext: String? = nil,
         developerInstructions: String? = nil,
         onDelta: @escaping (String) -> Void,
         onFinalMessage: @escaping (String) -> Void,
@@ -213,7 +313,26 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         sensitiveUserInputAnswerValues: [String] = [],
         hideSensitiveRecoveryPrompt: Bool = false
     ) async throws {
+        let wasQueued: Bool
+        do {
+            wasQueued = try await turnGate.acquire()
+        } catch {
+            throw ClientError.processStart("Couldn't reserve the Claude Code process slot: \(error.localizedDescription)")
+        }
+        if wasQueued {
+            StationAIDiagnostics.record("claude.turn.queued", fields: [
+                "requestedThreadID": threadID,
+                "activeThreadID": activeThreadID ?? "",
+                "clientPID": String(ProcessInfo.processInfo.processIdentifier)
+            ])
+        }
+        defer { Task { await turnGate.release() } }
+
         guard process == nil else {
+            StationAIDiagnostics.record("claude.turn.rejected", fields: diagnosticFields([
+                "requestedThreadID": threadID,
+                "reason": "client_process_still_active"
+            ]))
             throw ClientError.protocolFailure("Another Claude Code turn is already running in this client.")
         }
         let sessionID = threadID
@@ -259,6 +378,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         }
 
         let isNewSession = newSessionIDs.contains(sessionID)
+        var providerPrompt = text
         var initialize: [String: Any]
         do {
             initialize = try await launchSession(
@@ -267,8 +387,15 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
                 workspace: workspace, developerInstructions: developerInstructions
             )
         } catch ClientError.sessionNotFound {
-            // A session ID is persisted before its first turn; if that turn never
-            // reached Claude Code, create the session now under the same ID.
+            // A new session ID may have been persisted before its first turn
+            // reached Claude Code. A missing resumed session needs the visible
+            // StationAI transcript so Claude does not silently lose its context.
+            if !isNewSession {
+                providerPrompt = ConversationHandoff.prompt(
+                    ConversationHandoff.stripContext(from: text),
+                    context: sessionRecoveryContext
+                )
+            }
             stopProcess()
             initialize = try await launchSession(
                 sessionID: sessionID, resume: false, mode: mode, modelID: modelID,
@@ -284,7 +411,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         activeTurnID = turnID
         turnCompletion = TurnCompletion()
         pendingCommandUUIDs = [userMessageID]
-        try writeUserMessage(text: text, imageDataURLs: imageDataURLs, uuid: userMessageID, priority: nil)
+        try writeUserMessage(text: providerPrompt, imageDataURLs: imageDataURLs, uuid: userMessageID, priority: nil)
         isTurnActive = true
         Self.processActiveSessionIDs.insert(sessionID)
         ConversationSteerMailbox.publishActiveTurn(threadID: sessionID, turnID: turnID)
@@ -433,7 +560,12 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
 
     func markTurnStarting(threadID: String) {
         startingSessionIDs.insert(threadID)
-        activeThreadID = threadID
+        // Do not replace the identity of a live process while this session
+        // waits at the shared-client gate. Mailbox steering, interrupt, and
+        // user-input routing for that process all use activeThreadID.
+        if startingSessionIDs.count == 1, activeThreadID == nil, process == nil, activeTurnID == nil {
+            activeThreadID = threadID
+        }
     }
 
     func clearTurnStarting(threadID: String) {

@@ -180,6 +180,8 @@ struct TaskConversationView: View {
     @State private var isSwitchingProvider = false
     @State private var providerNotice: String?
     @State private var messages: [ConversationMessage] = []
+    @State private var visibleConversationMessageCount = 40
+    @State private var hasPresentedLatestConversation = false
     @State private var annotations: [ConversationAnnotation] = []
     @State private var annotationSelection: AnnotationSelection?
     @State private var currentTextSelection: AnnotationSelection?
@@ -318,6 +320,26 @@ struct TaskConversationView: View {
         return messages.filter { !completedProgressIDs.contains($0.id) }
     }
 
+    private static let initialVisibleConversationMessageCount = 40
+    private static let olderConversationMessageBatchSize = 40
+
+    private var renderedConversationMessages: [ConversationMessage] {
+        let allMessages = conversationMessages
+        return Array(allMessages.suffix(visibleConversationMessageCount))
+    }
+
+    private var hasOlderConversationMessages: Bool {
+        conversationMessages.count > renderedConversationMessages.count
+    }
+
+    private func revealOlderConversationMessages() {
+        guard hasOlderConversationMessages else { return }
+        visibleConversationMessageCount = min(
+            conversationMessages.count,
+            visibleConversationMessageCount + Self.olderConversationMessageBatchSize
+        )
+    }
+
     private func goalAchievementAnchorMessageID(for entry: GoalAchievementTimelineEntry) -> String? {
         if entry.afterMessageID == GoalAchievementTimelineEntry.beforeFirstMessageID { return nil }
         if conversationMessages.contains(where: { $0.id == entry.afterMessageID }) {
@@ -335,16 +357,6 @@ struct TaskConversationView: View {
 
     private var shouldShowActivityDisclosure: Bool {
         !activities.isEmpty || !progressMessages.isEmpty || isResponding || completedResponseDuration != nil || hasCompletedAssistantResponse
-    }
-
-    private var currentActivity: ConversationActivity? {
-        activities.enumerated()
-            .filter { $0.element.isActive }
-            .max { lhs, rhs in
-                let lhsStart = lhs.element.startedAt ?? .distantPast
-                let rhsStart = rhs.element.startedAt ?? .distantPast
-                return lhsStart == rhsStart ? lhs.offset < rhs.offset : lhsStart < rhsStart
-            }?.element
     }
 
     private var hasCompletedAssistantResponse: Bool {
@@ -1061,63 +1073,15 @@ struct TaskConversationView: View {
                         .lineLimit(3)
                         .accessibilityIdentifier("task-status-message")
                 }
-                if isResponding {
-                    currentActivityIndicator
-                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
             Spacer(minLength: 0)
-
-            Button {
-                isShowingWorkspaceEditor = true
-            } label: {
-                Label("Folders", systemImage: "folder")
-                    .font(.system(size: 12, weight: .medium))
-            }
-            .buttonHoverPointer()
-            .buttonStyle(.bordered)
-            .help("Edit working folders for this task")
-            .accessibilityIdentifier("edit-workspace-roots-button")
-            .disabled(isReadOnly)
         }
         .padding(.horizontal, 26)
         .padding(.vertical, 15)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(WorkspaceTheme.windowBackground.opacity(0.96))
-    }
-
-    private var currentActivityIndicator: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { timeline in
-            HStack(spacing: 7) {
-                Circle()
-                    .fill(Color.accentColor)
-                    .frame(width: 6, height: 6)
-                if let currentActivity {
-                    Text(currentActivity.title)
-                        .font(.system(size: 11, weight: .medium))
-                        .lineLimit(1)
-                        .accessibilityIdentifier("current-activity-title")
-                    Spacer(minLength: 4)
-                    if currentActivity.startedAt != nil {
-                        Text(currentActivity.durationLabel(at: timeline.date) ?? "Running · 0 ms")
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .accessibilityValue(currentActivity.durationLabel(at: timeline.date) ?? "Running · 0 ms")
-                            .accessibilityIdentifier("current-activity-duration")
-                    }
-                } else {
-                    Text("Thinking")
-                        .font(.system(size: 11, weight: .medium))
-                        .accessibilityIdentifier("current-activity-title")
-                    Spacer(minLength: 4)
-                }
-            }
-            .foregroundStyle(Color.accentColor)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("current-activity-indicator")
-        }
     }
 
     private var repositoryBadges: some View {
@@ -1460,7 +1424,16 @@ struct TaskConversationView: View {
                             ForEach(providerBoundaries.filter { $0.afterMessageID == nil }) { boundary in
                                 providerBoundaryRow(boundary)
                             }
-                            ForEach(conversationMessages) { message in
+                            if hasOlderConversationMessages {
+                                Color.clear
+                                    .frame(height: 1)
+                                    .onAppear {
+                                        guard hasPresentedLatestConversation else { return }
+                                        revealOlderConversationMessages()
+                                    }
+                                    .accessibilityIdentifier("conversation-load-older-anchor")
+                            }
+                            ForEach(renderedConversationMessages) { message in
                                 if shouldShowActivityDisclosure, message.id == activityDisclosureAnchorID {
                                     activityList
                                 }
@@ -1515,10 +1488,11 @@ struct TaskConversationView: View {
                             .accessibilityIdentifier("conversation-user-input-request")
                     }
 
-                    if isDisplayingActiveResponse {
-                        ForEach(activeSubagents) { activity in
-                            subagentTimelineRow(activity)
-                        }
+                    if let activeProcess {
+                        activityRow(activeProcess)
+                    }
+                    ForEach(activeSubagents) { activity in
+                        subagentTimelineRow(activity)
                     }
                     ForEach(activities.filter { $0.isContextCompaction && $0.timelineOrder == nil }) { activity in
                         contextCompactionTimelineRow(activity)
@@ -1537,6 +1511,7 @@ struct TaskConversationView: View {
             }
             .scrollIndicators(.visible)
             .accessibilityIdentifier("conversation-scroll-view")
+            .accessibilityValue("Showing latest \(renderedConversationMessages.count) of \(conversationMessages.count) messages")
             .onChange(of: messages.count) { _, _ in
                 scrollToLatest(using: scrollProxy)
             }
@@ -1577,7 +1552,21 @@ struct TaskConversationView: View {
     }
 
     private var activeSubagents: [ConversationActivity] {
-        activities.filter { $0.isSubagent && ["inprogress", "running"].contains($0.status.lowercased()) }
+        activities.filter { $0.isSubagent && $0.isActive }
+    }
+
+    /// Keep the latest live non-agent operation in the conversation timeline.
+    /// Earlier live operations remain available in the expanded activity list.
+    private var activeProcess: ConversationActivity? {
+        activities
+            .filter { !$0.isSubagent && !$0.isContextCompaction && $0.isActive }
+            .enumerated()
+            .max { left, right in
+                let leftOrder = left.element.timelineOrder ?? left.offset
+                let rightOrder = right.element.timelineOrder ?? right.offset
+                return leftOrder < rightOrder
+            }?
+            .element
     }
 
     private var activityList: some View {
@@ -1619,16 +1608,20 @@ struct TaskConversationView: View {
                                 .accessibilityIdentifier("codex-progress-message-\(message.id)")
                         }
                     }
-                    ForEach(activities.filter { !$0.isSubagent && !$0.isContextCompaction }) { activity in
+                    let activeIDsOutside = Set(activeSubagents.map(\.id) + [activeProcess?.id].compactMap { $0 })
+                    ForEach(activities.filter {
+                        !$0.isSubagent && !$0.isContextCompaction && !activeIDsOutside.contains($0.id)
+                    }) { activity in
                         activityRow(activity)
                     }
                     let agentActivities = activities.filter(\.isSubagent)
-                    if !isDisplayingActiveResponse && !agentActivities.isEmpty {
+                    let completedAgentActivities = agentActivities.filter { !$0.isActive }
+                    if !completedAgentActivities.isEmpty {
                         Text("Agents used")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.secondary)
                             .padding(.top, 4)
-                        ForEach(agentActivities) { activity in
+                        ForEach(completedAgentActivities) { activity in
                             subagentTimelineRow(activity)
                         }
                     }
@@ -2063,6 +2056,12 @@ struct TaskConversationView: View {
                     .accessibilityLabel(String(Self.markdownAttributedText(displayText).characters))
                     .accessibilityIdentifier("assistant-message-\(message.id)")
             }
+            if let createdAt = message.createdAt {
+                Text(createdAt, format: .dateTime.hour().minute())
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityIdentifier("message-time-\(message.id)")
+            }
         }
         .frame(maxWidth: 620, alignment: .leading)
     }
@@ -2098,6 +2097,12 @@ struct TaskConversationView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 16).padding(.vertical, 11)
                     .background(WorkspaceTheme.accent, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+            }
+            if let createdAt = message.createdAt {
+                Text(createdAt, format: .dateTime.hour().minute())
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityIdentifier("message-time-\(message.id)")
             }
         }
             .frame(maxWidth: 620, alignment: .trailing)
@@ -2953,6 +2958,7 @@ struct TaskConversationView: View {
             userInputRequest = history.pendingUserInputRequest?.threadID == task.activeConversationID
                 ? history.pendingUserInputRequest
                 : nil
+            visibleConversationMessageCount = Self.initialVisibleConversationMessageCount
             restoreAnnotations(from: history.messages)
             answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
             activities = history.activities
@@ -3064,15 +3070,13 @@ struct TaskConversationView: View {
     }
 
     private func loadModels() async {
+        selectedModelID = (try? conversationManager.modelID(taskID: task.id)) ?? ""
         selectedEffort = (try? conversationManager.effort(taskID: task.id)) ?? .medium
         if let cachedModels = try? conversationManager.cachedModels(taskID: task.id), !cachedModels.isEmpty {
             modelOptions = cachedModels.newestVersionPerFamily()
         }
         do {
             modelOptions = try await conversationManager.models(taskID: task.id)
-            if !selectedModelID.isEmpty && !modelOptions.contains(where: { $0.id == selectedModelID }) {
-                selectedModelID = ""
-            }
             if !currentEffortChoices.contains(selectedEffort) {
                 selectedEffort = currentEffortChoices.contains(.medium) ? .medium : currentEffortChoices[0]
                 // Persist the clamp so the CLI and sends read the same effort the composer shows.
@@ -3121,6 +3125,7 @@ struct TaskConversationView: View {
         let effortChanged = selectedEffort != pickerEffort
         selectedModelID = pickerModelID
         selectedEffort = pickerEffort
+        Task { try? conversationManager.setModelID(taskID: task.id, modelID: pickerModelID) }
         guard effortChanged else { return }
         Task { try? await conversationManager.setEffort(taskID: task.id, effort: pickerEffort) }
     }
@@ -4036,6 +4041,7 @@ struct TaskConversationView: View {
         // created its final row, which intermittently leaves reopened chats at top.
         Task { @MainActor in
             await Task.yield()
+            hasPresentedLatestConversation = true
             withAnimation(.easeOut(duration: 0.2)) {
                 proxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
             }

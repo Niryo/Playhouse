@@ -2106,6 +2106,7 @@ final class BoardTaskManager {
             let task = try requireTask(id)
             guard task.status != .done else { return BoardTaskRecord(task: task) }
             task.status = status
+            task.lifecycleRevision += 1
             task.statusMessage = message
             if status != .inProgress { clearProgressReport(task) }
             try await saveTaskContext(taskID: id)
@@ -2114,6 +2115,38 @@ final class BoardTaskManager {
                 "status": task.status.rawValue
             ])
             return BoardTaskRecord(task: task)
+        }
+    }
+
+    func transitionLifecycleStatus(_ id: UUID, from expectedStatus: TaskStatus, to status: TaskStatus) async throws -> Int? {
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.status == expectedStatus, task.status != .done else { return nil }
+            task.status = status
+            task.statusMessage = nil
+            if status != .inProgress { clearProgressReport(task) }
+            try await saveTaskContext(taskID: id)
+            StationAIDiagnostics.record("task.lifecycle_status.write.succeeded", fields: [
+                "taskID": id.uuidString,
+                "status": task.status.rawValue
+            ])
+            return task.lifecycleRevision
+        }
+    }
+
+    func restoreLifecycleStatus(_ id: UUID, to status: TaskStatus, ifRevision revision: Int) async throws -> Bool {
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.status == .waitingResponse, task.lifecycleRevision == revision else { return false }
+            task.status = status
+            task.statusMessage = nil
+            if status != .inProgress { clearProgressReport(task) }
+            try await saveTaskContext(taskID: id)
+            StationAIDiagnostics.record("task.lifecycle_status.write.succeeded", fields: [
+                "taskID": id.uuidString,
+                "status": task.status.rawValue
+            ])
+            return true
         }
     }
 
@@ -3857,6 +3890,10 @@ final class ConversationManager {
         "conversation.models.cache.\(provider.rawValue)"
     }
 
+    private func selectedModelKey(for provider: ConversationProvider) -> String {
+        "conversation.model.selected.\(provider.rawValue)"
+    }
+
     func cachedModels(taskID: UUID) throws -> [ConversationModelOption] {
         let task = try tasks.taskModel(taskID)
         guard let data = preferences.data(forKey: modelCacheKey(for: task.conversationProvider)),
@@ -3888,8 +3925,28 @@ final class ConversationManager {
         ConversationEffort(rawValue: try tasks.taskModel(taskID).conversationEffort) ?? .medium
     }
 
+    func modelID(taskID: UUID) throws -> String? {
+        let task = try tasks.taskModel(taskID)
+        let key = selectedModelKey(for: task.conversationProvider)
+        if let selectedModelID = preferences.string(forKey: key) {
+            return selectedModelID
+        }
+
+        // One-time migration from the previous per-task preference.
+        if let legacyModelID = task.conversationModelID {
+            preferences.set(legacyModelID, forKey: key)
+            return legacyModelID
+        }
+        return nil
+    }
+
     func setEffort(taskID: UUID, effort: ConversationEffort) async throws -> BoardTaskRecord {
         try await tasks.setConversationEffort(taskID, effort: effort)
+    }
+
+    func setModelID(taskID: UUID, modelID: String) throws {
+        let task = try tasks.taskModel(taskID)
+        preferences.set(modelID, forKey: selectedModelKey(for: task.conversationProvider))
     }
 
     // MARK: - Providers
@@ -4076,7 +4133,38 @@ final class ConversationManager {
             ])
             return false
         }
-        let interrupted = try await client(for: task).interruptActiveTurn(threadID: threadID)
+        let providerClient = client(for: task)
+        guard providerClient.isTurnActive(threadID: threadID)
+                || providerClient.activeTurnOwnerProcessID(threadID: threadID) != nil else {
+            StationAIDiagnostics.record("conversation.interrupt.skipped", fields: [
+                "taskID": taskID.uuidString,
+                "reason": "no_active_turn"
+            ])
+            return false
+        }
+        // A user-requested stop is a resumable pause. Persist that intent before
+        // asking the provider so the task leaves In Progress as soon as Stop is
+        // clicked, even when the provider is still thinking or the interrupt
+        // acknowledgment takes time.
+        let pauseRevision = try await tasks.transitionLifecycleStatus(
+            taskID,
+            from: .inProgress,
+            to: .waitingResponse
+        )
+        let interrupted: Bool
+        do {
+            interrupted = try await providerClient.interruptActiveTurn(threadID: threadID)
+        } catch {
+            if let pauseRevision,
+               (providerClient.isTurnActive(threadID: threadID)
+                    || providerClient.activeTurnOwnerProcessID(threadID: threadID) != nil) {
+                _ = try? await tasks.restoreLifecycleStatus(taskID, to: .inProgress, ifRevision: pauseRevision)
+            }
+            throw error
+        }
+        if !interrupted, let pauseRevision {
+            _ = try await tasks.restoreLifecycleStatus(taskID, to: .inProgress, ifRevision: pauseRevision)
+        }
         StationAIDiagnostics.record("conversation.interrupt.finished", fields: [
             "taskID": taskID.uuidString,
             "threadID": threadID,
@@ -4572,6 +4660,9 @@ final class ConversationManager {
             // new native thread: Codex can't list a thread that has no turns yet.
             phase = "transcript-segment"
             let segment = try await prepareSegment(task: try tasks.taskModel(taskID))
+            let sessionRecoveryContext = provider == .claude
+                ? ConversationHandoff.context(for: .claude, messages: try await history(taskID: taskID).messages)
+                : nil
             phase = "thread-start"
             let threadID: String
             if let existing = task.activeConversationID {
@@ -4622,6 +4713,7 @@ final class ConversationManager {
                 effort: effort,
                 threadID: threadID,
                 workspace: workspace,
+                sessionRecoveryContext: sessionRecoveryContext,
                 developerInstructions: TaskThreadDeveloperInstructions.make(
                     taskID: taskID,
                     repositories: task.repositoryWorktrees,
@@ -4840,13 +4932,15 @@ final class ConversationManager {
             fields.merge(client.diagnosticFields()) { _, new in new }
             let shutdownMessage = "StationAI closed while this turn was running. Your conversation is saved; review it and send a follow-up to continue."
             let shouldKeepResumable = client.isPreparingForApplicationTermination
+            let wasUserInterrupted = client.wasLastTurnInterrupted
+            let shouldKeepWaiting = shouldKeepResumable || wasUserInterrupted
             let safeFailureMessage = hideSensitiveRecoveryPrompt
                 ? "The private answer could not be applied. Please answer the question again."
                 : Self.redactingSensitiveText(error.localizedDescription, values: sensitiveUserInputAnswerValues)
             _ = try? await tasks.setLifecycleStatus(
                 taskID,
-                to: shouldKeepResumable ? .waitingResponse : .blocked,
-                message: shouldKeepResumable ? shutdownMessage : safeFailureMessage
+                to: shouldKeepWaiting ? .waitingResponse : .blocked,
+                message: shouldKeepResumable ? shutdownMessage : (wasUserInterrupted ? nil : safeFailureMessage)
             )
             StationAIDiagnostics.record("conversation.send.failed", fields: fields)
             if hideSensitiveRecoveryPrompt || !sensitiveUserInputAnswerValues.isEmpty {
@@ -5040,7 +5134,7 @@ final class ConversationManager {
         }
     }
 
-    private static func isValidModelID(_ value: String) -> Bool {
+    static func isValidModelID(_ value: String) -> Bool {
         !value.isEmpty && value.count <= 100 && value.unicodeScalars.allSatisfy {
             CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-").contains($0)
         }
@@ -5130,7 +5224,7 @@ final class StationAIBridgeRuntime {
             func conversationClients(codexHome: String? = nil, goalFeatureEnabled: Bool = false) -> ConversationClients {
                 ConversationClients(
                     codex: CodexAppServerClient(codexExecutableOverride: codexExecutable, codexHomeOverride: codexHome, goalFeatureEnabled: goalFeatureEnabled),
-                    claude: ClaudeCodeClient(executableOverride: claudeExecutable)
+                    claude: ClaudeCodeClient.sharedPrimaryClient(executableOverride: claudeExecutable)
                 )
             }
 
@@ -5334,6 +5428,18 @@ final class StationAIBridgeRuntime {
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 let task = try await conversations.setEffort(taskID: taskID, effort: effort)
                 result = try Self.value(task)
+            case "conversation.model.get":
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings, preferences: preferences)
+                result = .object(["modelID": try conversations.modelID(taskID: request.requiredUUID("taskID")).map(BridgeValue.string) ?? .null])
+            case "conversation.model.set":
+                let taskID = try request.requiredUUID("taskID")
+                let modelID = try request.requiredString("modelID")
+                guard ConversationManager.isValidModelID(modelID) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Model ID must contain only letters, numbers, periods, underscores, or hyphens.")
+                }
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings, preferences: preferences)
+                try conversations.setModelID(taskID: taskID, modelID: modelID)
+                result = .object(["modelID": .string(modelID)])
             case "conversation.models.cached":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings, preferences: preferences)
                 result = .object(["models": .array(try conversations.cachedModels(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })])
