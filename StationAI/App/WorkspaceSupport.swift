@@ -307,7 +307,8 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
                 detail: detail,
                 status: status,
                 durationMs: item["durationMs"] as? Int ?? measuredDurationMs,
-                startedAt: startedAt
+                startedAt: startedAt,
+                turnID: turnID
             )
         case "fileChange":
             let changes = item["changes"] as? [[String: Any]] ?? []
@@ -474,6 +475,7 @@ struct ConversationHistory: Codable, Equatable {
     let activities: [ConversationActivity]
     let diff: ConversationTurnDiff?
     var answeredAsyncQuestionIDs: [String] = []
+    var pendingUserInputRequest: ConversationUserInputRequest?
     /// Dividers where the task's conversation moved to another provider.
     var providerBoundaries: [ConversationProviderBoundary] = []
 }

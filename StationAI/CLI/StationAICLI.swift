@@ -394,6 +394,25 @@ enum StationAICLI {
                     "taskID": .string(id), "itemID": .string(tail[1]),
                     "answers": .array((flags["--answer"] ?? []).map(BridgeValue.string))
                 ])
+            case "answer-user-input":
+                guard tail.count >= 2 else { throw CLIError.usage("Use: stationai conversation answer-user-input <task-id> <request-id> --answer <question-id>=<answer> [--answer <question-id>=<answer>]...") }
+                let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--answer"])
+                var answers: [String: [String]] = [:]
+                for pair in flags["--answer"] ?? [] {
+                    guard let separator = pair.firstIndex(of: "="), separator != pair.startIndex else {
+                        throw CLIError.usage("Use --answer <question-id>=<answer>.")
+                    }
+                    let questionID = String(pair[..<separator])
+                    let answer = String(pair[pair.index(after: separator)...])
+                    guard !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        throw CLIError.usage("Question answers can't be blank.")
+                    }
+                    answers[questionID, default: []].append(answer)
+                }
+                return BridgeRequest(command: "conversation.answer_user_input", arguments: [
+                    "taskID": .string(id), "requestID": .string(tail[1]),
+                    "answers": .object(answers.mapValues { .array($0.map(BridgeValue.string)) })
+                ])
             case "send":
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode", "--model", "--answer", "--image"])
                 var answers: [String: [String]] = [:]
@@ -534,6 +553,7 @@ enum StationAICLI {
       stationai conversation queue-steer <task-id> <message-id>
       stationai conversation steer <task-id> --message <text> [--image <path>]...
       stationai conversation answer-async <task-id> <item-id> --answer <text> [--answer <text>]...
+      stationai conversation answer-user-input <task-id> <request-id> --answer <question-id>=<answer> [--answer <question-id>=<answer>]...
       stationai conversation models <task-id>
       stationai conversation effort <task-id> [set <low|medium|high|xhigh>]
       stationai conversation models <task-id> --cached
