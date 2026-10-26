@@ -3055,7 +3055,7 @@ struct TaskConversationView: View {
         let effortChanged = selectedEffort != pickerEffort
         selectedModelID = pickerModelID
         selectedEffort = pickerEffort
-        Task { try? await conversationManager.setModelID(taskID: task.id, modelID: pickerModelID) }
+        Task { try? conversationManager.setModelID(taskID: task.id, modelID: pickerModelID) }
         guard effortChanged else { return }
         Task { try? await conversationManager.setEffort(taskID: task.id, effort: pickerEffort) }
     }

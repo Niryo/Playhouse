@@ -2935,7 +2935,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(recovered_record["savedPrompt"], stale_prompt)
         self.assertIsNone(recovered_record.get("pendingSubmittedPrompt"))
 
-    # case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC.
+    # case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC.
     def test_conversation_provider_selection_persists_and_validates(self):
         settings = self.assert_success(self.call_cli("settings", "get")[0])
         self.assertEqual(settings["defaultProvider"], "codex", "Existing installs keep Codex as the default provider.")
@@ -4183,20 +4183,39 @@ class StationAIBridgeTests(unittest.TestCase):
                              for event in plan_diagnostics))
         self.assertNotIn(markdown_reply, json.dumps(plan_diagnostics))
 
-    # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. The selected model and effort persist through fresh CLI/XPC reads and reopening the conversation; malformed saved model IDs and unsupported efforts are rejected without replacing prior choices. The Codex composer updates after model selection; unsupported modes and malformed model IDs are rejected before creating history.
+    # case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. The selected model is global across conversations for the active provider, persists through fresh CLI/XPC reads and reopening, and remains isolated between providers; a saved per-conversation model migrates into the global preference on first read; effort persists per conversation. Malformed model IDs and unsupported efforts are rejected without replacing prior choices. The UI opens a second conversation and shows the global model selection; unsupported modes and malformed model IDs are rejected before creating history.
     def test_conversation_mode_rejects_unknown_mode_without_starting_a_turn(self):
-        task_id = self.create_task(title="Conversation mode validation")["id"]
+        title = "Conversation mode validation"
+        task_id = self.create_task(title=title)["id"]
         response, _ = self.call_cli("conversation", "models", task_id)
         models = self.assert_success(response)["models"]
         self.assertTrue(models)
         self.assertTrue(all(model.get("id") and model.get("name") for model in models))
-        self.assertIsNone(self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"])
         selected_model_id = models[0]["id"]
-        self.assertEqual(self.assert_success(self.call_cli("conversation", "model", task_id, "set", selected_model_id)[0])["conversationModelID"], selected_model_id)
-        self.assertEqual(self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"], selected_model_id)
+        legacy_data = json.dumps({"codex": selected_model_id}).encode("utf-8")
+        with sqlite3.connect(self.data_directory / "StationAI-v2.store") as database:
+            seeded = database.execute(
+                "UPDATE ZBOARDTASK SET ZCONVERSATIONMODELIDSDATA = ? WHERE ZTITLE = ?",
+                (legacy_data, title),
+            )
+            self.assertEqual(seeded.rowcount, 1, "Seed the real SwiftData row with its pre-global provider model.")
+        self.assertEqual(
+            self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"],
+            selected_model_id,
+            "The first read should migrate the existing per-conversation model to the global preference.",
+        )
+        global_model_id = next(model["id"] for model in models if model["id"] != selected_model_id)
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "model", task_id, "set", global_model_id)[0])["modelID"], global_model_id)
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"], global_model_id)
+        second_task_id = self.create_task(title="Global model selection")['id']
+        self.assertEqual(
+            self.assert_success(self.call_cli("conversation", "model", second_task_id)[0])["modelID"],
+            global_model_id,
+            "A model selected in one conversation should be the global choice in another conversation.",
+        )
         invalid_model, _ = self.call_cli("conversation", "model", task_id, "set", "bad model!", expected_status=2)
         self.assert_failure(invalid_model, "invalid_argument")
-        self.assertEqual(self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"], selected_model_id)
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"], global_model_id)
         self.assertEqual(self.assert_success(self.call_cli("conversation", "effort", task_id)[0])["effort"], "medium")
         self.assertEqual(self.assert_success(self.call_cli("conversation", "effort", task_id, "set", "xhigh")[0])["conversationEffort"], "xhigh")
         self.assertEqual(self.assert_success(self.call_cli("conversation", "effort", task_id)[0])["effort"], "xhigh")

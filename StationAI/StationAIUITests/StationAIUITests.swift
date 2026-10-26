@@ -3927,7 +3927,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Blank composer leaves send disabled")
     }
 
-    // case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC.
+    // case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC.
     func test_conversation_provider_selection_persists_and_validates() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -6299,17 +6299,36 @@ final class StationAIUITests: XCTestCase {
         claudePicker.click()
     }
 
-    // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. The selected model and effort persist through fresh CLI/XPC reads and reopening the conversation; malformed saved model IDs and unsupported efforts are rejected without replacing prior choices. The Codex composer updates after model selection; unsupported modes and malformed model IDs are rejected before creating history.
+    // case-contract: test_conversation_mode_rejects_unknown_mode_without_starting_a_turn | The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. The selected model is global across conversations for the active provider, persists through fresh CLI/XPC reads and reopening, and remains isolated between providers; a saved per-conversation model migrates into the global preference on first read; effort persists per conversation. Malformed model IDs and unsupported efforts are rejected without replacing prior choices. The UI opens a second conversation and shows the global model selection; unsupported modes and malformed model IDs are rejected before creating history.
     func test_conversation_mode_rejects_unknown_mode_without_starting_a_turn() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Conversation modes", roots: [fixture.primary.path])
-        openTask(named: "Conversation modes")
-
         let taskID = try taskID(named: "Conversation modes")
         let modelResult = try runCLI(["conversation", "models", taskID])["result"] as? [String: Any]
         let availableModels = try XCTUnwrap(modelResult?["models"] as? [[String: Any]])
         XCTAssertFalse(availableModels.isEmpty)
+        let migratedModelID = try XCTUnwrap(availableModels.first?["id"] as? String)
+        let legacyModelData = try JSONSerialization.data(withJSONObject: ["codex": migratedModelID])
+        let legacyModelHex = legacyModelData.map { String(format: "%02x", $0) }.joined()
+        let seedLegacyModel = Process()
+        seedLegacyModel.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        seedLegacyModel.arguments = [
+            dataDirectory.appendingPathComponent("StationAI-v2.store").path,
+            "UPDATE ZBOARDTASK SET ZCONVERSATIONMODELIDSDATA = X'\(legacyModelHex)' WHERE ZTITLE = 'Conversation modes'",
+        ]
+        let seedOutput = Pipe()
+        seedLegacyModel.standardOutput = seedOutput
+        seedLegacyModel.standardError = seedOutput
+        try seedLegacyModel.run()
+        seedLegacyModel.waitUntilExit()
+        let seedDetails = String(data: seedOutput.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(seedLegacyModel.terminationStatus, 0, "Seed the real SwiftData task row with its pre-global model: \(seedDetails)")
+        let migratedModel = try XCTUnwrap(try runCLI(["conversation", "model", taskID])["result"] as? [String: Any])
+        XCTAssertEqual(migratedModel["modelID"] as? String, migratedModelID,
+            "The first bridge read should migrate the persisted per-conversation model globally.")
+
+        openTask(named: "Conversation modes")
         let modelPicker = element("model-picker-menu")
         XCTAssertTrue(modelPicker.waitForExistence(timeout: 5), "The composer should expose a model returned by Codex.")
         XCTAssertTrue(modelPicker.label.contains("effort: Medium"), "The selected model effort should default to Medium.")
@@ -6326,6 +6345,7 @@ final class StationAIUITests: XCTestCase {
         }, "The composer should expose a model returned by Codex.")
         let selectedModelName = try XCTUnwrap(selectedModel["name"] as? String)
         let selectedModelID = try XCTUnwrap(selectedModel["id"] as? String)
+        XCTAssertEqual(selectedModelID, migratedModelID, "The visible picker should restore the model migrated from this conversation.")
         let modelMenu = modelPicker
         XCTAssertTrue(displayedModelValue().caseInsensitiveCompare(selectedModelName) == .orderedSame
             || displayedModelValue().caseInsensitiveCompare(selectedModelID) == .orderedSame)
@@ -6460,6 +6480,16 @@ final class StationAIUITests: XCTestCase {
         let restoredModelPicker = element("model-picker-menu")
         XCTAssertTrue(restoredModelPicker.waitForExistence(timeout: 5))
         XCTAssertTrue(waitUntil({ restoredModelPicker.label.contains(alternateName) }, timeout: 5), "Reopening the task should restore the last selected model.")
+
+        try createTaskFixture(title: "Global model selection", roots: [fixture.primary.path])
+        element("back-to-board-button").click()
+        openTask(named: "Global model selection")
+        let globalModelPicker = element("model-picker-menu")
+        XCTAssertTrue(globalModelPicker.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitUntil({ globalModelPicker.label.contains(alternateName) }, timeout: 5),
+            "A newly opened conversation should use the global model selected in the previous conversation.")
+        element("back-to-board-button").click()
+        openTask(named: "Conversation modes")
 
         let modeMenu = element("conversation-mode-menu")
         XCTAssertTrue(modeMenu.waitForExistence(timeout: 10))
