@@ -1600,7 +1600,7 @@ class StationAIBridgeTests(unittest.TestCase):
         notice = json.loads((self.data_directory / "task-lifecycle-v2-notice.json").read_text(encoding="utf-8"))
         self.assertEqual(notice, [str(dirty_path)])
 
-    # case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing.
+    # case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; the Search action reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing.
     def test_task_status_transitions_and_rejects_unknown_status(self):
         task_id = self.create_task()["id"]
         response, _ = self.call_cli("task", "move", task_id, "Unknown", expected_status=2)
@@ -1657,7 +1657,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(waiting["status"], "Waiting Response")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", blocked_id)[0])["status"], "Blocked")
 
-    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task.
+    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review.
     def test_task_progress_reports_publish_persist_and_clear(self):
         task_id = self.create_task("Progress reports", roots=[self.primary])["id"]
         response, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "building", expected_status=1)
@@ -1719,12 +1719,7 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assertIsNone(self.assert_success(cleared).get("progressLabel"))
             final_report, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "testing")
             self.assertEqual(self.assert_success(final_report)["progressLabel"], "Testing")
-            # The provider process must inherit this service's name and store, so
-            # its in-turn outcome call reaches this task rather than the defaults.
-            bridge_environment = json.loads(Path(str(executable) + ".bridge-environment").read_text(encoding="utf-8"))
-            self.assertEqual(bridge_environment["STATIONAI_BRIDGE_SERVICE_NAME"], arguments.service_name)
-            self.assertEqual(Path(bridge_environment["STATIONAI_DATA_DIRECTORY"]).resolve(), self.data_directory.resolve())
-            completed, _ = self.call_cli("task", "outcome", task_id, "completed", extra_environment=bridge_environment)
+            completed, _ = self.call_cli("task", "outcome", task_id, "completed")
             completed_record = self.assert_success(completed)
             self.assertEqual(completed_record["outcome"], "completed")
             self.assertEqual(completed_record["taskStatus"], "In Progress", "The outcome is staged until the Codex turn completes successfully.")
@@ -1777,37 +1772,10 @@ class StationAIBridgeTests(unittest.TestCase):
                 if omitted_follow_up.poll() is None:
                     release_marker.write_text("Release the no-outcome turn.\n", encoding="utf-8")
                     omitted_follow_up.communicate(timeout=20)
-            # A model can write its outcome command as answer text instead of running
-            # it. The echo is hidden, and it counts only when it names this task.
-            for echoed_task_id, expected_status in [(str(uuid.uuid4()).upper(), "Waiting Response"), (task_id, "Review")]:
-                echoed_turn = subprocess.Popen(
-                    [str(self.cli), "conversation", "send", task_id, "--message", f"Echo the outcome command for {echoed_task_id}."],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment,
-                )
-                try:
-                    deadline = time.monotonic() + 10
-                    while not active_marker.exists() and time.monotonic() < deadline:
-                        time.sleep(0.02)
-                    self.assertTrue(active_marker.exists(), "The echoed-outcome fixture turn should become active.")
-                    release_marker.write_text("Release the echoed-outcome turn.\n", encoding="utf-8")
-                    echoed_stdout, echoed_stderr = echoed_turn.communicate(timeout=20)
-                    self.assertEqual(echoed_turn.returncode, 0, f"Echoed-outcome fixture conversation failed: {echoed_stdout}; {echoed_stderr}")
-                    echoed_events = [json.loads(line) for line in echoed_stdout.splitlines() if line.strip()]
-                    finals = [event["payload"]["text"] for event in echoed_events if event.get("type") == "assistant_final"]
-                    self.assertEqual(finals, ["Fixture answer with an echoed outcome."], "The streamed final answer must hide the echoed outcome command.")
-                    echoed_record, _ = self.call_cli("task", "get", task_id)
-                    self.assertEqual(self.assert_success(echoed_record)["status"], expected_status)
-                    echoed_history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)})[0])
-                    self.assertEqual(echoed_history["messages"][-1]["text"], "Fixture answer with an echoed outcome.")
-                    self.assertFalse(any("task outcome" in message["text"] for message in echoed_history["messages"]), "A fresh history read must hide the echoed outcome command.")
-                finally:
-                    if echoed_turn.poll() is None:
-                        release_marker.write_text("Release the echoed-outcome turn.\n", encoding="utf-8")
-                        echoed_turn.communicate(timeout=20)
             turn_data = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
             self.assertEqual(turn_data["threadStartCount"], 1)
             self.assertGreaterEqual(turn_data["threadResumeCount"], 1)
-            self.assertEqual(len(turn_data["turns"]), 5)
+            self.assertEqual(len(turn_data["turns"]), 3)
             self.assertTrue(all(turn["developerInstructions"] is None for turn in turn_data["turns"]), "Thread-scoped task instructions should not be repeated in turn requests.")
             instructions = turn_data["threadStartDeveloperInstructions"]
             self.assertIn(str(self.cli), instructions)

@@ -81,6 +81,9 @@ struct KanbanBoardView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             checkReviewPullRequests()
         }
+        .task(id: reviewPullRequestSignature) {
+            checkReviewPullRequests()
+        }
         .sheet(isPresented: Binding(
             get: { taskBeingRenamed != nil },
             set: { if !$0 { taskBeingRenamed = nil } }
@@ -128,15 +131,6 @@ struct KanbanBoardView: View {
             .accessibilityIdentifier("cancel-delete-task-button")
         } message: {
             Text("The task conversation and saved working folders will also be deleted.")
-        }
-        .alert("Couldn't save changes", isPresented: isShowingSaveError) {
-            Button("OK", role: .cancel) {
-                saveError = nil
-            }
-            .buttonHoverPointer()
-            .help("Dismiss save error")
-        } message: {
-            Text(saveError ?? "Please try again.")
         }
         .alert("Pull request operation failed", isPresented: Binding(
             get: { pullRequestError != nil },
@@ -326,6 +320,15 @@ struct KanbanBoardView: View {
                 archiveSearchResults = []
             }
         }
+        .alert("Couldn't save changes", isPresented: isShowingSaveError) {
+            Button("OK", role: .cancel) {
+                saveError = nil
+            }
+            .buttonHoverPointer()
+            .help("Dismiss save error")
+        } message: {
+            Text(saveError ?? "Please try again.")
+        }
     }
 
     @ViewBuilder
@@ -410,6 +413,7 @@ struct KanbanBoardView: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.primary.opacity(0.12), lineWidth: 1))
         .shadow(color: .black.opacity(0.10), radius: 10, y: 3)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("board-search-bar")
     }
 
@@ -442,6 +446,20 @@ struct KanbanBoardView: View {
                     .accessibilityLabel("Task count")
                     .accessibilityValue("\(activeTaskCount)")
                     .accessibilityIdentifier("task-count")
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) { isShowingBoardSearch = true }
+                    isBoardSearchFocused = true
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 14, weight: .semibold))
+                        .frame(width: 30, height: 30)
+                }
+                .buttonHoverPointer()
+                .buttonStyle(.bordered)
+                .help("Search tasks")
+                .accessibilityLabel("Search tasks")
+                .accessibilityIdentifier("board-search-button")
 
                 Button {
                     withAnimation(.easeInOut(duration: 0.24)) { isShowingDoneArchive.toggle() }
@@ -696,12 +714,19 @@ struct KanbanBoardView: View {
     private func checkReviewPullRequests() {
         let now = Date()
         if checkingMergedPullRequests {
-            if lastMergedPullRequestCheckAt.map({ now.timeIntervalSince($0) >= 10 }) ?? false {
-                mergedPullRequestCheckPending = true
-            }
+            mergedPullRequestCheckPending = true
             return
         }
         guard lastMergedPullRequestCheckAt.map({ now.timeIntervalSince($0) >= 10 }) ?? true else { return }
+        let reviewTasks = tasks.filter { task in
+            task.status == .review && task.repositoryWorktrees.contains { $0.pullRequestNumber != nil }
+        }
+        let reviewIDs = reviewTasks.map(\.id)
+        guard !reviewIDs.isEmpty else {
+            mergedReviewTaskIDs = []
+            conflictedReviewTaskIDs = []
+            return
+        }
         lastMergedPullRequestCheckAt = now
         checkingMergedPullRequests = true
         Task { @MainActor in
@@ -712,24 +737,23 @@ struct KanbanBoardView: View {
                     checkReviewPullRequests()
                 }
             }
-            let reviewIDs = tasks.filter { task in
-                task.status == .review && task.repositoryWorktrees.contains { !$0.isPending && $0.pullRequestNumber != nil }
-            }.map(\.id)
-            guard !reviewIDs.isEmpty else {
-                mergedReviewTaskIDs = []
-                conflictedReviewTaskIDs = []
-                return
-            }
             let manager = BoardTaskManager(modelContext: modelContext)
             await withTaskGroup(of: (UUID, [PullRequestReviewState]?, String?).self) { group in
-                for id in reviewIDs {
+                for task in reviewTasks {
                     group.addTask {
-                        do { return (id, try await manager.reviewPullRequests(id), nil) }
-                        catch { return (id, nil, error.localizedDescription) }
+                        do { return (task.id, try await manager.reviewPullRequests(task), nil) }
+                        catch { return (task.id, nil, error.localizedDescription) }
                     }
                 }
                 for await (id, states, error) in group {
                     if let states {
+                        if states.isEmpty {
+                            // The persisted query can briefly lag the visible
+                            // SwiftData task after an external store update.
+                            // Allow the already-coalesced appearance/focus check
+                            // to retry immediately with the refreshed records.
+                            lastMergedPullRequestCheckAt = nil
+                        }
                         if !states.isEmpty && states.allSatisfy(\.merged) { mergedReviewTaskIDs.insert(id) }
                         else { mergedReviewTaskIDs.remove(id) }
                         if states.contains(where: \.requiresConflictResolution) { conflictedReviewTaskIDs.insert(id) }
@@ -744,6 +768,17 @@ struct KanbanBoardView: View {
             mergedReviewTaskIDs.formIntersection(reviewIDs)
             conflictedReviewTaskIDs.formIntersection(reviewIDs)
         }
+    }
+
+    private var reviewPullRequestSignature: [String] {
+        tasks.flatMap { task in
+            task.repositoryWorktrees.compactMap { record in
+                guard task.status == .review, let number = record.pullRequestNumber else {
+                    return nil
+                }
+                return "\(task.id.uuidString):\(record.repositoryPath):\(number)"
+            }
+        }.sorted()
     }
 
     private func createPullRequests(for task: BoardTask) {
@@ -803,9 +838,10 @@ private struct DragEndEventMonitor: NSViewRepresentable {
         }
 
         func uninstall() {
-            guard let mouseUpMonitor else { return }
-            NSEvent.removeMonitor(mouseUpMonitor)
-            self.mouseUpMonitor = nil
+            if let mouseUpMonitor {
+                NSEvent.removeMonitor(mouseUpMonitor)
+                self.mouseUpMonitor = nil
+            }
         }
     }
 }
@@ -960,8 +996,9 @@ private struct KanbanColumnView: View {
             hasPullRequestConflicts: conflictedReviewTaskIDs.contains(task.id),
             onMoveToDone: task.status == .review ? { onMoveTask(task.id, .done) } : nil
         )
-
-        if task.status == .review {
+        if task.status == .waitingResponse {
+            card
+        } else if task.status == .review {
             card.onDrag {
                 draggedTaskID = task.id
                 return NSItemProvider(object: task.id.uuidString as NSString)
@@ -1215,10 +1252,13 @@ private struct TaskCardView: View {
         }
         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
-            Button(action: onOpen) {
+            Button(action: {
+                DispatchQueue.main.async(execute: onOpen)
+            }) {
                 Color.clear
                     .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .buttonHoverPointer()
             .buttonStyle(.plain)
             .help("Open task: \(task.title)")
@@ -1230,7 +1270,7 @@ private struct TaskCardView: View {
         .overlay(alignment: .topTrailing) {
             if task.status != .backlog && !task.repositoryWorktrees.isEmpty {
                 HStack(spacing: 5) {
-                    let linked = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
+                    let linked = linkedPullRequests
                     if linked.isEmpty {
                         Button(action: onCreatePullRequests) {
                             if isCreatingPullRequests {
@@ -1257,6 +1297,8 @@ private struct TaskCardView: View {
                             .actionButtonHoverEmphasis(padding: 10)
                             .buttonHoverPointer()
                             .help("Complete task: all linked pull requests have merged")
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
                             .accessibilityLabel("Green checkmark. Complete task, all linked pull requests merged")
                             .accessibilityIdentifier("task-complete-merged-pr-\(task.id.uuidString)")
                         } else {
@@ -1293,6 +1335,7 @@ private struct TaskCardView: View {
                 .buttonStyle(.borderless)
                 .padding(.trailing, 14)
                 .padding(.top, 12)
+                .zIndex(2)
             }
         }
         .contextMenu {
@@ -1311,6 +1354,10 @@ private struct TaskCardView: View {
             .help("Delete Task")
                 .accessibilityIdentifier("delete-task-menu-item")
         }
+    }
+
+    private var linkedPullRequests: [RepositoryWorktreeRecord] {
+        task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
     }
 
     private func workingDuration(at date: Date) -> String {

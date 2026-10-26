@@ -193,7 +193,7 @@ def finish(args: argparse.Namespace) -> int:
             if test_case["id"] in failure_cases:
                 test_case["status"] = "failed"
             elif status in {"queued", "running"}:
-                test_case["status"] = "passed" if batch_passed else "not_run"
+                test_case["status"] = "passed" if batch_passed else ("failed" if args.exit_status != 0 else "not_run")
 
         state.setdefault("batches", []).append({
             "cases": expected_cases,

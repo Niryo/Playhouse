@@ -749,7 +749,11 @@ enum GitHubPullRequestManager {
     }
 
     static func resolveExecutable() throws -> String {
-        let paths = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map {
+        let explicit = ProcessInfo.processInfo.environment["STATIONAI_E2E_GH_EXECUTABLE"]
+        let localFixture = ProcessInfo.processInfo.environment["STATIONAI_DATA_DIRECTORY"].map {
+            URL(fileURLWithPath: $0, isDirectory: true).appendingPathComponent("gh-fixture/gh").path
+        }
+        let paths = (explicit.map { [$0] } ?? []) + (localFixture.map { [$0] } ?? []) + (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map {
             URL(fileURLWithPath: String($0)).appendingPathComponent("gh").path
         } + ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
         guard let path = paths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
@@ -811,9 +815,12 @@ enum GitHubPullRequestManager {
     private static func run(_ executable: String, _ arguments: [String], directory: String) throws -> String {
         let result: StationAIProcessResult
         do {
+            let fixture = ProcessInfo.processInfo.environment["STATIONAI_E2E_GH_EXECUTABLE"]
+            let processExecutable = fixture == executable ? "/bin/sh" : executable
+            let processArguments = fixture == executable ? [executable] + arguments : arguments
             result = try StationAIProcessRunner.run(
-                executable: executable,
-                arguments: arguments,
+                executable: processExecutable,
+                arguments: processArguments,
                 directory: directory
             )
         } catch {
@@ -1986,7 +1993,15 @@ final class BoardTaskManager {
 
     func reviewPullRequests(_ id: UUID) async throws -> [PullRequestReviewState] {
         let task = try requireTask(id)
-        let records = task.repositoryWorktrees.filter { !$0.isPending && $0.pullRequestNumber != nil }
+        return try await reviewPullRequests(task)
+    }
+
+    func reviewPullRequests(_ task: BoardTask) async throws -> [PullRequestReviewState] {
+        let records = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil }
+        return try await reviewPullRequests(records)
+    }
+
+    func reviewPullRequests(_ records: [RepositoryWorktreeRecord]) async throws -> [PullRequestReviewState] {
         guard !records.isEmpty else { return [] }
         let executable = try pullRequestService.resolveExecutable()
         return try await withThrowingTaskGroup(of: PullRequestReviewState.self) { group in
@@ -2568,13 +2583,19 @@ final class BoardTaskManager {
         }
     }
 
-    func prepareRepositoryWorktrees(_ id: UUID, fallbackPrompt: String? = nil) async throws -> BoardTask {
+    func prepareRepositoryWorktrees(
+        _ id: UUID,
+        fallbackPrompt: String? = nil,
+        resolvedTitle: String? = nil
+    ) async throws -> BoardTask {
         let initialTask = try requireTask(id)
         let initialRecords = initialTask.repositoryWorktrees
         let pending = initialRecords.filter(\.isPending)
         guard !pending.isEmpty else { return initialTask }
         let branchTitle: String
-        if ["Generating title…", "Untitled task"].contains(initialTask.title) {
+        if let resolvedTitle, !resolvedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            branchTitle = resolvedTitle
+        } else if ["Generating title…", "Untitled task"].contains(initialTask.title) {
             let prompt = initialTask.savedPrompt ?? fallbackPrompt ?? initialTask.title
             branchTitle = prompt.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
         } else {
@@ -4168,27 +4189,30 @@ final class ConversationManager {
         let resolveTitleBeforeWorktree: Bool
         let workspace: ConversationWorkspaceContext
         let titleGeneration: Task<Void, Never>?
+        var resolvedWorktreeTitle: String? = ["Untitled task", "Generating title…"].contains(task.title)
+            ? nil
+            : task.title
         do {
-            let titleMustPrecedeAutoWorktree = task.repositoryWorktrees.contains {
-                $0.isPending && $0.branch == "auto"
-            }
-            resolveTitleBeforeWorktree = shouldGenerateTitle && titleMustPrecedeAutoWorktree
+            // Resolve the first submitted prompt's title before preparing any
+            // repositories. The app's model context can lag repository changes
+            // made through the bridge, so using this snapshot to detect an auto
+            // branch can otherwise allocate "untitled-task" before the generated
+            // title arrives.
+            resolveTitleBeforeWorktree = shouldGenerateTitle
             if resolveTitleBeforeWorktree {
-                let reserved = try await tasks.renameIfTitleMatches(
+                _ = try await tasks.renameIfTitleMatches(
                     taskID,
                     expectedTitle: task.title,
                     title: "Generating title…"
                 )
-                if reserved != nil {
-                    let titleRoots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
-                    let titleWorkspace = try ConversationWorkspaceContext(roots: titleRoots)
-                    try await generateAndApplyTitle(
-                        taskID: taskID,
-                        prompt: normalizedText,
-                        workspace: titleWorkspace,
-                        clients: clients.helperClients(preferring: provider)
-                    )
-                }
+                let titleRoots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
+                let titleWorkspace = try ConversationWorkspaceContext(roots: titleRoots)
+                resolvedWorktreeTitle = try await generateAndApplyTitle(
+                    taskID: taskID,
+                    prompt: normalizedText,
+                    workspace: titleWorkspace,
+                    clients: clients.helperClients(preferring: provider)
+                )
                 task = try tasks.taskModel(taskID)
                 if ["Untitled task", "Generating title…"].contains(task.title) {
                     throw BridgeCommandError(
@@ -4197,7 +4221,11 @@ final class ConversationManager {
                     )
                 }
             }
-            task = try await tasks.prepareRepositoryWorktrees(taskID, fallbackPrompt: normalizedText)
+            task = try await tasks.prepareRepositoryWorktrees(
+                taskID,
+                fallbackPrompt: normalizedText,
+                resolvedTitle: resolvedWorktreeTitle ?? normalizedText
+            )
             if !normalizedText.isEmpty {
                 _ = try await tasks.savePrompt(taskID, prompt: normalizedText, status: .inProgress, submitted: true)
             }
@@ -4217,7 +4245,7 @@ final class ConversationManager {
                     let titleClients = clients.helperClients(preferring: provider)
                     titleGeneration = Task { @MainActor in
                         do {
-                            try await self.generateAndApplyTitle(
+                            _ = try await self.generateAndApplyTitle(
                                 taskID: taskID,
                                 prompt: normalizedText,
                                 workspace: workspace,
@@ -4399,7 +4427,19 @@ final class ConversationManager {
             phase = "review-status-persistence"
             let reportedOutcome = try await tasks.finishConversationTurnOutcome(taskID) ?? leakedOutcome
             let finalStatus: TaskStatus = reportedOutcome == "completed" ? .review : .waitingResponse
-            _ = try await tasks.setLifecycleStatus(taskID, to: finalStatus)
+            var persistedFinalStatus = false
+            for _ in 0..<100 {
+                do {
+                    _ = try await tasks.setLifecycleStatus(taskID, to: finalStatus)
+                    persistedFinalStatus = true
+                    break
+                } catch {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+            }
+            if !persistedFinalStatus {
+                throw BridgeFileLockError(message: "Couldn't persist the completed conversation status.")
+            }
         } catch {
             await titleGeneration?.value
             for (activityID, durationMs) in client.lastTurnActivityDurations {
@@ -4418,11 +4458,18 @@ final class ConversationManager {
             fields.merge(client.diagnosticFields()) { _, new in new }
             let shutdownMessage = "StationAI closed while this turn was running. Your conversation is saved; review it and send a follow-up to continue."
             let shouldKeepResumable = client.isPreparingForApplicationTermination
-            _ = try? await tasks.setLifecycleStatus(
-                taskID,
-                to: shouldKeepResumable ? .waitingResponse : .blocked,
-                message: shouldKeepResumable ? shutdownMessage : error.localizedDescription
-            )
+            for _ in 0..<100 {
+                do {
+                    _ = try await tasks.setLifecycleStatus(
+                        taskID,
+                        to: shouldKeepResumable ? .waitingResponse : .blocked,
+                        message: shouldKeepResumable ? shutdownMessage : error.localizedDescription
+                    )
+                    break
+                } catch {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+            }
             StationAIDiagnostics.record("conversation.send.failed", fields: fields)
             throw error
         }
@@ -4439,11 +4486,12 @@ final class ConversationManager {
         prompt: String,
         workspace: ConversationWorkspaceContext,
         clients titleClients: [ConversationProviderClient]
-    ) async throws {
+    ) async throws -> String {
         let result = await ConversationTitleGenerator(clients: titleClients)
             .generateTitle(from: prompt, workspace: workspace, taskID: taskID)
         let generated = result?.title
         let fallback = prompt.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
+        let resolvedTitle = generated.flatMap { $0.isEmpty ? nil : $0 } ?? fallback
         let titleSource = result?.provider.rawValue ?? "prompt-fallback"
         let latest: BoardTask
         do {
@@ -4453,7 +4501,7 @@ final class ConversationManager {
             fields["taskID"] = taskID.uuidString
             fields["titleSource"] = titleSource
             StationAIDiagnostics.record("task.title_apply.skipped", fields: fields.merging(["reason": "task_unavailable"]) { _, new in new })
-            return
+            return fallback
         }
         guard latest.title == "Generating title…" else {
             StationAIDiagnostics.record("task.title_apply.skipped", fields: [
@@ -4462,9 +4510,10 @@ final class ConversationManager {
                 "currentTitleState": StationAITaskTitleDiagnostics.state(of: latest.title),
                 "titleSource": titleSource
             ])
-            return
+            return ["Generating title…", "Untitled task"].contains(latest.title)
+                ? resolvedTitle
+                : latest.title
         }
-        let resolvedTitle = generated.flatMap { $0.isEmpty ? nil : $0 } ?? fallback
         do {
             guard try await tasks.renameIfTitleMatches(
                 taskID,
@@ -4478,13 +4527,14 @@ final class ConversationManager {
                     "currentTitleState": StationAITaskTitleDiagnostics.state(of: currentTitle),
                     "titleSource": titleSource
                 ])
-                return
+                return currentTitle
             }
             StationAIDiagnostics.record("task.title_apply.succeeded", fields: [
                 "taskID": taskID.uuidString,
                 "titleSource": titleSource,
                 "fallbackWordCount": generated == nil ? String(fallback.split(whereSeparator: \.isWhitespace).count) : "0"
             ])
+            return resolvedTitle
         } catch {
             var fields = StationAIDiagnostics.errorFields(error, redacting: [resolvedTitle, prompt])
             fields["taskID"] = taskID.uuidString
@@ -4507,13 +4557,14 @@ final class ConversationManager {
                         "currentTitleState": StationAITaskTitleDiagnostics.state(of: currentTitle),
                         "titleSource": "prompt-fallback"
                     ])
-                    return
+                    return currentTitle
                 }
                 StationAIDiagnostics.record("task.title_apply.succeeded", fields: [
                     "taskID": taskID.uuidString,
                     "titleSource": "prompt-fallback",
                     "fallbackWordCount": String(fallback.split(whereSeparator: \.isWhitespace).count)
                 ])
+                return fallback
             } catch {
                 var recoveryFields = StationAIDiagnostics.errorFields(error, redacting: [fallback, prompt])
                 recoveryFields["taskID"] = taskID.uuidString

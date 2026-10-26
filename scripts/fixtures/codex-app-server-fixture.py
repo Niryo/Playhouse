@@ -360,7 +360,12 @@ def main():
                     resume.unlink(missing_ok=True)
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID,
-                    "item": {"id": "item_stationai_title", "type": "agentMessage", "text": "Generated fixture title"},
+                    "item": {
+                        "id": "item_stationai_title",
+                        "type": "agentMessage",
+                        "phase": "final_answer",
+                        "text": "Generated fixture title",
+                    },
                 }})
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": THREAD_ID,
@@ -920,6 +925,17 @@ def main():
                 release.unlink(missing_ok=True)
                 if not was_released:
                     return 3
+            echoed = echoed_outcome_answer(turn_message)
+            if not failed and echoed:
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID,
+                    "item": {
+                        "id": "item_stationai_echoed_outcome",
+                        "type": "agentMessage",
+                        "phase": "final_answer",
+                        "text": echoed,
+                    },
+                }})
             write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                 "threadId": THREAD_ID,
                 "turn": {"id": TURN_ID, "status": "interrupted" if mode.endswith("-interrupted") else ("failed" if failed else "completed"),
@@ -1011,7 +1027,7 @@ def main():
                     if user_content:
                         contents.extend([
                             {"id": f"item_user_fixture_{index}", "type": "userMessage", "content": user_content},
-                            {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": answer_text(user_message)},
+                            {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "phase": "final_answer", "text": answer_text(user_message)},
                         ])
             elif saved_history.get("turns"):
                 contents = []
@@ -1023,12 +1039,12 @@ def main():
                     ]
                     if user_content:
                         echoed = echoed_outcome_answer(user_message)
-                        assistant = {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."}
+                        assistant = {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "phase": "final_answer", "text": "Answers received: Blue / fixture-secret."}
                         if echoed:
                             assistant.update(phase="final_answer", text=echoed)
                         contents.extend([
                             {"id": f"item_user_fixture_{index}", "type": "userMessage", "content": user_content},
-                            assistant if echoed else {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": answer_text(user_message)},
+                            assistant if echoed else {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "phase": "final_answer", "text": answer_text(user_message)},
                         ])
             else:
                 user_message = saved_history.get("userMessage") or (turn_message if answers else None)
@@ -1038,7 +1054,7 @@ def main():
                 ]
                 contents = ([
                     {"id": "item_user_fixture", "type": "userMessage", "content": user_content},
-                    {"id": "item_assistant_fixture", "type": "agentMessage", "text": answer_text(user_message)},
+                    {"id": "item_assistant_fixture", "type": "agentMessage", "phase": "final_answer", "text": answer_text(user_message)},
                 ] if user_content and not mode.endswith("-empty") else [])
             if mode.endswith("-subagent") or mode.endswith("-subagent-wait"):
                 contents = [

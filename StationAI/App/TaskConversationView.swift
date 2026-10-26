@@ -334,13 +334,7 @@ struct TaskConversationView: View {
     }
 
     private var currentActivity: ConversationActivity? {
-        activities.enumerated()
-            .filter { $0.element.isActive }
-            .max { lhs, rhs in
-                let lhsStart = lhs.element.startedAt ?? .distantPast
-                let rhsStart = rhs.element.startedAt ?? .distantPast
-                return lhsStart == rhsStart ? lhs.offset < rhs.offset : lhsStart < rhsStart
-            }?.element
+        activities.last(where: \.isActive)
     }
 
     private var hasCompletedAssistantResponse: Bool {
@@ -440,6 +434,10 @@ struct TaskConversationView: View {
             if !isReadOnly {
                 refreshQueuedMessages()
                 await loadModels()
+            }
+            if isNewTask {
+                await Task.yield()
+                isComposerFocused = true
             }
             if conflictResolutionRequested && !isReadOnly && !isResponding {
                 conflictResolutionAttempt = 1
@@ -1016,7 +1014,6 @@ struct TaskConversationView: View {
             .help("Back to Kanban")
             .accessibilityLabel("Back to Kanban board")
             .accessibilityIdentifier("back-to-board-button")
-            .disabled(isPreparingSubmittedMessage)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
@@ -1405,8 +1402,8 @@ struct TaskConversationView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .textSelection(.enabled)
-                    .accessibilityLabel(folderSummary)
-                    .accessibilityValue(fullFolderSummary)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(fullFolderSummary)
                     .accessibilityIdentifier("working-folders-summary")
                     .frame(maxWidth: 820, alignment: .leading)
                     .frame(maxWidth: .infinity)
@@ -1427,21 +1424,25 @@ struct TaskConversationView: View {
                                 .foregroundStyle(emptyConversationRepositoryTitleColor)
                                 .multilineTextAlignment(.center)
                                 .lineLimit(2)
+                                .accessibilityLabel(emptyConversationRepositoryTitle)
+                                .accessibilityIdentifier("empty-conversation-repository-title")
                             Spacer(minLength: 58)
                             VStack(spacing: 14) {
                                 Image(systemName: "bubble.left.and.bubble.right")
                                     .font(.system(size: 29, weight: .regular))
                                     .foregroundStyle(Color.accentColor.opacity(0.8))
                                     .accessibilityLabel("Conversation")
-                                Text("Send a message to \(provider.assistantLabel).")
+                                Text("Send a message to \(selectedModelName.isEmpty ? provider.defaultModelName : selectedModelName).")
                                     .font(.system(size: 14, weight: .medium))
                                     .foregroundStyle(.secondary)
+                                    .accessibilityLabel("Send a message to \(selectedModelName.isEmpty ? provider.defaultModelName : selectedModelName).")
                             }
                             Spacer(minLength: 28)
                         }
                         .frame(maxWidth: .infinity, minHeight: 280)
                         .padding(.horizontal, 30)
                         .padding(.vertical, 38)
+                        .accessibilityElement(children: .contain)
                         .accessibilityIdentifier("empty-conversation")
                     } else if !messages.isEmpty {
                         LazyVStack(alignment: .leading, spacing: 16) {
@@ -1504,11 +1505,6 @@ struct TaskConversationView: View {
                         }
                     }
 
-                    if isDisplayingActiveResponse {
-                        ForEach(activeSubagents) { activity in
-                            subagentTimelineRow(activity)
-                        }
-                    }
                     ForEach(activities.filter { $0.isContextCompaction && $0.timelineOrder == nil }) { activity in
                         contextCompactionTimelineRow(activity)
                     }
@@ -1553,8 +1549,16 @@ struct TaskConversationView: View {
     }
 
     private var emptyConversationRepositoryTitle: String {
-        let repositoryNames = task.repositoryWorktrees.map {
+        var repositoryNames = task.repositoryWorktrees.map {
             URL(fileURLWithPath: $0.repositoryPath).lastPathComponent
+        }
+        if repositoryNames.isEmpty {
+            repositoryNames = task.workspaceRootPaths.compactMap { path in
+                let repositoryURL = URL(fileURLWithPath: path, isDirectory: true)
+                let gitMarker = repositoryURL.appendingPathComponent(".git")
+                guard FileManager.default.fileExists(atPath: gitMarker.path) else { return nil }
+                return repositoryURL.lastPathComponent
+            }
         }
         return repositoryNames.isEmpty ? "No repository selected" : repositoryNames.joined(separator: " · ")
     }
@@ -1584,6 +1588,15 @@ struct TaskConversationView: View {
             .accessibilityValue(isActivityExpanded ? "Expanded, down chevron" : "Collapsed, right chevron")
             .accessibilityHint("Shows Codex progress messages and completed activity details.")
             .accessibilityIdentifier("codex-activity-disclosure")
+
+            // Keep active child rows in the materialized activity container so
+            // accessibility can discover them even when the conversation
+            // timeline is still settling its scroll position.
+            if isDisplayingActiveResponse {
+                ForEach(activities.filter(\.isSubagent)) { activity in
+                    subagentTimelineRow(activity)
+                }
+            }
 
             Divider()
                 .opacity(0.32)
@@ -2158,6 +2171,7 @@ struct TaskConversationView: View {
                         x: min(max(selection.bounds.midX, 56), max(56, geometry.size.width - 56)),
                         y: selection.bounds.minY - 22
                     )
+                    .offset(y: -132)
                     .zIndex(20)
                     .popover(isPresented: Binding(
                         get: { annotationSelection?.id == selection.id },
@@ -2532,6 +2546,7 @@ struct TaskConversationView: View {
                     height: $composerHeight,
                     isFocused: Binding(get: { isComposerFocused }, set: { isComposerFocused = $0 }),
                     isEnabled: !isReadOnly,
+                    autofocusOnAppear: isNewTask,
                     accessibilityHelp: isReadOnly
                         ? "Archived conversation, read-only."
                          : (isResponding ? "Press Return to queue this follow-up. Press Command-Return to steer the active turn, or use a queued row's Steer action."
@@ -2579,7 +2594,7 @@ struct TaskConversationView: View {
                         }
                         scheduleDraftAutosave(newValue)
                     }
-                    .disabled(isReadOnly || isLoadingHistory || isPreparingSubmittedMessage)
+                    .disabled(isReadOnly || isPreparingSubmittedMessage)
                     .accessibilityIdentifier("message-composer-scroll-view")
 
                 HStack(spacing: 12) {
@@ -2822,18 +2837,7 @@ struct TaskConversationView: View {
             if let other = userInputOther[question.id]?.trimmingCharacters(in: .whitespacesAndNewlines), !other.isEmpty { values.append(other) }
             answers[question.id] = values
         }
-        if request.isBlocking {
-            do {
-                _ = try await BoardTaskManager(modelContext: modelContext).setLifecycleStatus(task.id, to: .inProgress)
-            } catch {
-                errorMessage = error.localizedDescription
-                return
-            }
-        }
         guard providerClient.answerUserInput(requestID: request.id, threadID: request.threadID, answers: answers) else {
-            if request.isBlocking {
-                _ = try? await BoardTaskManager(modelContext: modelContext).setLifecycleStatus(task.id, to: .waitingResponse)
-            }
             errorMessage = "\(provider.displayName) couldn't accept those answers. Please check the responses and try again."
             return
         }
@@ -2850,11 +2854,36 @@ struct TaskConversationView: View {
         userInputRequest = nil
         userInputAnswers = [:]
         userInputOther = [:]
+        Task { @MainActor in
+            for _ in 0..<100 {
+                if let history = try? await conversationManager.history(taskID: task.id),
+                   history.messages != messages {
+                    messages = history.messages
+                    activities = history.activities
+                    answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
         if request.isBlocking {
             do {
                 _ = try await BoardTaskManager(modelContext: modelContext).resumeWaitingResponseAfterUserInput(task.id)
             } catch {
                 errorMessage = "Your answer was sent, but StationAI couldn't update the task status: \(error.localizedDescription)"
+            }
+        } else {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                for _ in 0..<100 {
+                    do {
+                        _ = try await BoardTaskManager(modelContext: modelContext)
+                            .setLifecycleStatus(task.id, to: .waitingResponse)
+                        break
+                    } catch {
+                        try? await Task.sleep(nanoseconds: 100_000_000)
+                    }
+                }
             }
         }
     }
@@ -3131,9 +3160,18 @@ struct TaskConversationView: View {
                         messages[messageIndex].text += delta
                     case "assistant_final":
                         guard let text = update.text else { return }
-                        guard let messageIndex = messages.lastIndex(where: { $0.role == .assistant }) else { return }
-                        messages[messageIndex].text = text
-                        messages[messageIndex].phase = "final_answer"
+                        if let messageIndex = messages.lastIndex(where: { $0.role == .assistant }),
+                           messages[messageIndex].asyncQuestions == nil {
+                            messages[messageIndex].text = text
+                            messages[messageIndex].phase = "final_answer"
+                        } else {
+                            messages.append(ConversationMessage(
+                                id: UUID().uuidString,
+                                role: .assistant,
+                                text: text,
+                                phase: "final_answer"
+                            ))
+                        }
                     case "assistant_progress":
                         guard let itemID = update.itemID, let text = update.text else { return }
                         if let index = messages.firstIndex(where: { $0.id == itemID }) {
@@ -3171,7 +3209,24 @@ struct TaskConversationView: View {
                         break
                     case "history", "completed":
                         guard let history = update.history else { return }
-                        messages = history.messages
+                        var mergedMessages = history.messages
+                        if update.type == "completed" {
+                            for liveMessage in messages where !liveMessage.text.isEmpty {
+                                if let persistedIndex = mergedMessages.firstIndex(where: { $0.id == liveMessage.id }) {
+                                    if mergedMessages[persistedIndex].text.isEmpty {
+                                        mergedMessages[persistedIndex] = liveMessage
+                                    }
+                                    continue
+                                }
+                                let alreadyPersisted = mergedMessages.contains {
+                                    $0.role == liveMessage.role && $0.text == liveMessage.text
+                                }
+                                if !alreadyPersisted {
+                                    mergedMessages.append(liveMessage)
+                                }
+                            }
+                        }
+                        messages = mergedMessages
                         answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
                         activities = history.activities
                         if update.type == "completed" {
@@ -3553,9 +3608,17 @@ struct TaskConversationView: View {
 
     private func saveAndBack() {
         draftAutosaveTask?.cancel()
+        if userInputRequest != nil {
+            userInputRequest = nil
+            Task { @MainActor in
+                await Task.yield()
+                onBack()
+            }
+            return
+        }
         if isReadOnly { onBack(); return }
         if isResponding { onBack(); return }
-        if isNewTask, draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, pendingImages.isEmpty,
+        if isNewTask, task.repositoryWorktrees.isEmpty, pendingImages.isEmpty,
            messages.isEmpty, activities.isEmpty, !isLoadingHistory {
             Task { @MainActor in
                 do {
@@ -3627,15 +3690,12 @@ struct TaskConversationView: View {
                 status: status,
                 submitted: reserveTitleForSend
             )
-            if (generateTitle || reserveTitleForSend), ["Generating title…", "Untitled task"].contains(savedTask.title) {
+            if generateTitle, ["Generating title…", "Untitled task"].contains(savedTask.title) {
                 shouldGenerateTitle = try await taskManager.renameIfTitleMatches(
                     task.id,
                     expectedTitle: savedTask.title,
                     title: "Generating title…"
                 ) != nil
-                if reserveTitleForSend {
-                    shouldGenerateTitle = false
-                }
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -3907,7 +3967,8 @@ struct TaskConversationView: View {
             do {
                 _ = try await BoardTaskManager(modelContext: modelContext).removeRepository(
                     task.id,
-                    repositoryPath: repository.repositoryPath
+                    repositoryPath: repository.repositoryPath,
+                    duringActiveConversation: true
                 )
                 repositoryBeingEdited = nil
                 errorMessage = nil
@@ -3939,6 +4000,7 @@ private struct NativeChatEditor: NSViewRepresentable {
     @Binding var height: CGFloat
     @Binding var isFocused: Bool
     let isEnabled: Bool
+    let autofocusOnAppear: Bool
     let accessibilityHelp: String
     let onSubmit: () -> Void
     let onSteerSubmit: () -> Void
@@ -3993,14 +4055,27 @@ private struct NativeChatEditor: NSViewRepresentable {
         editor.isEditable = isEnabled
         editor.isSelectable = isEnabled
         editor.setAccessibilityHelp(accessibilityHelp)
+        scroll.shouldFocusEditor = isFocused && isEnabled
+        scroll.shouldAutofocusEditor = autofocusOnAppear && isEnabled
         if editor.string != text {
             editor.string = text
             editor.undoManager?.removeAllActions()
             scroll.requestTextLayout()
         }
         if isFocused, isEnabled, editor.window?.firstResponder !== editor {
-            editor.window?.makeFirstResponder(editor)
+            if let window = editor.window {
+                window.makeFirstResponder(editor)
+            } else {
+                DispatchQueue.main.async { [weak editor, weak coordinator = context.coordinator] in
+                    guard let editor,
+                          let coordinator,
+                          coordinator.parent.isFocused,
+                          coordinator.parent.isEnabled else { return }
+                    editor.window?.makeFirstResponder(editor)
+                }
+            }
         }
+        scroll.focusEditorIfNeeded()
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -4020,6 +4095,9 @@ private struct NativeChatEditor: NSViewRepresentable {
 
 private final class ChatEditorScrollView: NSScrollView {
     var onHeightChange: ((CGFloat) -> Void)?
+    var shouldFocusEditor = false
+    var shouldAutofocusEditor = false
+    private var didAutofocusEditor = false
     private(set) var viewportHeight: CGFloat = 28
     private var previousWidth: CGFloat = 0
     private var textLayoutNeeded = true
@@ -4027,6 +4105,23 @@ private final class ChatEditorScrollView: NSScrollView {
     func requestTextLayout() {
         textLayoutNeeded = true
         needsLayout = true
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.focusEditorIfNeeded()
+        }
+    }
+
+    func focusEditorIfNeeded() {
+        guard let window,
+              let editor = documentView as? NSTextView,
+              shouldFocusEditor || (shouldAutofocusEditor && !didAutofocusEditor) else { return }
+        if window.makeFirstResponder(editor), shouldAutofocusEditor {
+            didAutofocusEditor = true
+        }
     }
 
     override func layout() {
