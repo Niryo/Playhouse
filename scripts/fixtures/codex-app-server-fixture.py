@@ -294,7 +294,7 @@ def main():
                     "threadStartCount": history.get("threadStartCount", 0) + 1,
                 })
                 history_path.write_text(json.dumps(history), encoding="utf-8")
-            write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": "gpt-6-luna"}})
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": message.get("params", {}).get("model", "gpt-6-luna")}})
         elif message.get("method") == "thread/resume":
             if serial_mode:
                 requested_thread_id = message.get("params", {}).get("threadId")
@@ -318,7 +318,7 @@ def main():
                     message.get("params", {}).get("developerInstructions")
                 )
                 history_path.write_text(json.dumps(history), encoding="utf-8")
-            write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": "gpt-6-luna"}})
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": message.get("params", {}).get("model", "gpt-6-luna")}})
         elif message.get("method") == "turn/start":
             saw_turn = True
             saw_question = True
@@ -326,6 +326,8 @@ def main():
             turn_message = next((item.get("text") for item in turn_input if item.get("type") == "text"), None)
             is_title_request = (turn_message or "").startswith("Write a concise task title of at most 8 words")
             serial_first_turn = False
+            if "-unique-turns-" in mode and not is_title_request:
+                TURN_ID = f"turn-{uuid.uuid4()}"
             if serial_mode and not is_title_request:
                 TURN_ID = f"turn-{uuid.uuid4()}"
                 first_turn_marker = Path(str(sys.argv[0]) + ".serial-first-turn")
@@ -467,7 +469,22 @@ def main():
                             continue
                         incoming = json.loads(sys.stdin.readline())
                         if incoming.get("method") == "thread/items/list":
-                            write({"jsonrpc": "2.0", "id": incoming["id"], "result": {"data": [], "nextCursor": None}})
+                            entries = []
+                            for index, saved_turn in enumerate(serial_history().get("messages", []), start=1):
+                                turn_id = saved_turn["turnID"]
+                                entries.append({"turnId": turn_id, "item": {
+                                    "id": f"item_stationai_async_user_{index}", "type": "userMessage",
+                                    "content": [{"type": "text", "text": saved_turn["userMessage"]}],
+                                }})
+                                if index == 1:
+                                    entries.extend([
+                                        {"turnId": turn_id, "item": async_question_item()},
+                                        {"turnId": turn_id, "item": {
+                                            "id": "item_stationai_async_followup", "type": "agentMessage",
+                                            "phase": "final_answer", "text": "I can continue while you decide.",
+                                        }},
+                                    ])
+                            write({"jsonrpc": "2.0", "id": incoming["id"], "result": {"data": entries, "nextCursor": None}})
                         elif incoming.get("method") == "turn/steer":
                             params = incoming.get("params", {})
                             if params.get("threadId") != THREAD_ID or params.get("expectedTurnId") != TURN_ID:
@@ -1078,8 +1095,15 @@ def main():
                     {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": saved_history.get("userMessage", "Plan the task.")} ]},
                     {"id": "item_stationai_plan", "type": "plan", "text": MARKDOWN_PLAN},
                 ]
+            data = []
+            for index, item in enumerate(contents):
+                turn_id = TURN_ID
+                saved_turns = saved_history.get("messages") or saved_history.get("turns") or []
+                if saved_turns:
+                    turn_id = saved_turns[min(index // 2, len(saved_turns) - 1)]["turnID"]
+                data.append({"item": item, "turnId": turn_id})
             write({"jsonrpc": "2.0", "id": message["id"], "result": {
-                "data": [{"item": item, "turnId": TURN_ID} for item in contents],
+                "data": data,
                 "nextCursor": None,
             }})
     if not saw_turn:

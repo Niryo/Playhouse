@@ -209,7 +209,8 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         onActionRequest: @escaping () -> Void,
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void,
         onSteerMessage: @escaping (String, [String]) -> Void = { _, _ in },
-        onProgressMessage: @escaping (ConversationMessage) -> Void = { _ in }
+        onProgressMessage: @escaping (ConversationMessage) -> Void = { _ in },
+        onTurnStarted: @escaping (String) -> Void
     ) async throws {
         guard process == nil else {
             throw ClientError.protocolFailure("Another Claude Code turn is already running in this client.")

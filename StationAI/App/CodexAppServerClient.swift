@@ -447,7 +447,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         onActionRequest: @escaping () -> Void,
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void,
         onSteerMessage: @escaping (String, [String]) -> Void = { _, _ in },
-        onProgressMessage: @escaping (ConversationMessage) -> Void = { _ in }
+        onProgressMessage: @escaping (ConversationMessage) -> Void = { _ in },
+        onTurnStarted: @escaping (String) -> Void
     ) async throws {
         actionRequestHandler = onActionRequest
         userInputHandler = onUserInput
@@ -519,6 +520,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             throw ClientError.protocolFailure("Codex did not return a turn ID.")
         }
         activeTurnID = turnID
+        onTurnStarted(turnID)
         isTurnActive = true
         ConversationSteerMailbox.publishActiveTurn(threadID: threadID, turnID: turnID)
         Self.processActiveThreadIDs.insert(threadID)

@@ -25,11 +25,16 @@ extension ConversationProvider {
         }
     }
 
-    /// The short name shown above assistant messages.
-    var assistantLabel: String {
+    /// The short name shown above assistant messages, derived from the model
+    /// that produced the message.
+    func assistantLabel(modelName: String?) -> String {
         switch self {
-        case .codex: "Codex · Luna"
-        case .claude: "Claude"
+        case .codex:
+            guard let modelName else { return "Codex" }
+            let shortName = modelName.split(separator: " ").last.map(String.init) ?? modelName
+            return "Codex · \(shortName)"
+        case .claude:
+            return modelName.map { "Claude · \($0)" } ?? "Claude"
         }
     }
 
@@ -64,8 +69,10 @@ struct ConversationMessage: Codable, Identifiable, Equatable {
     /// The runtime that produced an assistant message, or received a user message.
     /// Nil for transcripts saved before StationAI supported more than Codex.
     var provider: ConversationProvider?
+    /// Model selected when this message's turn was dispatched, when known.
+    var modelID: String?
 
-    init(id: String, role: ConversationRole, text: String, imageDataURLs: [String] = [], phase: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil, asyncQuestions: [ConversationAsyncQuestion]? = nil, provider: ConversationProvider? = nil) {
+    init(id: String, role: ConversationRole, text: String, imageDataURLs: [String] = [], phase: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil, asyncQuestions: [ConversationAsyncQuestion]? = nil, provider: ConversationProvider? = nil, modelID: String? = nil) {
         self.id = id
         self.role = role
         self.text = text
@@ -75,9 +82,10 @@ struct ConversationMessage: Codable, Identifiable, Equatable {
         self.timelineOrder = timelineOrder
         self.asyncQuestions = asyncQuestions
         self.provider = provider
+        self.modelID = modelID
     }
 
-    private enum CodingKeys: String, CodingKey { case id, role, text, imageDataURLs, phase, turnID, timelineOrder, asyncQuestions, provider }
+    private enum CodingKeys: String, CodingKey { case id, role, text, imageDataURLs, phase, turnID, timelineOrder, asyncQuestions, provider, modelID }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
@@ -89,6 +97,7 @@ struct ConversationMessage: Codable, Identifiable, Equatable {
         timelineOrder = try container.decodeIfPresent(Int.self, forKey: .timelineOrder)
         asyncQuestions = try container.decodeIfPresent([ConversationAsyncQuestion].self, forKey: .asyncQuestions)
         provider = try container.decodeIfPresent(ConversationProvider.self, forKey: .provider)
+        modelID = try container.decodeIfPresent(String.self, forKey: .modelID)
     }
 }
 
@@ -280,7 +289,8 @@ protocol ConversationProviderClient: AnyObject {
         onActionRequest: @escaping () -> Void,
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void,
         onSteerMessage: @escaping (String, [String]) -> Void,
-        onProgressMessage: @escaping (ConversationMessage) -> Void
+        onProgressMessage: @escaping (ConversationMessage) -> Void,
+        onTurnStarted: @escaping (String) -> Void
     ) async throws
     func interruptActiveTurn(threadID: String) async throws -> Bool
     func steerActiveTurn(threadID: String, text: String, imageDataURLs: [String]) async throws -> Bool
@@ -325,7 +335,7 @@ extension ConversationProviderClient {
             workspace: workspace, developerInstructions: developerInstructions,
             onDelta: { _ in }, onFinalMessage: onFinalMessage, onActivity: { _ in }, onDiff: { _ in },
             onHistory: { _ in }, onActionRequest: {}, onUserInput: onUserInput,
-            onSteerMessage: { _, _ in }, onProgressMessage: { _ in }
+            onSteerMessage: { _, _ in }, onProgressMessage: { _ in }, onTurnStarted: { _ in }
         )
     }
 }

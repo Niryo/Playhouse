@@ -1174,16 +1174,19 @@ final class BoardTaskManager {
         guard let conversationTurnLockDirectory else {
             throw BridgeFileLockError(message: "Couldn't determine the task-store location for the conversation-turn reservation.")
         }
-        let lockURL = conversationTurnLockDirectory
-            .appendingPathComponent("\(id.uuidString).lock")
-            .standardizedFileURL
+        let lockURL = conversationTurnLockDirectory.appendingPathComponent("\(id.uuidString).lock")
+        return try hasReservation(at: lockURL, purpose: "conversation-turn")
+    }
+
+    private func hasReservation(at url: URL, purpose: String) throws -> Bool {
+        let lockURL = url.standardizedFileURL
         let key = lockURL.path
         guard !TaskOperationLockGate.isHeld(key) else { return true }
 
         let descriptor = Darwin.open(lockURL.path, O_RDWR | O_CLOEXEC)
         guard descriptor >= 0 else {
             if errno == ENOENT { return false }
-            throw BridgeFileLockError(message: "Couldn't inspect the conversation-turn reservation (errno \(errno)).")
+            throw BridgeFileLockError(message: "Couldn't inspect the \(purpose) reservation (errno \(errno)).")
         }
         defer { _ = Darwin.close(descriptor) }
 
@@ -1191,7 +1194,7 @@ final class BoardTaskManager {
         lock.l_type = Int16(F_WRLCK)
         lock.l_whence = Int16(SEEK_SET)
         guard Darwin.fcntl(descriptor, F_GETLK, &lock) == 0 else {
-            throw BridgeFileLockError(message: "Couldn't inspect the conversation-turn reservation (errno \(errno)).")
+            throw BridgeFileLockError(message: "Couldn't inspect the \(purpose) reservation (errno \(errno)).")
         }
         return lock.l_type != Int16(F_UNLCK)
     }
@@ -3328,9 +3331,10 @@ final class ConversationManager {
                 ?? ConversationHistory(messages: [], activities: [], diff: nil)
             return ConversationHistory(messages: codex.messages, activities: codex.activities, diff: codex.diff, answeredAsyncQuestionIDs: answered)
         }
-        // Codex can't list a thread before its first turn, so a mixed transcript
-        // reads Codex only once a Codex segment owns turns.
-        let usesCodex = task.codexThreadID != nil && transcript.segments.contains { $0.provider == .codex && !$0.codexTurnIDs.isEmpty }
+        // Codex can't list a thread before its first accepted turn, so mixed
+        // transcripts only query it once a segment owns a turn.
+        let hasClaimedCodexTurns = transcript.segments.contains { $0.provider == .codex && !$0.codexTurnIDs.isEmpty }
+        let usesCodex = task.codexThreadID != nil && hasClaimedCodexTurns
         let codex = usesCodex ? try await codexHistory(task: task, onActionRequest: onActionRequest) : nil
         var history = Self.compose(transcript: transcript, codex: codex)
         history.answeredAsyncQuestionIDs = answered
@@ -3476,6 +3480,9 @@ final class ConversationManager {
             codexTurnSegment = segment
             var attributed = message
             attributed.provider = attributed.provider ?? .codex
+            if attributed.modelID == nil, let turnID = attributed.turnID {
+                attributed.modelID = segments.compactMap { $0.codexTurnModelIDs[turnID] }.first
+            }
             elements.append((segment, message.timelineOrder ?? offset, .message(attributed)))
         }
         let codexActivities = codex?.activities ?? []
@@ -3673,7 +3680,16 @@ final class ConversationManager {
 
     func cachedModels(taskID: UUID) throws -> [ConversationModelOption] {
         let task = try tasks.taskModel(taskID)
-        guard let data = preferences.data(forKey: modelCacheKey(for: task.conversationProvider)),
+        return try cachedModels(provider: task.conversationProvider)
+    }
+
+    func cachedModels(taskID: UUID, provider: ConversationProvider) throws -> [ConversationModelOption] {
+        _ = try tasks.taskModel(taskID)
+        return try cachedModels(provider: provider)
+    }
+
+    private func cachedModels(provider: ConversationProvider) throws -> [ConversationModelOption] {
+        guard let data = preferences.data(forKey: modelCacheKey(for: provider)),
               let models = try? JSONDecoder().decode([ConversationModelOption].self, from: data),
               !models.isEmpty else { return [] }
         return models.newestVersionPerFamily()
@@ -4063,25 +4079,25 @@ final class ConversationManager {
         let history: ConversationHistory
         do {
             history = try await tasks.withConversationTurnReservation(taskID) {
-                do {
-                    let result = try await self.sendReserved(
-                        taskID: taskID,
-                        text: text,
-                        imageDataURLs: imageDataURLs,
-                        mode: mode,
-                        requestedModelID: modelID,
-                        userInputAnswers: userInputAnswers,
-                        statusBeforeSubmission: statusBeforeSubmission,
-                        onTurnStarting: onTurnStarting,
-                        onUpdate: onUpdate,
-                        onUserInput: onUserInput
-                    )
-                    try? await self.tasks.clearPendingSubmittedPrompt(taskID)
-                    return result
-                } catch {
-                    try? await self.tasks.clearPendingSubmittedPrompt(taskID)
-                    throw error
-                }
+                    do {
+                        let result = try await self.sendReserved(
+                            taskID: taskID,
+                            text: text,
+                            imageDataURLs: imageDataURLs,
+                            mode: mode,
+                            requestedModelID: modelID,
+                            userInputAnswers: userInputAnswers,
+                            statusBeforeSubmission: statusBeforeSubmission,
+                            onTurnStarting: onTurnStarting,
+                            onUpdate: onUpdate,
+                            onUserInput: onUserInput
+                        )
+                        try? await self.tasks.clearPendingSubmittedPrompt(taskID)
+                        return result
+                    } catch {
+                        try? await self.tasks.clearPendingSubmittedPrompt(taskID)
+                        throw error
+                    }
             }
         } catch {
             if retainQueuedMessagesOnFailure, let threadID = try? tasks.taskModel(taskID).activeConversationID {
@@ -4159,13 +4175,14 @@ final class ConversationManager {
 
     /// Appends or updates a visible element of the current Claude turn. Writes
     /// are incremental so a crash mid-turn keeps everything already shown.
-    private func recordClaudeMessage(taskID: UUID, turnID: String? = nil, _ message: ConversationMessage) {
+    private func recordClaudeMessage(taskID: UUID, turnID: String? = nil, modelID: String? = nil, _ message: ConversationMessage) {
         do {
             try transcripts.mutate(taskID) { transcript in
                 guard let index = turnID.flatMap({ id in transcript.turns.lastIndex { $0.id == id } }) ?? transcript.turns.indices.last else { return }
                 var message = message
                 message.turnID = transcript.turns[index].id
                 message.provider = .claude
+                message.modelID = message.modelID ?? modelID
                 if let existing = transcript.turns[index].messages.firstIndex(where: { $0.id == message.id }) {
                     transcript.turns[index].messages[existing] = message
                 } else {
@@ -4198,6 +4215,23 @@ final class ConversationManager {
         }
     }
 
+    /// Records the accepted turn before its first events can be queried by another XPC call.
+    private func recordCodexTurnStarted(taskID: UUID, segmentID: String, turnID: String, modelID: String) {
+        do {
+            try transcripts.mutate(taskID) { transcript in
+                guard let index = transcript.segments.firstIndex(where: { $0.id == segmentID }) else { return }
+                if !transcript.segments[index].codexTurnIDs.contains(turnID) {
+                    transcript.segments[index].codexTurnIDs.append(turnID)
+                }
+                transcript.segments[index].codexTurnModelIDs[turnID] = modelID
+            }
+        } catch {
+            var fields = StationAIDiagnostics.errorFields(error)
+            fields["taskID"] = taskID.uuidString
+            StationAIDiagnostics.record("conversation.transcript.write_failed", fields: fields)
+        }
+    }
+
     /// Assigns Codex turns that ran during a segment to it, so a mixed transcript
     /// keeps them in order after later switches.
     private func claimCodexTurns(taskID: UUID, segmentID: String, _ messages: [ConversationMessage]) {
@@ -4206,7 +4240,8 @@ final class ConversationManager {
             try transcripts.mutate(taskID) { transcript in
                 guard let index = transcript.segments.firstIndex(where: { $0.id == segmentID }) else { return }
                 let claimed = Set(transcript.segments.flatMap(\.codexTurnIDs))
-                transcript.segments[index].codexTurnIDs += turnIDs.filter { !claimed.contains($0) }
+                let newTurnIDs = turnIDs.filter { !claimed.contains($0) }
+                transcript.segments[index].codexTurnIDs += newTurnIDs
             }
         } catch {
             var fields = StationAIDiagnostics.errorFields(error)
@@ -4220,13 +4255,12 @@ final class ConversationManager {
     private func prepareSegment(task: BoardTask) async throws -> (segmentID: String, handoff: String?)? {
         let provider = task.conversationProvider
         var transcript = try transcripts.read(task.id)
-        // Codex-only tasks keep their native history without a transcript file.
-        guard provider == .claude || !transcript.isEmpty else { return nil }
-        if transcript.segments.last?.provider != provider {
+        if transcript.segments.last?.provider != provider || transcript.segments.isEmpty {
             transcript = try transcripts.mutate(task.id) { transcript in
-                if transcript.segments.last?.provider != provider {
+                if transcript.segments.last?.provider != provider || transcript.segments.isEmpty {
+                    let isInitialExistingCodex = transcript.segments.isEmpty && provider == .codex && task.codexThreadID != nil
                     let isFirst = transcript.segments.isEmpty && task.codexThreadID == nil
-                    transcript.segments.append(.init(id: UUID().uuidString, provider: provider, startedAt: .now, handoffDelivered: isFirst))
+                    transcript.segments.append(.init(id: UUID().uuidString, provider: provider, startedAt: .now, handoffDelivered: isFirst || isInitialExistingCodex))
                 }
                 return transcript
             }
@@ -4406,7 +4440,7 @@ final class ConversationManager {
                 try transcripts.mutate(taskID) { transcript in
                     transcript.turns.append(.init(id: claudeTurnID, segmentID: segment.segmentID, messages: [ConversationMessage(
                         id: "\(claudeTurnID)-user", role: .user, text: normalizedText, imageDataURLs: imageDataURLs,
-                        turnID: claudeTurnID, provider: .claude
+                        turnID: claudeTurnID, provider: .claude, modelID: modelID
                     )]))
                 }
             }
@@ -4440,7 +4474,7 @@ final class ConversationManager {
                     // An answer that was only the echo still replaces the streamed text.
                     if let claudeTurnID, !message.isEmpty {
                         finalMessageCount += 1
-                        self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, ConversationMessage(
+                        self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, modelID: modelID, ConversationMessage(
                             id: "\(claudeTurnID)-final-\(finalMessageCount)", role: .assistant, text: message, phase: "final_answer"
                         ))
                     }
@@ -4463,6 +4497,24 @@ final class ConversationManager {
                 onHistory: { history in
                     if provider == .codex, let segment { self.claimCodexTurns(taskID: taskID, segmentID: segment.segmentID, history.messages) }
                     var history = history
+                    if provider == .codex, let transcript = try? self.transcripts.read(taskID) {
+                        let modelIDs = transcript.segments.reduce(into: [String: String]()) { result, segment in
+                            result.merge(segment.codexTurnModelIDs) { existing, _ in existing }
+                        }
+                        let messages = history.messages.map { message in
+                            var message = message
+                            message.provider = message.provider ?? .codex
+                            if message.modelID == nil, let turnID = message.turnID { message.modelID = modelIDs[turnID] }
+                            return message
+                        }
+                        history = ConversationHistory(
+                            messages: messages,
+                            activities: history.activities,
+                            diff: history.diff,
+                            answeredAsyncQuestionIDs: history.answeredAsyncQuestionIDs,
+                            providerBoundaries: history.providerBoundaries
+                        )
+                    }
                     history.answeredAsyncQuestionIDs = (try? self.tasks.answeredAsyncQuestionIDs(taskID: taskID)) ?? []
                     onUpdate(ConversationUpdate(type: "history", history: history))
                 },
@@ -4498,14 +4550,14 @@ final class ConversationManager {
                 },
                 onSteerMessage: { message, images in
                     if claudeTurnID != nil {
-                        self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, ConversationMessage(
+                        self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, modelID: modelID, ConversationMessage(
                             id: UUID().uuidString.lowercased(), role: .user, text: message, imageDataURLs: images
                         ))
                     }
                     onUpdate(ConversationUpdate(type: "steered_message", message: message, imageDataURLs: images))
                 },
                 onProgressMessage: { message in
-                    if let claudeTurnID { self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, message) }
+                    if let claudeTurnID { self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, modelID: modelID, message) }
                     onUpdate(ConversationUpdate(
                         type: "assistant_progress",
                         text: message.text,
@@ -4513,6 +4565,11 @@ final class ConversationManager {
                         phase: message.phase,
                         asyncQuestions: message.asyncQuestions
                     ))
+                },
+                onTurnStarted: { turnID in
+                    if provider == .codex, let segment {
+                        self.recordCodexTurnStarted(taskID: taskID, segmentID: segment.segmentID, turnID: turnID, modelID: modelID)
+                    }
                 }
             )
             if let segment, segment.handoff != nil || provider == .claude {

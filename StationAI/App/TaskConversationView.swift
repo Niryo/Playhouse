@@ -1433,7 +1433,7 @@ struct TaskConversationView: View {
                                     .font(.system(size: 29, weight: .regular))
                                     .foregroundStyle(Color.accentColor.opacity(0.8))
                                     .accessibilityLabel("Conversation")
-                                Text("Send a message to \(provider.assistantLabel).")
+                                Text("Send a message to \(provider.assistantLabel(modelName: selectedModelName)).")
                                     .font(.system(size: 14, weight: .medium))
                                     .foregroundStyle(.secondary)
                             }
@@ -1934,7 +1934,7 @@ struct TaskConversationView: View {
         let questions = message.asyncQuestions ?? []
         let answered = asyncQuestionWasAnswered(message)
         return VStack(alignment: .leading, spacing: 12) {
-            Text((message.provider ?? provider).assistantLabel)
+            Text(assistantLabel(for: message))
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
             ForEach(Array(questions.enumerated()), id: \.offset) { index, question in
@@ -2029,7 +2029,7 @@ struct TaskConversationView: View {
         let displayText = Self.displayableAssistantText(message.text)
         let responseAnnotations = responseAnnotationReferences(for: message)
         return VStack(alignment: .leading, spacing: 6) {
-            Text((message.provider ?? provider).assistantLabel)
+            Text(assistantLabel(for: message))
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("assistant-provider-\(message.id)")
@@ -3068,6 +3068,18 @@ struct TaskConversationView: View {
             return modelOptions.first(where: \.isDefault)?.name ?? provider.defaultModelName
         }
         return modelName(for: selectedModelID)
+    }
+
+    /// The label shown above an assistant message is based on the model ID
+    /// recorded for that turn, so later picker changes do not relabel history.
+    private func assistantLabel(for message: ConversationMessage) -> String {
+        let messageProvider = message.provider ?? provider
+        let modelID = message.modelID
+        let cachedModels = messageProvider == provider
+            ? modelOptions
+            : ((try? conversationManager.cachedModels(taskID: task.id, provider: messageProvider)) ?? [])
+        let modelName = modelID.flatMap { id in cachedModels.first(where: { $0.id == id })?.name }
+        return messageProvider.assistantLabel(modelName: modelName)
     }
 
     private var pickerEffortChoices: [ConversationEffort] {

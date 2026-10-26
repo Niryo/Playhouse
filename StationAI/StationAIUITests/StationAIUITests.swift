@@ -6553,9 +6553,9 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(retainedOfflineCache.first?["name"] as? String, "Offline Cached Claude")
     }
 
-    // case-contract: test_conversation_effort_dispatches_to_codex | The selected effort persists through CLI/XPC reads and reaches Codex turn/start collaborationMode.settings.reasoningEffort; a model's advertised effort limit rejects unsupported requests before history is created. The UI selects Extra High and sends a Codex fixture turn whose recorded protocol value is xhigh.
+    // case-contract: test_conversation_effort_dispatches_to_codex | The selected effort persists through CLI/XPC reads and reaches Codex turn/start collaborationMode.settings.reasoningEffort; a model's advertised effort limit rejects unsupported requests before history is created. The UI selects Extra High and sends a Sol turn, then simulates a legacy transcript with no Codex turn metadata and sends a Luna turn; the old reply remains provider-only and the new reply is attributed to Luna.
     func test_conversation_effort_dispatches_to_codex() throws {
-        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success")
+        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-unique-turns-success")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
         codexFixtureExecutable = executable.path
         try? FileManager.default.removeItem(at: URL(fileURLWithPath: executable.path + ".history"))
@@ -6563,6 +6563,7 @@ final class StationAIUITests: XCTestCase {
         try createTaskFixture(title: "Codex effort UI", roots: [fixture.primary.path])
         let taskID = try taskID(named: "Codex effort UI")
         openTask(named: "Codex effort UI")
+        XCTAssertTrue(app.staticTexts["Send a message to Codex · Luna."].waitForExistence(timeout: 10), "The default model's short name labels the empty conversation.")
         let picker = element("model-picker-menu")
         XCTAssertTrue(picker.waitForExistence(timeout: 10))
         picker.click()
@@ -6570,7 +6571,10 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(slider.waitForExistence(timeout: 5))
         slider.adjust(toNormalizedSliderPosition: 1)
         XCTAssertTrue(waitUntil({ element("selected-model-effort").label == "Extra High" }, timeout: 5))
+        app.buttons["model-option-gpt-6-sol"].click()
         picker.click()
+        XCTAssertTrue(app.staticTexts["Send a message to Codex · Sol."].waitForExistence(timeout: 10), "Selecting another model updates its short name in the label, instead of staying stuck on the default.")
+        XCTAssertEqual((try runCLI(["conversation", "model", taskID])["result"] as? [String: Any])?["modelID"] as? String, "gpt-6-sol")
         let unsupported = try runCLI([
             "conversation", "send", taskID, "--message", "Unsupported effort.", "--model", "gpt-6-mini"
         ], expectedStatus: 2)
@@ -6582,6 +6586,27 @@ final class StationAIUITests: XCTestCase {
         composer.typeText("Check Codex effort dispatch.")
         element("send-message-button").click()
         XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["Codex · Sol"].exists, "The sent reply's label reflects the model actually selected for the turn, not the hardcoded default.")
+        let transcriptURL = dataDirectory.appendingPathComponent("conversation-transcripts", isDirectory: true)
+            .appendingPathComponent("\(taskID.uppercased()).json")
+        var transcript = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: transcriptURL)) as? [String: Any])
+        var segments = try XCTUnwrap(transcript["segments"] as? [[String: Any]])
+        for index in segments.indices {
+            segments[index]["codexTurnIDs"] = []
+            segments[index].removeValue(forKey: "codexTurnModelIDs")
+        }
+        transcript["segments"] = segments
+        try JSONSerialization.data(withJSONObject: transcript).write(to: transcriptURL, options: .atomic)
+        picker.click()
+        app.buttons["model-option-gpt-6-luna"].click()
+        picker.click()
+        XCTAssertTrue(app.staticTexts["Send a message to Codex · Luna."].waitForExistence(timeout: 10))
+        composer.click()
+        composer.typeText("Check legacy model attribution.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ app.staticTexts.matching(identifier: "OK.").count >= 2 }, timeout: 15))
+        XCTAssertTrue(app.staticTexts["Codex"].exists, "A legacy reply without a stored model stays provider-only.")
+        XCTAssertTrue(app.staticTexts["Codex · Luna"].exists, "The new turn is attributed to the model selected for that send.")
         let historyURL = URL(fileURLWithPath: executable.path + ".history")
         let history = try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any]
         let turns = try XCTUnwrap(history?["turns"] as? [[String: Any]])
@@ -6590,7 +6615,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(effort["effort"] as? String, "xhigh")
     }
 
-    // case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 as the concrete latest choice. The Claude composer retains native Default dispatch until a model is explicitly selected. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
+    // case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 as the concrete latest choice. Selecting it changes the prompt and reply label to Claude · Opus 5.5, and later model changes preserve the old reply's model attribution. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
     func test_conversation_effort_dispatches_to_claude() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
@@ -6608,6 +6633,9 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(app.buttons["model-option-default"].exists, "The Claude Default pseudo-model should not appear in the menu.")
         XCTAssertFalse(app.buttons["model-option-opus"].exists, "The versioned Opus model should replace its alias.")
         XCTAssertTrue(app.buttons["model-option-claude-opus-5-5"].exists, "The latest concrete Opus model should remain selectable.")
+        app.buttons["model-option-claude-opus-5-5"].click()
+        picker.click()
+        XCTAssertTrue(app.staticTexts["Send a message to Claude · Opus 5.5."].waitForExistence(timeout: 10))
         attachScreenshot(named: "Claude model list shows only versioned model families")
         let slider = element("model-effort-slider")
         XCTAssertTrue(slider.waitForExistence(timeout: 5))
@@ -6619,12 +6647,20 @@ final class StationAIUITests: XCTestCase {
         composer.typeText("Check Claude effort dispatch.")
         element("send-message-button").click()
         XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["Claude · Opus 5.5"].exists)
+        picker.click()
+        app.buttons["model-option-claude-sonnet-5-5"].click()
+        picker.click()
+        XCTAssertTrue(app.staticTexts["Send a message to Claude · Sonnet 5.5."].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Claude · Opus 5.5"].exists, "Changing the selected model must not relabel the earlier reply.")
         let historyURL = URL(fileURLWithPath: executable.path + ".history")
         let history = try JSONSerialization.jsonObject(with: Data(contentsOf: historyURL)) as? [String: Any]
         let turns = try XCTUnwrap(history?["turns"] as? [[String: Any]])
         XCTAssertEqual(turns.last?["effort"] as? String, "xhigh")
         let arguments = try XCTUnwrap(turns.last?["arguments"] as? [String])
-        XCTAssertFalse(arguments.contains("--model"), "An untouched Claude model choice should preserve Claude Code's configured default.")
+        let modelArgumentIndex = try XCTUnwrap(arguments.firstIndex(of: "--model"))
+        let modelArgument = try XCTUnwrap(arguments.dropFirst(modelArgumentIndex + 1).first)
+        XCTAssertEqual(modelArgument, "claude-opus-5-5", "The selected Claude model should reach Claude Code.")
         let effort = try XCTUnwrap(try runCLI(["conversation", "effort", taskID])["result"] as? [String: Any])
         XCTAssertEqual(effort["effort"] as? String, "xhigh")
     }
@@ -6769,7 +6805,7 @@ final class StationAIUITests: XCTestCase {
         assertTaskVisible("Non-blocking question", inColumn: "Waiting Response")
     }
 
-    // case-contract: test_codex_async_questions_render_and_reply_as_followup | Async agentMessage questions retain choices and a free-text prompt in live updates and fresh CLI/XPC history, stay separate from later assistant text, and receive validated answers through the shared manager during and after an active turn. The UI shows inline answer cards instead of raw bullet text, blocks incomplete answers, preserves answered cards across reopening, and displays both submitted answers and responses.
+    // case-contract: test_codex_async_questions_render_and_reply_as_followup | Async agentMessage questions retain choices and a free-text prompt in live updates and fresh CLI/XPC history, retain accepted-turn model attribution during an active history reload, stay separate from later assistant text, and receive validated answers through the shared manager during and after an active turn. The UI shows inline answer cards instead of raw bullet text, blocks incomplete answers, preserves answered cards across reopening, and displays both submitted answers and responses.
     func test_codex_async_questions_render_and_reply_as_followup() throws {
         let created = try runCLI(["task", "create", "--title", "Async Codex question", "--root", fixture.primary.path])
         let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
@@ -6794,6 +6830,14 @@ final class StationAIUITests: XCTestCase {
                       "The assistant message after the question must remain separate.")
         XCTAssertTrue(FileManager.default.fileExists(atPath: WorkspaceFixture.root.appendingPathComponent("codex-fixture-async-question.question-ready").path),
                       "The question fixture must still have an active turn.")
+        element("back-to-board-button").click()
+        openTask(named: "Async Codex question")
+        XCTAssertTrue(app.staticTexts["I can continue while you decide."].waitForExistence(timeout: 10),
+                      "Reopening during the active turn must load Codex history, not only restore the pending question request.")
+        XCTAssertTrue(app.staticTexts["Codex · Luna"].exists,
+                      "The reopened active history message must retain its accepted-turn model label.")
+        XCTAssertTrue(element("async-question-item_stationai_async_question").exists,
+                      "The pending question remains visible after the active history reload.")
         yesOption.click()
         XCTAssertFalse(element("submit-async-questions-item_stationai_async_question").isEnabled,
                        "Every async question needs an answer before submission.")
