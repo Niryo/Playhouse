@@ -180,6 +180,8 @@ struct TaskConversationView: View {
     @State private var isSwitchingProvider = false
     @State private var providerNotice: String?
     @State private var messages: [ConversationMessage] = []
+    @State private var visibleConversationMessageCount = 40
+    @State private var hasPresentedLatestConversation = false
     @State private var annotations: [ConversationAnnotation] = []
     @State private var annotationSelection: AnnotationSelection?
     @State private var currentTextSelection: AnnotationSelection?
@@ -316,6 +318,26 @@ struct TaskConversationView: View {
     private var conversationMessages: [ConversationMessage] {
         let completedProgressIDs = progressMessageIDs
         return messages.filter { !completedProgressIDs.contains($0.id) }
+    }
+
+    private static let initialVisibleConversationMessageCount = 40
+    private static let olderConversationMessageBatchSize = 40
+
+    private var renderedConversationMessages: [ConversationMessage] {
+        let allMessages = conversationMessages
+        return Array(allMessages.suffix(visibleConversationMessageCount))
+    }
+
+    private var hasOlderConversationMessages: Bool {
+        conversationMessages.count > renderedConversationMessages.count
+    }
+
+    private func revealOlderConversationMessages() {
+        guard hasOlderConversationMessages else { return }
+        visibleConversationMessageCount = min(
+            conversationMessages.count,
+            visibleConversationMessageCount + Self.olderConversationMessageBatchSize
+        )
     }
 
     private func goalAchievementAnchorMessageID(for entry: GoalAchievementTimelineEntry) -> String? {
@@ -1408,7 +1430,16 @@ struct TaskConversationView: View {
                             ForEach(providerBoundaries.filter { $0.afterMessageID == nil }) { boundary in
                                 providerBoundaryRow(boundary)
                             }
-                            ForEach(conversationMessages) { message in
+                            if hasOlderConversationMessages {
+                                Color.clear
+                                    .frame(height: 1)
+                                    .onAppear {
+                                        guard hasPresentedLatestConversation else { return }
+                                        revealOlderConversationMessages()
+                                    }
+                                    .accessibilityIdentifier("conversation-load-older-anchor")
+                            }
+                            ForEach(renderedConversationMessages) { message in
                                 if shouldShowActivityDisclosure, message.id == activityDisclosureAnchorID {
                                     activityList
                                 }
@@ -1480,6 +1511,7 @@ struct TaskConversationView: View {
             }
             .scrollIndicators(.visible)
             .accessibilityIdentifier("conversation-scroll-view")
+            .accessibilityValue("Showing latest \(renderedConversationMessages.count) of \(conversationMessages.count) messages")
             .onChange(of: messages.count) { _, _ in
                 scrollToLatest(using: scrollProxy)
             }
@@ -2889,6 +2921,7 @@ struct TaskConversationView: View {
                 actionNotice = approvalNotice
             }
             messages = history.messages
+            visibleConversationMessageCount = Self.initialVisibleConversationMessageCount
             restoreAnnotations(from: history.messages)
             answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
             activities = history.activities
@@ -3971,6 +4004,7 @@ struct TaskConversationView: View {
         // created its final row, which intermittently leaves reopened chats at top.
         Task { @MainActor in
             await Task.yield()
+            hasPresentedLatestConversation = true
             withAnimation(.easeOut(duration: 0.2)) {
                 proxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
             }
