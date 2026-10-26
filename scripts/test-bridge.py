@@ -16,6 +16,7 @@ import stat
 import struct
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 import uuid
@@ -291,14 +292,186 @@ class StationAIBridgeTests(unittest.TestCase):
             return []
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
-    def create_task(self, title="Bridge task", roots=None):
+    def create_task(self, title="Bridge task", roots=None, provider=None):
         if roots is None:
             roots = [self.primary]
         command = ["task", "create", "--title", title]
         for root in roots:
             command.extend(["--root", root])
+        if provider:
+            command.extend(["--provider", provider])
         response, _ = self.call_cli(*command)
         return self.assert_success(response)
+
+    def assert_user_stop_pauses_provider_turn(self, title, provider, environment_name, fixture_name):
+        task = self.create_task(title, provider=provider)
+        fixture_source = Path(__file__).resolve().parent / "fixtures" / fixture_name
+        executable = self.data_directory / f"{provider}-fixture-hold-interrupt"
+        shutil.copyfile(fixture_source, executable)
+        executable.chmod(0o755)
+        marker_name, marker_value = (
+            (".stationai-codex-fixture-owner", "StationAI test owns this Codex protocol fixture (v1).\n")
+            if provider == "codex" else
+            (".stationai-claude-fixture-owner", "StationAI test owns this Claude Code protocol fixture (v1).\n")
+        )
+        (self.data_directory / marker_name).write_text(marker_value, encoding="utf-8")
+        environment = {environment_name: str(executable)}
+        ready = Path(str(executable) + ".interrupt-ready")
+        received = Path(str(executable) + ".interrupt-received")
+        release = Path(str(executable) + ".interrupt-release")
+        send_results = {}
+        send_failures = []
+        stop_results = {}
+        stop_failures = []
+
+        def send_turn():
+            try:
+                send_results["response"], send_results["events"] = self.call_cli(
+                    "conversation", "send", task["id"], "--message", "Hold until stopped.",
+                    expected_status=1, timeout=45, extra_environment=environment,
+                )
+            except Exception as error:
+                send_failures.append(error)
+
+        sender = threading.Thread(target=send_turn, daemon=True)
+        sender.start()
+        deadline = time.monotonic() + 15
+        while not ready.is_file() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(ready.is_file(), f"{provider} should reach its active thinking fixture before Stop.")
+        active = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(active["status"], "In Progress")
+
+        def stop_turn():
+            try:
+                stop_results["response"] = self.call_cli(
+                    "conversation", "stop", task["id"], timeout=20, extra_environment=environment,
+                )[0]
+            except Exception as error:
+                stop_failures.append(error)
+
+        stopper = threading.Thread(target=stop_turn, daemon=True)
+        stopper.start()
+        interrupt_deadline = time.monotonic() + 10
+        while not received.is_file() and time.monotonic() < interrupt_deadline:
+            time.sleep(0.02)
+        self.assertTrue(received.is_file(), f"{provider} should receive its native interrupt before acknowledging it.")
+        stopping = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(stopping["status"], "Waiting Response", "The task should leave In Progress before the provider acknowledges Stop.")
+        release.write_text("acknowledge interrupt\n", encoding="utf-8")
+        stopper.join(timeout=20)
+        self.assertFalse(stopper.is_alive(), f"The {provider} interrupt acknowledgment should settle.")
+        self.assertEqual(stop_failures, [])
+        stopped = self.assert_success(stop_results["response"])
+        self.assertTrue(stopped["interrupted"], f"{provider} should acknowledge its native turn interrupt.")
+        sender.join(timeout=20)
+        self.assertFalse(sender.is_alive(), f"The {provider} send should finish after its active turn is interrupted.")
+        self.assertEqual(send_failures, [])
+        self.assertTrue(received.is_file(), f"The {provider} fixture should confirm it received the native interrupt.")
+        persisted = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(persisted["status"], "Waiting Response")
+        events = self.diagnostic_events()
+        self.assertTrue(any(
+            event.get("event") == "conversation.interrupt.finished"
+            and event.get("taskID") == task["id"]
+            and event.get("interrupted") == "true"
+            for event in events
+        ), f"The {provider} stop should be recorded as accepted.")
+        failed_send = next((event for event in events
+                            if event.get("event") == "conversation.send.failed"
+                            and event.get("taskID") == task["id"]), None)
+        self.assertIsNotNone(failed_send, "The stopped provider turn should settle through the send failure path.")
+        self.assertIsNone(persisted.get("statusMessage"))
+
+    # case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted.
+    def test_codex_stop_interrupts_thinking_turn_and_waits_for_response(self):
+        self.assert_user_stop_pauses_provider_turn(
+            "Codex stop while thinking", "codex", "STATIONAI_E2E_CODEX_EXECUTABLE", "codex-app-server-fixture.py"
+        )
+
+    # case-contract: test_claude_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Claude reasoning immediately moves the task to Waiting Response and sends Claude's session-scoped control interrupt. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted.
+    def test_claude_stop_interrupts_thinking_turn_and_waits_for_response(self):
+        self.assert_user_stop_pauses_provider_turn(
+            "Claude stop while thinking", "claude", "STATIONAI_E2E_CLAUDE_EXECUTABLE", "claude-code-fixture.py"
+        )
+
+    def assert_rejected_stop_restores_active_status(self, provider, environment_name, fixture_name):
+        task = self.create_task(f"{provider.title()} rejected stop", provider=provider)
+        fixture_source = Path(__file__).resolve().parent / "fixtures" / fixture_name
+        executable = self.data_directory / f"{provider}-fixture-hold-reject-interrupt"
+        shutil.copyfile(fixture_source, executable)
+        executable.chmod(0o755)
+        marker_name, marker_value = (
+            (".stationai-codex-fixture-owner", "StationAI test owns this Codex protocol fixture (v1).\n")
+            if provider == "codex" else
+            (".stationai-claude-fixture-owner", "StationAI test owns this Claude Code protocol fixture (v1).\n")
+        )
+        (self.data_directory / marker_name).write_text(marker_value, encoding="utf-8")
+        environment = {environment_name: str(executable)}
+        ready = Path(str(executable) + ".interrupt-ready")
+        received = Path(str(executable) + ".interrupt-received")
+        reject = Path(str(executable) + ".interrupt-reject")
+        release = Path(str(executable) + ".interrupt-release")
+        send_result = {}
+        send_failures = []
+
+        def send_turn():
+            try:
+                send_result["response"], _ = self.call_cli(
+                    "conversation", "send", task["id"], "--message", "Hold until stopped.",
+                    timeout=45, extra_environment=environment,
+                )
+            except Exception as error:
+                send_failures.append(error)
+
+        sender = threading.Thread(target=send_turn, daemon=True)
+        sender.start()
+        deadline = time.monotonic() + 15
+        while not ready.is_file() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(ready.is_file(), f"{provider} should be thinking before rejected Stop.")
+        stop_result = {}
+        stop_failures = []
+
+        def reject_stop():
+            try:
+                stop_result["response"], _ = self.call_cli(
+                    "conversation", "stop", task["id"], expected_status=1, timeout=20, extra_environment=environment,
+                )
+            except Exception as error:
+                stop_failures.append(error)
+
+        stopper = threading.Thread(target=reject_stop, daemon=True)
+        stopper.start()
+        interrupt_deadline = time.monotonic() + 10
+        while not received.is_file() and time.monotonic() < interrupt_deadline:
+            time.sleep(0.02)
+        self.assertTrue(received.is_file(), f"{provider} should receive its native interrupt before rejecting it.")
+        stopping = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(stopping["status"], "Waiting Response", "The optimistic pause should persist while rejection is pending.")
+        reject.write_text("reject interrupt\n", encoding="utf-8")
+        stopper.join(timeout=20)
+        self.assertFalse(stopper.is_alive(), f"{provider} should return its interrupt rejection.")
+        self.assertEqual(stop_failures, [])
+        failed_stop = stop_result["response"]
+        self.assertFalse(failed_stop.get("ok", True), f"{provider} rejection should reach the caller as a failed stop.")
+        active = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(active["status"], "In Progress", "A rejected interrupt must restore the active task while its turn continues.")
+        release.write_text("finish active turn\n", encoding="utf-8")
+        sender.join(timeout=20)
+        self.assertFalse(sender.is_alive(), f"{provider} should complete after the fixture releases its still-active turn.")
+        self.assertEqual(send_failures, [])
+        self.assert_success(send_result["response"])
+        completed = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(completed["status"], "Waiting Response", "The non-interrupted turn should finish normally and return the task for review.")
+
+    # case-contract: test_codex_stop_rejection_restores_active_task | If Codex rejects turn/interrupt while its turn is still active, Stop reports the provider failure and the task returns to In Progress; releasing the fixture lets the original turn complete normally into Waiting Response.
+    def test_codex_stop_rejection_restores_active_task(self):
+        self.assert_rejected_stop_restores_active_status("codex", "STATIONAI_E2E_CODEX_EXECUTABLE", "codex-app-server-fixture.py")
+
+    # case-contract: test_claude_stop_rejection_restores_active_task | If Claude rejects its session control interrupt while its turn is still active, Stop reports the provider failure and the task returns to In Progress; releasing the fixture lets the original turn complete normally into Waiting Response.
+    def test_claude_stop_rejection_restores_active_task(self):
+        self.assert_rejected_stop_restores_active_status("claude", "STATIONAI_E2E_CLAUDE_EXECUTABLE", "claude-code-fixture.py")
 
     def create_repo_task(self, title, repositories, branches=None, branch_from=None, roots=None, merge_targets=None, materialize=False):
         command = ["task", "create", "--title", title]

@@ -420,6 +420,60 @@ def main():
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
+            elif mode.endswith("-hold-interrupt") or mode.endswith("-hold-reject-interrupt"):
+                active = Path(str(sys.argv[0]) + ".interrupt-ready")
+                active.write_text("The fixture turn is active and waiting for an interrupt.\n", encoding="utf-8")
+                deadline = time.monotonic() + 30
+                received_interrupt = False
+                while time.monotonic() < deadline:
+                    ready, _, _ = select.select([sys.stdin], [], [], 0.02)
+                    if not ready:
+                        continue
+                    interrupt_message = json.loads(sys.stdin.readline())
+                    if interrupt_message.get("method") != "turn/interrupt":
+                        continue
+                    received_interrupt = True
+                    saved_history = serial_history()
+                    saved_history["interruptReceived"] = True
+                    history_path.write_text(json.dumps(saved_history), encoding="utf-8")
+                    Path(str(sys.argv[0]) + ".interrupt-received").write_text("turn/interrupt\n", encoding="utf-8")
+                    if mode.endswith("-hold-reject-interrupt"):
+                        reject = Path(str(sys.argv[0]) + ".interrupt-reject")
+                        reject_deadline = time.monotonic() + 15
+                        while not reject.exists() and time.monotonic() < reject_deadline:
+                            time.sleep(0.02)
+                        reject.unlink(missing_ok=True)
+                        write({"jsonrpc": "2.0", "id": interrupt_message["id"], "error": {
+                            "code": -32044, "message": "Fixture rejected the interrupt while the turn remains active.",
+                        }})
+                        interrupt_release = Path(str(sys.argv[0]) + ".interrupt-release")
+                        ack_deadline = time.monotonic() + 15
+                        while not interrupt_release.exists() and time.monotonic() < ack_deadline:
+                            time.sleep(0.02)
+                        interrupt_release.unlink(missing_ok=True)
+                        write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                            "threadId": THREAD_ID,
+                            "item": {"id": "item_stationai_message", "type": "agentMessage", "text": "The turn completed after Stop was rejected."},
+                        }})
+                        write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                            "threadId": THREAD_ID,
+                            "turn": {"id": TURN_ID, "status": "completed"},
+                        }})
+                        break
+                    interrupt_release = Path(str(sys.argv[0]) + ".interrupt-release")
+                    ack_deadline = time.monotonic() + 15
+                    while not interrupt_release.exists() and time.monotonic() < ack_deadline:
+                        time.sleep(0.02)
+                    interrupt_release.unlink(missing_ok=True)
+                    write({"jsonrpc": "2.0", "id": interrupt_message["id"], "result": {}})
+                    write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                        "threadId": THREAD_ID,
+                        "turn": {"id": TURN_ID, "status": "interrupted", "error": {"message": "Codex interrupted this turn."}},
+                    }})
+                    break
+                active.unlink(missing_ok=True)
+                if not received_interrupt:
+                    return 3
             elif mode.endswith("-abort"):
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": THREAD_ID,

@@ -3927,6 +3927,115 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Blank composer leaves send disabled")
     }
 
+    private func exerciseStopDuringThinking(provider: String, title: String) throws {
+        let task = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", title, "--root", fixture.primary.path, "--provider", provider,
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        let fixtureName = provider == "codex" ? "codex-fixture-hold-interrupt" : "claude-fixture-ui"
+        let executable = WorkspaceFixture.root.appendingPathComponent(fixtureName).path
+        let ready = URL(fileURLWithPath: executable + ".interrupt-ready")
+        let received = URL(fileURLWithPath: executable + ".interrupt-received")
+        let release = URL(fileURLWithPath: executable + ".interrupt-release")
+        try? FileManager.default.removeItem(at: ready)
+        try? FileManager.default.removeItem(at: received)
+        try? FileManager.default.removeItem(at: release)
+        if provider == "codex" { codexFixtureExecutable = executable }
+        else { claudeFixtureExecutable = executable }
+
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: title)
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        composer.click()
+        composer.typeText("Hold until stopped.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15), "\(provider) should be actively thinking before Stop is clicked.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+
+        let stop = element("pause-response-button")
+        XCTAssertTrue(waitUntil({ stop.isEnabled }, timeout: 10), "Stop should be enabled while the provider turn is active, before any text is written.")
+        stop.click()
+        XCTAssertTrue(waitUntil({ (try? taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" }, timeout: 5), "The task should move to Waiting Response immediately after Stop.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        let waitingColumn = element("column-waiting-response")
+        let waitingCard = waitingColumn.buttons["task-card-\(taskID.uppercased())"]
+        XCTAssertTrue(waitingCard.waitForExistence(timeout: 5), "The visible board should place the stopped task in Waiting Response before interrupt acknowledgment.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: received.path) }, timeout: 10), "\(provider) should receive its native interrupt.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response", "The task should move before the provider acknowledges the interrupt.")
+        try Data("acknowledge interrupt\n".utf8).write(to: release)
+        waitingCard.click()
+        XCTAssertTrue(element("continue-response-button").waitForExistence(timeout: 15), "The stopped turn should reset the composer to its resumable state.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+        XCTAssertNil(try taskRecord(id: taskID)?["statusMessage"] as? String, "A user-requested stop should not leave a failure reason.")
+    }
+
+    // case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted.
+    func test_codex_stop_interrupts_thinking_turn_and_waits_for_response() throws {
+        try exerciseStopDuringThinking(provider: "codex", title: "Codex stop while thinking")
+    }
+
+    // case-contract: test_claude_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Claude reasoning immediately moves the task to Waiting Response and sends Claude's session-scoped control interrupt. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted.
+    func test_claude_stop_interrupts_thinking_turn_and_waits_for_response() throws {
+        try exerciseStopDuringThinking(provider: "claude", title: "Claude stop while thinking")
+    }
+
+    private func exerciseRejectedStop(provider: String, title: String) throws {
+        let task = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", title, "--root", fixture.primary.path, "--provider", provider,
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        let fixtureName = provider == "codex" ? "codex-fixture-hold-reject-interrupt" : "claude-fixture-hold-reject-interrupt"
+        let executable = WorkspaceFixture.root.appendingPathComponent(fixtureName).path
+        let ready = URL(fileURLWithPath: executable + ".interrupt-ready")
+        let received = URL(fileURLWithPath: executable + ".interrupt-received")
+        let reject = URL(fileURLWithPath: executable + ".interrupt-reject")
+        let release = URL(fileURLWithPath: executable + ".interrupt-release")
+        try? FileManager.default.removeItem(at: ready)
+        try? FileManager.default.removeItem(at: received)
+        try? FileManager.default.removeItem(at: reject)
+        try? FileManager.default.removeItem(at: release)
+        if provider == "codex" { codexFixtureExecutable = executable }
+        else { claudeFixtureExecutable = executable }
+
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: title)
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        composer.click()
+        composer.typeText("Hold until stopped.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15), "\(provider) should be thinking before the rejected Stop.")
+        element("pause-response-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: received.path) }, timeout: 10), "\(provider) should receive its native interrupt before rejecting it.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response", "The optimistic pause should persist while rejection is pending.")
+        try Data("reject interrupt\n".utf8).write(to: reject)
+        let stopError = element("codex-chat-error")
+        XCTAssertTrue(stopError.waitForExistence(timeout: 10), "The UI should report the provider's rejected interrupt.")
+        XCTAssertTrue(stopError.label.localizedCaseInsensitiveContains("rejected"), "The visible error should explain that the provider rejected Stop.")
+        XCTAssertTrue(waitUntil({ (try? taskRecord(id: taskID)?["status"] as? String) == "In Progress" }, timeout: 5), "A rejected stop should restore In Progress while the turn remains active.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        let activeColumn = element("column-in-progress")
+        let activeCard = activeColumn.buttons["task-card-\(taskID.uppercased())"]
+        XCTAssertTrue(activeCard.waitForExistence(timeout: 5), "The visible board should keep the still-running task in In Progress.")
+        try Data("finish active turn\n".utf8).write(to: release)
+        XCTAssertTrue(waitUntil({ (try? taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" }, timeout: 15), "The original turn should complete normally and return the task for review.")
+        let waitingColumn = element("column-waiting-response")
+        XCTAssertTrue(waitingColumn.buttons["task-card-\(taskID.uppercased())"].waitForExistence(timeout: 8), "The visible board should show the naturally completed task awaiting review.")
+    }
+
+    // case-contract: test_codex_stop_rejection_restores_active_task | If Codex rejects turn/interrupt while its turn is still active, Stop reports the provider failure and the task returns to In Progress; releasing the fixture lets the original turn complete normally into Waiting Response.
+    func test_codex_stop_rejection_restores_active_task() throws {
+        try exerciseRejectedStop(provider: "codex", title: "Codex rejected stop")
+    }
+
+    // case-contract: test_claude_stop_rejection_restores_active_task | If Claude rejects its session control interrupt while its turn is still active, Stop reports the provider failure and the task returns to In Progress; releasing the fixture lets the original turn complete normally into Waiting Response.
+    func test_claude_stop_rejection_restores_active_task() throws {
+        try exerciseRejectedStop(provider: "claude", title: "Claude rejected stop")
+    }
+
     // case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC.
     func test_conversation_provider_selection_persists_and_validates() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
