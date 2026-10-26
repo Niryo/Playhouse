@@ -4751,7 +4751,7 @@ final class StationAIBridgeRuntime {
             func conversationClients(codexHome: String? = nil, goalFeatureEnabled: Bool = false) -> ConversationClients {
                 ConversationClients(
                     codex: CodexAppServerClient(codexExecutableOverride: codexExecutable, codexHomeOverride: codexHome, goalFeatureEnabled: goalFeatureEnabled),
-                    claude: ClaudeCodeClient(executableOverride: claudeExecutable)
+                    claude: ClaudeCodeClient.sharedPrimaryClient(executableOverride: claudeExecutable)
                 )
             }
 
