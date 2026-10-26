@@ -1074,18 +1074,6 @@ struct TaskConversationView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             Spacer(minLength: 0)
-
-            Button {
-                isShowingWorkspaceEditor = true
-            } label: {
-                Label("Folders", systemImage: "folder")
-                    .font(.system(size: 12, weight: .medium))
-            }
-            .buttonHoverPointer()
-            .buttonStyle(.bordered)
-            .help("Edit working folders for this task")
-            .accessibilityIdentifier("edit-workspace-roots-button")
-            .disabled(isReadOnly)
         }
         .padding(.horizontal, 26)
         .padding(.vertical, 15)

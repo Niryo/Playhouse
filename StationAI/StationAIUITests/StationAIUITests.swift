@@ -556,12 +556,6 @@ final class StationAIUITests: XCTestCase {
         setConversationRepositoryField("secondary", field: "branch-from", value: "branch-source")
         setConversationRepositoryField("primary", field: "branch-from", value: "branch-source")
         setConversationRepositoryField("primary", field: "merge-target", value: "branch-source")
-        let editRoots = element("edit-workspace-roots-button")
-        editRoots.click()
-        XCTAssertTrue(element("browse-workspace-roots-button").waitForExistence(timeout: 5))
-        element("browse-workspace-roots-button").click()
-        try chooseFolder(in: openFolderPanel, folder: fixture.custom, confirmationButton: "Add Folders")
-        element("save-workspace-roots-button").click()
         let prompt = "PROMPT_TEXT_NOT_IN_DIAGNOSTICS_\(UUID().uuidString)"
         saveNewTaskPromptAndReturnToBoard("Ordered roots", prompt: prompt)
         openTask(named: "Ordered roots")
@@ -574,7 +568,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(records.map { $0["mergeTarget"] as? String }, ["main", "branch-source"])
         XCTAssertEqual(records.map { $0["isPending"] as? Bool }, [true, true])
         XCTAssertEqual(records.map { $0["worktreePath"] as? String }, [fixture.secondary.path, fixture.primary.path])
-        XCTAssertEqual(expectedRoots, [fixture.secondary.path, fixture.primary.path, fixture.custom.path])
+        XCTAssertEqual(expectedRoots, [fixture.secondary.path, fixture.primary.path])
         for repository in [fixture.secondary, fixture.primary] {
             XCTAssertEqual(try runGitOutput(repository, "branch", "--list", "ordered-roots").trimmingCharacters(in: .whitespacesAndNewlines), "")
         }
@@ -687,18 +681,16 @@ final class StationAIUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         openNewTaskConversation()
         closeConversationRepositoryPicker()
-        element("edit-workspace-roots-button").click()
-        XCTAssertTrue(element("browse-workspace-roots-button").waitForExistence(timeout: 5))
-        element("browse-workspace-roots-button").click()
-        try chooseFolder(in: openFolderPanel, folder: fixture.custom, confirmationButton: "Add Folders")
-        element("save-workspace-roots-button").click()
         saveNewTaskPromptAndReturnToBoard("Folder-only UI")
-        let task = try XCTUnwrap(taskRecord(named: "Folder-only UI"))
-        XCTAssertEqual(((task["repositoryWorktrees"] as? [[String: Any]]) ?? []).count, 0)
-        XCTAssertEqual(task["contextFolders"] as? [String], [fixture.custom.path])
-        XCTAssertEqual(task["workspaceRoots"] as? [String], [fixture.custom.path])
+        let taskID = try taskID(named: "Folder-only UI")
+        let roots = try runCLI(["task", "roots", "set", taskID, "--root", fixture.custom.path])
+        let rootsRecord = try XCTUnwrap(roots["result"] as? [String: Any])
+        XCTAssertEqual(((rootsRecord["repositoryWorktrees"] as? [[String: Any]]) ?? []).count, 0)
+        XCTAssertEqual(rootsRecord["contextFolders"] as? [String], [fixture.custom.path])
+        XCTAssertEqual(rootsRecord["workspaceRoots"] as? [String], [fixture.custom.path])
         assertTaskVisible("Folder-only UI", inColumn: "Backlog")
         openTask(named: "Folder-only UI")
+        assertOrderedRoots([fixture.custom.path])
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Folder-only UI")
         element("back-to-board-button").click()
         moveTaskToDone("Folder-only UI")
@@ -1524,7 +1516,6 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("archived-conversation-read-only").waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
         XCTAssertFalse(element("message-composer").exists, "Archived conversations must not expose the composer.")
-        XCTAssertFalse(element("edit-workspace-roots-button").isEnabled, "Archived conversations must not allow workspace edits.")
         element("back-to-board-button").click()
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done", "Leaving the read-only conversation must not alter the archived task.")
         attachScreenshot(named: "Completed task opens from the searchable read-only archive")
@@ -2439,30 +2430,19 @@ final class StationAIUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         _ = try runCLI(["task", "create", "--title", "Edit roots", "--repo", fixture.primary.path])
         openTask(named: "Edit roots")
-        element("edit-workspace-roots-button").click()
-        XCTAssertTrue(element("save-workspace-roots-button").waitForExistence(timeout: 5))
-
-        element("repository-suggestion-secondary").click()
-        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "secondary")).count, 1)
-        XCTAssertFalse(element("repository-suggestion-secondary").exists, "A selected repository must leave the suggestion list.")
-        let current = try XCTUnwrap(taskRecord(named: "Edit roots")?["repositoryWorktrees"] as? [[String: Any]])
-        _ = try XCTUnwrap(current.first?["worktreePath"] as? String)
-        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "primary ·")).firstMatch.click()
-        let secondaryPath = fixture.secondary.lastPathComponent
-        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", secondaryPath)).firstMatch.click()
-        let saveButton = element("save-workspace-roots-button")
-        XCTAssertFalse(saveButton.isEnabled, "The editor must require at least one folder.")
-        element("repository-suggestion-secondary").click()
-        element("browse-workspace-roots-button").click()
-        try chooseFolder(in: openFolderPanel, folder: fixture.custom, confirmationButton: "Add Folders")
-        element("repository-suggestion-primary").click()
         let taskID = try taskID(named: "Edit roots")
+
         let conversationReservation = try ConversationTurnLockBarrier(dataDirectory: dataDirectory, taskID: taskID)
         var conversationReservationReleased = false
         defer {
             if !conversationReservationReleased { try? conversationReservation.release() }
         }
-        saveButton.click()
+        let rootsEditProcess = try startCLIProcess([
+            "task", "roots", "set", taskID,
+            "--root", fixture.secondary.path,
+            "--root", fixture.custom.path,
+            "--root", fixture.primary.path,
+        ])
         Thread.sleep(forTimeInterval: 0.25)
         XCTAssertEqual(
             try taskRecord(id: taskID)?["workspaceRoots"] as? [String],
@@ -2471,13 +2451,10 @@ final class StationAIUITests: XCTestCase {
         )
         try conversationReservation.release()
         conversationReservationReleased = true
-        XCTAssertTrue(waitUntil({
-            guard let current = try? self.taskRecord(id: taskID),
-                  let roots = current["workspaceRoots"] as? [String] else { return false }
-            return roots != [self.fixture.primary.path]
-        }, timeout: 10), "The saved workspace roots should update after the conversation turn releases its reservation.")
+        let rootsEditResult = try finishCLIProcess(rootsEditProcess)
+        let expectedRoots = try XCTUnwrap((rootsEditResult["result"] as? [String: Any])?["workspaceRoots"] as? [String])
         let taskAfterEdit = try XCTUnwrap(taskRecord(named: "Edit roots"))
-        let expectedRoots = try XCTUnwrap(taskAfterEdit["workspaceRoots"] as? [String])
+        XCTAssertEqual(taskAfterEdit["workspaceRoots"] as? [String], expectedRoots)
         assertOrderedRoots(expectedRoots)
 
         let duplicateRoots = try runCLI([
@@ -2516,19 +2493,12 @@ final class StationAIUITests: XCTestCase {
         try barrier.waitForReader()
 
         openTask(named: concurrentTitle)
-        element("edit-workspace-roots-button").click()
-        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "primary ·")).firstMatch.click()
-        element("browse-workspace-roots-button").click()
-        try chooseFolder(in: openFolderPanel, folder: fixture.custom, confirmationButton: "Add Folders")
-        element("save-workspace-roots-button").click()
-        XCTAssertTrue(waitUntil({
-            do {
-                guard let current = try self.taskRecord(id: concurrentID) else { return false }
-                return current["workspaceRoots"] as? [String] == [self.fixture.custom.path]
-                    && current["contextFolders"] as? [String] == [self.fixture.custom.path]
-                    && (current["repositoryWorktrees"] as? [Any])?.isEmpty == true
-            } catch { return false }
-        }, timeout: 10), "The newer UI folder edit should persist before the stale validation is released.")
+        let newerRoots = try runCLI(["task", "roots", "set", concurrentID, "--root", fixture.custom.path])
+        let newerRecord = try XCTUnwrap(newerRoots["result"] as? [String: Any])
+        XCTAssertEqual(newerRecord["workspaceRoots"] as? [String], [fixture.custom.path])
+        XCTAssertEqual(newerRecord["contextFolders"] as? [String], [fixture.custom.path])
+        XCTAssertEqual((newerRecord["repositoryWorktrees"] as? [Any])?.isEmpty, true)
+        assertOrderedRoots([fixture.custom.path])
 
         try barrier.release()
         barrierReleased = true
@@ -3432,12 +3402,9 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("send-message-button").isEnabled, "A configured root allows a standalone message even when no repository is selected.")
         let shell = try XCTUnwrap(tasksFromBoardList().first)
         XCTAssertTrue((shell["workspaceRoots"] as? [String] ?? []).isEmpty, "New Task should persist an empty pending task before repository selection.")
+        let shellID = try XCTUnwrap(shell["id"] as? String)
 
-        element("edit-workspace-roots-button").click()
-        XCTAssertTrue(element("browse-workspace-roots-button").waitForExistence(timeout: 5))
-        element("browse-workspace-roots-button").click()
-        try chooseFolder(in: openFolderPanel, folder: fixture.custom, confirmationButton: "Add Folders")
-        element("save-workspace-roots-button").click()
+        _ = try runCLI(["task", "roots", "set", shellID, "--root", fixture.custom.path])
         XCTAssertTrue(element("empty-conversation").waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["Untitled task"].exists, "An empty conversation should keep its untitled title until the first prompt is added.")
         XCTAssertFalse(element("task-title-generating-loader").exists, "Title generation should not start before the first prompt.")
