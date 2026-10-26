@@ -4938,6 +4938,164 @@ final class StationAIUITests: XCTestCase {
         }
     }
 
+    // case-contract: test_conversation_serializes_concurrent_claude_sends | When a CLI/XPC Claude turn overlaps a UI turn, the second send waits on the shared cross-process Claude slot instead of failing with an already-running error. Both turns complete and persist their own user and assistant messages, and diagnostics identify the separate bridge process entering the queue without logging prompt text. The UI shows the queued answer after reopening its task.
+    func test_conversation_serializes_concurrent_claude_sends() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-concurrent-sends")
+        let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
+        try FileManager.default.copyItem(at: source, to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("StationAI test owns this Claude Code protocol fixture (v1).\n".utf8)
+            .write(to: dataDirectory.appendingPathComponent(".stationai-claude-fixture-owner"))
+        claudeFixtureExecutable = executable.path
+        launchApp(defaultParent: fixture.parent.path)
+
+        let first = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "First Claude conversation", "--repo", fixture.primary.path, "--provider", "claude"
+        ])["result"] as? [String: Any])
+        let firstID = try XCTUnwrap(first["id"] as? String)
+        let second = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Second Claude conversation", "--repo", fixture.secondary.path, "--provider", "claude"
+        ])["result"] as? [String: Any])
+        let secondID = try XCTUnwrap(second["id"] as? String)
+        let ready = URL(fileURLWithPath: executable.path + ".concurrent-turn-ready")
+        let release = URL(fileURLWithPath: executable.path + ".concurrent-turn-release")
+        defer {
+            if FileManager.default.fileExists(atPath: ready.path) {
+                try? "Release the first Claude turn.\n".write(to: release, atomically: true, encoding: .utf8)
+            }
+        }
+
+        openTask(named: "First Claude conversation")
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        composer.click()
+        composer.typeText("Please hold-claude-turn-for-concurrency.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15), "The first Claude turn should be active before navigating to the second task.")
+        let secondProcess = try startCLIProcess(
+            ["conversation", "send", secondID, "--message", "Second Claude response."],
+            extraEnvironment: ["STATIONAI_E2E_CLAUDE_EXECUTABLE": executable.path]
+        )
+        XCTAssertTrue(waitUntil({
+            guard let record = try? self.taskRecord(id: secondID) else { return false }
+            return record["status"] as? String == "In Progress" && record["claudeSessionID"] != nil
+        }, timeout: 10), "The CLI/XPC send should be accepted while waiting for the app's Claude process slot.")
+        let secondSessionID = try XCTUnwrap(try taskRecord(id: secondID)?["claudeSessionID"] as? String)
+        let appProcessID = try XCTUnwrap(diagnosticEvents().first {
+            $0["event"] as? String == "claude.turn.started"
+                && $0["threadID"] as? String == (try? taskRecord(id: firstID)?["claudeSessionID"] as? String)
+        }?["clientPID"] as? String)
+        let diagnosticText = String(data: try JSONSerialization.data(withJSONObject: diagnosticEvents()), encoding: .utf8) ?? ""
+        XCTAssertFalse(diagnosticText.contains("Please hold-claude-turn-for-concurrency."))
+        XCTAssertFalse(diagnosticText.contains("Second Claude response."))
+        XCTAssertTrue(secondProcess.process.isRunning, "The CLI send should remain pending until the UI turn releases its process slot.")
+        Thread.sleep(forTimeInterval: 1)
+        try "Release the first Claude turn.\n".write(to: release, atomically: true, encoding: .utf8)
+        let secondResult = try finishCLIProcess(secondProcess)
+        XCTAssertEqual(secondResult["ok"] as? Bool, true)
+        let queuedEvent = try XCTUnwrap(diagnosticEvents().first {
+            $0["event"] as? String == "claude.turn.queued"
+                && $0["requestedThreadID"] as? String == secondSessionID
+        })
+        XCTAssertNotEqual(queuedEvent["clientPID"] as? String, appProcessID, "The queued send must come from the separate bridge process.")
+
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: secondID)?["status"] as? String) == "Waiting Response" }, timeout: 10))
+        let firstHistory = try XCTUnwrap(try runCLI(["conversation", "history", firstID])["result"] as? [String: Any])
+        let firstMessages = firstHistory["messages"] as? [[String: Any]] ?? []
+        XCTAssertTrue(firstMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == "Please hold-claude-turn-for-concurrency." })
+        XCTAssertTrue(firstMessages.contains { ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "OK." })
+        let secondHistory = try XCTUnwrap(try runCLI(["conversation", "history", secondID])["result"] as? [String: Any])
+        XCTAssertTrue((secondHistory["messages"] as? [[String: Any]] ?? []).contains { ($0["text"] as? String) == "Second Claude response." })
+        XCTAssertTrue((secondHistory["messages"] as? [[String: Any]] ?? []).contains { ($0["text"] as? String) == "OK." })
+        element("back-to-board-button").click()
+        openTask(named: "Second Claude conversation")
+        XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 15), "The reopened UI should show the queued CLI answer from persisted history.")
+    }
+
+    // case-contract: test_conversation_releases_queued_claude_send_after_failure | When an active UI Claude turn fails while a CLI/XPC send is queued from a separate process, the failure releases the shared cross-process slot so the queued turn starts and completes. Diagnostics identify the bridge process and provider failure, and the UI shows the queued answer after reopening its task with fresh history.
+    func test_conversation_releases_queued_claude_send_after_failure() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-concurrent-failure")
+        let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
+        try FileManager.default.copyItem(at: source, to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("StationAI test owns this Claude Code protocol fixture (v1).\n".utf8)
+            .write(to: dataDirectory.appendingPathComponent(".stationai-claude-fixture-owner"))
+        claudeFixtureExecutable = executable.path
+        launchApp(defaultParent: fixture.parent.path)
+
+        let first = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Failing Claude conversation", "--repo", fixture.primary.path, "--provider", "claude"
+        ])["result"] as? [String: Any])
+        let firstID = try XCTUnwrap(first["id"] as? String)
+        let second = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Queued Claude conversation", "--repo", fixture.secondary.path, "--provider", "claude"
+        ])["result"] as? [String: Any])
+        let secondID = try XCTUnwrap(second["id"] as? String)
+        let ready = URL(fileURLWithPath: executable.path + ".concurrent-turn-ready")
+        let release = URL(fileURLWithPath: executable.path + ".concurrent-turn-release")
+        defer {
+            if FileManager.default.fileExists(atPath: ready.path) {
+                try? "Release the failing Claude turn.\n".write(to: release, atomically: true, encoding: .utf8)
+            }
+        }
+
+        openTask(named: "Failing Claude conversation")
+        let firstComposer = element("message-composer")
+        XCTAssertTrue(firstComposer.waitForExistence(timeout: 10))
+        firstComposer.click()
+        firstComposer.typeText("Please fail-after-hold-claude-turn-for-concurrency.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15))
+        let secondProcess = try startCLIProcess(
+            ["conversation", "send", secondID, "--message", "Second Claude turn after failure."],
+            extraEnvironment: ["STATIONAI_E2E_CLAUDE_EXECUTABLE": executable.path]
+        )
+        XCTAssertTrue(waitUntil({
+            guard let record = try? self.taskRecord(id: secondID) else { return false }
+            return record["status"] as? String == "In Progress" && record["claudeSessionID"] != nil
+        }, timeout: 10), "The CLI/XPC send should wait while the UI turn owns Claude's slot.")
+        let secondSessionID = try XCTUnwrap(try taskRecord(id: secondID)?["claudeSessionID"] as? String)
+        let appProcessID = try XCTUnwrap(diagnosticEvents().first {
+            $0["event"] as? String == "claude.turn.started"
+                && $0["threadID"] as? String == (try? taskRecord(id: firstID)?["claudeSessionID"] as? String)
+        }?["clientPID"] as? String)
+        XCTAssertTrue(waitUntil({
+            guard let record = try? self.taskRecord(id: secondID) else { return false }
+            return record["status"] as? String == "In Progress"
+                && record["claudeSessionID"] as? String == secondSessionID
+        }, timeout: 15), "The CLI/XPC send should be accepted while the UI turn owns Claude's process slot.")
+        XCTAssertTrue(secondProcess.process.isRunning, "The CLI send should remain pending until the UI turn releases its process slot.")
+        Thread.sleep(forTimeInterval: 1)
+        try "Fail the first Claude turn.\n".write(to: release, atomically: true, encoding: .utf8)
+        let secondResult = try finishCLIProcess(secondProcess)
+        XCTAssertEqual(secondResult["ok"] as? Bool, true)
+
+        XCTAssertTrue(waitUntil({
+            (try? self.diagnosticEvents().contains {
+                $0["event"] as? String == "claude.process.exited" && $0["exitStatus"] as? String == "1"
+            }) == true
+        }, timeout: 10), "The first Claude process failure should be recorded before the queued answer completes.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: secondID)?["status"] as? String) == "Waiting Response" }, timeout: 10))
+        let firstHistory = try XCTUnwrap(try runCLI(["conversation", "history", firstID])["result"] as? [String: Any])
+        let firstMessages = firstHistory["messages"] as? [[String: Any]] ?? []
+        XCTAssertTrue(firstMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == "Please fail-after-hold-claude-turn-for-concurrency." })
+        XCTAssertFalse(firstMessages.contains { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" })
+        let secondHistory = try XCTUnwrap(try runCLI(["conversation", "history", secondID])["result"] as? [String: Any])
+        let secondMessages = secondHistory["messages"] as? [[String: Any]] ?? []
+        XCTAssertTrue(secondMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == "Second Claude turn after failure." })
+        XCTAssertTrue(secondMessages.contains { ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "OK." })
+        let queuedFailureEvent = try XCTUnwrap(diagnosticEvents().first {
+            $0["event"] as? String == "claude.turn.queued"
+                && $0["requestedThreadID"] as? String == secondSessionID
+        })
+        XCTAssertNotEqual(queuedFailureEvent["clientPID"] as? String, appProcessID, "The queued send must come from the separate bridge process.")
+        element("back-to-board-button").click()
+        openTask(named: "Queued Claude conversation")
+        XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 15), "The reopened UI should show the queued CLI answer from persisted history.")
+    }
+
     // case-contract: test_conversation_serializes_concurrent_sends | Two concurrent sends for the same task are serialized across the app and CLI/XPC paths against the local Codex app-server fixture; the second waits for the first, both complete on the persisted thread, the task remains In Progress while a send is active, and successful turns without outcome calls finish in Waiting Response.
     func test_conversation_serializes_concurrent_sends() throws {
         let sharedFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-concurrent-serial-success-wait")
@@ -5627,7 +5785,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
     }
 
-    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. The conversation header has no live activity line while responding. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
+    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. The latest active process appears outside Working for while older active processes remain inside; completion moves it inside. The conversation header has no live activity line while responding. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
     func test_conversation_shows_mcp_and_dynamic_tool_activity() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-tool-activity").path
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
@@ -5651,6 +5809,10 @@ final class StationAIUITests: XCTestCase {
         }
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: toolReady.path) }, timeout: 20), "The fixture should pause after the tool start notifications.")
         XCTAssertFalse(element("current-activity-indicator").exists, "The conversation header should not show a live activity line while responding.")
+        let latestActiveRow = element("codex-activity-row-item_fixture_dynamic_legacy")
+        XCTAssertTrue(latestActiveRow.waitForExistence(timeout: 10), "The latest active process should appear outside Working for.")
+        XCTAssertFalse(element("codex-activity-row-item_fixture_mcp_call").exists)
+        XCTAssertFalse(element("codex-activity-row-item_fixture_dynamic_call").exists)
         element("codex-activity-disclosure").click()
         let activityDetails = element("codex-activity-details")
         XCTAssertTrue(activityDetails.waitForExistence(timeout: 5), "Expanded Working for should contain tool activity rows.")
@@ -5663,19 +5825,20 @@ final class StationAIUITests: XCTestCase {
         let mcpRow = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").firstMatch
         let dynamicRow = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").firstMatch
         let legacyDynamicRow = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").firstMatch
-        XCTAssertTrue(mcpRow.waitForExistence(timeout: 10), "MCP calls should appear inside expanded Working for while in progress.")
-        XCTAssertTrue(dynamicRow.waitForExistence(timeout: 10), "Dynamic tool calls should appear inside expanded Working for while in progress.")
-        XCTAssertTrue(legacyDynamicRow.waitForExistence(timeout: 10), "Every active call should appear inside expanded Working for.")
-        for identifier in ["item_fixture_mcp_call", "item_fixture_dynamic_call", "item_fixture_dynamic_legacy"] {
+        XCTAssertTrue(mcpRow.waitForExistence(timeout: 10), "Older MCP calls should remain inside expanded Working for.")
+        XCTAssertTrue(dynamicRow.waitForExistence(timeout: 10), "Older dynamic calls should remain inside expanded Working for.")
+        XCTAssertFalse(legacyDynamicRow.exists, "The newest active call should stay outside expanded Working for.")
+        XCTAssertTrue(latestActiveRow.label.contains("In progress"))
+        for identifier in ["item_fixture_mcp_call", "item_fixture_dynamic_call"] {
             let liveDuration = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-duration-\(identifier)").firstMatch
             XCTAssertTrue(liveDuration.exists, "Expanded Working for should show a live duration for \(identifier).")
             XCTAssertTrue(containsPositiveRunningDuration(liveDuration.value as? String ?? ""), "The live duration for \(identifier) should contain positive elapsed time in milliseconds.")
         }
         XCTAssertTrue(mcpRow.label.contains("In progress"))
         XCTAssertTrue(dynamicRow.label.contains("In progress"))
-        XCTAssertTrue(legacyDynamicRow.label.contains("In progress"))
         try "Finish the newest call first.\n".write(to: toolReleaseLatest, atomically: true, encoding: .utf8)
-        XCTAssertTrue(waitUntil({ legacyDynamicRow.label.contains("Completed") }, timeout: 10))
+        XCTAssertTrue(waitUntil({ latestActiveRow.label.contains("Completed") }, timeout: 10))
+        XCTAssertTrue(waitUntil({ legacyDynamicRow.waitForExistence(timeout: 0.1) }, timeout: 10), "A completed process should move inside Working for.")
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").count, 1)
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").count, 1)
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").count, 1)
@@ -5819,8 +5982,12 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: subagentReady.path) }, timeout: 20), "The fixture should expose the active child interval before completion.")
         let activityDisclosure = element("codex-activity-disclosure")
         XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 10), "Active child work should appear in conversation activity.")
+        XCTAssertEqual(activityDisclosure.value as? String, "Collapsed, right chevron",
+                       "Active agent rows should be presented while Working for is collapsed.")
         let activeChildButton = element("codex-subagent-row-00000000-0000-0000-0000-000000000002")
         XCTAssertTrue(activeChildButton.waitForExistence(timeout: 10), "The running child should appear as a clickable timeline row while Codex activity is collapsed.")
+        XCTAssertEqual(activityDisclosure.descendants(matching: .any).matching(identifier: "codex-subagent-row-00000000-0000-0000-0000-000000000002").count, 0,
+                       "Active agents should not be nested inside Working for.")
         XCTAssertTrue(activeChildButton.label.contains("Sandbox review"))
         XCTAssertTrue(activeChildButton.label.contains("started working"))
         let agentIcon = activeChildButton.images.matching(NSPredicate(format: "label == %@", "Sandbox review agent icon")).firstMatch
