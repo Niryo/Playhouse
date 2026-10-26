@@ -4382,6 +4382,9 @@ final class ConversationManager {
             // new native thread: Codex can't list a thread that has no turns yet.
             phase = "transcript-segment"
             let segment = try await prepareSegment(task: try tasks.taskModel(taskID))
+            let sessionRecoveryContext = provider == .claude
+                ? ConversationHandoff.context(for: .claude, messages: try await history(taskID: taskID).messages)
+                : nil
             phase = "thread-start"
             let threadID: String
             if let existing = task.activeConversationID {
@@ -4426,6 +4429,7 @@ final class ConversationManager {
                 effort: effort,
                 threadID: threadID,
                 workspace: workspace,
+                sessionRecoveryContext: sessionRecoveryContext,
                 developerInstructions: TaskThreadDeveloperInstructions.make(
                     taskID: taskID,
                     repositories: task.repositoryWorktrees,

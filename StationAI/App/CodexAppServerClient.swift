@@ -438,6 +438,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         effort: ConversationEffort,
         threadID: String,
         workspace: ConversationWorkspaceContext,
+        sessionRecoveryContext: String? = nil,
         developerInstructions: String? = nil,
         onDelta: @escaping (String) -> Void,
         onFinalMessage: @escaping (String) -> Void,
