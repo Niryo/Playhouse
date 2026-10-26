@@ -5461,7 +5461,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
     }
 
-    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. The conversation header shows only the newest active call; when it completes, the indicator falls back to the next still-active call. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
+    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. The conversation header has no live activity line while responding. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
     func test_conversation_shows_mcp_and_dynamic_tool_activity() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-tool-activity").path
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
@@ -5484,9 +5484,7 @@ final class StationAIUITests: XCTestCase {
             try? "Release tool completions after assertion failure.\n".write(to: toolRelease, atomically: true, encoding: .utf8)
         }
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: toolReady.path) }, timeout: 20), "The fixture should pause after the tool start notifications.")
-        let currentActivity = element("current-activity-title")
-        XCTAssertTrue(waitUntil({ currentActivity.label == "Tool · legacySummary" }, timeout: 10), "The header should show the most recently started active call.")
-        XCTAssertTrue(element("current-activity-duration").exists, "The current activity should show its elapsed time outside the disclosure.")
+        XCTAssertFalse(element("current-activity-indicator").exists, "The conversation header should not show a live activity line while responding.")
         element("codex-activity-disclosure").click()
         let activityDetails = element("codex-activity-details")
         XCTAssertTrue(activityDetails.waitForExistence(timeout: 5), "Expanded Working for should contain tool activity rows.")
@@ -5511,7 +5509,6 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(dynamicRow.label.contains("In progress"))
         XCTAssertTrue(legacyDynamicRow.label.contains("In progress"))
         try "Finish the newest call first.\n".write(to: toolReleaseLatest, atomically: true, encoding: .utf8)
-        XCTAssertTrue(waitUntil({ currentActivity.label == "Tool · summarize" }, timeout: 15), "When the newest call finishes, the header should fall back to the next active call.")
         XCTAssertTrue(waitUntil({ legacyDynamicRow.label.contains("Completed") }, timeout: 10))
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").count, 1)
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").count, 1)
