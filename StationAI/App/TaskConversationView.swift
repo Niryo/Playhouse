@@ -2006,6 +2006,12 @@ struct TaskConversationView: View {
                     .accessibilityLabel(String(Self.markdownAttributedText(displayText).characters))
                     .accessibilityIdentifier("assistant-message-\(message.id)")
             }
+            if let createdAt = message.createdAt {
+                Text(createdAt, format: .dateTime.hour().minute())
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityIdentifier("message-time-\(message.id)")
+            }
         }
         .frame(maxWidth: 620, alignment: .leading)
     }
@@ -2041,6 +2047,12 @@ struct TaskConversationView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 16).padding(.vertical, 11)
                     .background(WorkspaceTheme.accent, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+            }
+            if let createdAt = message.createdAt {
+                Text(createdAt, format: .dateTime.hour().minute())
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityIdentifier("message-time-\(message.id)")
             }
         }
             .frame(maxWidth: 620, alignment: .trailing)
