@@ -4329,7 +4329,7 @@ class StationAIBridgeTests(unittest.TestCase):
         history, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(history)["messages"], [])
 
-    # case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
+    # case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the submitted user message remains visible in the transcript. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
     def test_conversation_shows_mcp_and_dynamic_tool_activity(self):
         task_id = self.create_task(title="Tool activity")['id']
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -4375,6 +4375,9 @@ class StationAIBridgeTests(unittest.TestCase):
                                 completed_rows[activity.get("id")] = activity
             self.assertTrue(ready.exists(), "The fixture should hold both tool calls after their start notifications.")
             self.assertTrue(expected_tool_ids.issubset(active_rows), "All expected tool calls should publish their started state.")
+            held_history, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+            held_messages = self.assert_success(held_history)["messages"]
+            self.assertIn("Show tool activity.", [message["text"] for message in held_messages], "The submitted user message should remain in persisted history while the provider turn is held active.")
             self.assertEqual(active_rows["item_fixture_mcp_call"]["toolKind"], "mcp")
             self.assertEqual(active_rows["item_fixture_dynamic_call"]["toolKind"], "dynamic")
             self.assertEqual(active_rows["item_fixture_dynamic_legacy"]["toolKind"], "dynamic")
