@@ -872,6 +872,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         var subagentIndexes: [String: Int] = [:]
         var lastAssistantTurnID: String?
         var lastAssistantPhase: String?
+        var privateOutcomeReminderTurnIDs = Set<String>()
         var cursor: String?
         var visitedCursors = Set<String>()
         var historyItemOrder = 0
@@ -891,6 +892,16 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             let data = response["data"] as? [[String: Any]] ?? []
             for entry in data {
                 guard let item = entry["item"] as? [String: Any] else { continue }
+                let turnID = entry["turnId"] as? String
+                if item["type"] as? String == "userMessage",
+                   Self.chatMessage(from: entry)?.text.localizedCaseInsensitiveContains("StationAI internal outcome reminder:") == true,
+                   let turnID {
+                    privateOutcomeReminderTurnIDs.insert(turnID)
+                }
+                if let turnID, privateOutcomeReminderTurnIDs.contains(turnID) {
+                    historyItemOrder += 1
+                    continue
+                }
                 if item["type"] as? String == "contextCompaction" {
                     compactionHistory.append((item, entry["turnId"] as? String, historyItemOrder))
                     // Preserve the event boundary between same-phase assistant
@@ -1702,7 +1713,8 @@ enum TaskThreadDeveloperInstructions {
 
         At the very end of every turn, make exactly one definitive outcome call using this task ID:
         \(quotedExecutable) task outcome \(id) <completed|waiting-response>
-        Use completed only when all work for this turn is finished and no user decision or response is needed. If you need the user to answer, choose between options, provide missing information, or take another action before you can continue, use waiting-response. The outcome call must be your final CLI action for the turn. StationAI moves the task to Review only for completed. If you omit the outcome call, StationAI moves it to Waiting Response.
+        Use completed only when all work for this turn is finished and no user decision or response is needed. If you need the user to answer, choose between options, provide missing information, or take another action before you can continue, use waiting-response. The outcome call must be your final CLI action for the turn. StationAI moves the task to Review only for completed.
+        Reporting an outcome is required for every successful turn. If you finish without reporting one, StationAI will send up to two private follow-up messages explicitly asking you to report the outcome. Respond to those messages without repeating the completed work, and run the task outcome command for this task. StationAI uses Waiting Response only if neither reminder produces an outcome.
         """
     }
 

@@ -26,6 +26,7 @@ INSPECTION_ANSWER = "Inspection done: the workspace is ready."
 UNANSWERED_FIRST = "Starting the checks."
 UNANSWERED_LAST = "Checks are running; results will follow."
 SIMPLE_ANSWER = "OK."
+PENDING_QUESTION_SUCCESS_MARKER = "finish while a structured question remains pending"
 
 
 def write(value):
@@ -70,9 +71,39 @@ def run_tool(tool_id, name, tool_input, command=None):
     return output
 
 
-def respond(user_text, instructions):
+def respond(user_text, instructions, preserve_no_outcome=False):
     commands = []
-    if "answer to the pending question from the prior stationai session" in user_text.lower():
+    if PENDING_QUESTION_SUCCESS_MARKER in user_text.lower():
+        question_input = {
+            "questions": [{
+                "header": "Color",
+                "question": "Which color should I use?",
+                "options": [{"label": "Blue"}, {"label": "Green"}],
+                "multiSelect": False,
+            }]
+        }
+        assistant("msg_pending_question_success", [{"type": "tool_use", "id": "toolu_question", "name": "AskUserQuestion", "input": question_input}])
+        write({"type": "control_request", "request_id": "question-request-1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
+        }})
+    elif "stationai internal outcome reminder:" in user_text.lower() and "outcome-reminder-question" in Path(sys.argv[0]).name:
+        question_input = {
+            "questions": [{
+                "header": "Color",
+                "question": "Which color should I use?",
+                "options": [{"label": "Blue"}, {"label": "Green"}],
+                "multiSelect": False,
+            }]
+        }
+        assistant("msg_private_reminder_question", [{"type": "tool_use", "id": "toolu_question", "name": "AskUserQuestion", "input": question_input}])
+        write({"type": "control_request", "request_id": "question-request-1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
+        }})
+    elif "stationai internal outcome reminder:" in user_text.lower() and not preserve_no_outcome:
+        command = report_command(instructions, " task outcome ", "waiting-response")
+        if command:
+            commands.append({"command": command, "output": run_tool("toolu_outcome_reminder", "Bash", {"command": command}, command)})
+    elif "answer to the pending question from the prior stationai session" in user_text.lower():
         answer = user_text.split("Answer: ", 1)[-1].splitlines()[0].strip()
         text("msg_recovered_question_answer", f"Recovered answer: {answer}.")
     elif "ask a restart-safe structured question" in user_text.lower():
@@ -270,6 +301,10 @@ def main():
             updated_input = response.get("updatedInput", {})
             answers = updated_input.get("answers", {})
             if response.get("behavior") != "allow" or not isinstance(answers, dict) or not answers:
+                if "stationai internal outcome reminder:" in turn.get("userText", "").lower():
+                    rejection_log = Path(str(sys.argv[0]) + ".private-reminder-question-rejection")
+                    with rejection_log.open("a", encoding="utf-8") as stream:
+                        stream.write(response.get("message", "") + "\n")
                 write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
                     {"type": "tool_result", "tool_use_id": "toolu_question", "content": response.get("message", "Question was rejected."), "is_error": True},
                 ]}})
@@ -301,11 +336,26 @@ def main():
                 write({"type": "result", "subtype": "error", "is_error": True,
                        "result": "Fixture provider echoed Answer: Green and the private recovery prompt."})
                 continue
-            turn["reportCommands"] = respond(user_text, instructions)
+            prior_turns = json.loads(history_path.read_text(encoding="utf-8")).get("turns", []) if history_path.exists() else []
+            previous_prompt = next((
+                prior.get("userText", "").lower()
+                for prior in reversed(prior_turns)
+                if "stationai internal outcome reminder:" not in prior.get("userText", "").lower()
+            ), "")
+            preserve_no_outcome = any(marker in previous_prompt for marker in ("please inspect the workspace", "start the checks"))
+            turn["reportCommands"] = respond(user_text, instructions, preserve_no_outcome=preserve_no_outcome)
             history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else {"turns": []}
             history["turns"].append(turn)
             history_path.write_text(json.dumps(history), encoding="utf-8")
-            if "structured question" in user_text.lower():
+            if PENDING_QUESTION_SUCCESS_MARKER in user_text.lower():
+                # Exercise a completed provider turn whose question remains unanswered.
+                # Let StationAI persist and emit the request before reporting success.
+                time.sleep(0.1)
+                write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+            elif "structured question" in user_text.lower() or (
+                "stationai internal outcome reminder:" in user_text.lower()
+                and "outcome-reminder-question" in Path(str(sys.argv[0])).name
+            ):
                 # Keep the provider turn alive until StationAI answers or rejects
                 # the control request; otherwise a pending question races with
                 # an already successful result.

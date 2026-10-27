@@ -1829,7 +1829,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(waiting["status"], "Waiting Response")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", blocked_id)[0])["status"], "Blocked")
 
-    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task.
+    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to two private follow-up requests to report one; a completed report during either reminder moves the task to Review, a waiting-response report during a reminder stops retries and leaves the task in Waiting Response, and no report after both reminders falls back to Waiting Response. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. Private reminder prompts, replies, and turn-scoped activities remain absent from Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those reminders also retains the latest ordinary-turn diff while keeping reminder-only replies hidden.
     def test_task_progress_reports_publish_persist_and_clear(self):
         task_id = self.create_task("Progress reports", roots=[self.primary])["id"]
         response, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "building", expected_status=1)
@@ -1838,7 +1838,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assert_failure(inactive_outcome, "invalid_transition")
 
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
-        executable = self.data_directory / "codex-fixture-hold-release"
+        executable = self.data_directory / "codex-fixture-unique-turns-hold-release"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
         (self.data_directory / ".stationai-codex-fixture-owner").write_text(
@@ -1940,15 +1940,93 @@ class StationAIBridgeTests(unittest.TestCase):
                 while not active_marker.exists() and time.monotonic() < deadline:
                     time.sleep(0.02)
                 self.assertTrue(active_marker.exists(), "The no-outcome fixture turn should become active.")
-                release_marker.write_text("Release the no-outcome turn.\n", encoding="utf-8")
+                for reminder_index in range(3):
+                    self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress", "The fallback status should be deferred until both reminders finish.")
+                    release_marker.write_text(f"Release turn {reminder_index + 1}.\n", encoding="utf-8")
+                    if reminder_index < 2:
+                        deadline = time.monotonic() + 10
+                        while active_marker.exists() and time.monotonic() < deadline:
+                            time.sleep(0.02)
+                        self.assertFalse(active_marker.exists(), "The fixture should finish the current unreported turn.")
+                        deadline = time.monotonic() + 10
+                        while not active_marker.exists() and time.monotonic() < deadline:
+                            time.sleep(0.02)
+                        self.assertTrue(active_marker.exists(), "StationAI should send the next private outcome reminder.")
                 omitted_stdout, omitted_stderr = omitted_follow_up.communicate(timeout=20)
                 self.assertEqual(omitted_follow_up.returncode, 0, f"No-outcome fixture conversation failed: {omitted_stdout}; {omitted_stderr}")
                 omitted_record, _ = self.call_cli("task", "get", task_id)
                 self.assertEqual(self.assert_success(omitted_record)["status"], "Waiting Response")
+                visible_history, _ = self.call_cli(
+                    "conversation", "history", task_id,
+                    extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+                )
+                visible_history_record = self.assert_success(visible_history)
+                visible_messages = visible_history_record["messages"]
+                self.assertFalse(any("previous request finished" in item.get("text", "") for item in visible_messages), "Private reminder text must not appear in conversation history.")
+                self.assertFalse(any("Fixture internal reminder reply." in item.get("text", "") for item in visible_messages), "Private reminder replies must not appear in conversation history.")
+                self.assertIn("ordinary-turn-diff-after-reminders", visible_history_record["diff"]["unifiedDiff"], "Private reminders must not replace the latest ordinary-turn diff.")
             finally:
                 if omitted_follow_up.poll() is None:
                     release_marker.write_text("Release the no-outcome turn.\n", encoding="utf-8")
                     omitted_follow_up.communicate(timeout=20)
+            recovered_follow_up = subprocess.Popen(
+                [str(self.cli), "conversation", "send", task_id, "--message", "Report the outcome after a reminder."],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment,
+            )
+            try:
+                deadline = time.monotonic() + 10
+                while not active_marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(active_marker.exists(), "The reminder recovery fixture turn should become active.")
+                release_marker.write_text("Release the initial unreported turn.\n", encoding="utf-8")
+                deadline = time.monotonic() + 10
+                while active_marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertFalse(active_marker.exists(), "The initial unreported turn should finish before the reminder.")
+                deadline = time.monotonic() + 10
+                while not active_marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(active_marker.exists(), "StationAI should send a private reminder after the omitted outcome.")
+                completed_reminder, _ = self.call_cli("task", "outcome", task_id, "completed", extra_environment=bridge_environment)
+                self.assertEqual(self.assert_success(completed_reminder)["outcome"], "completed")
+                release_marker.write_text("Release the reminder after its outcome is reported.\n", encoding="utf-8")
+                recovered_stdout, recovered_stderr = recovered_follow_up.communicate(timeout=20)
+                self.assertEqual(recovered_follow_up.returncode, 0, f"Reminder recovery fixture conversation failed: {recovered_stdout}; {recovered_stderr}")
+                recovered_record, _ = self.call_cli("task", "get", task_id)
+                self.assertEqual(self.assert_success(recovered_record)["status"], "Review", "A completed CLI outcome reported during a private reminder should be honored.")
+            finally:
+                if recovered_follow_up.poll() is None:
+                    release_marker.write_text("Release the reminder recovery turn.\n", encoding="utf-8")
+                    recovered_follow_up.communicate(timeout=20)
+            waiting_follow_up = subprocess.Popen(
+                [str(self.cli), "conversation", "send", task_id, "--message", "Report waiting after a reminder."],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment,
+            )
+            try:
+                deadline = time.monotonic() + 10
+                while not active_marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(active_marker.exists(), "The waiting outcome fixture turn should become active.")
+                release_marker.write_text("Release the initial unreported turn.\n", encoding="utf-8")
+                deadline = time.monotonic() + 10
+                while active_marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertFalse(active_marker.exists(), "The initial turn should finish before asking for its outcome.")
+                deadline = time.monotonic() + 10
+                while not active_marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(active_marker.exists(), "StationAI should send a reminder before reporting a waiting outcome.")
+                waiting_reminder, _ = self.call_cli("task", "outcome", task_id, "waiting-response", extra_environment=bridge_environment)
+                self.assertEqual(self.assert_success(waiting_reminder)["outcome"], "waiting-response")
+                release_marker.write_text("Release the reminder after its outcome is reported.\n", encoding="utf-8")
+                waiting_stdout, waiting_stderr = waiting_follow_up.communicate(timeout=20)
+                self.assertEqual(waiting_follow_up.returncode, 0, f"Waiting reminder fixture conversation failed: {waiting_stdout}; {waiting_stderr}")
+                waiting_record, _ = self.call_cli("task", "get", task_id)
+                self.assertEqual(self.assert_success(waiting_record)["status"], "Waiting Response", "A waiting-response outcome reported during a private reminder should be honored.")
+            finally:
+                if waiting_follow_up.poll() is None:
+                    release_marker.write_text("Release the waiting reminder turn.\n", encoding="utf-8")
+                    waiting_follow_up.communicate(timeout=20)
             # A model can write its outcome command as answer text instead of running
             # it. The echo is hidden, and it counts only when it names this task.
             for echoed_task_id, expected_status in [(str(uuid.uuid4()).upper(), "Waiting Response"), (task_id, "Review")]:
@@ -1961,7 +2039,18 @@ class StationAIBridgeTests(unittest.TestCase):
                     while not active_marker.exists() and time.monotonic() < deadline:
                         time.sleep(0.02)
                     self.assertTrue(active_marker.exists(), "The echoed-outcome fixture turn should become active.")
-                    release_marker.write_text("Release the echoed-outcome turn.\n", encoding="utf-8")
+                    held_turns = 3 if expected_status == "Waiting Response" else 1
+                    for held_turn_index in range(held_turns):
+                        release_marker.write_text(f"Release echoed turn {held_turn_index + 1}.\n", encoding="utf-8")
+                        if held_turn_index < held_turns - 1:
+                            deadline = time.monotonic() + 10
+                            while active_marker.exists() and time.monotonic() < deadline:
+                                time.sleep(0.02)
+                            self.assertFalse(active_marker.exists(), "The current echoed turn should finish before a private reminder.")
+                            deadline = time.monotonic() + 10
+                            while not active_marker.exists() and time.monotonic() < deadline:
+                                time.sleep(0.02)
+                            self.assertTrue(active_marker.exists(), "StationAI should send a private reminder for an unreported echoed outcome.")
                     echoed_stdout, echoed_stderr = echoed_turn.communicate(timeout=20)
                     self.assertEqual(echoed_turn.returncode, 0, f"Echoed-outcome fixture conversation failed: {echoed_stdout}; {echoed_stderr}")
                     echoed_events = [json.loads(line) for line in echoed_stdout.splitlines() if line.strip()]
@@ -1970,8 +2059,12 @@ class StationAIBridgeTests(unittest.TestCase):
                     echoed_record, _ = self.call_cli("task", "get", task_id)
                     self.assertEqual(self.assert_success(echoed_record)["status"], expected_status)
                     echoed_history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)})[0])
-                    self.assertEqual(echoed_history["messages"][-1]["text"], "Fixture answer with an echoed outcome.")
+                    self.assertTrue(any(item["text"] == "Fixture answer with an echoed outcome." for item in echoed_history["messages"]))
                     self.assertFalse(any("task outcome" in message["text"] for message in echoed_history["messages"]), "A fresh history read must hide the echoed outcome command.")
+                    self.assertFalse(any(item.get("text") == "[StationAI private outcome reminder hidden]" for item in echoed_history["messages"]), "A later Codex history refresh must omit earlier private reminders.")
+                    self.assertFalse(any(item.get("text") == "[StationAI private outcome response hidden]" for item in echoed_history["messages"]), "A later Codex history refresh must omit earlier private reminder replies.")
+                    self.assertFalse(any("previous request finished without reporting" in item.get("text", "") or "Fixture internal reminder reply." in item.get("text", "") for item in echoed_history["messages"]), "Later history refreshes must not reveal prior reminder prompts or replies.")
+                    self.assertFalse(any(item.get("id", "").startswith("item_private_reminder_activity_") for item in echoed_history.get("activities", [])), "Later ordinary Codex history must omit activities owned by private reminders.")
                 finally:
                     if echoed_turn.poll() is None:
                         release_marker.write_text("Release the echoed-outcome turn.\n", encoding="utf-8")
@@ -1979,7 +2072,10 @@ class StationAIBridgeTests(unittest.TestCase):
             turn_data = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
             self.assertEqual(turn_data["threadStartCount"], 1)
             self.assertGreaterEqual(turn_data["threadResumeCount"], 1)
-            self.assertEqual(len(turn_data["turns"]), 5)
+            self.assertEqual(len(turn_data["turns"]), 13)
+            reminder_turns = [turn for turn in turn_data["turns"] if "previous request finished without reporting" in turn.get("userMessage", "")]
+            self.assertEqual(len(reminder_turns), 6, "Only the missing-outcome sends should receive private reminders.")
+            self.assertTrue(all("task outcome" in turn["userMessage"] and ("reminder 1 of 2" in turn["userMessage"] or "reminder 2 of 2" in turn["userMessage"]) for turn in reminder_turns), "Each hidden request should explicitly direct the agent to report an outcome.")
             self.assertTrue(all(turn["developerInstructions"] is None for turn in turn_data["turns"]), "Thread-scoped task instructions should not be repeated in turn requests.")
             instructions = turn_data["threadStartDeveloperInstructions"]
             self.assertIn(str(self.cli), instructions)
@@ -1990,6 +2086,7 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assertIn("CLI/XPC 3/8", instructions)
             self.assertIn("under 80 characters", instructions)
             self.assertIn("task outcome", instructions)
+            self.assertIn("up to two private follow-up messages", instructions)
             self.assertIn("waiting-response", instructions)
             self.assertIn("final CLI action", instructions)
             self.assertIn("Active task worktrees for edits", instructions)
@@ -3165,7 +3262,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIn("Done tasks are closed", done_switch["error"]["message"])
         self.assertEqual(self.assert_success(self.call_cli("task", "get", done_task["id"])[0])["conversationProvider"], "codex")
 
-    # case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its StationAI progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn without an outcome ends in Waiting Response. After switching to Codex, the first Codex prompt hands off the whole Claude answer and excludes the commentary of answered turns, while a turn that recorded only commentary hands off its last commentary instead. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
+    # case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its StationAI progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn without an outcome ends in Waiting Response. The fixture records both private reminder attempts for each unreported turn; fresh history hides reminder prompts and replies completely. Switching to Codex hands off the whole Claude answer, excludes answered-turn commentary and private reminder prompts and replies including their redacted placeholders, and hands off only the last commentary from the turn that recorded no answer. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
     def test_claude_answer_stays_final_around_outcome_report(self):
         story = "BISCUIT-7 waited by the gate every evening. One night the boy finally came home."
         story_answer = story + "\n\nThe story is above."
@@ -3215,17 +3312,25 @@ class StationAIBridgeTests(unittest.TestCase):
             ("commentary", "Starting the checks."),
             ("commentary", "Checks are running; results will follow."),
         ], "A fresh history read keeps the story as one final answer and the pre-tool text as commentary.")
+        self.assertFalse(any("StationAI internal outcome reminder:" in message["text"] for message in history["messages"]))
+        self.assertFalse(any("private outcome reminder hidden" in message["text"] for message in history["messages"]))
+        self.assertFalse(any("private outcome response hidden" in message["text"] for message in history["messages"]))
 
         self.assert_success(self.call_cli("conversation", "provider", task_id, "set", "codex")[0])
         sent, _ = self.call_cli("conversation", "send", task_id, "--message", "Continue the story.", extra_environment=fixtures)
         self.assert_success(sent)
-        handoff = json.loads(Path(str(codex) + ".history").read_text(encoding="utf-8"))["turns"][-1]["userMessage"]
+        codex_turns = json.loads(Path(str(codex) + ".history").read_text(encoding="utf-8"))["turns"]
+        handoff_turn = next(turn for turn in reversed(codex_turns) if turn.get("userMessage", "").endswith("Continue the story."))
+        handoff = handoff_turn["userMessage"]
         self.assertIn("<stationai-handoff-context>", handoff)
         self.assertIn(f"Claude: {story_answer}", handoff, "Codex must receive the whole Claude answer.")
         self.assertIn("Claude: Inspection done: the workspace is ready.", handoff)
         self.assertNotIn("I'll inspect the workspace first.", handoff, "Commentary of an answered turn stays with the provider that produced it.")
         self.assertIn("Claude: Checks are running; results will follow.", handoff, "A turn without an answer hands off its last commentary.")
         self.assertNotIn("Starting the checks.", handoff, "Only the unanswered turn's last commentary is handed off.")
+        self.assertNotIn("StationAI internal outcome reminder:", handoff, "Private outcome reminders must not cross provider boundaries.")
+        self.assertNotIn("[StationAI private outcome reminder hidden]", handoff, "Redacted reminder prompts must not cross provider boundaries.")
+        self.assertNotIn("private outcome response hidden", handoff, "Redacted reminder replies must not enter handoff context.")
         self.assertTrue(handoff.endswith("Continue the story."))
 
     # case-contract: test_claude_resume_recovers_visible_history | After a Claude turn and StationAI restart, if Claude cannot find its native resumed session, the retried fresh session receives the prior visible conversation from StationAI's persisted transcript together with the new prompt. Claude completes the turn, and fresh CLI/XPC history and the visible UI retain both turns. A normal Claude resume continues using the native session without receiving duplicate handoff context.
@@ -3245,7 +3350,10 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assert_success(second)
 
         fixture_history_path = Path(str(claude) + ".history")
-        normal_resume = json.loads(fixture_history_path.read_text(encoding="utf-8"))["turns"][-1]
+        normal_resume = next(
+            turn for turn in reversed(json.loads(fixture_history_path.read_text(encoding="utf-8"))["turns"])
+            if turn.get("userText") == "Please inspect the workspace."
+        )
         self.assertTrue(normal_resume["resumed"], normal_resume)
         self.assertNotIn("<stationai-handoff-context>", normal_resume["userText"], "A working native resume must not receive duplicate transcript context.")
 
@@ -3280,7 +3388,10 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assert_success(recovered)
         self.assertIn("OK.", [event["payload"]["text"] for event in events if event["type"] == "assistant_final"])
 
-        recovered_turn = json.loads(fixture_history_path.read_text(encoding="utf-8"))["turns"][-1]
+        recovered_turn = next(
+            turn for turn in reversed(json.loads(fixture_history_path.read_text(encoding="utf-8"))["turns"])
+            if "stationai internal outcome reminder:" not in turn.get("userText", "").lower()
+        )
         self.assertFalse(recovered_turn["resumed"], "A missing native session should be replaced by a fresh Claude session.")
         prompt = recovered_turn["userText"]
         self.assertIn("<stationai-handoff-context>", prompt)
@@ -3392,7 +3503,10 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assert_success(sent)
         history, _ = self.call_cli("conversation", "history", task["id"], extra_environment=fixture_environment)
-        user_messages = [message for message in self.assert_success(history)["messages"] if message["role"] == "user"]
+        user_messages = [
+            message for message in self.assert_success(history)["messages"]
+            if message["role"] == "user" and "stationai internal outcome reminder:" not in message["text"].lower()
+        ]
         self.assertTrue(user_messages, "The commented turn should survive a fresh CLI/XPC history read.")
         self.assertEqual(user_messages[-1]["text"], prompt)
         payload = prompt.split("<response-comments>", 1)[1].split("</response-comments>", 1)[0]
@@ -3580,12 +3694,11 @@ class StationAIBridgeTests(unittest.TestCase):
         diagnostics = (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8")
         self.assertNotIn("claude.turn.queued", diagnostics, "Parallel Claude turns must not wait on a shared turn slot.")
         self.assertNotIn(second_prompt, diagnostics, "Diagnostics must not include conversation prompt text.")
-        started = [json.loads(line) for line in diagnostics.splitlines() if '"event":"claude.turn.started"' in line]
         first_record = self.assert_success(self.call_cli("task", "get", first["id"])[0])
         second_record = self.assert_success(self.call_cli("task", "get", second["id"])[0])
-        sessions = {item.get("threadID") for item in started}
-        self.assertIn(first_record.get("claudeSessionID"), sessions, started)
-        self.assertIn(second_record.get("claudeSessionID"), sessions, started)
+        fixture_sessions = {turn.get("sessionID") for turn in turns}
+        self.assertIn(first_record.get("claudeSessionID"), fixture_sessions, turns)
+        self.assertIn(second_record.get("claudeSessionID"), fixture_sessions, turns)
 
     # case-contract: test_conversation_isolates_failing_claude_turn_from_parallel_send | A failing Claude turn does not disturb a conversation running in parallel. While one task's turn is held and then fails, a second task's send from a separate process completes on its own session and reaches Waiting Response; the failing task keeps its user message, records no final answer, and its provider process exit is the only failure in diagnostics. The UI shows the parallel answer after reopening its task with fresh history.
     def test_conversation_isolates_failing_claude_turn_from_parallel_send(self):
@@ -3841,7 +3954,8 @@ class StationAIBridgeTests(unittest.TestCase):
 
         saved_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
         self.assertEqual(
-            [turn["userMessage"] for turn in saved_history["messages"]],
+            [turn["userMessage"] for turn in saved_history["messages"]
+             if "stationai internal outcome reminder:" not in (turn["userMessage"] or "").lower()],
             [first_prompt, second_prompt],
             "Both sequential turns should persist in the same Codex thread history.",
         )
@@ -3850,12 +3964,15 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual([event["method"] for event in thread_events].count("thread/start"), 1)
         self.assertGreaterEqual([event["method"] for event in thread_events].count("thread/resume"), 1)
         self.assertTrue(all(event["threadID"] == thread_id for event in saved_history["events"]))
-        self.assertTrue(all(turn["threadID"] == thread_id for turn in saved_history["messages"]))
-        turn_ids = [turn["turnID"] for turn in saved_history["messages"]]
+        visible_turns = [turn for turn in saved_history["messages"]
+                         if "stationai internal outcome reminder:" not in (turn["userMessage"] or "").lower()]
+        self.assertTrue(all(turn["threadID"] == thread_id for turn in visible_turns))
+        turn_ids = [turn["turnID"] for turn in visible_turns]
         self.assertEqual(len(turn_ids), 2)
         self.assertEqual(len(set(turn_ids)), 2, "Each serialized send should have its own Codex turn ID.")
         self.assertEqual(
-            [event["turnID"] for event in saved_history["events"] if event["method"] == "turn/start"],
+            [event["turnID"] for event in saved_history["events"]
+             if event["method"] == "turn/start" and "stationai internal outcome reminder:" not in (event.get("userMessage") or "").lower()],
             turn_ids,
         )
         completed = self.assert_success(self.call_cli("task", "get", task_id)[0])
@@ -4197,7 +4314,10 @@ class StationAIBridgeTests(unittest.TestCase):
             "conversation", "history", task_id,
             extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
         )
-        saved_agent_image = self.assert_success(fresh_history)["messages"][-1]
+        saved_agent_image = next(
+            message for message in reversed(self.assert_success(fresh_history)["messages"])
+            if message["id"] == published_message["id"]
+        )
         self.assertEqual(saved_agent_image["id"], published_message["id"])
         self.assertEqual(saved_agent_image["imageDataURLs"], published_message["imageDataURLs"])
         thread_instructions = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["threadStartDeveloperInstructions"]
@@ -4214,7 +4334,11 @@ class StationAIBridgeTests(unittest.TestCase):
             "conversation", "history", task_id,
             extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
         )
-        self.assertEqual(self.assert_success(fresh_jpeg_history)["messages"][-1]["imageDataURLs"], jpeg_message["imageDataURLs"])
+        saved_jpeg = next(
+            message for message in reversed(self.assert_success(fresh_jpeg_history)["messages"])
+            if message["id"] == jpeg_message["id"]
+        )
+        self.assertEqual(saved_jpeg["imageDataURLs"], jpeg_message["imageDataURLs"])
         invalid_image = self.data_directory / "invalid-agent-image.png"
         invalid_image.write_bytes(b"not an image")
         invalid_publish, _ = self.call_cli(
@@ -4691,7 +4815,8 @@ class StationAIBridgeTests(unittest.TestCase):
         continued_messages = self.assert_success(continued)["messages"]
         self.assertEqual(continued_messages[-2]["text"], "Continue the implementation.")
         fixture_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
-        turn_modes = [turn["conversationMode"] for turn in fixture_history["turns"]]
+        turn_modes = [turn["conversationMode"] for turn in fixture_history["turns"]
+                      if "stationai internal outcome reminder:" not in (turn["userMessage"] or "").lower()]
         self.assertEqual(turn_modes, ["plan", "plan", "default", "default"], "Follow-up planning remains in Plan mode until implementation starts, and later implementation turns remain in Code mode.")
         history, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         reloaded_messages = self.assert_success(history)["messages"]
@@ -4892,7 +5017,8 @@ class StationAIBridgeTests(unittest.TestCase):
             extra_environment=environment
         )[0])
         history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
-        self.assertEqual(history["turns"][-1]["reasoningEffort"], "xhigh")
+        effort_turn = next(turn for turn in reversed(history["turns"]) if turn.get("userMessage", "").endswith("Check Codex effort."))
+        self.assertEqual(effort_turn["reasoningEffort"], "xhigh")
         self.assertEqual(self.assert_success(self.call_cli("conversation", "effort", task_id)[0])["effort"], "xhigh")
         self.assertEqual(self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"], "gpt-6-sol",
                           "Sending a turn must not silently fall back to the default model.")
@@ -4928,8 +5054,9 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assert_success(self.call_cli("conversation", "effort", task_id, "set", "xhigh")[0])
         self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Check Claude effort.", "--model", "claude-opus-5-5", extra_environment=environment)[0])
         history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
-        self.assertEqual(history["turns"][-1]["effort"], "xhigh")
-        arguments = history["turns"][-1]["arguments"]
+        effort_turn = next(turn for turn in reversed(history["turns"]) if turn.get("userText") == "Check Claude effort.")
+        self.assertEqual(effort_turn["effort"], "xhigh")
+        arguments = effort_turn["arguments"]
         self.assertIn("--model", arguments)
         model_argument_index = arguments.index("--model")
         self.assertEqual(arguments[model_argument_index + 1], "claude-opus-5-5")
@@ -5093,6 +5220,66 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(any(message["text"] == "Answer received: Blue." for message in result["messages"]))
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
 
+    # case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome reminders; after the user answers, the next successful turn receives two hidden CLI outcome requests. Questions raised during those reminders are rejected through Claude's control protocol with completed or waiting-response instructions, stay out of the transcript, and lead to Waiting Response only after both reminders fail to report an outcome.
+    def test_claude_outcome_reminder_rejects_user_questions(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / "claude-fixture-outcome-reminder-question"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
+            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        task, _ = self.call_cli(
+            "task", "create", "--title", "Claude reminder question", "--root", self.primary, "--provider", "claude"
+        )
+        task_id = self.assert_success(task)["id"]
+        initial, initial_events = self.call_cli(
+            "conversation", "send", task_id, "--message", "Finish while a structured question remains pending.",
+            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+        )
+        self.assert_success(initial)
+        questions = [event for event in initial_events if event.get("type") == "user_input"]
+        self.assertEqual(len(questions), 1, "The successful turn should leave its structured question pending.")
+        pending, _ = self.call_cli("conversation", "history", task_id,
+                                   extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)})
+        pending_history = self.assert_success(pending)
+        self.assertIsNotNone(pending_history.get("pendingUserInputRequest"))
+        self.assertFalse(any("StationAI internal outcome reminder:" in turn.get("userText", "")
+                             for turn in json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]))
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress")
+        request = questions[0]["payload"]["userInputRequest"]
+        answered, _ = self.call_cli(
+            "conversation", "answer-user-input", task_id, request["id"], "--answer", "question-1=Blue",
+            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+        )
+        self.assert_success(answered)
+        answered_history, _ = self.call_cli("conversation", "history", task_id,
+                                            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)})
+        self.assertIsNone(self.assert_success(answered_history).get("pendingUserInputRequest"))
+        followup, followup_events = self.call_cli(
+            "conversation", "send", task_id, "--message", "Continue after answering.",
+            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+        )
+        self.assertTrue(self.assert_success(followup)["messages"])
+        events = initial_events + followup_events
+        self.assertEqual(sum(event.get("type") == "user_input" for event in events), 1,
+                         "Questions from private Claude reminders must not be emitted as user input.")
+        turns = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
+        reminders = [turn for turn in turns if "StationAI internal outcome reminder:" in turn.get("userText", "")]
+        self.assertEqual(len(reminders), 2, "Claude must receive the second private reminder after the first question is rejected.")
+        self.assertTrue(all("explicitly run the StationAI CLI task outcome command" in turn["userText"] for turn in reminders))
+        rejections = Path(str(executable) + ".private-reminder-question-rejection").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(rejections), 2)
+        self.assertTrue(all("waiting-response" in message and "completed" in message for message in rejections))
+        history, _ = self.call_cli(
+            "conversation", "history", task_id,
+            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+        )
+        safe_history = self.assert_success(history)
+        self.assertIsNone(safe_history.get("pendingUserInputRequest"))
+        self.assertFalse(any("Which color should I use?" in message.get("text", "") for message in safe_history["messages"]))
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
+
     # case-contract: test_claude_empty_question_request_is_rejected | Claude AskUserQuestion requests with no questions are rejected through the control protocol, fail the turn, and mark the task Blocked; the UI shows the blocked task and its intervention indicator.
     def test_claude_empty_question_request_is_rejected(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
@@ -5198,7 +5385,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertNotIn("Answer: Green", diagnostics)
         self.assertNotIn("private recovery prompt", diagnostics.lower())
 
-    # case-contract: test_codex_pending_question_recovers_after_provider_process_restarts | Codex's pending structured question persists after its provider process exits; StationAI restores it from fresh CLI/XPC history, keeps provider switching blocked, requires the user to re-enter the secret once, and applies the answers in one recovery turn. CLI history and the live recovery event stream retain safe assistant text while redacting secret echoes and hiding provider activities and file-change diffs; a later non-sensitive Codex turn keeps its own diff, and the visible UI shows the safe response immediately and after app restart.
+    # case-contract: test_codex_pending_question_recovers_after_provider_process_restarts | Codex's pending structured question persists after its provider process exits; StationAI restores it from fresh CLI/XPC history, keeps provider switching blocked, requires the user to re-enter the secret once, and applies the answers in one recovery turn. The live recovery stream retains safe assistant text while redacting secret echoes; persisted history hides secret recovery responses, provider activities, and file-change diffs. A later non-sensitive Codex turn keeps its own diff and safe response visible in refreshed CLI/UI history while the earlier secret stays absent. In one task, a no-secret recovery response remains visible after a later secret recovery while the secret response is hidden. Secret answers with surrounding whitespace are still redacted when Codex normalizes its echo.
     def test_codex_pending_question_recovers_after_provider_process_restarts(self):
         task_id = self.create_task("Restart-safe Codex question", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -5224,20 +5411,21 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(self.call_cli("conversation", "provider", task_id)[0])["provider"], "codex")
         answer_final, recovery_events = self.call_cli(
             "conversation", "answer-user-input", task_id, request["id"],
-            "--answer", "color=Green", "--answer", "token=fixture-secret", extra_environment=env,
+            "--answer", "color=Green", "--answer", "token= fixture-secret ", extra_environment=env,
         )
         self.assert_success(answer_final)
         self.assertNotIn("fixture-secret", json.dumps(recovery_events), "Live recovery events must not expose secret-bearing activities or diffs.")
+        safe_recovery_answer = "Recovered answer: Green; private token [redacted secret answer] was applied."
+        self.assertIn(safe_recovery_answer, json.dumps(recovery_events), "The live recovery stream should retain the safe assistant answer after redacting the re-entered secret.")
         provider_history = Path(str(executable) + ".history").read_text(encoding="utf-8")
         self.assertIn("fixture-secret", provider_history, "The freshly re-entered secret must reach the resumed provider turn.")
         completed, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         completed_history = self.assert_success(completed)
         self.assertIsNone(completed_history.get("pendingUserInputRequest"))
         self.assertTrue(any(
-            message["role"] == "assistant"
-            and message["text"] == "Answers received: Blue / [redacted secret answer]."
+            message["role"] == "assistant" and message["text"] == "[Response to private answer hidden]"
             for message in completed_history["messages"]
-        ))
+        ), "Persisted history should hide the assistant response from a secret recovery turn.")
         self.assertTrue(any(
             message["role"] == "user" and message["text"] == "[Private answer sent after restart]"
             for message in completed_history["messages"]
@@ -5252,9 +5440,64 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assert_success(follow_up)
         follow_up_history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        self.assertTrue(any(
+            message["role"] == "assistant" and message["text"] == "Follow-up after private recovery complete."
+            for message in follow_up_history["messages"]
+        ), "A normal Codex follow-up after recovery must remain visible in refreshed history.")
         self.assertIn("follow-up-visible-diff", follow_up_history["diff"]["unifiedDiff"],
             "A later non-sensitive Codex turn must retain its own file-change diff.")
         self.assertNotIn("fixture-secret", json.dumps(follow_up_history))
+
+        no_secret_task_id = self.create_task("Restart-safe Codex question without a secret", roots=[self.primary])["id"]
+        no_secret_executable = self.data_directory / "codex-fixture-restart-question-no-secret"
+        shutil.copyfile(fixture, no_secret_executable)
+        no_secret_executable.chmod(0o755)
+        no_secret_env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(no_secret_executable)}
+        question_turn, _ = self.call_cli(
+            "conversation", "send", no_secret_task_id, "--message", "Ask a restart-safe non-secret question.",
+            expected_status=1, extra_environment=no_secret_env,
+        )
+        self.assertFalse(question_turn.get("ok", True), question_turn)
+        no_secret_pending = self.assert_success(self.call_cli(
+            "conversation", "history", no_secret_task_id, extra_environment=no_secret_env,
+        )[0])["pendingUserInputRequest"]
+        self.assertEqual([item["id"] for item in no_secret_pending["questions"]], ["color"])
+        self.assertFalse(no_secret_pending["questions"][0]["isSecret"])
+        _, no_secret_events = self.call_cli(
+            "conversation", "answer-user-input", no_secret_task_id, no_secret_pending["id"],
+            "--answer", "color=Blue", extra_environment=no_secret_env,
+        )
+        self.assertIn("Recovered answer: Blue; no secret was required.", json.dumps(no_secret_events))
+        no_secret_history = self.assert_success(self.call_cli(
+            "conversation", "history", no_secret_task_id, extra_environment=no_secret_env,
+        )[0])
+        self.assertTrue(any(
+            message["role"] == "assistant" and message["text"] == "Recovered answer: Blue; no secret was required."
+            for message in no_secret_history["messages"]
+        ), "Codex recovery with no secret answers should retain its safe assistant response.")
+        self.assertFalse(any(message["text"] == "[Response to private answer hidden]" for message in no_secret_history["messages"]))
+
+        second_question, _ = self.call_cli(
+            "conversation", "send", no_secret_task_id, "--message", "Ask a second restart-safe structured question.",
+            expected_status=1, extra_environment=no_secret_env,
+        )
+        self.assertFalse(second_question.get("ok", True), second_question)
+        second_pending = self.assert_success(self.call_cli(
+            "conversation", "history", no_secret_task_id, extra_environment=no_secret_env,
+        )[0])["pendingUserInputRequest"]
+        self.assertTrue(any(question["isSecret"] for question in second_pending["questions"]))
+        _, second_recovery_events = self.call_cli(
+            "conversation", "answer-user-input", no_secret_task_id, second_pending["id"],
+            "--answer", "color=Green", "--answer", "token=fixture-secret", extra_environment=no_secret_env,
+        )
+        self.assertIn("Recovered answer: Green; private token [redacted secret answer] was applied.", json.dumps(second_recovery_events))
+        sequential_history = self.assert_success(self.call_cli(
+            "conversation", "history", no_secret_task_id, extra_environment=no_secret_env,
+        )[0])
+        sequential_assistant_texts = [message["text"] for message in sequential_history["messages"] if message["role"] == "assistant"]
+        self.assertIn("Recovered answer: Blue; no secret was required.", sequential_assistant_texts,
+            "A later secret recovery must not scrub the earlier safe no-secret recovery response in the same task.")
+        self.assertIn("[Response to private answer hidden]", sequential_assistant_texts)
 
     # case-contract: test_codex_secret_recovery_redaction_fails_closed | When Codex recovery and a later thread-resume/history read error echo the full recovery prompt and answers, StationAI preserves the pending question while the task stays In Progress, uses a generic visible error, and redacts private content from returned history, saved task state, diagnostics, and error text across fresh CLI/XPC reads and app restarts.
     def test_codex_secret_recovery_redaction_fails_closed(self):
@@ -5369,7 +5612,7 @@ class StationAIBridgeTests(unittest.TestCase):
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Waiting Response")
 
-    # case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation and returning, and keep the task In Progress until answered; the answered turn returns to Waiting Response without an explicit completed outcome.
+    # case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation and returning, and keep the task In Progress until answered; after the answered turn finishes without an outcome, StationAI sends two hidden requests explicitly directing a CLI task outcome report and then returns to Waiting Response; questions raised during those reminders are rejected with outcome instructions, and a failed first reminder still permits the second request.
     def test_codex_nonblocking_question_keeps_task_in_progress(self):
         task_id = self.create_task("Non-blocking question", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -5407,6 +5650,16 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Waiting Response")
+        fixture_turns = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
+        reminders = [turn for turn in fixture_turns if "StationAI internal outcome reminder:" in turn.get("userMessage", "")]
+        self.assertEqual(len(reminders), 2, "An answered non-blocking question turn without an outcome should receive two private reminders.")
+        self.assertTrue(all("explicitly run the StationAI CLI task outcome command" in turn["userMessage"] for turn in reminders))
+        self.assertEqual(sum(event.get("type") == "user_input" for event in events), 1, "Questions from private reminders must not be emitted as user input.")
+        rejection_messages = Path(str(executable) + ".private-reminder-question-rejection").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(rejection_messages), 2, "Both private reminder questions should be rejected before a second retry finishes.")
+        self.assertTrue(all("waiting-response" in message and "completed" in message for message in rejection_messages))
+        visible_history, _ = self.call_cli("conversation", "history", task_id, extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)})
+        self.assertIsNone(self.assert_success(visible_history).get("pendingUserInputRequest"), "Private reminder questions must not remain pending in the transcript.")
 
     # case-contract: test_codex_async_questions_render_and_reply_as_followup | Async agentMessage questions retain choices and a free-text prompt in live updates and fresh CLI/XPC history, retain accepted-turn model attribution during an active history reload, stay separate from later assistant text, and receive validated answers through the shared manager during and after an active turn. The UI shows inline answer cards instead of raw bullet text, blocks incomplete answers, preserves answered cards across reopening, and displays both submitted answers and responses.
     def test_codex_async_questions_render_and_reply_as_followup(self):

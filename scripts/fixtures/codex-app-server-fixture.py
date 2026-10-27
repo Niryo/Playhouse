@@ -4,7 +4,10 @@
 
 import json
 import os
+import re
 import select
+import shlex
+import subprocess
 import sys
 import time
 import uuid
@@ -49,10 +52,24 @@ def write(value):
 
 def answer_text(user_message):
     mode = os.path.basename(sys.argv[0])
-    if mode.endswith("-restart-question") and not (user_message or "").startswith(
+    if "stationai internal outcome reminder:" in (user_message or "").lower():
+        return "Fixture internal reminder reply."
+    if user_message == "Follow up after private recovery.":
+        return "Follow-up after private recovery complete."
+    if is_restart_question_mode(mode) and mode.endswith("-no-secret") and (user_message or "").startswith("Continue this conversation by applying"):
+        answer_values = re.findall(r"(?m)^\s*Answer:\s*(.*?)\s*$", user_message)
+        secret_answer = any(value.strip() == "fixture-secret" for value in answer_values)
+        return (
+            "Recovered answer: Green; private token fixture-secret was applied."
+            if secret_answer
+            else "Recovered answer: Blue; no secret was required."
+        )
+    if is_restart_question_mode(mode) and not (user_message or "").startswith(
         "Continue this conversation by applying"
     ):
         return "I am waiting for the pending question to be answered."
+    if is_restart_question_mode(mode):
+        return "Recovered answer: Green; private token fixture-secret was applied."
     if Path(sys.argv[0]).name.endswith("-user-question"):
         return "Answer received: Continue."
     if isinstance(user_message, str) and user_message.startswith("Long response fixture input."):
@@ -76,9 +93,29 @@ def answer_text(user_message):
     return "Answers received: Blue / fixture-secret."
 
 
+def is_restart_question_mode(mode):
+    return mode.endswith("-restart-question") or mode.endswith("-restart-question-no-secret")
+
+
 def question_request(request_id):
     mode = os.path.basename(sys.argv[0])
-    if mode.endswith("-restart-question") and Path(str(sys.argv[0]) + ".asked").exists():
+    if mode.endswith("-restart-question-no-secret") and Path(str(sys.argv[0]) + ".secret-stage").exists():
+        questions = [
+            {
+                "id": "color", "header": "Color", "question": "Which color should I use?",
+                "options": [{"label": "Blue", "description": "Use blue."}, {"label": "Green", "description": "Use green."}],
+                "isOther": False, "isSecret": False,
+            },
+            {"id": "token", "header": "Private token", "question": "What is the private token?", "options": None,
+             "isOther": False, "isSecret": True},
+        ]
+    elif mode.endswith("-restart-question-no-secret"):
+        questions = [{
+            "id": "color", "header": "Color", "question": "Which color should I use?",
+            "options": [{"label": "Blue", "description": "Use blue."}, {"label": "Green", "description": "Use green."}],
+            "isOther": False, "isSecret": False,
+        }]
+    elif mode.endswith("-restart-question") and Path(str(sys.argv[0]) + ".asked").exists():
         questions = [{
             "id": "token", "header": "Private token", "question": "What is the private token?",
             "options": None, "isOther": False, "isSecret": True,
@@ -340,10 +377,13 @@ def main():
         elif message.get("method") == "turn/start":
             saw_turn = True
             saw_question = True
-            if mode.endswith("-restart-question"):
+            if is_restart_question_mode(mode):
                 TURN_ID = f"turn-{uuid.uuid4()}"
             turn_input = message.get("params", {}).get("input", [])
             turn_message = next((item.get("text") for item in turn_input if item.get("type") == "text"), None)
+            is_outcome_reminder = "stationai internal outcome reminder:" in (turn_message or "").lower()
+            if is_outcome_reminder:
+                TURN_ID = f"turn-{uuid.uuid4()}"
             is_title_request = (turn_message or "").startswith("Write a concise task title of at most 8 words")
             serial_first_turn = False
             if "-unique-turns-" in mode and not is_title_request:
@@ -413,16 +453,30 @@ def main():
                 turn_history["threadID"] = THREAD_ID
                 messages.append(turn_history)
                 saved_history["messages"] = messages
-                saved_history.update(turn_history)
+                if not is_outcome_reminder:
+                    saved_history.update(turn_history)
                 saved_history["events"].append({"method": "turn/start", "threadID": THREAD_ID, "turnID": TURN_ID, "userMessage": turn_message, "conversationMode": turn_history["conversationMode"]})
                 history_path.write_text(json.dumps(saved_history), encoding="utf-8")
             else:
                 saved_history = serial_history()
-                saved_history.update(turn_history)
+                if not is_outcome_reminder:
+                    saved_history.update(turn_history)
                 turns = saved_history.get("turns", [])
                 turns.append(turn_history)
                 saved_history["turns"] = turns
                 history_path.write_text(json.dumps(saved_history), encoding="utf-8")
+            preserve_no_outcome = any(marker in mode for marker in ("nonblocking-slow", "hold-release"))
+            if is_outcome_reminder and not preserve_no_outcome:
+                instructions = turn_history.get("developerInstructions") or serial_history().get("threadStartDeveloperInstructions") or ""
+                outcome_line = next((line.strip() for line in instructions.splitlines() if " task outcome " in line), None)
+                if outcome_line:
+                    outcome_command = outcome_line.replace("<completed|waiting-response>", "waiting-response")
+                    completed = subprocess.run(shlex.split(outcome_command), capture_output=True, text=True, timeout=60)
+                    if completed.returncode != 0:
+                        raise RuntimeError(f"Fixture task outcome command failed: {completed.stderr.strip()}")
+                write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": TURN_ID, "status": "inProgress"}}})
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"}}})
+                continue
             provider_error = Path(str(sys.argv[0]) + ".provider-error")
             if provider_error.exists():
                 provider_error.unlink(missing_ok=True)
@@ -448,6 +502,7 @@ def main():
                 was_released = release.exists()
                 active.unlink(missing_ok=True)
                 release.unlink(missing_ok=True)
+                time.sleep(0.1)
                 if not was_released:
                     return 3
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
@@ -976,11 +1031,16 @@ def main():
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
-            elif mode.endswith("-restart-question"):
+            elif is_restart_question_mode(mode):
                 asked = Path(str(sys.argv[0]) + ".asked")
+                secret_stage = Path(str(sys.argv[0]) + ".secret-stage")
                 if not asked.exists():
                     question_request(901)
                     asked.write_text("Provider process ended with a pending question.\n", encoding="utf-8")
+                    return 0
+                if mode.endswith("-restart-question-no-secret") and turn_message == "Ask a second restart-safe structured question.":
+                    secret_stage.write_text("A later secret question is pending.\n", encoding="utf-8")
+                    question_request(902)
                     return 0
                 if turn_message and not turn_message.startswith("Continue this conversation by applying"):
                     write({"jsonrpc": "2.0", "method": "item/completed", "params": {
@@ -991,7 +1051,9 @@ def main():
                         "threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"},
                     }})
                     continue
-                if not turn_message or "Green" not in turn_message or "fixture-secret" not in turn_message:
+                no_secret_recovery = mode.endswith("-restart-question-no-secret") and not secret_stage.exists()
+                expected_recovery_answers = ("Blue",) if no_secret_recovery else ("Green", "fixture-secret")
+                if not turn_message or any(answer not in turn_message for answer in expected_recovery_answers):
                     write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                         "threadId": THREAD_ID,
                         "turn": {"id": TURN_ID, "status": "failed", "error": {"message": "Recovery turn omitted a re-entered answer."}},
@@ -1026,7 +1088,7 @@ def main():
                 }})
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID, "turnId": TURN_ID,
-                    "item": {"id": "item_recovered_answer", "type": "agentMessage", "phase": "final_answer", "text": "Recovered answer: Green; private token fixture-secret was applied."},
+                    "item": {"id": f"item_recovered_answer_{TURN_ID}", "type": "agentMessage", "phase": "final_answer", "text": answer_text(turn_message)},
                 }})
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"},
@@ -1055,6 +1117,7 @@ def main():
                 was_released = release.exists()
                 active.unlink(missing_ok=True)
                 release.unlink(missing_ok=True)
+                time.sleep(0.1)
                 if not was_released:
                     return 3
                 turn_status = "interrupted" if "-interrupted" in mode else ("failed" if "-failed" in mode else "completed")
@@ -1071,9 +1134,13 @@ def main():
                 }})
             else:
                 question_request(901)
-        elif message.get("id") == 901:
+        elif message.get("id") in {901, 902}:
             if "error" in message:
                 answers = None
+                rejection_message = message.get("error", {}).get("message", "")
+                if "private StationAI outcome reminder" in rejection_message:
+                    with Path(str(sys.argv[0]) + ".private-reminder-question-rejection").open("a", encoding="utf-8") as stream:
+                        stream.write(rejection_message + "\n")
             else:
                 answers = message.get("result", {}).get("answers")
             if "-slow" in mode and not mode.endswith("-interrupted"):
@@ -1082,8 +1149,15 @@ def main():
                 "color": {"answers": ["Blue"]},
                 "token": {"answers": ["fixture-secret"]},
             }
-            if mode.endswith("-restart-question"):
-                expected_answers = {"token": {"answers": ["fixture-secret"]}}
+            if is_restart_question_mode(mode):
+                no_secret_fixture = mode.endswith("-restart-question-no-secret")
+                secret_stage = Path(str(sys.argv[0]) + ".secret-stage").exists()
+                expected_answers = (
+                    {"color": {"answers": ["Blue"]}}
+                    if no_secret_fixture and not secret_stage
+                    else ({"color": {"answers": ["Green"]}, "token": {"answers": ["fixture-secret"]}}
+                          if no_secret_fixture else {"token": {"answers": ["fixture-secret"]}})
+                )
             if mode.endswith("-user-question"):
                 expected_answers = {"question_action": {"answers": ["Continue"]}}
             failed = mode.endswith("-empty") or mode.endswith("-fail") or answers != expected_answers
@@ -1099,10 +1173,10 @@ def main():
                 release.unlink(missing_ok=True)
                 if not was_released:
                     return 3
-            if not failed and mode.endswith("-restart-question"):
+            if not failed and is_restart_question_mode(mode):
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID, "turnId": TURN_ID,
-                    "item": {"id": "item_recovered_answer", "type": "agentMessage", "phase": "final_answer", "text": "Recovered answer: Green; private token fixture-secret was applied."},
+                    "item": {"id": f"item_recovered_answer_{TURN_ID}", "type": "agentMessage", "phase": "final_answer", "text": answer_text(turn_message)},
                 }})
             write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                 "threadId": THREAD_ID,
@@ -1220,6 +1294,13 @@ def main():
                             {"id": f"item_user_fixture_{index}", "type": "userMessage", "content": user_content},
                             assistant if echoed else {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": answer_text(user_message)},
                         ])
+                        if mode.endswith("-hold-release") and "stationai internal outcome reminder:" not in (user_message or "").lower():
+                            contents.append({
+                                "id": f"item_hold_release_file_change_{index}",
+                                "type": "fileChange",
+                                "changes": [{"path": "progress-fixture.txt", "kind": "update", "diff": "+ordinary-turn-diff-after-reminders"}],
+                                "status": "completed",
+                            })
                         if "fixture-secret" in (user_message or ""):
                             contents.append({
                                 "id": f"item_private_recovery_file_change_{index}",
@@ -1306,23 +1387,47 @@ def main():
                 ]
             entries = []
             saved_turns = saved_history.get("messages") or saved_history.get("turns") or []
+            ordinary_turn_indexes = [
+                index for index, saved_turn in enumerate(saved_turns)
+                if "stationai internal outcome reminder:" not in (saved_turn.get("userMessage") or "").lower()
+            ]
+            for turn_index, saved_turn in enumerate(saved_turns, start=1):
+                if (
+                    "hold-release" in os.path.basename(sys.argv[0])
+                    and "stationai internal outcome reminder:" in (saved_turn.get("userMessage") or "").lower()
+                ):
+                    contents.append({
+                        "id": f"item_private_reminder_activity_{turn_index}",
+                        "type": "mcpToolCall",
+                        "server": "private-reminder-fixture",
+                        "tool": "reminder-only-tool",
+                        "status": "completed",
+                        "durationMs": 11,
+                        "_fixture_turn_index": turn_index - 1,
+                    })
             unassociated_restart_question = os.path.basename(sys.argv[0]).endswith("-unassociated-restart-question")
             for index, item in enumerate(contents):
                 item_id = item.get("id", "")
                 turn_id = TURN_ID
                 if saved_turns:
                     try:
-                        if item_id.startswith("item_long_history_"):
+                        if "_fixture_turn_index" in item:
+                            turn_index = item.pop("_fixture_turn_index")
+                        elif item_id.startswith("item_long_history_"):
                             turn_index = int(item_id.rsplit("_", 1)[1]) - 1
                         elif item_id.rsplit("_", 1)[-1].isdigit():
                             turn_index = int(item_id.rsplit("_", 1)[1]) - 1
+                        elif mode.endswith("-tool-activity") and ordinary_turn_indexes:
+                            turn_index = ordinary_turn_indexes[0]
+                        elif ordinary_turn_indexes:
+                            turn_index = ordinary_turn_indexes[-1]
                         else:
                             turn_index = min(index // 2, len(saved_turns) - 1)
                     except (ValueError, IndexError):
                         turn_index = -1
                     if 0 <= turn_index < len(saved_turns):
                         turn_id = saved_turns[turn_index].get("turnID", TURN_ID)
-                        if turn_index == 1:
+                        if turn_index in ordinary_turn_indexes and ordinary_turn_indexes.index(turn_index) == 1:
                             item["createdAt"] = "2026-10-26T12:34:00Z"
                 if unassociated_restart_question and item.get("type") == "userMessage":
                     entries.append({"item": item})
