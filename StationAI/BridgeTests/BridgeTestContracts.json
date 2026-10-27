@@ -180,12 +180,16 @@
     "expectation": "An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree."
   },
   {
-    "id": "test_conversation_serializes_concurrent_claude_sends",
-    "expectation": "When a CLI/XPC Claude turn overlaps a UI turn, the second send waits on the shared cross-process Claude slot instead of failing with an already-running error. Both turns complete and persist their own user and assistant messages, and diagnostics identify the separate bridge process entering the queue without logging prompt text. The UI shows the queued answer after reopening its task."
+    "id": "test_conversation_runs_concurrent_claude_sends_in_parallel",
+    "expectation": "Claude turns for different conversations run at the same time instead of queueing on a shared turn slot. While one task's turn is held active, a second task's send starts in its own Claude process, runs its own tool, and completes with its own user and assistant messages before the held turn is released. Each turn's process uses its own task working directory, each conversation keeps only its own activity rows and measured durations, diagnostics record no queued-slot event and no prompt text, and the second conversation's answer is available while the first turn is still running."
   },
   {
-    "id": "test_conversation_releases_queued_claude_send_after_failure",
-    "expectation": "When an active UI Claude turn fails while a CLI/XPC send is queued from a separate process, the failure releases the shared cross-process slot so the queued turn starts and completes. Diagnostics identify the bridge process and provider failure, and the UI shows the queued answer after reopening its task with fresh history."
+    "id": "test_conversation_isolates_failing_claude_turn_from_parallel_send",
+    "expectation": "A failing Claude turn does not disturb a conversation running in parallel. While one task's turn is held and then fails, a second task's send from a separate process completes on its own session and reaches Waiting Response; the failing task keeps its user message, records no final answer, and its provider process exit is the only failure in diagnostics. The UI shows the parallel answer after reopening its task with fresh history."
+  },
+  {
+    "id": "test_claude_stop_leaves_parallel_conversation_running",
+    "expectation": "Stopping one Claude turn pauses only that conversation while a second Claude conversation runs in parallel. The parallel conversation answers and keeps its own activity rows and measured durations while the first turn is still thinking; the stopped task moves to Waiting Response with no failure reason, records no answer, and leaves the parallel task's Waiting Response result untouched. A fresh CLI/XPC read confirms both results."
   },
   {
     "id": "test_conversation_serializes_concurrent_sends",

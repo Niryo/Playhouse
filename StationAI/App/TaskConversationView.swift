@@ -265,13 +265,22 @@ struct TaskConversationView: View {
         conversationClients.client(for: provider)
     }
 
-    /// Observed so the view refreshes when either runtime starts or ends a turn.
+    /// Observed so the view refreshes when this task's turn starts or ends.
+    /// Claude runs conversations in parallel, so a client-wide flag would miss
+    /// this task's edge while another conversation keeps running.
     private var providerTurnIsActive: Bool {
-        provider == .claude ? claudeClient.isTurnActive : codexClient.isTurnActive
+        guard provider == .claude else { return codexClient.isTurnActive }
+        guard let threadID = task.activeConversationID else { return claudeClient.isTurnActive }
+        return claudeClient.activeThreadIDs.contains(threadID)
     }
 
+    /// Claude can hold a pending question in several conversations at once, so
+    /// this task reads the question from its own session rather than from the
+    /// client-wide value.
     private var providerPendingUserInputRequest: ConversationUserInputRequest? {
-        provider == .claude ? claudeClient.pendingUserInputRequest : codexClient.pendingUserInputRequest
+        provider == .claude
+            ? claudeClient.pendingUserInputRequest(forThread: task.activeConversationID ?? "")
+            : codexClient.pendingUserInputRequest
     }
 
     private var isConversationTurnActive: Bool {
@@ -3374,7 +3383,7 @@ struct TaskConversationView: View {
                 }
                 responseStartedAt = nil
                 UserDefaults.standard.removeObject(forKey: responseStartedAtDefaultsKey)
-                if providerClient.wasLastTurnInterrupted {
+                if providerClient.wasLastTurnInterrupted(threadID: task.activeConversationID ?? "") {
                     hasPausedResponse = true
                 } else {
                     messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
