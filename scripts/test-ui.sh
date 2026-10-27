@@ -77,7 +77,7 @@ codex_fixtures=(
   ui empty nonblocking slow plan-slow interrupted abort success goal-success
   title-success title-failure title-success-wait hold hold-interrupt hold-reject-interrupt
   progress-hold-release progress-hold-release-failed progress-hold-release-interrupted
-  progress-question success-wait store-write-success-wait concurrent-serial-success-wait
+  progress-question success-wait store-write-success-wait concurrent-serial-success-wait restart-question unassociated-restart-question
   status-transition-ui nonblocking-slow async-question async-question-queued subagent context-compaction tool-activity long-history-success markdown steer-queue-serial-success-wait
 )
 for fixture in "${codex_fixtures[@]}"; do

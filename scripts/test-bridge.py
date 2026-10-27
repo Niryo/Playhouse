@@ -1821,11 +1821,9 @@ class StationAIBridgeTests(unittest.TestCase):
             for event in question_events
         ), "Starting the question turn should move the task into In Progress.")
         input_event = next(event for event in question_events if event.get("type") == "user_input")
-        self.assertEqual(input_event["payload"].get("taskStatus"), "Waiting Response")
-        self.assertTrue(any(
-            event.get("type") == "task_status" and event.get("payload", {}).get("taskStatus") == "In Progress"
-            for event in question_events
-        ), "Answering the question should resume the task into In Progress.")
+        self.assertEqual(input_event["payload"].get("taskStatus"), "In Progress")
+        self.assertFalse(any(event.get("type") == "task_status" for event in question_events),
+                         "Answering an inline question should not need a lifecycle status transition.")
         waiting = self.assert_success(self.call_cli("task", "get", waiting_id)[0])
         self.assertEqual(waiting["status"], "Waiting Response")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", blocked_id)[0])["status"], "Blocked")
@@ -2009,7 +2007,7 @@ class StationAIBridgeTests(unittest.TestCase):
             active_marker.unlink(missing_ok=True)
             release_marker.unlink(missing_ok=True)
 
-    # case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; a staged completed outcome is discarded if its turn fails, leaving the task Blocked. The task card removes the report while lifecycle states remain Blocked or Waiting Response. A generic blocking question appears in a confirmation sheet; the answer reaches Codex and the task resumes while its turn is active. A late UI answer callback preserves Waiting Response after the active-turn marker clears, verified after the helper records its skipped transition. First-thread instructions distinguish source repository paths from active task worktree paths, allow read-only inspection without attaching a repo, and reserve repository add APIs for changes that need a worktree.
+    # case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; a staged completed outcome is discarded if its turn fails, leaving the task Blocked. The task card removes the report while lifecycle states remain Blocked or In Progress. A generic structured question appears inline in the conversation while the task remains In Progress; its answer reaches Codex, and the answered turn finishes in Waiting Response. First-thread instructions distinguish source repository paths from active task worktree paths, allow read-only inspection without attaching a repo, and reserve repository add APIs for changes that need a worktree.
     def test_task_progress_reports_clear_on_failed_turns_and_questions(self):
         for fixture_name, expected_reason in [
             ("codex-fixture-progress-hold-release-failed", "failed"),
@@ -2057,12 +2055,8 @@ class StationAIBridgeTests(unittest.TestCase):
             while not outcome_active.exists() and time.monotonic() < deadline:
                 time.sleep(0.02)
             self.assertTrue(outcome_active.is_file(), "The fixture should acknowledge the answer and hold final completion.")
-            resume_deadline = time.monotonic() + 10
-            while not any(event.get("event") == "task.lifecycle_status.user_input_resumed" and event.get("taskID") == task_id for event in self.diagnostic_events()) and time.monotonic() < resume_deadline:
-                time.sleep(0.02)
-            self.assertTrue(any(event.get("event") == "task.lifecycle_status.user_input_resumed" and event.get("taskID") == task_id for event in self.diagnostic_events()), "The supplied answer should complete the active-turn status transition.")
             current, _ = self.call_cli("task", "get", task_id)
-            self.assertEqual(self.assert_success(current)["status"], "In Progress", "An accepted answer should resume the active turn before completion.")
+            self.assertEqual(self.assert_success(current)["status"], "In Progress", "The accepted answer should leave the active task In Progress.")
             outcome_release.write_text("Release final turn completion.\n", encoding="utf-8")
             stdout, stderr = process.communicate(timeout=20)
             self.assertEqual(process.returncode, 0, f"Answering the fixture question should complete the turn: {stdout}; {stderr}")
@@ -4864,7 +4858,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, f"Could not read isolated preference {key}: {completed.stderr}")
         return completed.stdout.strip(), completed.stderr
 
-    # case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode use the existing question path, move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome.
+    # case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode remain in the conversation and keep the task In Progress while unanswered; leaving and reopening the conversation preserves the pending question, keyed answers resume the provider turn without a lifecycle status transition, and the answered turn returns to Waiting Response without an explicit completed outcome.
     def test_codex_questions_can_be_answered_over_cli_xpc(self):
         task_id = self.create_task("Codex questions", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -4908,13 +4902,13 @@ class StationAIBridgeTests(unittest.TestCase):
                 observed_request = event.get("payload", {}).get("userInputRequest")
                 self.assertEqual([question["id"] for question in observed_request["questions"]], ["color", "token"])
                 self.assertTrue(observed_request["isBlocking"])
-                self.assertEqual(event.get("payload", {}).get("taskStatus"), "Waiting Response")
+                self.assertEqual(event.get("payload", {}).get("taskStatus"), "In Progress")
             if event.get("type") == "task_status" and event.get("payload", {}).get("taskStatus") == "In Progress":
                 resumed_status_observed = True
         stderr = process.stderr.read() if process.stderr else ""
         self.assertEqual(process.wait(timeout=30), 0, f"Conversation CLI failed: {final}; {stderr}")
         self.assertIsNotNone(observed_request, "CLI/XPC did not surface Codex's question request.")
-        self.assertTrue(resumed_status_observed, "Submitting answers should emit In Progress before the turn finishes.")
+        self.assertFalse(resumed_status_observed, "Submitting answers should leave the already-active task In Progress.")
         self.assertTrue(final and final.get("ok"), final)
         messages = final["result"]["messages"]
         self.assertTrue(any("Answers received: Blue / fixture-secret." in message["text"] for message in messages))
@@ -4924,6 +4918,265 @@ class StationAIBridgeTests(unittest.TestCase):
         saved_task = self.assert_success(saved_draft)
         self.assertEqual(saved_task["status"], "Waiting Response")
         self.assertEqual(saved_task["savedPrompt"], "A follow-up draft.")
+
+    # case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and leave the task In Progress while pending; the UI renders the question inline, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
+    def test_claude_questions_can_be_answered_after_switching_conversations(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / "claude-fixture-question"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
+            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        task, _ = self.call_cli(
+            "task", "create", "--title", "Claude question", "--root", self.primary, "--provider", "claude"
+        )
+        task_id = self.assert_success(task)["id"]
+        response, events = self.call_cli(
+            "conversation", "send", task_id, "--message", "Ask a structured question.", "--answer", "question-1=Blue",
+            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+        )
+        result = self.assert_success(response)
+        user_input = next(event for event in events if event.get("type") == "user_input")
+        request = user_input["payload"]["userInputRequest"]
+        self.assertEqual(request["questions"][0]["question"], "Which color should I use?")
+        self.assertEqual(user_input["payload"].get("taskStatus"), "In Progress")
+        self.assertTrue(any(message["text"] == "Answer received: Blue." for message in result["messages"]))
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
+
+    # case-contract: test_claude_empty_question_request_is_rejected | Claude AskUserQuestion requests with no questions are rejected through the control protocol, fail the turn, and mark the task Blocked; the UI shows the blocked task and its intervention indicator.
+    def test_claude_empty_question_request_is_rejected(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / "claude-fixture-empty-question"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
+            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        task, _ = self.call_cli(
+            "task", "create", "--title", "Empty Claude question", "--root", self.primary, "--provider", "claude"
+        )
+        task_id = self.assert_success(task)["id"]
+        failed, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Ask an empty structured question.",
+            expected_status=1,
+            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+        )
+        self.assertFalse(failed.get("ok", True), failed)
+        self.assertIn("question", failed.get("error", {}).get("message", "").lower())
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Blocked")
+
+    # case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains In Progress, and answering resumes the saved Claude session, delivers the answer, hides the private recovery prompt and redacts secret answers from StationAI history, clears pending state, and returns to Waiting Response.
+    def test_claude_pending_question_recovers_after_provider_process_restarts(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / "claude-fixture-restart-question"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
+            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        task, _ = self.call_cli(
+            "task", "create", "--title", "Restart-safe Claude question", "--root", self.primary, "--provider", "claude"
+        )
+        task_id = self.assert_success(task)["id"]
+        failed, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Ask a restart-safe structured question.",
+            expected_status=1,
+            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+        )
+        self.assertFalse(failed.get("ok", True), failed)
+        restored, _ = self.call_cli("conversation", "history", task_id)
+        restored_history = self.assert_success(restored)
+        pending = restored_history.get("pendingUserInputRequest")
+        self.assertEqual(pending["questions"][0]["question"], "Which color should I use?")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress")
+        rejected, _ = self.call_cli(
+            "conversation", "answer-user-input", task_id, pending["id"], "--answer", "question-1=",
+            expected_status=2,
+            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+        )
+        self.assertFalse(rejected.get("ok", True), rejected)
+        still_pending, _ = self.call_cli("conversation", "history", task_id)
+        self.assertEqual(self.assert_success(still_pending).get("pendingUserInputRequest"), pending)
+        accepted, _ = self.call_cli(
+            "conversation", "answer-user-input", task_id, pending["id"], "--answer", "question-1=Green",
+            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+        )
+        self.assertTrue(self.assert_success(accepted)["accepted"])
+        resumed, _ = self.call_cli("conversation", "history", task_id)
+        resumed_history = self.assert_success(resumed)
+        self.assertTrue(any(message["text"] == "Recovered answer: Green." for message in resumed_history["messages"]))
+        self.assertFalse(any("Answer: Green" in message["text"] for message in resumed_history["messages"]))
+        self.assertNotIn("Answer: Green", self.assert_success(self.call_cli("task", "get", task_id)[0]).get("savedPrompt", ""))
+        self.assertIsNone(resumed_history.get("pendingUserInputRequest"))
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
+
+    # case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, StationAI returns a generic error, preserves the pending question for retry while the task stays In Progress, and keeps the prompt out of history, saved task state, and diagnostics.
+    def test_claude_private_recovery_failure_fails_closed(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / "claude-fixture-recovery-failure"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
+            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        task = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Claude private recovery failure", "--root", self.primary, "--provider", "claude"
+        )[0])
+        task_id = task["id"]
+        failed, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Ask a restart-safe structured question.",
+            expected_status=1, extra_environment=env,
+        )
+        self.assertFalse(failed.get("ok", True), failed)
+        pending = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])["pendingUserInputRequest"]
+        Path(str(executable) + ".recovery-error").write_text("StationAI owns this Claude fixture marker.\n", encoding="utf-8")
+        recovery_failure, _ = self.call_cli(
+            "conversation", "answer-user-input", task_id, pending["id"], "--answer", "question-1=Green",
+            expected_status=1, extra_environment=env,
+        )
+        self.assert_failure(recovery_failure, "operation_failed")
+        self.assertEqual(recovery_failure["error"]["message"], "The private answer could not be applied. Please answer the question again.")
+        self.assertNotIn("Answer: Green", recovery_failure["error"]["message"])
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        self.assertIsNotNone(history.get("pendingUserInputRequest"), "The failed answer must remain available for retry.")
+        self.assertFalse(any("Answer: Green" in message["text"] or "private recovery prompt" in message["text"].lower() for message in history["messages"]))
+        task_record = self.assert_success(self.call_cli("task", "get", task_id, extra_environment=env)[0])
+        self.assertEqual(task_record["status"], "In Progress", "An unanswered question stays active and retryable after a failed recovery attempt.")
+        self.assertNotIn("Answer: Green", task_record.get("savedPrompt", ""))
+        diagnostics = (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("Answer: Green", diagnostics)
+        self.assertNotIn("private recovery prompt", diagnostics.lower())
+
+    # case-contract: test_codex_pending_question_recovers_after_provider_process_restarts | Codex's pending structured question persists after its provider process exits; StationAI restores it from fresh CLI/XPC history, keeps provider switching blocked, requires the user to re-enter the secret once, and applies the answers in one recovery turn. CLI history and the live recovery event stream retain safe assistant text while redacting secret echoes and hiding provider activities and file-change diffs; a later non-sensitive Codex turn keeps its own diff, and the visible UI shows the safe response immediately and after app restart.
+    def test_codex_pending_question_recovers_after_provider_process_restarts(self):
+        task_id = self.create_task("Restart-safe Codex question", roots=[self.primary])["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-restart-question"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        failed, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Ask a restart-safe structured question.", expected_status=1,
+            extra_environment=env,
+        )
+        self.assertFalse(failed.get("ok", True), failed)
+        pending, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        request = self.assert_success(pending).get("pendingUserInputRequest")
+        self.assertEqual([item["id"] for item in request["questions"]], ["color", "token"])
+        self.assertTrue(request["questions"][1]["isSecret"])
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress")
+        blocked_switch, _ = self.call_cli("conversation", "provider", task_id, "set", "claude", expected_status=1, extra_environment=env)
+        self.assert_failure(blocked_switch, "invalid_transition")
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "provider", task_id)[0])["provider"], "codex")
+        answer_final, recovery_events = self.call_cli(
+            "conversation", "answer-user-input", task_id, request["id"],
+            "--answer", "color=Green", "--answer", "token=fixture-secret", extra_environment=env,
+        )
+        self.assert_success(answer_final)
+        self.assertNotIn("fixture-secret", json.dumps(recovery_events), "Live recovery events must not expose secret-bearing activities or diffs.")
+        provider_history = Path(str(executable) + ".history").read_text(encoding="utf-8")
+        self.assertIn("fixture-secret", provider_history, "The freshly re-entered secret must reach the resumed provider turn.")
+        completed, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        completed_history = self.assert_success(completed)
+        self.assertIsNone(completed_history.get("pendingUserInputRequest"))
+        self.assertTrue(any(
+            message["role"] == "assistant"
+            and message["text"] == "Answers received: Blue / [redacted secret answer]."
+            for message in completed_history["messages"]
+        ))
+        self.assertTrue(any(
+            message["role"] == "user" and message["text"] == "[Private answer sent after restart]"
+            for message in completed_history["messages"]
+        ))
+        self.assertNotIn("fixture-secret", json.dumps(completed_history), "Secret echoes in Codex activities or diffs must stay hidden too.")
+        self.assertFalse(any("fixture-secret" in message["text"] for message in completed_history["messages"]))
+        self.assertNotIn("fixture-secret", self.assert_success(self.call_cli("task", "get", task_id)[0]).get("savedPrompt", ""))
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
+
+        follow_up, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Follow up after private recovery.", extra_environment=env,
+        )
+        self.assert_success(follow_up)
+        follow_up_history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        self.assertIn("follow-up-visible-diff", follow_up_history["diff"]["unifiedDiff"],
+            "A later non-sensitive Codex turn must retain its own file-change diff.")
+        self.assertNotIn("fixture-secret", json.dumps(follow_up_history))
+
+    # case-contract: test_codex_secret_recovery_redaction_fails_closed | When Codex recovery and a later thread-resume/history read error echo the full recovery prompt and answers, StationAI preserves the pending question while the task stays In Progress, uses a generic visible error, and redacts private content from returned history, saved task state, diagnostics, and error text across fresh CLI/XPC reads and app restarts.
+    def test_codex_secret_recovery_redaction_fails_closed(self):
+        task_id = self.create_task("Fail-closed secret recovery", roots=[self.primary])["id"]
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-unassociated-restart-question"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        failed, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", "Ask a restart-safe structured question.",
+            expected_status=1, extra_environment=env,
+        )
+        self.assertFalse(failed.get("ok", True), failed)
+        pending, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        request = self.assert_success(pending).get("pendingUserInputRequest")
+        self.assertIsNotNone(request)
+        Path(str(executable) + ".provider-error-async").write_text(
+            "StationAI owns this Codex fixture failure marker.\n", encoding="utf-8"
+        )
+        recovery_failure, _ = self.call_cli(
+            "conversation", "answer-user-input", task_id, request["id"],
+            "--answer", "color=Green", "--answer", "token=fixture-secret",
+            expected_status=1, extra_environment=env,
+        )
+        self.assert_failure(recovery_failure, "operation_failed")
+        self.assertNotIn("fixture-secret", recovery_failure["error"]["message"])
+        self.assertNotIn("Answer: Green", recovery_failure["error"]["message"])
+
+        fresh_history, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        history = self.assert_success(fresh_history)
+        self.assertIsNotNone(history.get("pendingUserInputRequest"), "The failed recovery must leave the question available to retry.")
+        self.assertTrue(any(
+            message["role"] == "user" and message["text"] == "[Private answer sent after restart]"
+            for message in history["messages"]
+        ))
+        self.assertFalse(any("fixture-secret" in message["text"] for message in history["messages"]))
+        record = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertEqual(record["status"], "In Progress", "An unanswered question stays active and retryable after a failed recovery attempt.")
+        self.assertNotIn("fixture-secret", record.get("statusMessage", ""))
+        self.assertNotIn("fixture-secret", record.get("savedPrompt", ""))
+        diagnostics = (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("fixture-secret", diagnostics)
+        self.assertNotIn("Answer: Green", diagnostics)
+        Path(str(executable) + ".history-error").write_text(
+            "StationAI owns this Codex fixture history failure marker.\n", encoding="utf-8"
+        )
+        history_failure, _ = self.call_cli(
+            "conversation", "history", task_id, expected_status=1, extra_environment=env
+        )
+        self.assert_failure(history_failure, "operation_failed")
+        self.assertNotIn("fixture-secret", history_failure["error"]["message"])
+        diagnostics = (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("fixture-secret", diagnostics)
+        Path(str(executable) + ".history-error").unlink()
+        Path(str(executable) + ".resume-error").write_text(
+            "StationAI owns this Codex fixture resume failure marker.\n", encoding="utf-8"
+        )
+        resume_failure, _ = self.call_cli(
+            "conversation", "history", task_id, expected_status=1, extra_environment=env
+        )
+        self.assert_failure(resume_failure, "operation_failed")
+        self.assertEqual(
+            resume_failure["error"]["message"],
+            "History for a private recovery conversation could not be loaded.",
+        )
+        diagnostics = (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("fixture-secret", diagnostics)
 
     # case-contract: test_codex_empty_question_request_is_rejected | A failed turn preserves its blocked reason and appears in the compact Blocked section above Backlog with a user-intervention indication; retrying clears that section, and the successful retry returns to Waiting Response without an explicit completed outcome.
     def test_codex_empty_question_request_is_rejected(self):
@@ -4967,7 +5220,7 @@ class StationAIBridgeTests(unittest.TestCase):
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Waiting Response")
 
-    # case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions remain visible without moving the task out of In Progress, then the answered turn returns to Waiting Response without an explicit completed outcome.
+    # case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation and returning, and keep the task In Progress until answered; the answered turn returns to Waiting Response without an explicit completed outcome.
     def test_codex_nonblocking_question_keeps_task_in_progress(self):
         task_id = self.create_task("Non-blocking question", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"

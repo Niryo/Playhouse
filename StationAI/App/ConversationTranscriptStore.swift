@@ -32,6 +32,21 @@ struct ConversationTranscript: Codable, Equatable {
     var version = 1
     var segments: [Segment] = []
     var turns: [Turn] = []
+    /// A provider question that is waiting for user input. The native request
+    /// ID is useful only while its provider process is alive; this durable copy
+    /// lets the UI restore the question and continue the saved session later.
+    var pendingUserInputRequest: ConversationUserInputRequest?
+    /// Private recovery turns. The submitted answers and prompt are never stored
+    /// raw; provider activity and diffs for these turns stay hidden.
+    var sensitiveTurnIDs: [String]?
+    /// Codex turn IDs containing private recovery prompts. Codex-only tasks may
+    /// not have a transcript segment to associate these IDs with.
+    var sensitiveCodexTurnIDs: [String]?
+    /// Locally sanitized message copies for private Codex recovery turns. Raw
+    /// provider messages can be replaced after restart without losing safe text.
+    var sensitiveCodexTurnMessages: [String: [ConversationMessage]]?
+    /// Fail-closed marker written before a private recovery prompt is sent.
+    var pendingSensitiveUserInputRedaction: Bool?
 
     var isEmpty: Bool { segments.isEmpty && turns.isEmpty }
 

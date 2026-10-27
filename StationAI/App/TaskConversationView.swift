@@ -242,7 +242,7 @@ struct TaskConversationView: View {
     @FocusState private var isRepositorySearchFocused: Bool
 
     private var isSendDisabled: Bool {
-        !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isResponding || isLoadingHistory
+        !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isResponding || isLoadingHistory || userInputRequest != nil
     }
 
     private var isRepositoryRootConfigured: Bool {
@@ -278,7 +278,7 @@ struct TaskConversationView: View {
         providerClient.isTurnActive(threadID: task.activeConversationID ?? "")
     }
 
-    /// A switch waits for the turn, questions, and queued follow-ups to settle.
+    /// Provider switches wait for active turns and queued follow-ups to settle.
     private var canSwitchProvider: Bool {
         !isReadOnly && !isResponding && !isLoadingHistory && !isPreparingSubmittedMessage && !isSwitchingProvider
             && userInputRequest == nil && queuedMessages.isEmpty && task.status != .done
@@ -431,12 +431,6 @@ struct TaskConversationView: View {
                 repositoryWorktrees: task.repositoryWorktrees,
                 onSave: updateWorkspaceRoots
             )
-        }
-        .sheet(item: $userInputRequest) { request in
-            userInputForm(request)
-                .frame(minWidth: 420, idealWidth: 560, maxWidth: 720, minHeight: 260)
-                .padding(12)
-                .accessibilityIdentifier("ai-question-confirmation-sheet")
         }
         .sheet(isPresented: Binding(
             get: { selectedChatImage != nil },
@@ -1487,6 +1481,11 @@ struct TaskConversationView: View {
                             goalAchievementTimelineRow(entry)
                                 .id(entry.id)
                         }
+                    }
+                    if let request = userInputRequest, request.threadID == task.activeConversationID {
+                        userInputForm(request)
+                            .frame(maxWidth: 620, alignment: .leading)
+                            .accessibilityIdentifier("conversation-user-input-request")
                     }
 
                     if let activeProcess {
@@ -2845,7 +2844,7 @@ struct TaskConversationView: View {
 
     private func userInputForm(_ request: ConversationUserInputRequest) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Codex has a few questions")
+            Text("A few questions")
                 .font(.system(size: 14, weight: .semibold))
                 .accessibilityIdentifier("ai-question-form-title")
             ForEach(request.questions) { question in
@@ -2915,30 +2914,34 @@ struct TaskConversationView: View {
             if let other = userInputOther[question.id]?.trimmingCharacters(in: .whitespacesAndNewlines), !other.isEmpty { values.append(other) }
             answers[question.id] = values
         }
-        if request.isBlocking {
-            do {
-                _ = try await BoardTaskManager(modelContext: modelContext).setLifecycleStatus(task.id, to: .inProgress)
-            } catch {
-                errorMessage = error.localizedDescription
+        isResponding = true
+        errorMessage = nil
+        do {
+            let accepted = try await conversationManager.answerUserInput(
+                taskID: task.id,
+                request: request,
+                answers: answers,
+                mode: conversationMode,
+                modelID: selectedModelID.isEmpty ? nil : selectedModelID,
+                onUpdate: { update in
+                    guard update.type == "user_input", let nextRequest = update.userInputRequest else { return }
+                    userInputRequest = nextRequest
+                    userInputAnswers = [:]
+                    userInputOther = [:]
+                }
+            )
+            guard accepted else {
+                isResponding = false
+                errorMessage = "\(provider.displayName) couldn't accept those answers. Please check the responses and try again."
                 return
             }
-        }
-        guard providerClient.answerUserInput(requestID: request.id, threadID: request.threadID, answers: answers) else {
-            if request.isBlocking {
-                _ = try? await BoardTaskManager(modelContext: modelContext).setLifecycleStatus(task.id, to: .waitingResponse)
-            }
-            errorMessage = "\(provider.displayName) couldn't accept those answers. Please check the responses and try again."
-            return
-        }
-        userInputRequest = nil
-        userInputAnswers = [:]
-        userInputOther = [:]
-        if request.isBlocking {
-            do {
-                _ = try await BoardTaskManager(modelContext: modelContext).resumeWaitingResponseAfterUserInput(task.id)
-            } catch {
-                errorMessage = "Your answer was sent, but StationAI couldn't update the task status: \(error.localizedDescription)"
-            }
+            userInputRequest = nil
+            userInputAnswers = [:]
+            userInputOther = [:]
+            await loadConversation()
+        } catch {
+            isResponding = providerClient.isTurnActive(threadID: request.threadID)
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -2952,6 +2955,9 @@ struct TaskConversationView: View {
                 actionNotice = approvalNotice
             }
             messages = history.messages
+            userInputRequest = history.pendingUserInputRequest?.threadID == task.activeConversationID
+                ? history.pendingUserInputRequest
+                : nil
             visibleConversationMessageCount = Self.initialVisibleConversationMessageCount
             restoreAnnotations(from: history.messages)
             answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
@@ -3133,7 +3139,7 @@ struct TaskConversationView: View {
         let freeformText = (overrideText ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
         let pendingAnnotations = annotations.filter(\.pending)
         let usesComposerDraft = overrideText == nil
-        guard (!freeformText.isEmpty || (usesComposerDraft && !pendingImages.isEmpty) || !pendingAnnotations.isEmpty), !isResponding, !isLoadingHistory else { return }
+        guard (!freeformText.isEmpty || (usesComposerDraft && !pendingImages.isEmpty) || !pendingAnnotations.isEmpty), !isResponding, !isLoadingHistory, userInputRequest == nil else { return }
         let annotationPrompt: String
         if pendingAnnotations.isEmpty {
             annotationPrompt = freeformText
