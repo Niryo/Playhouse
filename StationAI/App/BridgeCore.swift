@@ -2309,9 +2309,13 @@ final class BoardTaskManager {
             }
             let pendingQuestion = try conversationTranscriptStore().read(id).pendingUserInputRequest
             if let pendingQuestion, pendingQuestion.threadID == threadID, task.status != .done {
-                if task.status != .inProgress || task.statusMessage != "Waiting for your saved question to be answered." {
-                    task.status = .inProgress
-                    task.statusMessage = "Waiting for your saved question to be answered."
+                let pendingStatus: TaskStatus = pendingQuestion.isBlocking ? .waitingResponse : .inProgress
+                let pendingStatusMessage = pendingQuestion.isBlocking
+                    ? "Waiting for your saved question to be answered."
+                    : "A saved question is available for your response."
+                if task.status != pendingStatus || task.statusMessage != pendingStatusMessage {
+                    task.status = pendingStatus
+                    task.statusMessage = pendingStatusMessage
                     clearProgressReport(task)
                     try await saveTaskContext(taskID: id)
                 }
@@ -3458,6 +3462,10 @@ final class ConversationManager {
         let client = client(for: task)
         if client.answerUserInput(requestID: request.id, threadID: request.threadID, answers: answers) {
             try clearPendingUserInputRequest(taskID: taskID, requestID: request.id)
+            if request.isBlocking {
+                let resumed = try await tasks.resumeWaitingResponseAfterUserInput(taskID)
+                onUpdate(ConversationUpdate(type: "task_status", taskStatus: resumed.status))
+            }
             return true
         }
 
@@ -3531,6 +3539,8 @@ final class ConversationManager {
     /// the same transcript path.
     func publishImage(taskID: UUID, path: String, caption: String = "") async throws -> ConversationMessage {
         let task = try tasks.taskModel(taskID)
+        let provider = task.conversationProvider
+        let codexClient = clients.codex
         let url = URL(fileURLWithPath: path)
         let data = try Data(contentsOf: url)
         guard data.count <= 10_000_000 else {
@@ -3546,15 +3556,26 @@ final class ConversationManager {
         guard Self.isValidImageDataURL(image) else {
             throw BridgeCommandError(code: "invalid_argument", message: "The file is not a valid PNG or JPEG image.")
         }
-        let existingHistory = try await history(taskID: taskID)
-        let provider = task.conversationProvider
+        let activeCodexThreadID = provider == .codex ? task.activeConversationID : nil
+        let activeCodexTurnID = activeCodexThreadID.flatMap { threadID in
+            codexClient.activeTurnID(for: threadID)
+                ?? ConversationSteerMailbox.activeTurnID(threadID: threadID)
+        }
+        let isActiveCodexPublication = activeCodexThreadID != nil && activeCodexTurnID != nil
+        // A Codex thread can reject a history read while its turn is writing.
+        // An agent publishes its generated image from inside that turn, so use
+        // the active turn identity and attach the image to StationAI's transcript.
+        // History composition positions it after that turn's native messages.
+        let existingHistory = isActiveCodexPublication ? nil : try await history(taskID: taskID)
         let message = ConversationMessage(
             id: UUID().uuidString.lowercased(), role: .assistant,
             text: caption.trimmingCharacters(in: .whitespacesAndNewlines),
-            imageDataURLs: [image], phase: "agent_image",
-            timelineOrder: provider == .codex
-                ? (existingHistory.messages.compactMap(\.timelineOrder).max() ?? existingHistory.messages.count - 1) + 1
-                : nil,
+            imageDataURLs: [image], phase: "agent_image", turnID: activeCodexTurnID,
+            timelineOrder: existingHistory.flatMap { history in
+                provider == .codex
+                    ? (history.messages.compactMap(\.timelineOrder).max() ?? history.messages.count - 1) + 1
+                    : nil
+            },
             provider: provider
         )
         let activeClaudeTurn = provider == .claude
@@ -3572,8 +3593,11 @@ final class ConversationManager {
             }
             guard let segment else { return }
             if provider == .codex, let index = transcript.segments.firstIndex(where: { $0.id == segment.id }) {
+                if let activeCodexTurnID, !transcript.segments[index].codexTurnIDs.contains(activeCodexTurnID) {
+                    transcript.segments[index].codexTurnIDs.append(activeCodexTurnID)
+                }
                 let claimed = Set(transcript.segments.flatMap(\.codexTurnIDs))
-                let ids = Self.orderedTurnIDs(existingHistory.messages)
+                let ids = Self.orderedTurnIDs(existingHistory?.messages ?? [])
                 transcript.segments[index].codexTurnIDs += ids.filter { !claimed.contains($0) }
             }
             if activeClaudeTurn,
@@ -3674,7 +3698,7 @@ final class ConversationManager {
             case message(ConversationMessage)
             case compaction(ConversationActivity)
         }
-        var elements: [(segment: Int, order: Int, element: Element)] = []
+        var elements: [(segment: Int, order: Int, tieBreak: Int, element: Element)] = []
         let segments = transcript.segments
         let lastCodexSegment = segments.lastIndex { $0.provider == .codex } ?? -1
         var codexSegmentByTurn: [String: Int] = [:]
@@ -3689,6 +3713,21 @@ final class ConversationManager {
         var codexTurnSegment: Int?
         let sensitiveTurnIDs = Self.sensitiveCodexTurnIDs(transcript)
         let safeCodexMessages = Self.codexMessagesForDisplay(codex?.messages ?? [], transcript: transcript)
+        func transcriptOrder(for message: ConversationMessage, fallback: Int) -> (order: Int, tieBreak: Int) {
+            guard message.provider == .codex, message.phase == "agent_image" else {
+                return (message.timelineOrder ?? fallback, 0)
+            }
+            if let order = message.timelineOrder { return (order, 0) }
+            let relevantMessages = message.turnID.map { turnID in
+                safeCodexMessages.filter { $0.turnID == turnID }
+            } ?? safeCodexMessages
+            guard let lastTurnOrder = relevantMessages.compactMap(\.timelineOrder).max() else {
+                return (fallback, 0)
+            }
+            // Keep the image just after the final native item of its turn and
+            // ahead of the next turn's first item, even when their orders touch.
+            return (lastTurnOrder, fallback + 1)
+        }
         for (offset, message) in safeCodexMessages.enumerated() {
             let segment = message.turnID.map(codexSegment) ?? codexTurnSegment ?? lastCodexSegment
             codexTurnSegment = segment
@@ -3697,7 +3736,7 @@ final class ConversationManager {
             if attributed.modelID == nil, let turnID = attributed.turnID {
                 attributed.modelID = segments.compactMap { $0.codexTurnModelIDs[turnID] }.first
             }
-            elements.append((segment, message.timelineOrder ?? offset, .message(attributed)))
+            elements.append((segment, message.timelineOrder ?? offset, 0, .message(attributed)))
         }
         let allSensitiveTurnIDs = Set(transcript.sensitiveTurnIDs ?? [])
         let codexActivities = transcript.pendingSensitiveUserInputRedaction == true
@@ -3706,23 +3745,24 @@ final class ConversationManager {
         for activity in codexActivities where activity.isContextCompaction {
             let order = activity.timelineOrder ?? Int.max
             let precedingTurn = codex?.messages.last { ($0.timelineOrder ?? 0) < order }?.turnID
-            elements.append((codexSegment(activity.turnID ?? precedingTurn), order, .compaction(activity)))
+            elements.append((codexSegment(activity.turnID ?? precedingTurn), order, 0, .compaction(activity)))
         }
         var localOrder = 0
         for turn in transcript.turns {
             let segment = transcript.segmentIndex(of: turn.segmentID) ?? segments.count
             for message in turn.messages {
-                elements.append((segment, message.timelineOrder ?? localOrder, .message(message)))
+                let position = transcriptOrder(for: message, fallback: localOrder)
+                elements.append((segment, position.order, position.tieBreak, .message(message)))
                 localOrder += 1
             }
             for activity in turn.activities where activity.turnID.map(allSensitiveTurnIDs.contains) != true {
                 if activity.isContextCompaction {
-                    elements.append((segment, activity.timelineOrder ?? localOrder, .compaction(activity)))
+                    elements.append((segment, activity.timelineOrder ?? localOrder, 0, .compaction(activity)))
                 }
                 localOrder += 1
             }
         }
-        elements.sort { ($0.segment, $0.order) < ($1.segment, $1.order) }
+        elements.sort { ($0.segment, $0.order, $0.tieBreak) < ($1.segment, $1.order, $1.tieBreak) }
 
         var messages: [ConversationMessage] = []
         var compactions: [ConversationActivity] = []
@@ -4919,11 +4959,17 @@ final class ConversationManager {
                         onUpdate(ConversationUpdate(type: "action_notice", message: "Couldn't save the pending question. The provider turn was stopped so the question isn't lost."))
                         return
                     }
+                    // A blocking provider question pauses the conversation until
+                    // the user answers. Reflect that pause on the board even
+                    // though the provider turn remains reserved in the background.
+                    let lifecycle = request.isBlocking
+                        ? try? await self.tasks.transitionLifecycleStatus(taskID, from: .inProgress, to: .waitingResponse)
+                        : nil
                     let status = try? await self.tasks.clearProgressReport(taskID)
                     onUpdate(ConversationUpdate(
                         type: "user_input",
                         userInputRequest: request,
-                        taskStatus: status?.status
+                        taskStatus: lifecycle != nil ? TaskStatus.waitingResponse.rawValue : status?.status
                     ))
                     if !userInputAnswers.isEmpty {
                         let answersAccepted = client.answerUserInput(requestID: request.id, threadID: request.threadID, answers: userInputAnswers)
@@ -4931,6 +4977,10 @@ final class ConversationManager {
                             onUpdate(ConversationUpdate(type: "action_notice", message: "The supplied answers didn't match \(provider.displayName)'s questions."))
                         } else {
                             try? self.clearPendingUserInputRequest(taskID: taskID, requestID: request.id)
+                            if request.isBlocking,
+                               let resumed = try? await self.tasks.resumeWaitingResponseAfterUserInput(taskID) {
+                                onUpdate(ConversationUpdate(type: "task_status", taskStatus: resumed.status))
+                            }
                         }
                     }
                     await onUserInput(request)
@@ -5024,13 +5074,22 @@ final class ConversationManager {
             let safeFailureMessage = hideSensitiveRecoveryPrompt
                 ? "The private answer could not be applied. Please answer the question again."
                 : Self.redactingSensitiveText(error.localizedDescription, values: sensitiveUserInputAnswerValues)
-            let failureStatus: TaskStatus = hideSensitiveRecoveryPrompt
-                ? .inProgress
-                : (shouldKeepWaiting ? .waitingResponse : .blocked)
+            let pendingQuestion = try? transcripts.read(taskID).pendingUserInputRequest
+            let hasPendingBlockingQuestion = pendingQuestion?.isBlocking == true
+            let failureStatus: TaskStatus
+            if hasPendingBlockingQuestion || shouldKeepWaiting {
+                failureStatus = .waitingResponse
+            } else if hideSensitiveRecoveryPrompt {
+                failureStatus = .inProgress
+            } else {
+                failureStatus = .blocked
+            }
             _ = try? await tasks.setLifecycleStatus(
                 taskID,
                 to: failureStatus,
-                message: shouldKeepResumable ? shutdownMessage : (wasUserInterrupted ? nil : safeFailureMessage)
+                message: shouldKeepResumable
+                    ? shutdownMessage
+                    : (wasUserInterrupted ? nil : (hasPendingBlockingQuestion ? "Waiting for your saved question to be answered." : safeFailureMessage))
             )
             StationAIDiagnostics.record("conversation.send.failed", fields: fields)
             if hideSensitiveRecoveryPrompt || !sensitiveUserInputAnswerValues.isEmpty {
@@ -5665,7 +5724,7 @@ final class StationAIBridgeRuntime {
             return .failure(request, code: code, message: error.localizedDescription)
         } catch {
             var fields = requestFields
-            fields.merge(StationAIDiagnostics.errorFields(error)) { _, new in new }
+            fields.merge(StationAIDiagnostics.errorFields(error, includeUserInfoDetails: true)) { _, new in new }
             fields["errorCode"] = "operation_failed"
             fields["durationMilliseconds"] = Self.elapsedMilliseconds(since: requestStartedAt)
             StationAIDiagnostics.record("bridge.request.failed", fields: fields)

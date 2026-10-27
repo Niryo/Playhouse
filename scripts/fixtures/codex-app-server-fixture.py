@@ -28,7 +28,7 @@ else:
     TURN_ID = "turn_stationai_fixture"
 
 
-MARKDOWN_PLAN = '## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening'
+MARKDOWN_PLAN = '## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening\n\n1. First numbered step: capture the baseline state before changes.\n\n2. Second numbered step: apply the fix and confirm there are no regressions.\n\n```javascript\nconsole.log("Hello, world!");\n```'
 
 ECHOED_OUTCOME_PREFIX = "Echo the outcome command for "
 ECHOED_OUTCOME_ANSWER = "Fixture answer with an echoed outcome."
@@ -49,6 +49,8 @@ def write(value):
 
 def answer_text(user_message):
     mode = os.path.basename(sys.argv[0])
+    if mode.endswith("-nonblocking-slow"):
+        return "Answers received: Custom approach / fixture-secret."
     if mode.endswith("-restart-question") and not (user_message or "").startswith(
         "Continue this conversation by applying"
     ):
@@ -105,7 +107,7 @@ def question_request(request_id):
                 {"label": "Blue", "description": "Use blue."},
                 {"label": "Green", "description": "Use green."},
             ],
-            "isOther": False,
+            "isOther": True,
             "isSecret": False,
         },
         {
@@ -617,6 +619,9 @@ def main():
                         except json.JSONDecodeError:
                             continue
                         if steer_request.get("method") == "thread/items/list":
+                            observe_history = Path(str(sys.argv[0]) + ".observe-history-while-active")
+                            if observe_history.exists():
+                                Path(str(sys.argv[0]) + ".history-read-while-active").touch()
                             write({"jsonrpc": "2.0", "id": steer_request.get("id"), "result": {"data": [], "nextCursor": None}})
                         elif steer_request.get("method") == "turn/steer":
                             params = steer_request.get("params", {})
@@ -991,7 +996,8 @@ def main():
                         "threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"},
                     }})
                     continue
-                if not turn_message or "Green" not in turn_message or "fixture-secret" not in turn_message:
+                expected_color_answer = "Custom approach" if "-nonblocking" in mode else "Green"
+                if not turn_message or expected_color_answer not in turn_message or "fixture-secret" not in turn_message:
                     write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                         "threadId": THREAD_ID,
                         "turn": {"id": TURN_ID, "status": "failed", "error": {"message": "Recovery turn omitted a re-entered answer."}},
@@ -1082,6 +1088,8 @@ def main():
                 "color": {"answers": ["Blue"]},
                 "token": {"answers": ["fixture-secret"]},
             }
+            if mode.endswith("-nonblocking-slow"):
+                expected_answers["color"] = {"answers": ["Custom approach"]}
             if mode.endswith("-restart-question"):
                 expected_answers = {"token": {"answers": ["fixture-secret"]}}
             if mode.endswith("-user-question"):

@@ -537,6 +537,14 @@ enum ConversationSteerMailbox {
 
     /// The live process that published an active turn for this thread, if any.
     static func activeTurnOwnerProcessID(threadID: String) -> Int32? {
+        activeTurn(threadID: threadID)?.processID
+    }
+
+    static func activeTurnID(threadID: String) -> String? {
+        activeTurn(threadID: threadID)?.turnID
+    }
+
+    private static func activeTurn(threadID: String) -> ConversationSteerMailboxActiveTurn? {
         guard let directory else { return nil }
         let activeURL = activeTurnURL(threadID: threadID, directory: directory)
         guard let active = try? JSONDecoder().decode(ConversationSteerMailboxActiveTurn.self, from: Data(contentsOf: activeURL)),
@@ -545,7 +553,7 @@ enum ConversationSteerMailbox {
             try? FileManager.default.removeItem(at: activeURL)
             return nil
         }
-        return active.processID
+        return active
     }
 
     private static func activeTurnURL(threadID: String, directory: URL) -> URL {

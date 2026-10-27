@@ -3,10 +3,25 @@ import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// Shared by `CodeBlockTextView` and `SelectableAnnotationText`'s `sizeThatFits`: lays the given
+/// attributed string out in a throwaway text container at `width` and returns its used height.
+private func measuredTextHeight(for attributedText: NSAttributedString, width: CGFloat) -> CGFloat {
+    let storage = NSTextStorage(attributedString: attributedText)
+    let layoutManager = NSLayoutManager()
+    let container = NSTextContainer(size: NSSize(width: width, height: .greatestFiniteMagnitude))
+    container.lineFragmentPadding = 0
+    layoutManager.addTextContainer(container)
+    storage.addLayoutManager(layoutManager)
+    layoutManager.ensureLayout(for: container)
+    return layoutManager.usedRect(for: container).height
+}
+
 private struct AssistantMarkdownBlock: Identifiable {
     enum Kind {
         case heading(Int)
         case listItem
+        case orderedListItem(number: Int)
+        case codeBlock(language: String?)
         case paragraph
     }
 
@@ -17,8 +32,97 @@ private struct AssistantMarkdownBlock: Identifiable {
     var font: NSFont {
         switch kind {
         case .heading(let level): NSFont.systemFont(ofSize: level == 1 ? 19 : level == 2 ? 17 : 15, weight: .semibold)
-        case .listItem, .paragraph: NSFont.systemFont(ofSize: 16)
+        case .listItem, .orderedListItem, .paragraph: NSFont.systemFont(ofSize: 16)
+        case .codeBlock: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
         }
+    }
+}
+
+private struct CodeBlockCardView: View {
+    let blockID: Int
+    let code: String
+    let language: String?
+    let font: NSFont
+
+    @State private var didCopy = false
+    @State private var copyFeedbackToken = UUID()
+
+    private var languageDisplayName: String {
+        guard let language, !language.isEmpty else { return "Code" }
+        return language.prefix(1).uppercased() + language.dropFirst()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.left.forwardslash.chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(languageDisplayName)
+                    .font(.system(size: 12, weight: .medium))
+                    .accessibilityIdentifier("assistant-markdown-code-block-language-\(blockID)")
+                Spacer()
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(code, forType: .string)
+                    didCopy = true
+                    let token = UUID()
+                    copyFeedbackToken = token
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                        if copyFeedbackToken == token { didCopy = false }
+                    }
+                } label: {
+                    Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .buttonHoverPointer()
+                .help("Copy code")
+                .accessibilityLabel("Copy code")
+                .accessibilityIdentifier("assistant-markdown-code-block-copy-\(blockID)")
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+
+            Divider().opacity(0.15)
+
+            CodeBlockTextView(attributedText: CodeSyntaxHighlighter.highlight(code, language: language, font: font))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+        }
+        .background(WorkspaceTheme.inputBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+private struct CodeBlockTextView: NSViewRepresentable {
+    let attributedText: NSAttributedString
+
+    func makeNSView(context: Context) -> NSTextView {
+        let view = NSTextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.drawsBackground = false
+        view.textContainerInset = .zero
+        view.textContainer?.lineFragmentPadding = 0
+        view.isVerticallyResizable = true
+        view.isHorizontallyResizable = false
+        view.autoresizingMask = [.width]
+        view.textContainer?.widthTracksTextView = true
+        view.textStorage?.setAttributedString(attributedText)
+        return view
+    }
+
+    func updateNSView(_ view: NSTextView, context: Context) {
+        guard view.textStorage?.string != attributedText.string else { return }
+        view.textStorage?.setAttributedString(attributedText)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextView, context: Context) -> CGSize? {
+        let width = max(40, proposal.width ?? 500)
+        guard let renderedText = nsView.textStorage else { return nil }
+        let contentHeight = measuredTextHeight(for: renderedText, width: width)
+        return CGSize(width: width, height: ceil(contentHeight) + 2)
     }
 }
 
@@ -220,6 +324,7 @@ struct TaskConversationView: View {
     @State private var userInputRequest: ConversationUserInputRequest?
     @State private var userInputAnswers: [String: [String]] = [:]
     @State private var userInputOther: [String: String] = [:]
+    @State private var userInputOtherSelected: Set<String> = []
     @State private var asyncQuestionAnswers: [String: String] = [:]
     @State private var answeredAsyncQuestionIDs: Set<String> = []
     @State private var errorMessage: String?
@@ -1506,9 +1611,6 @@ struct TaskConversationView: View {
                     ForEach(activities.filter { $0.isContextCompaction && $0.timelineOrder == nil }) { activity in
                         contextCompactionTimelineRow(activity)
                     }
-                    // Keep a stable scroll target outside the LazyVStack. A newly
-                    // loaded last message may not have been materialized yet when
-                    // SwiftUI delivers the messages change notification.
                     Color.clear
                         .frame(height: 1)
                         .id("conversation-latest-anchor")
@@ -2168,6 +2270,27 @@ struct TaskConversationView: View {
             ?? AttributedString(markdown)
     }
 
+    /// Bridges Markdown-parsed text to `NSAttributedString`, resizing inline code/bold/italic
+    /// runs to `baseFont`'s point size (preserving their monospace/bold/italic traits) instead of
+    /// the parser's own default-size font, so inline formatting matches the surrounding body text.
+    private static func markdownNSAttributedString(_ markdown: String, baseFont: NSFont) -> NSAttributedString {
+        var attributed = Self.markdownAttributedText(markdown)
+        for run in attributed.runs {
+            guard let intent = run.inlinePresentationIntent else { continue }
+            if intent.contains(.code) {
+                attributed[run.range].appKit.font = NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .regular)
+            } else {
+                var traits: NSFontTraitMask = []
+                if intent.contains(.stronglyEmphasized) { traits.insert(.boldFontMask) }
+                if intent.contains(.emphasized) { traits.insert(.italicFontMask) }
+                if !traits.isEmpty {
+                    attributed[run.range].appKit.font = NSFontManager.shared.convert(baseFont, toHaveTrait: traits)
+                }
+            }
+        }
+        return NSAttributedString(attributed)
+    }
+
     private static func displayableAssistantText(_ text: String) -> String {
         text
             .replacingOccurrences(of: "<proposed_plan>", with: "")
@@ -2293,13 +2416,30 @@ struct TaskConversationView: View {
                         .font(.system(size: level == 1 ? 19 : level == 2 ? 17 : 15, weight: .semibold))
                         .accessibilityIdentifier("assistant-markdown-heading-\(block.id)")
                 case .listItem:
-                    HStack(alignment: .firstTextBaseline, spacing: 7) {
-                        Text("•").foregroundStyle(.secondary)
+                    // The marker is rendered through the same SelectableAnnotationText/NSTextView
+                    // plumbing as the content (see `markerText`), not a plain SwiftUI `Text`, so
+                    // both sides share identical font metrics and textContainerInset. Two
+                    // different text-layout engines (SwiftUI's vs. AppKit's) never report
+                    // identical line metrics for "the same" font size, so matching the engine is
+                    // what actually guarantees pixel alignment instead of a guessed padding value.
+                    HStack(alignment: .top, spacing: 7) {
+                        markerText("•")
                         selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations)
                             .accessibilityIdentifier("assistant-markdown-list-content-\(block.id)")
                     }
                     .accessibilityElement(children: .combine)
                     .accessibilityIdentifier("assistant-markdown-list-item-\(block.id)")
+                case .orderedListItem(let number):
+                    HStack(alignment: .top, spacing: 7) {
+                        markerText("\(number).")
+                        selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations)
+                            .accessibilityIdentifier("assistant-markdown-ordered-list-content-\(block.id)")
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("assistant-markdown-ordered-list-item-\(block.id)")
+                case .codeBlock(let language):
+                    CodeBlockCardView(blockID: block.id, code: block.text, language: language, font: block.font)
+                        .accessibilityIdentifier("assistant-markdown-code-block-\(block.id)")
                 case .paragraph:
                     selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations)
                         .accessibilityIdentifier("assistant-markdown-paragraph-\(block.id)")
@@ -2324,13 +2464,39 @@ struct TaskConversationView: View {
                 onSelection: { range, text, bounds in
                     currentTextSelection = text.isEmpty ? nil : AnnotationSelection(messageID: messageID, blockID: block.id, range: range, text: text, bounds: bounds)
                 },
-                formattedText: NSAttributedString(Self.markdownAttributedText(block.text)),
+                formattedText: Self.markdownNSAttributedString(block.text, baseFont: block.font),
                 font: block.font
             )
+                .fixedSize(horizontal: false, vertical: true)
                 .overlay(alignment: .topLeading) { selectionHint(messageID: messageID, blockID: block.id) }
         } else {
-            Text(Self.markdownAttributedText(block.text))
+            let formatted = Self.markdownNSAttributedString(block.text, baseFont: block.font)
+            Text((try? AttributedString(formatted, including: \.appKit)) ?? Self.markdownAttributedText(block.text))
         }
+    }
+
+    /// Renders a list marker ("•" or "1.") through the same `SelectableAnnotationText`/NSTextView
+    /// plumbing as list-item content, so the marker shares identical font metrics and
+    /// `textContainerInset` with its sibling content view — guaranteeing `.top`-aligned HStack
+    /// rows line up exactly, rather than approximating the gap between two different text-layout
+    /// engines (SwiftUI `Text` vs. AppKit `NSTextView`) with a guessed padding constant.
+    private func markerText(_ marker: String) -> some View {
+        let markerFont = NSFont.systemFont(ofSize: 16)
+        // Measure the marker itself instead of a fixed column width, so two-digit (or longer)
+        // ordered-list numbers ("10.", "100.") get enough width and never wrap/clip.
+        let markerWidth = NSAttributedString(string: marker, attributes: [.font: markerFont]).size().width
+        return SelectableAnnotationText(
+            text: marker,
+            annotations: [],
+            onSelection: { _, _, _ in },
+            formattedText: NSAttributedString(string: marker, attributes: [
+                .font: markerFont,
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]),
+            font: markerFont
+        )
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: ceil(markerWidth) + 4, alignment: .leading)
     }
 
     private func addAnnotation(_ selection: AnnotationSelection) {
@@ -2360,10 +2526,22 @@ struct TaskConversationView: View {
         }
     }
 
+    private static func orderedListPrefix(_ line: Substring) -> (number: Int, rest: Substring)? {
+        let digits = line.prefix(while: { $0.isNumber })
+        guard !digits.isEmpty, let number = Int(digits) else { return nil }
+        let afterDigits = line.dropFirst(digits.count)
+        guard afterDigits.first == ".", afterDigits.dropFirst().first == " " else { return nil }
+        return (number, afterDigits.dropFirst(2))
+    }
+
     private static func markdownBlocks(_ markdown: String) -> [AssistantMarkdownBlock] {
         var blocks: [AssistantMarkdownBlock] = []
         var paragraphLines: [String] = []
         var paragraphStart: Int?
+        // Only treat digit-dot-space prefixes as an ordered list when they form a sequence that
+        // starts at 1 and increments by one; otherwise a sentence like "3. 5 billion parameters…"
+        // would be mis-parsed as a list item.
+        var lastOrderedNumber: Int?
 
         func flushParagraph() {
             guard let start = paragraphStart, !paragraphLines.isEmpty else { return }
@@ -2376,21 +2554,55 @@ struct TaskConversationView: View {
             paragraphStart = nil
         }
 
-        for (index, rawLine) in markdown.components(separatedBy: .newlines).enumerated() {
+        let rawLines = markdown.components(separatedBy: .newlines)
+        var index = 0
+        while index < rawLines.count {
+            let rawLine = rawLines[index]
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             guard !line.isEmpty else {
+                // A blank line alone does not end an ordered list: Markdown allows a "loose"
+                // list with blank lines between items, so `lastOrderedNumber` carries across
+                // this gap and only resets once a non-list block actually interrupts it.
                 flushParagraph()
+                index += 1
+                continue
+            }
+            if line.hasPrefix("```") {
+                flushParagraph()
+                lastOrderedNumber = nil
+                let fenceStart = index
+                let language = line.dropFirst(3).trimmingCharacters(in: .whitespaces)
+                var codeLines: [String] = []
+                index += 1
+                // Only a line consisting solely of backticks closes the fence, matching
+                // CommonMark; a mere `hasPrefix("```")` would also match content lines inside the
+                // code block itself (e.g. a code sample that demonstrates Markdown fences).
+                while index < rawLines.count {
+                    let candidate = rawLines[index].trimmingCharacters(in: .whitespaces)
+                    if candidate.count >= 3, candidate.allSatisfy({ $0 == "`" }) { break }
+                    codeLines.append(rawLines[index])
+                    index += 1
+                }
+                if index < rawLines.count { index += 1 } // consume closing fence
+                blocks.append(AssistantMarkdownBlock(
+                    id: fenceStart,
+                    kind: .codeBlock(language: language.isEmpty ? nil : language),
+                    text: codeLines.joined(separator: "\n")
+                ))
                 continue
             }
             if line.range(of: #":(?:stationai-annotation|codex-annotation)\{index=\"\d+\"\}"#, options: .regularExpression) != nil {
                 flushParagraph()
+                lastOrderedNumber = nil
                 blocks.append(AssistantMarkdownBlock(id: index, kind: .paragraph, text: line))
+                index += 1
                 continue
             }
             let headingPrefix = line.prefix(while: { $0 == "#" })
             if !headingPrefix.isEmpty, headingPrefix.count <= 6,
                line.dropFirst(headingPrefix.count).first == " " {
                 flushParagraph()
+                lastOrderedNumber = nil
                 blocks.append(AssistantMarkdownBlock(
                     id: index,
                     kind: .heading(headingPrefix.count),
@@ -2398,11 +2610,20 @@ struct TaskConversationView: View {
                 ))
             } else if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
                 flushParagraph()
+                lastOrderedNumber = nil
                 blocks.append(AssistantMarkdownBlock(id: index, kind: .listItem, text: String(line.dropFirst(2))))
+            } else if let ordered = orderedListPrefix(line[...]),
+                      paragraphLines.isEmpty,
+                      ordered.number == (lastOrderedNumber.map { $0 + 1 } ?? 1) {
+                flushParagraph()
+                lastOrderedNumber = ordered.number
+                blocks.append(AssistantMarkdownBlock(id: index, kind: .orderedListItem(number: ordered.number), text: String(ordered.rest)))
             } else {
+                lastOrderedNumber = nil
                 paragraphStart = paragraphStart ?? index
                 paragraphLines.append(line)
             }
+            index += 1
         }
         flushParagraph()
         return blocks
@@ -2925,6 +3146,7 @@ struct TaskConversationView: View {
                             let isSelected = (userInputAnswers[question.id] ?? []).first == option.label
                             Button {
                                 userInputAnswers[question.id] = [option.label]
+                                userInputOtherSelected.remove(question.id)
                             } label: {
                                 Label(option.label, systemImage: isSelected ? "largecircle.fill.circle" : "circle")
                             }
@@ -2935,10 +3157,25 @@ struct TaskConversationView: View {
                             .accessibilityValue(isSelected ? "selected" : "not selected")
                         }
                         if question.allowsOther {
+                            Button {
+                                userInputAnswers[question.id] = []
+                                userInputOtherSelected.insert(question.id)
+                            } label: {
+                                Label("Other", systemImage: userInputOtherSelected.contains(question.id) ? "largecircle.fill.circle" : "circle")
+                            }
+                            .buttonHoverPointer()
+                            .help("Select a free-text answer")
+                            .buttonStyle(.plain)
+                            .accessibilityValue(userInputOtherSelected.contains(question.id) ? "selected" : "not selected")
                             TextField("Other answer", text: Binding(
                                 get: { userInputOther[question.id] ?? "" },
-                                set: { userInputOther[question.id] = $0 }
-                            )).textFieldStyle(.roundedBorder)
+                                set: {
+                                    userInputOther[question.id] = $0
+                                    userInputAnswers[question.id] = []
+                                    userInputOtherSelected.insert(question.id)
+                                }
+                            ))
+                            .textFieldStyle(.roundedBorder)
                         }
                     }
                 }
@@ -2951,7 +3188,7 @@ struct TaskConversationView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(request.questions.contains { question in
                     let selections = userInputAnswers[question.id] ?? []
-                    return selections.isEmpty && (userInputOther[question.id] ?? "").isEmpty
+                    return selections.isEmpty && (!userInputOtherSelected.contains(question.id) || (userInputOther[question.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 })
                 .accessibilityIdentifier("submit-ai-answers-button")
         }
@@ -2965,7 +3202,9 @@ struct TaskConversationView: View {
         var answers: [String: [String]] = [:]
         for question in request.questions {
             var values = userInputAnswers[question.id] ?? []
-            if let other = userInputOther[question.id]?.trimmingCharacters(in: .whitespacesAndNewlines), !other.isEmpty { values.append(other) }
+            if userInputOtherSelected.contains(question.id), let other = userInputOther[question.id]?.trimmingCharacters(in: .whitespacesAndNewlines), !other.isEmpty {
+                values = [other]
+            }
             answers[question.id] = values
         }
         isResponding = true
@@ -2981,6 +3220,7 @@ struct TaskConversationView: View {
                     userInputRequest = nextRequest
                     userInputAnswers = [:]
                     userInputOther = [:]
+                    userInputOtherSelected = []
                 }
             )
             guard accepted else {
@@ -2991,6 +3231,7 @@ struct TaskConversationView: View {
             userInputRequest = nil
             userInputAnswers = [:]
             userInputOther = [:]
+            userInputOtherSelected = []
             await loadConversation()
         } catch {
             isResponding = providerClient.isTurnActive(threadID: request.threadID)
@@ -3388,6 +3629,7 @@ struct TaskConversationView: View {
                     userInputRequest = request
                     userInputAnswers = [:]
                     userInputOther = [:]
+                    userInputOtherSelected = []
                 })
 
                 if messages.first(where: { $0.id == assistantMessageID })?.text.isEmpty == true {
@@ -3638,6 +3880,7 @@ struct TaskConversationView: View {
                     userInputRequest = request
                     userInputAnswers = [:]
                     userInputOther = [:]
+                    userInputOtherSelected = []
                 })
                 guard retried else {
                     throw BridgeCommandError(code: "operation_failed", message: "The queued follow-up still needs your attention.")
@@ -4101,14 +4344,20 @@ struct TaskConversationView: View {
 
     private func scrollToLatest(using proxy: ScrollViewProxy) {
         guard !messages.isEmpty || !activities.isEmpty || activeGoal?.status == "complete" else { return }
+        // Scroll to the real latest row. A synthetic target after LazyVStack can
+        // be positioned using its estimated content height before the lazy rows
+        // have settled, leaving the viewport in the blank space below the chat.
+        let latestMessageID = renderedConversationMessages.last?.id
         // Defer until the state-driven content update has had a layout pass.
-        // Scrolling synchronously from onChange can run before LazyVStack has
-        // created its final row, which intermittently leaves reopened chats at top.
         Task { @MainActor in
             await Task.yield()
             hasPresentedLatestConversation = true
             withAnimation(.easeOut(duration: 0.2)) {
-                proxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
+                if let latestMessageID {
+                    proxy.scrollTo(latestMessageID, anchor: .bottom)
+                } else {
+                    proxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
+                }
             }
         }
     }
@@ -4348,14 +4597,7 @@ private struct SelectableAnnotationText: NSViewRepresentable {
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextView, context: Context) -> CGSize? {
         let width = max(40, proposal.width ?? 500)
         guard let renderedText = nsView.textStorage else { return nil }
-        let storage = NSTextStorage(attributedString: renderedText)
-        let layoutManager = NSLayoutManager()
-        let container = NSTextContainer(size: NSSize(width: width, height: .greatestFiniteMagnitude))
-        container.lineFragmentPadding = 0
-        layoutManager.addTextContainer(container)
-        storage.addLayoutManager(layoutManager)
-        layoutManager.ensureLayout(for: container)
-        let contentHeight = layoutManager.usedRect(for: container).height
+        let contentHeight = measuredTextHeight(for: renderedText, width: width)
         return CGSize(width: width, height: ceil(contentHeight) + 2 * nsView.textContainerInset.height + 2)
     }
 
