@@ -271,7 +271,15 @@ protocol ConversationProviderClient: AnyObject {
     var isPreparingForApplicationTermination: Bool { get }
     var lastTurnActivityDurations: [String: Int] { get }
 
+    /// The most recent turn result for one conversation. Providers that can run
+    /// conversations in parallel must answer per thread, not for the client.
+    func wasLastTurnInterrupted(threadID: String) -> Bool
+    func lastTurnActivityDurations(threadID: String) -> [String: Int]
+
     func diagnosticFields(_ additionalFields: [String: String]) -> [String: String]
+    /// Diagnostics for one conversation's turn. A runtime that can run several
+    /// turns at once must not report another conversation's process or turn.
+    func diagnosticFields(forThread threadID: String, _ additionalFields: [String: String]) -> [String: String]
     func startThread(workspace: ConversationWorkspaceContext, modelID: String, developerInstructions: String?) async throws -> String
     func availableModels(workspace: ConversationWorkspaceContext) async throws -> [ConversationModelOption]
     func validateEffort(_ effort: ConversationEffort, modelID: String, workspace: ConversationWorkspaceContext) async throws
@@ -323,6 +331,16 @@ extension ConversationProviderClient {
     func validateEffort(_ effort: ConversationEffort, modelID: String, workspace: ConversationWorkspaceContext) async throws {}
 
     func diagnosticFields() -> [String: String] { diagnosticFields([:]) }
+
+    /// A runtime that runs one turn at a time already describes that turn.
+    func diagnosticFields(forThread threadID: String, _ additionalFields: [String: String]) -> [String: String] {
+        diagnosticFields(additionalFields)
+    }
+
+    /// A runtime that runs one turn at a time has only one last turn to report.
+    func wasLastTurnInterrupted(threadID: String) -> Bool { wasLastTurnInterrupted }
+
+    func lastTurnActivityDurations(threadID: String) -> [String: Int] { lastTurnActivityDurations }
 
     func sendMessage(
         _ text: String,

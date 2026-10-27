@@ -2,86 +2,6 @@ import Combine
 import Darwin
 import Foundation
 
-/// Serializes sends through one Claude client. Primary app and bridge runtimes
-/// reuse a client; auxiliary clients own independent one-shot processes.
-private actor ClaudeTurnGate {
-    private let lockURL: URL?
-    private var isOccupied = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-    private var fileDescriptor: Int32?
-
-    init(lockURL: URL?) {
-        self.lockURL = lockURL
-    }
-
-    func acquire() async throws -> Bool {
-        let wasQueued = isOccupied
-        if wasQueued {
-            await withCheckedContinuation { waiters.append($0) }
-        } else {
-            isOccupied = true
-        }
-        do {
-            let (descriptor, waitedForProcess) = try await acquireProcessLock()
-            fileDescriptor = descriptor
-            return wasQueued || waitedForProcess
-        } catch {
-            if waiters.isEmpty {
-                isOccupied = false
-            } else {
-                waiters.removeFirst().resume()
-            }
-            throw error
-        }
-    }
-
-    func release() {
-        if let fileDescriptor, fileDescriptor >= 0 {
-            var lock = flock()
-            lock.l_type = Int16(F_UNLCK)
-            lock.l_whence = Int16(SEEK_SET)
-            _ = Darwin.fcntl(fileDescriptor, F_SETLK, &lock)
-            _ = Darwin.close(fileDescriptor)
-            self.fileDescriptor = nil
-        }
-        if waiters.isEmpty {
-            isOccupied = false
-        } else {
-            waiters.removeFirst().resume()
-        }
-    }
-
-    private func acquireProcessLock() async throws -> (Int32, Bool) {
-        guard let lockURL else { return (-1, false) }
-        let url = lockURL
-        return try await Task.detached(priority: .utility) {
-            try FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            let descriptor = Darwin.open(url.path, O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR)
-            guard descriptor >= 0 else {
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
-            }
-            var lock = flock()
-            lock.l_type = Int16(F_WRLCK)
-            lock.l_whence = Int16(SEEK_SET)
-            var waited = false
-            while Darwin.fcntl(descriptor, F_SETLK, &lock) != 0 {
-                if errno == EACCES || errno == EAGAIN {
-                    waited = true
-                    usleep(50_000)
-                    continue
-                }
-                let code = errno
-                _ = Darwin.close(descriptor)
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
-            }
-            return (descriptor, waited)
-        }.value
-    }
-}
-
 /// Native capabilities a provider reports for a workspace, shown when a task
 /// switches providers. StationAI reads each provider's own configuration and
 /// never copies settings or credentials between them.
@@ -102,73 +22,18 @@ struct ConversationProviderCapabilities: Codable, Equatable {
     var error: String?
 }
 
-/// Runs Claude Code turns through the installed `claude` executable using its
-/// documented streaming JSON protocol (`--input-format stream-json` /
-/// `--output-format stream-json`), the same transport the Claude Agent SDK
-/// wraps. Each turn runs in its own process resumed by session ID; StationAI
-/// persists the visible transcript itself.
+/// Owns the Claude Code CLI process for one turn of one session.
+///
+/// Claude Code starts a fresh process per turn and resumes a conversation by
+/// session ID, so every StationAI conversation can run its own process with its
+/// own worktree as the working directory. All per-turn protocol state lives
+/// here rather than on the client, which is what lets separate conversations
+/// run at the same time without a shared turn slot.
 @MainActor
-final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
-    nonisolated static let defaultModelID = "default"
-    /// The model family StationAI prefers when the user hasn't picked one, so new
-    /// conversations default to Sonnet rather than whatever Claude Code's own
-    /// account-level default currently resolves to.
-    nonisolated static let preferredDefaultModelID = "sonnet"
-    nonisolated static let titleModelID = "haiku"
-    /// The first Claude Code release StationAI verified for active-turn steering
-    /// (`priority: "next"`) and command lifecycle events.
-    nonisolated static let minimumVersion = "2.1.296"
-    nonisolated static let foregroundExecutionInstruction = """
-        Run every shell command in the foreground and wait for it to finish, including long sleeps, builds, and tests. Never set run_in_background, never background a command with &, and never end your turn while work you started is still running.
-        """
+final class ClaudeSessionRunner {
+    typealias ClientError = ClaudeCodeClient.ClientError
 
-    let provider = ConversationProvider.claude
-    private static var processActiveSessionIDs = Set<String>()
-    private static var activeClientsBySessionID: [String: ClaudeCodeClient] = [:]
-    private static var sharedPrimaryClients: [String: ClaudeCodeClient] = [:]
-    private let turnGate: ClaudeTurnGate
-
-    @Published private(set) var isTurnActive = false
-    @Published private(set) var activeThreadID: String?
-    @Published private(set) var pendingUserInputRequest: ConversationUserInputRequest?
-
-    private(set) var wasLastTurnInterrupted = false
-    private(set) var isPreparingForApplicationTermination = false
-    private(set) var lastTurnActivityDurations: [String: Int] = [:]
-
-    enum ClientError: LocalizedError {
-        case cliNotFound
-        case processStart(String)
-        case processExited(String)
-        case protocolFailure(String)
-        case authentication(String)
-        case unsupportedVersion(String)
-        case turnFailed(String)
-        case sessionNotFound
-
-        var errorDescription: String? {
-            switch self {
-            case .cliNotFound:
-                "Claude Code wasn't found. Install Claude Code or add `claude` to PATH, then restart StationAI."
-            case .processStart(let detail):
-                "StationAI couldn't start Claude Code: \(detail)"
-            case .processExited(let detail):
-                "Claude Code stopped unexpectedly. \(detail)"
-            case .protocolFailure(let detail):
-                "StationAI couldn't communicate with Claude Code: \(detail)"
-            case .authentication(let detail):
-                "Claude Code needs a valid sign-in. Run `claude` in Terminal and sign in, then try again. \(detail)"
-            case .unsupportedVersion(let version):
-                "Claude Code \(version) is too old for StationAI. Update to \(ClaudeCodeClient.minimumVersion) or later (`claude update`), then try again."
-            case .turnFailed(let detail):
-                detail
-            case .sessionNotFound:
-                "Claude Code couldn't find this conversation's session."
-            }
-        }
-    }
-
-    private struct PendingQuestion {
+    struct PendingQuestion {
         let controlRequestID: String
         let sessionID: String
         let input: [String: Any]
@@ -180,9 +45,12 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         var resultError: Error?
     }
 
-    private let executableOverride: String?
+    let sessionID: String
+    private let executable: String
     private let configDirectoryOverride: String?
     private let persistsSessions: Bool
+    private weak var owner: ClaudeCodeClient?
+
     private let outputQueue = DispatchQueue(label: "com.stationai.claude.stdout")
     private var stdoutBuffer = Data()
     private var stderrTail = ""
@@ -190,206 +58,86 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     private var inputPipe: Pipe?
     private var nextControlRequestID = 1
     private var pendingControlRequests: [String: CheckedContinuation<[String: Any], Error>] = [:]
-    private var newSessionIDs = Set<String>()
-    private var startingSessionIDs = Set<String>()
-    private var activeTurnID: String?
     private var activeMode: ConversationMode = .code
     private var pendingCommandUUIDs = Set<String>()
     private var sawCommandLifecycle = false
     private var sessionWasMissing = false
     private var turnCompletion = TurnCompletion()
     private var turnWaiter: CheckedContinuation<Void, Error>?
-    private var pendingQuestion: PendingQuestion?
     private var planWasPresented = false
     private var pendingAssistantText: (id: String, text: String)?
     /// Set when the pending answer text was followed only by StationAI's outcome
     /// call, so text Claude writes after that call extends the same answer.
     private var pendingTextSpansOutcomeReport = false
     private var toolActivities: [String: ConversationActivity] = [:]
-    private var subagentToolIDs = Set<String>()
     private var activityStartedAtUptime: [String: UInt64] = [:]
-    private var conversationOperationsInFlight = 0
-    private var deltaHandler: ((String) -> Void)?
-    private var finalMessageHandler: ((String) -> Void)?
-    private var progressMessageHandler: ((ConversationMessage) -> Void)?
-    private var steerMessageHandler: ((String, [String]) -> Void)?
-    private var activityHandler: ((ConversationActivity) -> Void)?
-    private var actionRequestHandler: (() -> Void)?
-    private var userInputHandler: ((ConversationUserInputRequest) async -> Void)?
 
-    static func sharedPrimaryClient(executableOverride: String?) -> ClaudeCodeClient {
-        let key = executableOverride.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? "__default__"
-        if let client = sharedPrimaryClients[key] { return client }
-        let client = ClaudeCodeClient(executableOverride: executableOverride, usesSharedProcessSlot: true)
-        sharedPrimaryClients[key] = client
-        return client
-    }
+    private(set) var activeTurnID: String?
+    private(set) var isTurnActive = false
+    private(set) var pendingQuestion: PendingQuestion?
+    private(set) var pendingUserInputRequest: ConversationUserInputRequest?
+    private(set) var wasInterrupted = false
+    private(set) var activityDurations: [String: Int] = [:]
+
+    var deltaHandler: ((String) -> Void)?
+    var finalMessageHandler: ((String) -> Void)?
+    var progressMessageHandler: ((ConversationMessage) -> Void)?
+    var steerMessageHandler: ((String, [String]) -> Void)?
+    var activityHandler: ((ConversationActivity) -> Void)?
+    var actionRequestHandler: (() -> Void)?
+    var userInputHandler: ((ConversationUserInputRequest) async -> Void)?
 
     init(
-        executableOverride: String? = nil,
-        configDirectoryOverride: String? = nil,
-        persistsSessions: Bool = true,
-        usesSharedProcessSlot: Bool = false
+        sessionID: String,
+        executable: String,
+        configDirectoryOverride: String?,
+        persistsSessions: Bool,
+        owner: ClaudeCodeClient?
     ) {
-        let lockURL = usesSharedProcessSlot
-            ? StationAIDiagnostics.storeURL.deletingLastPathComponent().appendingPathComponent("claude-primary-turn.lock")
-            : nil
-        turnGate = ClaudeTurnGate(lockURL: lockURL)
-        self.executableOverride = ConversationProviderFixture.ownedExecutable(
-            executableOverride,
-            providerMarker: (".stationai-claude-fixture-owner", "StationAI test owns this Claude Code protocol fixture (v1).\n")
-        )
+        self.sessionID = sessionID
+        self.executable = executable
         self.configDirectoryOverride = configDirectoryOverride
         self.persistsSessions = persistsSessions
+        self.owner = owner
     }
+
+    var processIdentifier: Int32 { process?.processIdentifier ?? -1 }
+
+    var canInterrupt: Bool { activeTurnID != nil }
 
     func diagnosticFields(_ additionalFields: [String: String]) -> [String: String] {
         var fields = additionalFields
-        fields["provider"] = provider.rawValue
+        fields["provider"] = ConversationProvider.claude.rawValue
         fields["clientPID"] = String(ProcessInfo.processInfo.processIdentifier)
-        fields["claudePID"] = String(process?.processIdentifier ?? -1)
-        fields["activeThreadID"] = activeThreadID ?? ""
+        fields["claudePID"] = String(processIdentifier)
+        fields["activeThreadID"] = sessionID
         fields["activeTurnID"] = activeTurnID ?? ""
         fields["isTurnActive"] = String(isTurnActive)
         return fields
     }
 
-    /// Claude Code creates a session on its first message, so a new session is
-    /// only an ID that the first turn passes as `--session-id`.
-    func startThread(workspace: ConversationWorkspaceContext, modelID: String, developerInstructions: String?) async throws -> String {
-        guard executablePath != nil else { throw ClientError.cliNotFound }
-        let sessionID = UUID().uuidString.lowercased()
-        newSessionIDs.insert(sessionID)
-        return sessionID
-    }
+    // MARK: - Turn
 
-    func availableModels(workspace: ConversationWorkspaceContext) async throws -> [ConversationModelOption] {
-        let response = try await withMetadataSession(workspace: workspace) { _ in [:] }
-        let models = (response.initialize["models"] as? [[String: Any]] ?? []).compactMap { item -> ConversationModelOption? in
-            guard let value = item["value"] as? String, !value.isEmpty else { return nil }
-            let isPreferredDefault = value == Self.defaultModelID || value.lowercased().contains(Self.preferredDefaultModelID)
-            return ConversationModelOption(id: value, name: item["displayName"] as? String ?? value, isDefault: isPreferredDefault)
-        }
-        return models.isEmpty ? [ConversationModelOption(id: Self.defaultModelID, name: "Default", isDefault: true)] : models
-    }
-
-    /// Reads Claude Code's own skills, subagents, and MCP servers for the workspace
-    /// without starting a model turn.
-    func capabilities(workspace: ConversationWorkspaceContext) async -> ConversationProviderCapabilities {
-        var capabilities = ConversationProviderCapabilities(provider: .claude, isAvailable: false, supportsGoals: false)
-        do {
-            let response = try await withMetadataSession(workspace: workspace) { client in
-                try await client.controlRequest(["subtype": "mcp_status"])
-            }
-            capabilities.isAvailable = true
-            capabilities.version = response.initialize["claude_code_version"] as? String
-            capabilities.skills = (response.initialize["commands"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
-            capabilities.subagents = (response.initialize["agents"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
-            capabilities.mcpServers = (response.extra["mcpServers"] as? [[String: Any]] ?? []).compactMap { server in
-                guard let name = server["name"] as? String else { return nil }
-                return .init(name: name, status: server["status"] as? String ?? "unknown")
-            }
-            capabilities.notes = ["Uses your Claude Code settings, skills, hooks, and MCP servers."]
-        } catch {
-            capabilities.error = error.localizedDescription
-        }
-        return capabilities
-    }
-
-    func sendMessage(
-        _ text: String,
-        imageDataURLs: [String] = [],
+    /// Runs one turn to completion in this session's own process.
+    func runTurn(
+        text: String,
+        imageDataURLs: [String],
         mode: ConversationMode,
         modelID: String,
         effort: ConversationEffort,
-        threadID: String,
         workspace: ConversationWorkspaceContext,
-        sessionRecoveryContext: String? = nil,
-        developerInstructions: String? = nil,
-        onDelta: @escaping (String) -> Void,
-        onFinalMessage: @escaping (String) -> Void,
-        onActivity: @escaping (ConversationActivity) -> Void,
-        onDiff: @escaping (ConversationTurnDiff) -> Void,
-        onHistory: @escaping (ConversationHistory) -> Void,
-        onActionRequest: @escaping () -> Void,
-        onUserInput: @escaping (ConversationUserInputRequest) async -> Void,
-        onSteerMessage: @escaping (String, [String]) -> Void = { _, _ in },
-        onProgressMessage: @escaping (ConversationMessage) -> Void = { _ in },
-        onTurnStarted: @escaping (String) -> Void,
-        sensitiveUserInputAnswerValues: [String] = [],
-        hideSensitiveRecoveryPrompt: Bool = false
+        isNewSession: Bool,
+        sessionRecoveryContext: String?,
+        developerInstructions: String?,
+        sensitiveUserInputAnswerValues: [String],
+        hideSensitiveRecoveryPrompt: Bool
     ) async throws {
-        let wasQueued: Bool
-        do {
-            wasQueued = try await turnGate.acquire()
-        } catch {
-            throw ClientError.processStart("Couldn't reserve the Claude Code process slot: \(error.localizedDescription)")
-        }
-        if wasQueued {
-            StationAIDiagnostics.record("claude.turn.queued", fields: [
-                "requestedThreadID": threadID,
-                "activeThreadID": activeThreadID ?? "",
-                "clientPID": String(ProcessInfo.processInfo.processIdentifier)
-            ])
-        }
-        defer { Task { await turnGate.release() } }
-
-        guard process == nil else {
-            StationAIDiagnostics.record("claude.turn.rejected", fields: diagnosticFields([
-                "requestedThreadID": threadID,
-                "reason": "client_process_still_active"
-            ]))
-            throw ClientError.protocolFailure("Another Claude Code turn is already running in this client.")
-        }
-        let sessionID = threadID
-        activeThreadID = sessionID
-        activeTurnID = nil
         activeMode = mode
-        isTurnActive = false
-        wasLastTurnInterrupted = false
-        planWasPresented = false
-        pendingAssistantText = nil
-        pendingTextSpansOutcomeReport = false
-        toolActivities.removeAll()
-        subagentToolIDs.removeAll()
-        activityStartedAtUptime.removeAll()
-        lastTurnActivityDurations.removeAll()
-        deltaHandler = onDelta
-        finalMessageHandler = onFinalMessage
-        progressMessageHandler = onProgressMessage
-        steerMessageHandler = onSteerMessage
-        activityHandler = onActivity
-        actionRequestHandler = onActionRequest
-        userInputHandler = onUserInput
-        Self.activeClientsBySessionID[sessionID] = self
-        defer {
-            Self.processActiveSessionIDs.remove(sessionID)
-            ConversationSteerMailbox.clearActiveTurn(threadID: sessionID)
-            if Self.activeClientsBySessionID[sessionID] === self {
-                Self.activeClientsBySessionID.removeValue(forKey: sessionID)
-            }
-            activeThreadID = nil
-            activeTurnID = nil
-            activeMode = .code
-            isTurnActive = false
-            pendingQuestion = nil
-            pendingUserInputRequest = nil
-            deltaHandler = nil
-            finalMessageHandler = nil
-            progressMessageHandler = nil
-            steerMessageHandler = nil
-            activityHandler = nil
-            userInputHandler = nil
-            stopProcess()
-        }
-
-        let isNewSession = newSessionIDs.contains(sessionID)
         var providerPrompt = text
         var initialize: [String: Any]
         do {
-            initialize = try await launchSession(
-                sessionID: sessionID, resume: !isNewSession, mode: mode, modelID: modelID,
-                effort: effort,
+            initialize = try await launch(
+                resume: !isNewSession, mode: mode, modelID: modelID, effort: effort,
                 workspace: workspace, developerInstructions: developerInstructions
             )
         } catch ClientError.sessionNotFound {
@@ -403,14 +151,12 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
                 )
             }
             stopProcess()
-            initialize = try await launchSession(
-                sessionID: sessionID, resume: false, mode: mode, modelID: modelID,
-                effort: effort,
+            initialize = try await launch(
+                resume: false, mode: mode, modelID: modelID, effort: effort,
                 workspace: workspace, developerInstructions: developerInstructions
             )
         }
-        newSessionIDs.remove(sessionID)
-        try Self.verifyVersion(initialize["claude_code_version"] as? String)
+        try ClaudeCodeClient.verifyVersion(initialize["claude_code_version"] as? String)
 
         let turnID = UUID().uuidString.lowercased()
         let userMessageID = UUID().uuidString.lowercased()
@@ -419,7 +165,8 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         pendingCommandUUIDs = [userMessageID]
         try writeUserMessage(text: providerPrompt, imageDataURLs: imageDataURLs, uuid: userMessageID, priority: nil)
         isTurnActive = true
-        Self.processActiveSessionIDs.insert(sessionID)
+        owner?.runnerStateChanged(self)
+        ClaudeCodeClient.markProcessActive(sessionID: sessionID)
         ConversationSteerMailbox.publishActiveTurn(threadID: sessionID, turnID: turnID)
         StationAIDiagnostics.record("claude.turn.started", fields: diagnosticFields([
             "threadID": sessionID,
@@ -429,13 +176,13 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         ]))
 
         let mailboxTask = Task { @MainActor [weak self] in
-            while let self, !Task.isCancelled, self.activeThreadID == sessionID, self.activeTurnID == turnID {
-                await ConversationSteerMailbox.service(threadID: sessionID, turnID: turnID) { text, images in
+            while let self, !Task.isCancelled, self.activeTurnID == turnID {
+                await ConversationSteerMailbox.service(threadID: self.sessionID, turnID: turnID) { text, images in
                     let accepted = try self.sendSteerInput(text: text, imageDataURLs: images)
                     if accepted { self.steerMessageHandler?(text, images) }
                     return accepted
                 } interrupt: {
-                    try await self.interruptActiveTurn(threadID: sessionID)
+                    try await self.interrupt()
                 }
                 try? await Task.sleep(for: .milliseconds(75))
             }
@@ -452,41 +199,45 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
                 : StationAIDiagnostics.errorFields(error, redacting: sensitiveUserInputAnswerValues)
             fields["threadID"] = sessionID
             fields["turnID"] = turnID
-            fields["turnStatus"] = wasLastTurnInterrupted ? "interrupted" : "failed"
+            fields["turnStatus"] = wasInterrupted ? "interrupted" : "failed"
             fields.merge(diagnosticFields([:])) { _, new in new }
             StationAIDiagnostics.record("claude.turn.ended", fields: fields)
             throw error
         }
     }
 
-    func interruptActiveTurn(threadID: String) async throws -> Bool {
-        guard activeThreadID == threadID, activeTurnID != nil, process?.isRunning == true else {
-            // Another StationAI process may own the turn.
-            guard Self.activeClientsBySessionID[threadID] == nil else { return false }
-            return try await ConversationSteerMailbox.requestInterrupt(threadID: threadID)
-        }
-        wasLastTurnInterrupted = true
+    func finishTurnCleanup() {
+        ClaudeCodeClient.clearProcessActive(sessionID: sessionID)
+        ConversationSteerMailbox.clearActiveTurn(threadID: sessionID)
+        activeTurnID = nil
+        activeMode = .code
+        isTurnActive = false
+        pendingQuestion = nil
+        pendingUserInputRequest = nil
+        deltaHandler = nil
+        finalMessageHandler = nil
+        progressMessageHandler = nil
+        steerMessageHandler = nil
+        activityHandler = nil
+        userInputHandler = nil
+        stopProcess()
+    }
+
+    func interrupt() async throws -> Bool {
+        guard activeTurnID != nil, process?.isRunning == true else { return false }
+        wasInterrupted = true
         do {
             _ = try await controlRequest(["subtype": "interrupt"])
             return true
         } catch {
-            wasLastTurnInterrupted = false
+            wasInterrupted = false
             throw error
         }
     }
 
-    func steerActiveTurn(threadID: String, text: String, imageDataURLs: [String] = []) async throws -> Bool {
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty || !imageDataURLs.isEmpty else { throw StationAIManagerError.invalidMessage }
-        guard let target = Self.activeClientsBySessionID[threadID] else {
-            return try await ConversationSteerMailbox.requestSteer(threadID: threadID, text: normalized, imageDataURLs: imageDataURLs)
-        }
-        return try target.sendSteerInput(text: normalized, imageDataURLs: imageDataURLs)
-    }
-
     /// Delivers input into the running turn with `priority: "next"`, which Claude
     /// Code injects at its next tool boundary without cancelling in-flight work.
-    private func sendSteerInput(text: String, imageDataURLs: [String]) throws -> Bool {
+    func sendSteerInput(text: String, imageDataURLs: [String]) throws -> Bool {
         guard isTurnActive, activeTurnID != nil, process?.isRunning == true,
               !turnCompletion.resultReceived || !pendingCommandUUIDs.isEmpty else { return false }
         let uuid = UUID().uuidString.lowercased()
@@ -501,8 +252,8 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         return true
     }
 
-    func answerUserInput(requestID: String, threadID: String, answers: [String: [String]]) -> Bool {
-        guard let pending = pendingQuestion, pending.controlRequestID == requestID, pending.sessionID == threadID else { return false }
+    func answerUserInput(requestID: String, answers: [String: [String]]) -> Bool {
+        guard let pending = pendingQuestion, pending.controlRequestID == requestID else { return false }
         let questionsByID = Dictionary(uniqueKeysWithValues: pending.questions.map { ($0.id, $0) })
         let valid = Set(answers.keys) == Set(questionsByID.keys) && answers.allSatisfy { id, values in
             guard !values.isEmpty, let question = questionsByID[id] else { return false }
@@ -511,7 +262,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         }
         guard valid else {
             StationAIDiagnostics.record("claude.user_input.answer.failed", fields: [
-                "requestID": requestID, "threadID": threadID, "reason": "invalid_answer_shape"
+                "requestID": requestID, "threadID": sessionID, "reason": "invalid_answer_shape"
             ])
             return false
         }
@@ -527,114 +278,29 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
             actionRequestHandler?()
             return false
         }
-        pendingQuestion = nil
-        pendingUserInputRequest = nil
+        clearPendingQuestion()
         StationAIDiagnostics.record("claude.user_input.answer.succeeded", fields: [
-            "requestID": requestID, "threadID": threadID, "questionCount": String(answers.count)
+            "requestID": requestID, "threadID": sessionID, "questionCount": String(answers.count)
         ])
         return true
     }
 
-    func rejectUserInput(requestID: String, threadID: String, message: String) {
-        guard let pending = pendingQuestion, pending.controlRequestID == requestID, pending.sessionID == threadID else { return }
-        pendingQuestion = nil
-        pendingUserInputRequest = nil
+    func rejectUserInput(requestID: String, message: String) {
+        guard let pending = pendingQuestion, pending.controlRequestID == requestID else { return }
+        clearPendingQuestion()
         try? sendControlResponse(requestID: requestID, response: ["behavior": "deny", "message": message, "interrupt": true])
         finishTurn(.failure(ClientError.turnFailed(message)))
-    }
-
-    func isTurnActive(threadID: String) -> Bool {
-        startingSessionIDs.contains(threadID)
-            || (activeThreadID == threadID && activeTurnID != nil)
-            || pendingQuestion?.sessionID == threadID
-    }
-
-    func isTurnActiveInProcess(threadID: String) -> Bool {
-        Self.processActiveSessionIDs.contains(threadID)
-    }
-
-    func canInterruptActiveTurn(threadID: String) -> Bool {
-        activeThreadID == threadID && activeTurnID != nil
-    }
-
-    func activeTurnOwnerProcessID(threadID: String) -> Int32? {
-        if let target = Self.activeClientsBySessionID[threadID], target.isTurnActive(threadID: threadID) {
-            return Int32(ProcessInfo.processInfo.processIdentifier)
-        }
-        return ConversationSteerMailbox.activeTurnOwnerProcessID(threadID: threadID)
-    }
-
-    func markTurnStarting(threadID: String) {
-        startingSessionIDs.insert(threadID)
-        // Do not replace the identity of a live process while this session
-        // waits at the shared-client gate. Mailbox steering, interrupt, and
-        // user-input routing for that process all use activeThreadID.
-        if startingSessionIDs.count == 1, activeThreadID == nil, process == nil, activeTurnID == nil {
-            activeThreadID = threadID
-        }
-    }
-
-    func clearTurnStarting(threadID: String) {
-        startingSessionIDs.remove(threadID)
-        if activeThreadID == threadID, activeTurnID == nil { activeThreadID = nil }
-    }
-
-    func beginConversationOperation() { conversationOperationsInFlight += 1 }
-
-    func finishConversationOperation() { conversationOperationsInFlight = max(0, conversationOperationsInFlight - 1) }
-
-    func prepareForApplicationTermination() async {
-        isPreparingForApplicationTermination = true
-        if let threadID = activeThreadID, isTurnActive {
-            _ = try? await interruptActiveTurn(threadID: threadID)
-        }
-        let deadline = ContinuousClock.now + .seconds(4)
-        while conversationOperationsInFlight > 0, ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(50))
-        }
-        shutdown()
     }
 
     func shutdown() {
         stopProcess()
     }
 
-    func isProviderUnavailable(_ error: Error) -> Bool {
-        switch error as? ClientError {
-        case .cliNotFound, .processStart, .authentication, .unsupportedVersion: true
-        default: false
-        }
-    }
-
-    func makeAuxiliaryClient() -> ConversationProviderClient {
-        ClaudeCodeClient(executableOverride: executableOverride, configDirectoryOverride: configDirectoryOverride, persistsSessions: false)
-    }
-
     // MARK: - Process and protocol
 
-    private struct MetadataResponse {
-        let initialize: [String: Any]
-        let extra: [String: Any]
-    }
-
-    /// Starts a short-lived process that never receives a prompt, so no model
-    /// request is made, and reads its initialize response plus one extra query.
-    private func withMetadataSession(
-        workspace: ConversationWorkspaceContext,
-        _ query: (ClaudeCodeClient) async throws -> [String: Any]
-    ) async throws -> MetadataResponse {
-        let client = ClaudeCodeClient(executableOverride: executableOverride, configDirectoryOverride: configDirectoryOverride, persistsSessions: false)
-        defer { client.stopProcess() }
-        let initialize = try await client.launchSession(
-            sessionID: UUID().uuidString.lowercased(), resume: false, mode: .code, modelID: Self.defaultModelID,
-            effort: nil,
-            workspace: workspace, developerInstructions: nil
-        )
-        return MetadataResponse(initialize: initialize, extra: try await query(client))
-    }
-
-    private func launchSession(
-        sessionID: String,
+    /// Starts this session's process. Claude Code only ever sees one session per
+    /// process, so the working directory is the conversation's own worktree.
+    func launch(
         resume: Bool,
         mode: ConversationMode,
         modelID: String,
@@ -642,7 +308,6 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         workspace: ConversationWorkspaceContext,
         developerInstructions: String?
     ) async throws -> [String: Any] {
-        guard let executable = executablePath else { throw ClientError.cliNotFound }
         var arguments = [
             "-p",
             "--input-format", "stream-json",
@@ -653,19 +318,19 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
             "--permission-mode", mode == .plan ? "plan" : "default",
             resume ? "--resume" : "--session-id", sessionID
         ]
-        if modelID != Self.defaultModelID { arguments += ["--model", modelID] }
+        if modelID != ClaudeCodeClient.defaultModelID { arguments += ["--model", modelID] }
         if !persistsSessions { arguments.append("--no-session-persistence") }
         for root in workspace.roots.dropFirst() { arguments += ["--add-dir", root.path] }
         // Each turn's process exits when the turn ends, so work Claude moves to the
         // background is lost and its turn stops early. Keep every command in the foreground.
-        var systemPrompt = Self.foregroundExecutionInstruction
+        var systemPrompt = ClaudeCodeClient.foregroundExecutionInstruction
         if let developerInstructions, !developerInstructions.isEmpty {
             systemPrompt += "\n\n" + developerInstructions
         }
         arguments += ["--append-system-prompt", systemPrompt]
 
         var environment = ProcessInfo.processInfo.environment
-        environment["PATH"] = Self.expandedSearchPath(environment["PATH"])
+        environment["PATH"] = ClaudeCodeClient.expandedSearchPath(environment["PATH"])
         ConversationProcessEnvironment.forwardStationAIBridgeEnvironment(&environment)
         // Claude Code finds its keychain sign-in by user name; services started by
         // launchd are not guaranteed a login environment.
@@ -738,7 +403,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         return try await controlRequest(["subtype": "initialize"])
     }
 
-    private func controlRequest(_ request: [String: Any]) async throws -> [String: Any] {
+    func controlRequest(_ request: [String: Any]) async throws -> [String: Any] {
         let requestID = "stationai-\(nextControlRequestID)"
         nextControlRequestID += 1
         return try await withCheckedThrowingContinuation { continuation in
@@ -842,7 +507,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
 
     private func processDidTerminate(_ terminated: Process) {
         // A process stopped by `stopProcess` (or replaced by a relaunch) is no
-        // longer this client's; its late termination must not fail new requests.
+        // longer this runner's; its late termination must not fail new requests.
         guard process === terminated else { return }
         StationAIDiagnostics.record("claude.process.exited", fields: diagnosticFields([
             "processID": String(terminated.processIdentifier),
@@ -850,7 +515,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         ]))
         let error: Error = sessionWasMissing || stderrTail.contains("No conversation found with session ID")
             ? ClientError.sessionNotFound
-            : Self.classifyFailure(ClientError.processExited(stderrSummary(status: terminated.terminationStatus)), text: stderrTail)
+            : ClaudeCodeClient.classifyFailure(ClientError.processExited(stderrSummary(status: terminated.terminationStatus)), text: stderrTail)
         for continuation in pendingControlRequests.values { continuation.resume(throwing: error) }
         pendingControlRequests.removeAll()
         if !turnCompletion.resultReceived || turnWaiter != nil {
@@ -952,10 +617,6 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     }
 
     private func presentQuestions(requestID: String, input: [String: Any]) {
-        guard let sessionID = activeThreadID else {
-            sendControlError(requestID: requestID, message: "No active StationAI turn can answer this question.")
-            return
-        }
         let rawQuestions = input["questions"] as? [[String: Any]] ?? []
         let questions = rawQuestions.enumerated().compactMap { index, raw -> ConversationUserQuestion? in
             guard let question = raw["question"] as? String, !question.isEmpty else { return nil }
@@ -979,8 +640,15 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         pendingQuestion = PendingQuestion(controlRequestID: requestID, sessionID: sessionID, input: input, questions: questions)
         let request = ConversationUserInputRequest(id: requestID, threadID: sessionID, questions: questions, isBlocking: true)
         pendingUserInputRequest = request
+        owner?.runnerStateChanged(self)
         let handler = userInputHandler
         Task { @MainActor in await handler?(request) }
+    }
+
+    private func clearPendingQuestion() {
+        pendingQuestion = nil
+        pendingUserInputRequest = nil
+        owner?.runnerStateChanged(self)
     }
 
     private func handleAssistant(_ message: [String: Any]) {
@@ -1014,7 +682,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
                 let input = block["input"] as? [String: Any] ?? [:]
                 // StationAI's own progress and outcome reports are bookkeeping, not
                 // work, so they don't turn the answer written before them into commentary.
-                let report = Self.reportCommand(name: name, input: input)
+                let report = ClaudeCodeClient.reportCommand(name: name, input: input)
                 if pendingAssistantText != nil, let report {
                     if report == .outcome { pendingTextSpansOutcomeReport = true }
                 } else if let pending = pendingAssistantText {
@@ -1023,8 +691,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
                     pendingTextSpansOutcomeReport = false
                 }
                 activityStartedAtUptime[toolID] = DispatchTime.now().uptimeNanoseconds
-                let activity = Self.activity(toolID: toolID, name: name, input: input, status: "inProgress", turnID: activeTurnID)
-                if activity.isSubagent { subagentToolIDs.insert(toolID) }
+                let activity = ClaudeCodeClient.activity(toolID: toolID, name: name, input: input, status: "inProgress", turnID: activeTurnID)
                 toolActivities[toolID] = activity
                 activityHandler?(activity)
             default:
@@ -1047,7 +714,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         for block in content where block["type"] as? String == "tool_result" {
             guard let toolID = block["tool_use_id"] as? String, var activity = toolActivities[toolID] else { continue }
             let isError = block["is_error"] as? Bool ?? false
-            let output = Self.resultText(block["content"])
+            let output = ClaudeCodeClient.resultText(block["content"])
             var detail = activity.detail
             if !output.isEmpty, activity.toolKind != "mcp" {
                 detail = [detail, String(output.suffix(2_000))].filter { !$0.isEmpty }.joined(separator: "\n")
@@ -1061,7 +728,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
                 toolKind: activity.toolKind, server: activity.server, tool: activity.tool,
                 durationMs: duration, turnID: activity.turnID
             )
-            if let duration { lastTurnActivityDurations[activity.id] = duration }
+            if let duration { activityDurations[activity.id] = duration }
             toolActivities[toolID] = activity
             activityHandler?(activity)
         }
@@ -1074,10 +741,10 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
             let text = (message["result"] as? String) ?? (message["errors"] as? [String])?.joined(separator: " ") ?? ""
             if text.contains("No conversation found with session ID") { sessionWasMissing = true }
             let error: Error
-            if wasLastTurnInterrupted {
+            if wasInterrupted {
                 error = ClientError.turnFailed("The Claude turn was interrupted.")
             } else {
-                error = Self.classifyFailure(ClientError.turnFailed(text.isEmpty ? "Claude couldn't complete this turn (\(subtype))." : text), text: text)
+                error = ClaudeCodeClient.classifyFailure(ClientError.turnFailed(text.isEmpty ? "Claude couldn't complete this turn (\(subtype))." : text), text: text)
             }
             turnCompletion.resultReceived = true
             turnCompletion.resultError = error
@@ -1116,6 +783,424 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         progressMessageHandler?(ConversationMessage(
             id: id, role: .assistant, text: text, phase: "commentary", turnID: activeTurnID, provider: .claude
         ))
+    }
+}
+
+/// Runs Claude Code turns through the installed `claude` executable using its
+/// documented streaming JSON protocol (`--input-format stream-json` /
+/// `--output-format stream-json`), the same transport the Claude Agent SDK
+/// wraps.
+///
+/// Each conversation gets its own `ClaudeSessionRunner`, so turns for different
+/// conversations run as independent CLI processes in their own worktrees at the
+/// same time. The client only routes by session ID and publishes aggregate
+/// state for the UI; it never serializes turns.
+@MainActor
+final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
+    nonisolated static let defaultModelID = "default"
+    /// The model family StationAI prefers when the user hasn't picked one, so new
+    /// conversations default to Sonnet rather than whatever Claude Code's own
+    /// account-level default currently resolves to.
+    nonisolated static let preferredDefaultModelID = "sonnet"
+    nonisolated static let titleModelID = "haiku"
+    /// The first Claude Code release StationAI verified for active-turn steering
+    /// (`priority: "next"`) and command lifecycle events.
+    nonisolated static let minimumVersion = "2.1.296"
+    nonisolated static let foregroundExecutionInstruction = """
+        Run every shell command in the foreground and wait for it to finish, including long sleeps, builds, and tests. Never set run_in_background, never background a command with &, and never end your turn while work you started is still running.
+        """
+
+    let provider = ConversationProvider.claude
+    private static var processActiveSessionIDs = Set<String>()
+    /// Session-to-runner routing for this process, so steering, interrupts, and
+    /// answers reach the right turn no matter which client started it.
+    private static var activeRunnersBySessionID: [String: ClaudeSessionRunner] = [:]
+    private static var sharedPrimaryClients: [String: ClaudeCodeClient] = [:]
+
+    @Published private(set) var isTurnActive = false
+    /// Every conversation with a running turn. A view observes this instead of
+    /// `isTurnActive` so one conversation's turn ending is still an observable
+    /// change while another conversation keeps running.
+    @Published private(set) var activeThreadIDs: Set<String> = []
+    @Published private(set) var pendingUserInputRequest: ConversationUserInputRequest?
+
+    private(set) var isPreparingForApplicationTermination = false
+
+    enum ClientError: LocalizedError {
+        case cliNotFound
+        case processStart(String)
+        case processExited(String)
+        case protocolFailure(String)
+        case authentication(String)
+        case unsupportedVersion(String)
+        case turnFailed(String)
+        case sessionNotFound
+
+        var errorDescription: String? {
+            switch self {
+            case .cliNotFound:
+                "Claude Code wasn't found. Install Claude Code or add `claude` to PATH, then restart StationAI."
+            case .processStart(let detail):
+                "StationAI couldn't start Claude Code: \(detail)"
+            case .processExited(let detail):
+                "Claude Code stopped unexpectedly. \(detail)"
+            case .protocolFailure(let detail):
+                "StationAI couldn't communicate with Claude Code: \(detail)"
+            case .authentication(let detail):
+                "Claude Code needs a valid sign-in. Run `claude` in Terminal and sign in, then try again. \(detail)"
+            case .unsupportedVersion(let version):
+                "Claude Code \(version) is too old for StationAI. Update to \(ClaudeCodeClient.minimumVersion) or later (`claude update`), then try again."
+            case .turnFailed(let detail):
+                detail
+            case .sessionNotFound:
+                "Claude Code couldn't find this conversation's session."
+            }
+        }
+    }
+
+    private let executableOverride: String?
+    private let configDirectoryOverride: String?
+    private let persistsSessions: Bool
+    private var runners: [String: ClaudeSessionRunner] = [:]
+    private var newSessionIDs = Set<String>()
+    private var startingSessionIDs = Set<String>()
+    private var interruptedThreadIDs = Set<String>()
+    /// The process and turn identity each conversation last ran under, so a
+    /// failure recorded after the runner is torn down still names its own turn.
+    private var lastTurnDiagnosticsByThread: [String: [String: String]] = [:]
+    private var activityDurationsByThread: [String: [String: Int]] = [:]
+    private var lastFinishedThreadID: String?
+    private var conversationOperationsInFlight = 0
+
+    static func sharedPrimaryClient(executableOverride: String?) -> ClaudeCodeClient {
+        let key = executableOverride.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? "__default__"
+        if let client = sharedPrimaryClients[key] { return client }
+        let client = ClaudeCodeClient(executableOverride: executableOverride)
+        sharedPrimaryClients[key] = client
+        return client
+    }
+
+    init(
+        executableOverride: String? = nil,
+        configDirectoryOverride: String? = nil,
+        persistsSessions: Bool = true
+    ) {
+        self.executableOverride = ConversationProviderFixture.ownedExecutable(
+            executableOverride,
+            providerMarker: (".stationai-claude-fixture-owner", "StationAI test owns this Claude Code protocol fixture (v1).\n")
+        )
+        self.configDirectoryOverride = configDirectoryOverride
+        self.persistsSessions = persistsSessions
+    }
+
+    static func markProcessActive(sessionID: String) { processActiveSessionIDs.insert(sessionID) }
+
+    static func clearProcessActive(sessionID: String) { processActiveSessionIDs.remove(sessionID) }
+
+    /// Republishes the state the UI observes after any runner changes.
+    func runnerStateChanged(_ runner: ClaudeSessionRunner) {
+        let active = runners.values.filter { $0.isTurnActive }
+        activeThreadIDs = Set(active.map(\.sessionID))
+        isTurnActive = !active.isEmpty
+        pendingUserInputRequest = runners.values.compactMap(\.pendingUserInputRequest).first
+    }
+
+    /// Client-wide fields only. With parallel turns there is no single active
+    /// process or turn to report; `diagnosticFields(forThread:)` describes one.
+    func diagnosticFields(_ additionalFields: [String: String]) -> [String: String] {
+        var fields = additionalFields
+        fields["provider"] = provider.rawValue
+        fields["clientPID"] = String(ProcessInfo.processInfo.processIdentifier)
+        fields["isTurnActive"] = String(isTurnActive)
+        fields["activeTurnCount"] = String(activeThreadIDs.count)
+        return fields
+    }
+
+    /// Describes the conversation's own turn, so a failure record never carries
+    /// another conversation's process or turn identity. A turn that has already
+    /// torn down its process is described by the identity it ran under, which is
+    /// what a failure record needs.
+    func diagnosticFields(forThread threadID: String, _ additionalFields: [String: String]) -> [String: String] {
+        var fields = diagnosticFields(additionalFields)
+        guard let turnFields = runners[threadID]?.diagnosticFields([:]) ?? lastTurnDiagnosticsByThread[threadID] else {
+            return fields
+        }
+        fields.merge(turnFields) { _, new in new }
+        return fields
+    }
+
+    /// Claude Code creates a session on its first message, so a new session is
+    /// only an ID that the first turn passes as `--session-id`.
+    func startThread(workspace: ConversationWorkspaceContext, modelID: String, developerInstructions: String?) async throws -> String {
+        guard executablePath != nil else { throw ClientError.cliNotFound }
+        let sessionID = UUID().uuidString.lowercased()
+        newSessionIDs.insert(sessionID)
+        return sessionID
+    }
+
+    func availableModels(workspace: ConversationWorkspaceContext) async throws -> [ConversationModelOption] {
+        let response = try await withMetadataSession(workspace: workspace) { _ in [:] }
+        let models = (response.initialize["models"] as? [[String: Any]] ?? []).compactMap { item -> ConversationModelOption? in
+            guard let value = item["value"] as? String, !value.isEmpty else { return nil }
+            let isPreferredDefault = value == Self.defaultModelID || value.lowercased().contains(Self.preferredDefaultModelID)
+            return ConversationModelOption(id: value, name: item["displayName"] as? String ?? value, isDefault: isPreferredDefault)
+        }
+        return models.isEmpty ? [ConversationModelOption(id: Self.defaultModelID, name: "Default", isDefault: true)] : models
+    }
+
+    /// Reads Claude Code's own skills, subagents, and MCP servers for the workspace
+    /// without starting a model turn.
+    func capabilities(workspace: ConversationWorkspaceContext) async -> ConversationProviderCapabilities {
+        var capabilities = ConversationProviderCapabilities(provider: .claude, isAvailable: false, supportsGoals: false)
+        do {
+            let response = try await withMetadataSession(workspace: workspace) { runner in
+                try await runner.controlRequest(["subtype": "mcp_status"])
+            }
+            capabilities.isAvailable = true
+            capabilities.version = response.initialize["claude_code_version"] as? String
+            capabilities.skills = (response.initialize["commands"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
+            capabilities.subagents = (response.initialize["agents"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
+            capabilities.mcpServers = (response.extra["mcpServers"] as? [[String: Any]] ?? []).compactMap { server in
+                guard let name = server["name"] as? String else { return nil }
+                return .init(name: name, status: server["status"] as? String ?? "unknown")
+            }
+            capabilities.notes = ["Uses your Claude Code settings, skills, hooks, and MCP servers."]
+        } catch {
+            capabilities.error = error.localizedDescription
+        }
+        return capabilities
+    }
+
+    func sendMessage(
+        _ text: String,
+        imageDataURLs: [String] = [],
+        mode: ConversationMode,
+        modelID: String,
+        effort: ConversationEffort,
+        threadID: String,
+        workspace: ConversationWorkspaceContext,
+        sessionRecoveryContext: String? = nil,
+        developerInstructions: String? = nil,
+        onDelta: @escaping (String) -> Void,
+        onFinalMessage: @escaping (String) -> Void,
+        onActivity: @escaping (ConversationActivity) -> Void,
+        onDiff: @escaping (ConversationTurnDiff) -> Void,
+        onHistory: @escaping (ConversationHistory) -> Void,
+        onActionRequest: @escaping () -> Void,
+        onUserInput: @escaping (ConversationUserInputRequest) async -> Void,
+        onSteerMessage: @escaping (String, [String]) -> Void = { _, _ in },
+        onProgressMessage: @escaping (ConversationMessage) -> Void = { _ in },
+        onTurnStarted: @escaping (String) -> Void,
+        sensitiveUserInputAnswerValues: [String] = [],
+        hideSensitiveRecoveryPrompt: Bool = false
+    ) async throws {
+        guard let executable = executablePath else { throw ClientError.cliNotFound }
+        let sessionID = threadID
+        // Separate conversations run in parallel; only the same conversation is
+        // single-flight, because a session's transcript can take one writer.
+        guard Self.activeRunnersBySessionID[sessionID] == nil else {
+            StationAIDiagnostics.record("claude.turn.rejected", fields: diagnosticFields([
+                "requestedThreadID": sessionID,
+                "reason": "session_turn_already_active"
+            ]))
+            throw ClientError.protocolFailure("Another Claude Code turn is already running for this conversation.")
+        }
+
+        let runner = ClaudeSessionRunner(
+            sessionID: sessionID,
+            executable: executable,
+            configDirectoryOverride: configDirectoryOverride,
+            persistsSessions: persistsSessions,
+            owner: self
+        )
+        runner.deltaHandler = onDelta
+        runner.finalMessageHandler = onFinalMessage
+        runner.progressMessageHandler = onProgressMessage
+        runner.steerMessageHandler = onSteerMessage
+        runner.activityHandler = onActivity
+        runner.actionRequestHandler = onActionRequest
+        runner.userInputHandler = onUserInput
+        runners[sessionID] = runner
+        Self.activeRunnersBySessionID[sessionID] = runner
+        interruptedThreadIDs.remove(sessionID)
+        activityDurationsByThread[sessionID] = [:]
+        lastFinishedThreadID = sessionID
+        defer {
+            // The identity only; the client reports whether a turn is still active.
+            lastTurnDiagnosticsByThread[sessionID] = runner.diagnosticFields([:])
+                .filter { $0.key != "isTurnActive" }
+            runner.finishTurnCleanup()
+            interruptedThreadIDs.formUnion(runner.wasInterrupted ? [sessionID] : [])
+            activityDurationsByThread[sessionID] = runner.activityDurations
+            lastFinishedThreadID = sessionID
+            if Self.activeRunnersBySessionID[sessionID] === runner {
+                Self.activeRunnersBySessionID.removeValue(forKey: sessionID)
+            }
+            if runners[sessionID] === runner { runners.removeValue(forKey: sessionID) }
+            runnerStateChanged(runner)
+        }
+
+        let isNewSession = newSessionIDs.contains(sessionID)
+        try await runner.runTurn(
+            text: text,
+            imageDataURLs: imageDataURLs,
+            mode: mode,
+            modelID: modelID,
+            effort: effort,
+            workspace: workspace,
+            isNewSession: isNewSession,
+            sessionRecoveryContext: sessionRecoveryContext,
+            developerInstructions: developerInstructions,
+            sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
+            hideSensitiveRecoveryPrompt: hideSensitiveRecoveryPrompt
+        )
+        newSessionIDs.remove(sessionID)
+    }
+
+    func interruptActiveTurn(threadID: String) async throws -> Bool {
+        guard let runner = runners[threadID], runner.canInterrupt else {
+            // Another StationAI process may own the turn.
+            guard Self.activeRunnersBySessionID[threadID] == nil else { return false }
+            return try await ConversationSteerMailbox.requestInterrupt(threadID: threadID)
+        }
+        let interrupted = try await runner.interrupt()
+        if interrupted { interruptedThreadIDs.insert(threadID) }
+        return interrupted
+    }
+
+    func steerActiveTurn(threadID: String, text: String, imageDataURLs: [String] = []) async throws -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty || !imageDataURLs.isEmpty else { throw StationAIManagerError.invalidMessage }
+        guard let runner = Self.activeRunnersBySessionID[threadID] else {
+            return try await ConversationSteerMailbox.requestSteer(threadID: threadID, text: normalized, imageDataURLs: imageDataURLs)
+        }
+        return try runner.sendSteerInput(text: normalized, imageDataURLs: imageDataURLs)
+    }
+
+    func answerUserInput(requestID: String, threadID: String, answers: [String: [String]]) -> Bool {
+        guard let runner = runner(for: threadID) else { return false }
+        return runner.answerUserInput(requestID: requestID, answers: answers)
+    }
+
+    func rejectUserInput(requestID: String, threadID: String, message: String) {
+        runner(for: threadID)?.rejectUserInput(requestID: requestID, message: message)
+    }
+
+    func isTurnActive(threadID: String) -> Bool {
+        if startingSessionIDs.contains(threadID) { return true }
+        guard let runner = runners[threadID] else { return false }
+        return runner.activeTurnID != nil || runner.pendingQuestion != nil
+    }
+
+    func isTurnActiveInProcess(threadID: String) -> Bool {
+        Self.processActiveSessionIDs.contains(threadID)
+    }
+
+    func canInterruptActiveTurn(threadID: String) -> Bool {
+        runners[threadID]?.canInterrupt == true
+    }
+
+    func activeTurnOwnerProcessID(threadID: String) -> Int32? {
+        if Self.activeRunnersBySessionID[threadID] != nil {
+            return Int32(ProcessInfo.processInfo.processIdentifier)
+        }
+        return ConversationSteerMailbox.activeTurnOwnerProcessID(threadID: threadID)
+    }
+
+    func markTurnStarting(threadID: String) {
+        startingSessionIDs.insert(threadID)
+    }
+
+    func clearTurnStarting(threadID: String) {
+        startingSessionIDs.remove(threadID)
+    }
+
+    func beginConversationOperation() { conversationOperationsInFlight += 1 }
+
+    func finishConversationOperation() { conversationOperationsInFlight = max(0, conversationOperationsInFlight - 1) }
+
+    func prepareForApplicationTermination() async {
+        isPreparingForApplicationTermination = true
+        for runner in runners.values where runner.isTurnActive {
+            _ = try? await runner.interrupt()
+        }
+        let deadline = ContinuousClock.now + .seconds(4)
+        while conversationOperationsInFlight > 0, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        shutdown()
+    }
+
+    func shutdown() {
+        for runner in runners.values { runner.shutdown() }
+    }
+
+    func isProviderUnavailable(_ error: Error) -> Bool {
+        switch error as? ClientError {
+        case .cliNotFound, .processStart, .authentication, .unsupportedVersion: true
+        default: false
+        }
+    }
+
+    func makeAuxiliaryClient() -> ConversationProviderClient {
+        ClaudeCodeClient(executableOverride: executableOverride, configDirectoryOverride: configDirectoryOverride, persistsSessions: false)
+    }
+
+    // MARK: - Per-conversation turn results
+
+    /// Whether the conversation's own most recent turn ended because the user
+    /// stopped it. Parallel turns each keep their own answer.
+    func wasLastTurnInterrupted(threadID: String) -> Bool {
+        interruptedThreadIDs.contains(threadID)
+    }
+
+    func lastTurnActivityDurations(threadID: String) -> [String: Int] {
+        activityDurationsByThread[threadID] ?? [:]
+    }
+
+    func pendingUserInputRequest(forThread threadID: String) -> ConversationUserInputRequest? {
+        runners[threadID]?.pendingUserInputRequest
+    }
+
+    var wasLastTurnInterrupted: Bool {
+        lastFinishedThreadID.map { interruptedThreadIDs.contains($0) } ?? false
+    }
+
+    var lastTurnActivityDurations: [String: Int] {
+        lastFinishedThreadID.flatMap { activityDurationsByThread[$0] } ?? [:]
+    }
+
+    private func runner(for threadID: String) -> ClaudeSessionRunner? {
+        runners[threadID] ?? Self.activeRunnersBySessionID[threadID]
+    }
+
+    // MARK: - Metadata
+
+    private struct MetadataResponse {
+        let initialize: [String: Any]
+        let extra: [String: Any]
+    }
+
+    /// Starts a short-lived process that never receives a prompt, so no model
+    /// request is made, and reads its initialize response plus one extra query.
+    private func withMetadataSession(
+        workspace: ConversationWorkspaceContext,
+        _ query: (ClaudeSessionRunner) async throws -> [String: Any]
+    ) async throws -> MetadataResponse {
+        guard let executable = executablePath else { throw ClientError.cliNotFound }
+        let runner = ClaudeSessionRunner(
+            sessionID: UUID().uuidString.lowercased(),
+            executable: executable,
+            configDirectoryOverride: configDirectoryOverride,
+            persistsSessions: false,
+            owner: nil
+        )
+        defer { runner.shutdown() }
+        let initialize = try await runner.launch(
+            resume: false, mode: .code, modelID: Self.defaultModelID, effort: nil,
+            workspace: workspace, developerInstructions: nil
+        )
+        return MetadataResponse(initialize: initialize, extra: try await query(runner))
     }
 
     // MARK: - Mapping
@@ -1165,13 +1250,13 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         }
     }
 
-    private static func resultText(_ content: Any?) -> String {
+    static func resultText(_ content: Any?) -> String {
         if let text = content as? String { return text }
         guard let blocks = content as? [[String: Any]] else { return "" }
         return blocks.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }.joined(separator: "\n")
     }
 
-    private static func classifyFailure(_ error: ClientError, text: String) -> Error {
+    static func classifyFailure(_ error: ClientError, text: String) -> Error {
         let normalized = text.lowercased()
         if normalized.contains("/login") || normalized.contains("not logged in") || normalized.contains("invalid api key")
             || normalized.contains("authentication") || normalized.contains("oauth token") {
@@ -1201,11 +1286,10 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         return (pathEntries + common).first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    private static func expandedSearchPath(_ existingPath: String?) -> String {
+    static func expandedSearchPath(_ existingPath: String?) -> String {
         var paths = (existingPath ?? "").split(separator: ":").map(String.init)
         let home = NSHomeDirectory()
         paths.append(contentsOf: ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"])
         return Array(NSOrderedSet(array: paths)).compactMap { $0 as? String }.joined(separator: ":")
     }
 }
-

@@ -4951,9 +4951,9 @@ final class StationAIUITests: XCTestCase {
         }
     }
 
-    // case-contract: test_conversation_serializes_concurrent_claude_sends | When a CLI/XPC Claude turn overlaps a UI turn, the second send waits on the shared cross-process Claude slot instead of failing with an already-running error. Both turns complete and persist their own user and assistant messages, and diagnostics identify the separate bridge process entering the queue without logging prompt text. The UI shows the queued answer after reopening its task.
-    func test_conversation_serializes_concurrent_claude_sends() throws {
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-concurrent-sends")
+    // case-contract: test_conversation_runs_concurrent_claude_sends_in_parallel | Claude turns for different conversations run at the same time instead of queueing on a shared turn slot. While one task's turn is held active, a second task's send starts in its own Claude process, runs its own tool, and completes with its own user and assistant messages before the held turn is released. Each turn's process uses its own task working directory, each conversation keeps only its own activity rows and measured durations, diagnostics record no queued-slot event and no prompt text, and the second conversation's answer is available while the first turn is still running.
+    func test_conversation_runs_concurrent_claude_sends_in_parallel() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-parallel-sends")
         let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
         try FileManager.default.copyItem(at: source, to: executable)
@@ -4964,11 +4964,11 @@ final class StationAIUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
 
         let first = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "First Claude conversation", "--repo", fixture.primary.path, "--provider", "claude"
+            "task", "create", "--title", "Held Claude conversation", "--repo", fixture.primary.path, "--provider", "claude"
         ])["result"] as? [String: Any])
         let firstID = try XCTUnwrap(first["id"] as? String)
         let second = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Second Claude conversation", "--repo", fixture.secondary.path, "--provider", "claude"
+            "task", "create", "--title", "Parallel Claude conversation", "--repo", fixture.secondary.path, "--provider", "claude"
         ])["result"] as? [String: Any])
         let secondID = try XCTUnwrap(second["id"] as? String)
         let ready = URL(fileURLWithPath: executable.path + ".concurrent-turn-ready")
@@ -4979,56 +4979,84 @@ final class StationAIUITests: XCTestCase {
             }
         }
 
-        openTask(named: "First Claude conversation")
+        let firstPrompt = "Please hold-claude-turn-for-concurrency."
+        let secondPrompt = "Inspect the workspace while the other conversation is busy."
+        openTask(named: "Held Claude conversation")
         let composer = element("message-composer")
         XCTAssertTrue(composer.waitForExistence(timeout: 10))
         composer.click()
-        composer.typeText("Please hold-claude-turn-for-concurrency.")
+        composer.typeText(firstPrompt)
         element("send-message-button").click()
-        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15), "The first Claude turn should be active before navigating to the second task.")
-        let secondProcess = try startCLIProcess(
-            ["conversation", "send", secondID, "--message", "Second Claude response."],
-            extraEnvironment: ["STATIONAI_E2E_CLAUDE_EXECUTABLE": executable.path]
-        )
-        XCTAssertTrue(waitUntil({
-            guard let record = try? self.taskRecord(id: secondID) else { return false }
-            return record["status"] as? String == "In Progress" && record["claudeSessionID"] != nil
-        }, timeout: 10), "The CLI/XPC send should be accepted while waiting for the app's Claude process slot.")
-        let secondSessionID = try XCTUnwrap(try taskRecord(id: secondID)?["claudeSessionID"] as? String)
-        let appProcessID = try XCTUnwrap(diagnosticEvents().first {
-            $0["event"] as? String == "claude.turn.started"
-                && $0["threadID"] as? String == (try? taskRecord(id: firstID)?["claudeSessionID"] as? String)
-        }?["clientPID"] as? String)
-        let diagnosticText = String(data: try JSONSerialization.data(withJSONObject: diagnosticEvents()), encoding: .utf8) ?? ""
-        XCTAssertFalse(diagnosticText.contains("Please hold-claude-turn-for-concurrency."))
-        XCTAssertFalse(diagnosticText.contains("Second Claude response."))
-        XCTAssertTrue(secondProcess.process.isRunning, "The CLI send should remain pending until the UI turn releases its process slot.")
-        Thread.sleep(forTimeInterval: 1)
-        try "Release the first Claude turn.\n".write(to: release, atomically: true, encoding: .utf8)
-        let secondResult = try finishCLIProcess(secondProcess)
-        XCTAssertEqual(secondResult["ok"] as? Bool, true)
-        let queuedEvent = try XCTUnwrap(diagnosticEvents().first {
-            $0["event"] as? String == "claude.turn.queued"
-                && $0["requestedThreadID"] as? String == secondSessionID
-        })
-        XCTAssertNotEqual(queuedEvent["clientPID"] as? String, appProcessID, "The queued send must come from the separate bridge process.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15), "The first Claude turn should be active before the second conversation starts.")
 
-        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: secondID)?["status"] as? String) == "Waiting Response" }, timeout: 10))
+        // Both turns run inside this one StationAI process: the second
+        // conversation must be usable and answer while the first is held.
+        element("back-to-board-button").click()
+        openTask(named: "Parallel Claude conversation")
+        let parallelComposer = element("message-composer")
+        XCTAssertTrue(parallelComposer.waitForExistence(timeout: 10))
+        parallelComposer.click()
+        parallelComposer.typeText(secondPrompt)
+        let parallelSend = element("send-message-button")
+        XCTAssertTrue(parallelSend.isEnabled, "A Claude turn in another conversation must not block this conversation's composer.")
+        parallelSend.click()
+        XCTAssertTrue(app.staticTexts["Inspection done: the workspace is ready."].waitForExistence(timeout: 30),
+                      "The parallel conversation should show its own answer while the other turn is held.")
+        XCTAssertEqual(try taskRecord(id: firstID)?["status"] as? String, "In Progress",
+                       "The held turn must still be running when the parallel conversation finishes.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: secondID)?["status"] as? String) == "Waiting Response" }, timeout: 15))
+        let diagnosticText = String(data: try JSONSerialization.data(withJSONObject: try diagnosticEvents()), encoding: .utf8) ?? ""
+        XCTAssertFalse(diagnosticText.contains("claude.turn.queued"), "Parallel Claude turns must not wait on a shared turn slot.")
+        XCTAssertFalse(diagnosticText.contains(firstPrompt))
+        XCTAssertFalse(diagnosticText.contains(secondPrompt))
+
+        try "Release the first Claude turn.\n".write(to: release, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: firstID)?["status"] as? String) == "Waiting Response" }, timeout: 20))
+        element("back-to-board-button").click()
+        openTask(named: "Held Claude conversation")
+        XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 20),
+                      "The held conversation should show its own answer once released.")
+
         let firstHistory = try XCTUnwrap(try runCLI(["conversation", "history", firstID])["result"] as? [String: Any])
         let firstMessages = firstHistory["messages"] as? [[String: Any]] ?? []
-        XCTAssertTrue(firstMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == "Please hold-claude-turn-for-concurrency." })
+        XCTAssertTrue(firstMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == firstPrompt })
         XCTAssertTrue(firstMessages.contains { ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "OK." })
         let secondHistory = try XCTUnwrap(try runCLI(["conversation", "history", secondID])["result"] as? [String: Any])
-        XCTAssertTrue((secondHistory["messages"] as? [[String: Any]] ?? []).contains { ($0["text"] as? String) == "Second Claude response." })
-        XCTAssertTrue((secondHistory["messages"] as? [[String: Any]] ?? []).contains { ($0["text"] as? String) == "OK." })
-        element("back-to-board-button").click()
-        openTask(named: "Second Claude conversation")
-        XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 15), "The reopened UI should show the queued CLI answer from persisted history.")
+        let secondMessages = secondHistory["messages"] as? [[String: Any]] ?? []
+        XCTAssertTrue(secondMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == secondPrompt })
+        XCTAssertTrue(secondMessages.contains {
+            ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "Inspection done: the workspace is ready."
+        })
+
+        // Activity rows and their measured durations belong to the conversation
+        // that ran them, not to whichever Claude turn finished last.
+        let parallelRows = (secondHistory["activities"] as? [[String: Any]] ?? []).filter { ($0["id"] as? String) == "toolu_read" }
+        XCTAssertEqual(parallelRows.count, 1, "The parallel conversation should keep its own activity row.")
+        XCTAssertEqual(parallelRows.first?["status"] as? String, "completed")
+        XCTAssertGreaterThan(parallelRows.first?["durationMs"] as? Int ?? 0, 0,
+                             "The parallel conversation's activity should persist its measured duration.")
+        XCTAssertTrue((firstHistory["activities"] as? [[String: Any]] ?? []).allSatisfy { ($0["id"] as? String) != "toolu_read" },
+                      "The held conversation must not inherit the parallel conversation's activity.")
+
+        // Each turn ran its CLI process inside its own task worktree.
+        let fixtureHistory = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
+        ) as? [String: Any])
+        let turns = try XCTUnwrap(fixtureHistory["turns"] as? [[String: Any]])
+        func workingDirectory(forPrompt prompt: String) -> String? {
+            turns.first { ($0["userText"] as? String) == prompt }.flatMap { $0["cwd"] as? String }
+        }
+        let firstWorktree = try XCTUnwrap(try taskRecord(id: firstID)?["worktreePath"] as? String)
+        let secondWorktree = try XCTUnwrap(try taskRecord(id: secondID)?["worktreePath"] as? String)
+        XCTAssertEqual(workingDirectory(forPrompt: firstPrompt).map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path },
+                       URL(fileURLWithPath: firstWorktree).resolvingSymlinksInPath().path)
+        XCTAssertEqual(workingDirectory(forPrompt: secondPrompt).map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path },
+                       URL(fileURLWithPath: secondWorktree).resolvingSymlinksInPath().path)
     }
 
-    // case-contract: test_conversation_releases_queued_claude_send_after_failure | When an active UI Claude turn fails while a CLI/XPC send is queued from a separate process, the failure releases the shared cross-process slot so the queued turn starts and completes. Diagnostics identify the bridge process and provider failure, and the UI shows the queued answer after reopening its task with fresh history.
-    func test_conversation_releases_queued_claude_send_after_failure() throws {
-        let executable = dataDirectory.appendingPathComponent("claude-fixture-concurrent-failure")
+    // case-contract: test_conversation_isolates_failing_claude_turn_from_parallel_send | A failing Claude turn does not disturb a conversation running in parallel. While one task's turn is held and then fails, a second task's send from a separate process completes on its own session and reaches Waiting Response; the failing task keeps its user message, records no final answer, and its provider process exit is the only failure in diagnostics. The UI shows the parallel answer after reopening its task with fresh history.
+    func test_conversation_isolates_failing_claude_turn_from_parallel_send() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-parallel-failure")
         let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
         try FileManager.default.copyItem(at: source, to: executable)
@@ -5043,70 +5071,149 @@ final class StationAIUITests: XCTestCase {
         ])["result"] as? [String: Any])
         let firstID = try XCTUnwrap(first["id"] as? String)
         let second = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Queued Claude conversation", "--repo", fixture.secondary.path, "--provider", "claude"
+            "task", "create", "--title", "Unaffected Claude conversation", "--repo", fixture.secondary.path, "--provider", "claude"
         ])["result"] as? [String: Any])
         let secondID = try XCTUnwrap(second["id"] as? String)
         let ready = URL(fileURLWithPath: executable.path + ".concurrent-turn-ready")
         let release = URL(fileURLWithPath: executable.path + ".concurrent-turn-release")
         defer {
             if FileManager.default.fileExists(atPath: ready.path) {
-                try? "Release the failing Claude turn.\n".write(to: release, atomically: true, encoding: .utf8)
+                try? "Fail the first Claude turn.\n".write(to: release, atomically: true, encoding: .utf8)
             }
         }
 
+        let firstPrompt = "Please fail-after-hold-claude-turn-for-concurrency."
+        let secondPrompt = "Second Claude turn after failure."
         openTask(named: "Failing Claude conversation")
         let firstComposer = element("message-composer")
         XCTAssertTrue(firstComposer.waitForExistence(timeout: 10))
         firstComposer.click()
-        firstComposer.typeText("Please fail-after-hold-claude-turn-for-concurrency.")
+        firstComposer.typeText(firstPrompt)
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15))
         let secondProcess = try startCLIProcess(
-            ["conversation", "send", secondID, "--message", "Second Claude turn after failure."],
+            ["conversation", "send", secondID, "--message", secondPrompt],
             extraEnvironment: ["STATIONAI_E2E_CLAUDE_EXECUTABLE": executable.path]
         )
-        XCTAssertTrue(waitUntil({
-            guard let record = try? self.taskRecord(id: secondID) else { return false }
-            return record["status"] as? String == "In Progress" && record["claudeSessionID"] != nil
-        }, timeout: 10), "The CLI/XPC send should wait while the UI turn owns Claude's slot.")
-        let secondSessionID = try XCTUnwrap(try taskRecord(id: secondID)?["claudeSessionID"] as? String)
-        let appProcessID = try XCTUnwrap(diagnosticEvents().first {
-            $0["event"] as? String == "claude.turn.started"
-                && $0["threadID"] as? String == (try? taskRecord(id: firstID)?["claudeSessionID"] as? String)
-        }?["clientPID"] as? String)
-        XCTAssertTrue(waitUntil({
-            guard let record = try? self.taskRecord(id: secondID) else { return false }
-            return record["status"] as? String == "In Progress"
-                && record["claudeSessionID"] as? String == secondSessionID
-        }, timeout: 15), "The CLI/XPC send should be accepted while the UI turn owns Claude's process slot.")
-        XCTAssertTrue(secondProcess.process.isRunning, "The CLI send should remain pending until the UI turn releases its process slot.")
-        Thread.sleep(forTimeInterval: 1)
-        try "Fail the first Claude turn.\n".write(to: release, atomically: true, encoding: .utf8)
         let secondResult = try finishCLIProcess(secondProcess)
         XCTAssertEqual(secondResult["ok"] as? Bool, true)
+        XCTAssertEqual(try taskRecord(id: firstID)?["status"] as? String, "In Progress",
+                       "The failing turn must still be held while the parallel conversation completes.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: secondID)?["status"] as? String) == "Waiting Response" }, timeout: 10))
 
+        try "Fail the first Claude turn.\n".write(to: release, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({
             (try? self.diagnosticEvents().contains {
                 $0["event"] as? String == "claude.process.exited" && $0["exitStatus"] as? String == "1"
             }) == true
-        }, timeout: 10), "The first Claude process failure should be recorded before the queued answer completes.")
-        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: secondID)?["status"] as? String) == "Waiting Response" }, timeout: 10))
+        }, timeout: 15), "The failing Claude process exit should be recorded.")
+        let firstSessionID = try XCTUnwrap(try taskRecord(id: firstID)?["claudeSessionID"] as? String)
+        let failureThreadIDs = Set(try diagnosticEvents().filter {
+            $0["event"] as? String == "claude.process.exited" && $0["exitStatus"] as? String == "1"
+        }.compactMap { $0["activeThreadID"] as? String })
+        XCTAssertEqual(failureThreadIDs, [firstSessionID], "Only the failing conversation's Claude process should exit with a failure.")
+
         let firstHistory = try XCTUnwrap(try runCLI(["conversation", "history", firstID])["result"] as? [String: Any])
         let firstMessages = firstHistory["messages"] as? [[String: Any]] ?? []
-        XCTAssertTrue(firstMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == "Please fail-after-hold-claude-turn-for-concurrency." })
-        XCTAssertFalse(firstMessages.contains { $0["role"] as? String == "assistant" && $0["phase"] as? String == "final_answer" })
+        XCTAssertTrue(firstMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == firstPrompt })
+        XCTAssertFalse(firstMessages.contains { $0["phase"] as? String == "final_answer" })
         let secondHistory = try XCTUnwrap(try runCLI(["conversation", "history", secondID])["result"] as? [String: Any])
         let secondMessages = secondHistory["messages"] as? [[String: Any]] ?? []
-        XCTAssertTrue(secondMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == "Second Claude turn after failure." })
+        XCTAssertTrue(secondMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == secondPrompt })
         XCTAssertTrue(secondMessages.contains { ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "OK." })
-        let queuedFailureEvent = try XCTUnwrap(diagnosticEvents().first {
-            $0["event"] as? String == "claude.turn.queued"
-                && $0["requestedThreadID"] as? String == secondSessionID
-        })
-        XCTAssertNotEqual(queuedFailureEvent["clientPID"] as? String, appProcessID, "The queued send must come from the separate bridge process.")
+
         element("back-to-board-button").click()
-        openTask(named: "Queued Claude conversation")
-        XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 15), "The reopened UI should show the queued CLI answer from persisted history.")
+        openTask(named: "Unaffected Claude conversation")
+        XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 15), "The reopened UI should show the parallel answer from persisted history.")
+    }
+
+    // case-contract: test_claude_stop_leaves_parallel_conversation_running | Stopping one Claude turn pauses only that conversation while a second Claude conversation runs in parallel. The parallel conversation answers and keeps its own activity rows and measured durations while the first turn is still thinking; the stopped task moves to Waiting Response with no failure reason, records no answer, and leaves the parallel task's Waiting Response result untouched. A fresh CLI/XPC read confirms both results.
+    func test_claude_stop_leaves_parallel_conversation_running() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-parallel-stop")
+        let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
+        try FileManager.default.copyItem(at: source, to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("StationAI test owns this Claude Code protocol fixture (v1).\n".utf8)
+            .write(to: dataDirectory.appendingPathComponent(".stationai-claude-fixture-owner"))
+        claudeFixtureExecutable = executable.path
+        launchApp(defaultParent: fixture.parent.path)
+
+        let stopped = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Stopped Claude conversation", "--repo", fixture.primary.path, "--provider", "claude"
+        ])["result"] as? [String: Any])
+        let stoppedID = try XCTUnwrap(stopped["id"] as? String)
+        let running = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Running Claude conversation", "--repo", fixture.secondary.path, "--provider", "claude"
+        ])["result"] as? [String: Any])
+        let runningID = try XCTUnwrap(running["id"] as? String)
+        let ready = URL(fileURLWithPath: executable.path + ".interrupt-ready")
+        let received = URL(fileURLWithPath: executable.path + ".interrupt-received")
+        let release = URL(fileURLWithPath: executable.path + ".interrupt-release")
+        defer {
+            if FileManager.default.fileExists(atPath: ready.path) {
+                try? "acknowledge interrupt\n".write(to: release, atomically: true, encoding: .utf8)
+            }
+        }
+
+        let parallelPrompt = "Inspect the workspace while the other conversation is busy."
+        openTask(named: "Stopped Claude conversation")
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        composer.click()
+        composer.typeText("Hold until stopped.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15),
+                      "Claude should be actively thinking in the first conversation before the second one starts.")
+
+        // The second conversation runs its own Claude turn in this same process.
+        element("back-to-board-button").click()
+        openTask(named: "Running Claude conversation")
+        let parallelComposer = element("message-composer")
+        XCTAssertTrue(parallelComposer.waitForExistence(timeout: 10))
+        parallelComposer.click()
+        parallelComposer.typeText(parallelPrompt)
+        element("send-message-button").click()
+        XCTAssertTrue(app.staticTexts["Inspection done: the workspace is ready."].waitForExistence(timeout: 30),
+                      "The parallel conversation should answer while the other turn is still thinking.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: runningID)?["status"] as? String) == "Waiting Response" }, timeout: 15))
+        XCTAssertEqual(try taskRecord(id: stoppedID)?["status"] as? String, "In Progress")
+
+        element("back-to-board-button").click()
+        openTask(named: "Stopped Claude conversation")
+        let stop = element("pause-response-button")
+        XCTAssertTrue(waitUntil({ stop.isEnabled }, timeout: 10), "Stop should be enabled while this conversation's turn is active.")
+        stop.click()
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: stoppedID)?["status"] as? String) == "Waiting Response" }, timeout: 10))
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: received.path) }, timeout: 10),
+                      "Claude should receive its native interrupt for the stopped conversation.")
+        try Data("acknowledge interrupt\n".utf8).write(to: release)
+        XCTAssertTrue(element("continue-response-button").waitForExistence(timeout: 20),
+                      "The stopped turn should reset its own composer to the resumable state.")
+
+        // Only the stopped conversation carries the paused result.
+        XCTAssertEqual(try taskRecord(id: stoppedID)?["status"] as? String, "Waiting Response")
+        XCTAssertNil(try taskRecord(id: stoppedID)?["statusMessage"] as? String,
+                     "A user-requested stop should not leave a failure reason.")
+        XCTAssertEqual(try taskRecord(id: runningID)?["status"] as? String, "Waiting Response")
+        XCTAssertNil(try taskRecord(id: runningID)?["statusMessage"] as? String,
+                     "Stopping one conversation must not mark the parallel conversation as failed.")
+
+        let stoppedHistory = try XCTUnwrap(try runCLI(["conversation", "history", stoppedID])["result"] as? [String: Any])
+        let stoppedMessages = stoppedHistory["messages"] as? [[String: Any]] ?? []
+        XCTAssertFalse(stoppedMessages.contains { $0["phase"] as? String == "final_answer" },
+                       "The stopped conversation must not record an answer.")
+        let runningHistory = try XCTUnwrap(try runCLI(["conversation", "history", runningID])["result"] as? [String: Any])
+        let runningMessages = runningHistory["messages"] as? [[String: Any]] ?? []
+        XCTAssertTrue(runningMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == parallelPrompt })
+        XCTAssertTrue(runningMessages.contains {
+            ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "Inspection done: the workspace is ready."
+        })
+        let runningRows = (runningHistory["activities"] as? [[String: Any]] ?? []).filter { ($0["id"] as? String) == "toolu_read" }
+        XCTAssertEqual(runningRows.count, 1, "The parallel conversation should keep its own activity row.")
+        XCTAssertGreaterThan(runningRows.first?["durationMs"] as? Int ?? 0, 0)
+        XCTAssertTrue((stoppedHistory["activities"] as? [[String: Any]] ?? []).allSatisfy { ($0["id"] as? String) != "toolu_read" },
+                      "The stopped conversation must not inherit the parallel conversation's activity.")
     }
 
     // case-contract: test_conversation_serializes_concurrent_sends | Two concurrent sends for the same task are serialized across the app and CLI/XPC paths against the local Codex app-server fixture; the second waits for the first, both complete on the persisted thread, the task remains In Progress while a send is active, and successful turns without outcome calls finish in Waiting Response.

@@ -4601,7 +4601,7 @@ final class ConversationManager {
         try tasks.prepareConversationTurnOutcome(taskID)
         defer { tasks.clearConversationTurnOutcome(taskID) }
         var persistedThreadID = task.activeConversationID
-        StationAIDiagnostics.record("conversation.send.started", fields: client.diagnosticFields([
+        StationAIDiagnostics.record("conversation.send.started", fields: client.diagnosticFields(forThread: persistedThreadID ?? "", [
             "taskID": taskID.uuidString,
             "threadID": task.activeConversationID ?? "new",
             "taskStatus": task.status.rawValue,
@@ -4958,7 +4958,7 @@ final class ConversationManager {
                     transcript.segments[index].handoffDelivered = true
                 }
             }
-            for (activityID, durationMs) in client.lastTurnActivityDurations {
+            for (activityID, durationMs) in persistedThreadID.map({ client.lastTurnActivityDurations(threadID: $0) }) ?? [:] {
                 try await tasks.recordConversationActivityDuration(
                     taskID: taskID,
                     activityID: activityID,
@@ -4972,7 +4972,7 @@ final class ConversationManager {
             _ = try await tasks.setLifecycleStatus(taskID, to: finalStatus)
         } catch {
             await titleGeneration?.value
-            for (activityID, durationMs) in client.lastTurnActivityDurations {
+            for (activityID, durationMs) in persistedThreadID.map({ client.lastTurnActivityDurations(threadID: $0) }) ?? [:] {
                 try? await tasks.recordConversationActivityDuration(
                     taskID: taskID,
                     activityID: activityID,
@@ -4990,10 +4990,10 @@ final class ConversationManager {
             fields["provider"] = provider.rawValue
             fields["phase"] = phase
             fields["storePath"] = StationAIDiagnostics.storeURL.path
-            fields.merge(client.diagnosticFields()) { _, new in new }
+            fields.merge(client.diagnosticFields(forThread: persistedThreadID ?? "", [:])) { _, new in new }
             let shutdownMessage = "StationAI closed while this turn was running. Your conversation is saved; review it and send a follow-up to continue."
             let shouldKeepResumable = client.isPreparingForApplicationTermination
-            let wasUserInterrupted = client.wasLastTurnInterrupted
+            let wasUserInterrupted = persistedThreadID.map { client.wasLastTurnInterrupted(threadID: $0) } ?? false
             let shouldKeepWaiting = shouldKeepResumable || wasUserInterrupted
             let safeFailureMessage = hideSensitiveRecoveryPrompt
                 ? "The private answer could not be applied. Please answer the question again."
