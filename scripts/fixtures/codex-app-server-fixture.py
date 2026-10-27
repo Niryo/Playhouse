@@ -304,7 +304,7 @@ def main():
                     "threadStartCount": history.get("threadStartCount", 0) + 1,
                 })
                 history_path.write_text(json.dumps(history), encoding="utf-8")
-            write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": "gpt-6-luna"}})
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": message.get("params", {}).get("model", "gpt-6-luna")}})
         elif message.get("method") == "thread/resume":
             resume_error = Path(str(sys.argv[0]) + ".resume-error")
             if resume_error.is_file():
@@ -336,7 +336,7 @@ def main():
                     message.get("params", {}).get("developerInstructions")
                 )
                 history_path.write_text(json.dumps(history), encoding="utf-8")
-            write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": "gpt-6-luna"}})
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": message.get("params", {}).get("model", "gpt-6-luna")}})
         elif message.get("method") == "turn/start":
             saw_turn = True
             saw_question = True
@@ -346,6 +346,8 @@ def main():
             turn_message = next((item.get("text") for item in turn_input if item.get("type") == "text"), None)
             is_title_request = (turn_message or "").startswith("Write a concise task title of at most 8 words")
             serial_first_turn = False
+            if "-unique-turns-" in mode and not is_title_request:
+                TURN_ID = f"turn-{uuid.uuid4()}"
             if serial_mode and not is_title_request:
                 TURN_ID = f"turn-{uuid.uuid4()}"
                 first_turn_marker = Path(str(sys.argv[0]) + ".serial-first-turn")
@@ -555,7 +557,22 @@ def main():
                             continue
                         incoming = json.loads(sys.stdin.readline())
                         if incoming.get("method") == "thread/items/list":
-                            write({"jsonrpc": "2.0", "id": incoming["id"], "result": {"data": [], "nextCursor": None}})
+                            entries = []
+                            for index, saved_turn in enumerate(serial_history().get("messages", []), start=1):
+                                turn_id = saved_turn["turnID"]
+                                entries.append({"turnId": turn_id, "item": {
+                                    "id": f"item_stationai_async_user_{index}", "type": "userMessage",
+                                    "content": [{"type": "text", "text": saved_turn["userMessage"]}],
+                                }})
+                                if index == 1:
+                                    entries.extend([
+                                        {"turnId": turn_id, "item": async_question_item()},
+                                        {"turnId": turn_id, "item": {
+                                            "id": "item_stationai_async_followup", "type": "agentMessage",
+                                            "phase": "final_answer", "text": "I can continue while you decide.",
+                                        }},
+                                    ])
+                            write({"jsonrpc": "2.0", "id": incoming["id"], "result": {"data": entries, "nextCursor": None}})
                         elif incoming.get("method") == "turn/steer":
                             params = incoming.get("params", {})
                             if params.get("threadId") != THREAD_ID or params.get("expectedTurnId") != TURN_ID:
@@ -1279,22 +1296,28 @@ def main():
                     {"id": "item_stationai_plan", "type": "plan", "text": MARKDOWN_PLAN},
                 ]
             entries = []
-            for item in contents:
-                if (
-                    os.path.basename(sys.argv[0]).endswith("-unassociated-restart-question")
-                    and item.get("type") == "userMessage"
-                ):
+            saved_turns = saved_history.get("messages") or saved_history.get("turns") or []
+            unassociated_restart_question = os.path.basename(sys.argv[0]).endswith("-unassociated-restart-question")
+            for index, item in enumerate(contents):
+                item_id = item.get("id", "")
+                turn_id = TURN_ID
+                if saved_turns:
+                    try:
+                        if item_id.startswith("item_long_history_"):
+                            turn_index = int(item_id.rsplit("_", 1)[1]) - 1
+                        elif item_id.rsplit("_", 1)[-1].isdigit():
+                            turn_index = int(item_id.rsplit("_", 1)[1]) - 1
+                        else:
+                            turn_index = min(index // 2, len(saved_turns) - 1)
+                    except (ValueError, IndexError):
+                        turn_index = -1
+                    if 0 <= turn_index < len(saved_turns):
+                        turn_id = saved_turns[turn_index].get("turnID", TURN_ID)
+                        if turn_index == 1:
+                            item["createdAt"] = "2026-10-26T12:34:00Z"
+                if unassociated_restart_question and item.get("type") == "userMessage":
                     entries.append({"item": item})
                 else:
-                    item_id = item.get("id", "")
-                    turn_id = TURN_ID
-                    if saved_history.get("turns"):
-                        try:
-                            turn_index = int(item_id.rsplit("_", 1)[1]) - 1
-                        except (ValueError, IndexError):
-                            turn_index = -1
-                        if 0 <= turn_index < len(saved_history["turns"]):
-                            turn_id = saved_history["turns"][turn_index].get("turnID", TURN_ID)
                     entries.append({"item": item, "turnId": turn_id})
             write({"jsonrpc": "2.0", "id": message["id"], "result": {
                 "data": entries,

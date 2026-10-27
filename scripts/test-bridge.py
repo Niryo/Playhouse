@@ -4744,10 +4744,10 @@ class StationAIBridgeTests(unittest.TestCase):
         )[0])["models"]
         self.assertEqual(aliases_only, [], "Claude aliases should not be exposed without a concrete versioned choice.")
 
-    # case-contract: test_conversation_effort_dispatches_to_codex | The selected effort persists through CLI/XPC reads and reaches Codex turn/start collaborationMode.settings.reasoningEffort; a model's advertised effort limit rejects unsupported requests before history is created. The UI selects Extra High and sends a Codex fixture turn whose recorded protocol value is xhigh.
+    # case-contract: test_conversation_effort_dispatches_to_codex | The selected effort persists through CLI/XPC reads and reaches Codex turn/start collaborationMode.settings.reasoningEffort; a model's advertised effort limit rejects unsupported requests before history is created. The UI selects Extra High and sends a Sol turn, then simulates a legacy transcript with no Codex turn metadata and sends a Luna turn; the old reply remains provider-only and the new reply is attributed to Luna. The latest reply shows its provider timestamp, while a legacy history item without createdAt has no timestamp label.
     def test_conversation_effort_dispatches_to_codex(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
-        executable = self.data_directory / "codex-fixture-effort-success"
+        executable = self.data_directory / "codex-fixture-effort-unique-turns-success"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
         (self.data_directory / ".stationai-codex-fixture-owner").write_text(
@@ -4766,12 +4766,35 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assert_failure(unsupported, "invalid_argument")
         self.assertIn("not supported by model 'gpt-6-mini'", unsupported["error"]["message"])
         self.assertEqual(self.assert_success(self.call_cli("conversation", "history", task_id)[0])["messages"], [])
-        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Check Codex effort.", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-6-sol")[0])
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"], "gpt-6-sol",
+                          "The selected (non-default) model persists for the UI label to read back.")
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Check Codex effort.", "--model", "gpt-6-sol",
+            extra_environment=environment
+        )[0])
         history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
         self.assertEqual(history["turns"][-1]["reasoningEffort"], "xhigh")
         self.assertEqual(self.assert_success(self.call_cli("conversation", "effort", task_id)[0])["effort"], "xhigh")
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"], "gpt-6-sol",
+                          "Sending a turn must not silently fall back to the default model.")
+        transcript_path = self.data_directory / "conversation-transcripts" / f"{task_id.upper()}.json"
+        transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
+        for segment in transcript["segments"]:
+            segment["codexTurnIDs"] = []
+            segment.pop("codexTurnModelIDs", None)
+        transcript_path.write_text(json.dumps(transcript), encoding="utf-8")
+        self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-6-luna")[0])
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Check the next model.", "--model", "gpt-6-luna", extra_environment=environment)[0])
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+        assistants = [message for message in history["messages"] if message["role"] == "assistant"]
+        self.assertGreaterEqual(len(assistants), 2)
+        self.assertIsNone(assistants[0].get("modelID"), "Legacy replies without stored model attribution must remain provider-only.")
+        self.assertIsNone(assistants[0].get("createdAt"), "Legacy provider history without a timestamp must stay timestamp-free.")
+        self.assertEqual(assistants[-1]["modelID"], "gpt-6-luna")
+        self.assertEqual(assistants[-1]["createdAt"], "2026-10-26T12:34:00Z")
 
-    # case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 as the concrete latest choice. The Claude composer retains native Default dispatch until a model is explicitly selected. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
+    # case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 as the concrete latest choice. Selecting it changes the prompt and reply label to Claude · Opus 5.5, and later model changes preserve the old reply's model attribution. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
     def test_conversation_effort_dispatches_to_claude(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-effort"
@@ -4783,12 +4806,20 @@ class StationAIBridgeTests(unittest.TestCase):
         environment = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)}
         created, _ = self.call_cli("task", "create", "--title", "Claude effort dispatch", "--root", self.primary, "--provider", "claude")
         task_id = self.assert_success(created)["id"]
+        self.assert_success(self.call_cli("conversation", "model", task_id, "set", "claude-opus-5-5")[0])
         self.assert_success(self.call_cli("conversation", "effort", task_id, "set", "xhigh")[0])
-        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Check Claude effort.", extra_environment=environment)[0])
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Check Claude effort.", "--model", "claude-opus-5-5", extra_environment=environment)[0])
         history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
         self.assertEqual(history["turns"][-1]["effort"], "xhigh")
-        self.assertNotIn("--model", history["turns"][-1]["arguments"])
+        arguments = history["turns"][-1]["arguments"]
+        self.assertIn("--model", arguments)
+        model_argument_index = arguments.index("--model")
+        self.assertEqual(arguments[model_argument_index + 1], "claude-opus-5-5")
         self.assertEqual(self.assert_success(self.call_cli("conversation", "effort", task_id)[0])["effort"], "xhigh")
+        self.assert_success(self.call_cli("conversation", "model", task_id, "set", "claude-sonnet-5-5")[0])
+        visible = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+        assistant = next(message for message in visible["messages"] if message["role"] == "assistant")
+        self.assertEqual(assistant["modelID"], "claude-opus-5-5", "Changing the selected model must not rewrite prior turn attribution.")
 
     # case-contract: test_thread_goal_lifecycle_persists_through_cli_xpc | CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime.
     def test_thread_goal_lifecycle_persists_through_cli_xpc(self):
@@ -5259,7 +5290,7 @@ class StationAIBridgeTests(unittest.TestCase):
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Waiting Response")
 
-    # case-contract: test_codex_async_questions_render_and_reply_as_followup | Async agentMessage questions retain choices and a free-text prompt in live updates and fresh CLI/XPC history, stay separate from later assistant text, and receive validated answers through the shared manager during and after an active turn. The UI shows inline answer cards instead of raw bullet text, blocks incomplete answers, preserves answered cards across reopening, and displays both submitted answers and responses.
+    # case-contract: test_codex_async_questions_render_and_reply_as_followup | Async agentMessage questions retain choices and a free-text prompt in live updates and fresh CLI/XPC history, retain accepted-turn model attribution during an active history reload, stay separate from later assistant text, and receive validated answers through the shared manager during and after an active turn. The UI shows inline answer cards instead of raw bullet text, blocks incomplete answers, preserves answered cards across reopening, and displays both submitted answers and responses.
     def test_codex_async_questions_render_and_reply_as_followup(self):
         task_id = self.create_task("Async Codex question", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -5279,6 +5310,7 @@ class StationAIBridgeTests(unittest.TestCase):
         reloaded, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         live_history = self.assert_success(reloaded)
         question = next(message for message in live_history["messages"] if message["id"] == "item_stationai_async_question")
+        self.assertEqual(question.get("modelID"), "gpt-6-luna", "Fresh history must read the accepted active turn and its model attribution.")
         invalid, _ = self.call_cli("conversation", "answer-async", task_id, question["id"], "--answer", "Yes, update paired tests and run required verification", expected_status=2, extra_environment=env)
         self.assertEqual(invalid["error"]["code"], "invalid_argument")
         reply = "Test and verify: Yes, update paired tests and run required verification\nAdditional detail: Keep the draft intact."

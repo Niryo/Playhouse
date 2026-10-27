@@ -310,6 +310,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void,
         onSteerMessage: @escaping (String, [String]) -> Void = { _, _ in },
         onProgressMessage: @escaping (ConversationMessage) -> Void = { _ in },
+        onTurnStarted: @escaping (String) -> Void,
         sensitiveUserInputAnswerValues: [String] = [],
         hideSensitiveRecoveryPrompt: Bool = false
     ) async throws {

@@ -1,6 +1,6 @@
 # Workflow review: global selected model
 
-Task: `615D10F1-673D-4F93-87ED-E851DE9819F2` — Persisted Model: Global or Per-Conversation?  
+Task: `615D10F1-673D-4F93-87ED-E851DE9819F2` — Persisted Model: Global or Per-Conversation?
 Client date: 2026-10-26 (Asia/Jerusalem)
 
 ## Timeline and timing

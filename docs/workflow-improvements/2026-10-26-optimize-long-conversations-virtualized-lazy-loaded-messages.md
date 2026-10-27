@@ -1,6 +1,6 @@
 # Optimize long conversations with virtualized, lazy-loaded messages
 
-Task: `CD4F351C-A255-48DA-9232-56C42509AECB`  
+Task: `CD4F351C-A255-48DA-9232-56C42509AECB`
 Client date: 2026-10-26
 
 ## Timeline and evidence

@@ -1,6 +1,6 @@
 # Show active agents and latest process outside Working for
 
-Task: `EDF29C57-7679-4297-932C-131B3FD50529`  
+Task: `EDF29C57-7679-4297-932C-131B3FD50529`
 Client date: 2026-10-26 (Asia/Jerusalem)
 
 ## Timeline and measured cost

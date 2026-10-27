@@ -1,6 +1,6 @@
 # Workflow analysis: Make Questions Nonblocking Across Conversations
 
-Task: `BD1B15FA-4F04-490E-B701-E295B5F90C7F`  
+Task: `BD1B15FA-4F04-490E-B701-E295B5F90C7F`
 Client date: 2026-10-26 (Asia/Jerusalem)
 
 ## Observed timeline
