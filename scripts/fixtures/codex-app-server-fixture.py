@@ -996,7 +996,8 @@ def main():
                         "threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"},
                     }})
                     continue
-                if not turn_message or "Green" not in turn_message or "fixture-secret" not in turn_message:
+                expected_color_answer = "Custom approach" if "-nonblocking" in mode else "Green"
+                if not turn_message or expected_color_answer not in turn_message or "fixture-secret" not in turn_message:
                     write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                         "threadId": THREAD_ID,
                         "turn": {"id": TURN_ID, "status": "failed", "error": {"message": "Recovery turn omitted a re-entered answer."}},

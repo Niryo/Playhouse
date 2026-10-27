@@ -2309,9 +2309,13 @@ final class BoardTaskManager {
             }
             let pendingQuestion = try conversationTranscriptStore().read(id).pendingUserInputRequest
             if let pendingQuestion, pendingQuestion.threadID == threadID, task.status != .done {
-                if task.status != .inProgress || task.statusMessage != "Waiting for your saved question to be answered." {
-                    task.status = .inProgress
-                    task.statusMessage = "Waiting for your saved question to be answered."
+                let pendingStatus: TaskStatus = pendingQuestion.isBlocking ? .waitingResponse : .inProgress
+                let pendingStatusMessage = pendingQuestion.isBlocking
+                    ? "Waiting for your saved question to be answered."
+                    : "A saved question is available for your response."
+                if task.status != pendingStatus || task.statusMessage != pendingStatusMessage {
+                    task.status = pendingStatus
+                    task.statusMessage = pendingStatusMessage
                     clearProgressReport(task)
                     try await saveTaskContext(taskID: id)
                 }
@@ -3459,6 +3463,10 @@ final class ConversationManager {
         let client = client(for: task)
         if client.answerUserInput(requestID: request.id, threadID: request.threadID, answers: answers) {
             try clearPendingUserInputRequest(taskID: taskID, requestID: request.id)
+            if request.isBlocking {
+                let resumed = try await tasks.resumeWaitingResponseAfterUserInput(taskID)
+                onUpdate(ConversationUpdate(type: "task_status", taskStatus: resumed.status))
+            }
             return true
         }
 
@@ -4927,11 +4935,17 @@ final class ConversationManager {
                         onUpdate(ConversationUpdate(type: "action_notice", message: "Couldn't save the pending question. The provider turn was stopped so the question isn't lost."))
                         return
                     }
+                    // A blocking provider question pauses the conversation until
+                    // the user answers. Reflect that pause on the board even
+                    // though the provider turn remains reserved in the background.
+                    let lifecycle = request.isBlocking
+                        ? try? await self.tasks.transitionLifecycleStatus(taskID, from: .inProgress, to: .waitingResponse)
+                        : nil
                     let status = try? await self.tasks.clearProgressReport(taskID)
                     onUpdate(ConversationUpdate(
                         type: "user_input",
                         userInputRequest: request,
-                        taskStatus: status?.status
+                        taskStatus: lifecycle != nil ? TaskStatus.waitingResponse.rawValue : status?.status
                     ))
                     if !userInputAnswers.isEmpty {
                         let answersAccepted = client.answerUserInput(requestID: request.id, threadID: request.threadID, answers: userInputAnswers)
@@ -4939,6 +4953,10 @@ final class ConversationManager {
                             onUpdate(ConversationUpdate(type: "action_notice", message: "The supplied answers didn't match \(provider.displayName)'s questions."))
                         } else {
                             try? self.clearPendingUserInputRequest(taskID: taskID, requestID: request.id)
+                            if request.isBlocking,
+                               let resumed = try? await self.tasks.resumeWaitingResponseAfterUserInput(taskID) {
+                                onUpdate(ConversationUpdate(type: "task_status", taskStatus: resumed.status))
+                            }
                         }
                     }
                     await onUserInput(request)
@@ -5032,13 +5050,22 @@ final class ConversationManager {
             let safeFailureMessage = hideSensitiveRecoveryPrompt
                 ? "The private answer could not be applied. Please answer the question again."
                 : Self.redactingSensitiveText(error.localizedDescription, values: sensitiveUserInputAnswerValues)
-            let failureStatus: TaskStatus = hideSensitiveRecoveryPrompt
-                ? .inProgress
-                : (shouldKeepWaiting ? .waitingResponse : .blocked)
+            let pendingQuestion = try? transcripts.read(taskID).pendingUserInputRequest
+            let hasPendingBlockingQuestion = pendingQuestion?.isBlocking == true
+            let failureStatus: TaskStatus
+            if hasPendingBlockingQuestion || shouldKeepWaiting {
+                failureStatus = .waitingResponse
+            } else if hideSensitiveRecoveryPrompt {
+                failureStatus = .inProgress
+            } else {
+                failureStatus = .blocked
+            }
             _ = try? await tasks.setLifecycleStatus(
                 taskID,
                 to: failureStatus,
-                message: shouldKeepResumable ? shutdownMessage : (wasUserInterrupted ? nil : safeFailureMessage)
+                message: shouldKeepResumable
+                    ? shutdownMessage
+                    : (wasUserInterrupted ? nil : (hasPendingBlockingQuestion ? "Waiting for your saved question to be answered." : safeFailureMessage))
             )
             StationAIDiagnostics.record("conversation.send.failed", fields: fields)
             if hideSensitiveRecoveryPrompt || !sensitiveUserInputAnswerValues.isEmpty {

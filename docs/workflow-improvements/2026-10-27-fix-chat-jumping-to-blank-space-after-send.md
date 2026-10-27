@@ -1,6 +1,6 @@
 # Fix Chat Jumping to Blank Space After Send
 
-Task: `40E8A7F6-ABD5-47FB-8C2A-557BCADEC801`  
+Task: `40E8A7F6-ABD5-47FB-8C2A-557BCADEC801`
 Scope: the chat scroll fix and its paired CLI/UI coverage. Times below are UTC on 2026-10-27.
 
 ## Observed timeline
