@@ -503,8 +503,10 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
               let turnID = turn["id"] as? String else {
             throw ClientError.protocolFailure("Codex did not return a turn ID.")
         }
-        activeTurnID = turnID
-        isTurnActive = true
+        let turnKey = Self.turnKey(threadID: threadID, turnID: turnID)
+        let turnAlreadyCompleted = completedTurns[turnKey] != nil
+        activeTurnID = turnAlreadyCompleted ? nil : turnID
+        isTurnActive = !turnAlreadyCompleted
         ConversationSteerMailbox.publishActiveTurn(threadID: threadID, turnID: turnID)
         Self.processActiveThreadIDs.insert(threadID)
         StationAIDiagnostics.record("codex.turn.started", fields: diagnosticFields([
@@ -514,7 +516,6 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             "workspaceRootCount": String(workspace.roots.count),
         ]))
 
-        let turnKey = Self.turnKey(threadID: threadID, turnID: turnID)
         switch turn["status"] as? String {
         case "completed":
             break
@@ -1282,12 +1283,16 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 "turnStatus": turn["status"] as? String ?? "unknown",
             ]))
 
-            if goalObservationThreadID == threadID, activeTurnID == turnID {
+            let isMatchingActiveTurn = activeThreadID == threadID && activeTurnID == turnID
+            if isMatchingActiveTurn {
                 activeTurnID = nil
                 isTurnActive = false
-                goalTurnCompletedTurnID = turnID
                 Self.processActiveThreadIDs.remove(threadID)
                 ConversationSteerMailbox.clearActiveTurn(threadID: threadID)
+            }
+
+            if goalObservationThreadID == threadID, isMatchingActiveTurn {
+                goalTurnCompletedTurnID = turnID
                 goalTurnRevision += 1
                 goalTurnCompletedRevision += 1
                 return

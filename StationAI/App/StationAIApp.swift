@@ -66,6 +66,8 @@ struct StationAIApp: App {
                 Button("Search Tasks") {
                     NotificationCenter.default.post(name: .stationAIShowBoardSearch, object: nil)
                 }
+                .buttonHoverPointer()
+                .help("Search tasks")
                 .keyboardShortcut("f", modifiers: .command)
             }
         }

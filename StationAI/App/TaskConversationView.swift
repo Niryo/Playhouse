@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
@@ -236,7 +237,7 @@ struct TaskConversationView: View {
     @FocusState private var isRepositorySearchFocused: Bool
 
     private var isSendDisabled: Bool {
-        !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isResponding || isLoadingHistory
+        !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isDisplayingActiveResponse || isLoadingHistory
     }
 
     private var isRepositoryRootConfigured: Bool {
@@ -334,15 +335,31 @@ struct TaskConversationView: View {
     }
 
     private var currentActivity: ConversationActivity? {
-        activities.last(where: \.isActive)
+        let active = activities.filter(\.isActive)
+        return active.max {
+            if let leftOrder = $0.timelineOrder, let rightOrder = $1.timelineOrder, leftOrder != rightOrder {
+                return leftOrder < rightOrder
+            }
+            if let leftStarted = $0.startedAt, let rightStarted = $1.startedAt, leftStarted != rightStarted {
+                return leftStarted < rightStarted
+            }
+            return false
+        } ?? active.last
     }
 
     private var hasCompletedAssistantResponse: Bool {
         guard let latestUserIndex = messages.lastIndex(where: { $0.role == .user }) else {
             return messages.contains { $0.role == .assistant && $0.phase == "final_answer" }
         }
-        return messages.dropFirst(latestUserIndex + 1).contains {
+        let messagesAfterLatestUser = messages.dropFirst(latestUserIndex + 1)
+        if messagesAfterLatestUser.contains(where: {
             $0.role == .assistant && $0.phase == "final_answer"
+        }) {
+            return true
+        }
+        guard !providerTurnIsActive else { return false }
+        return messagesAfterLatestUser.contains {
+            $0.role == .assistant && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
     }
 
@@ -465,7 +482,10 @@ struct TaskConversationView: View {
                 isResponding = submittedTurnIsPending
                 return
             }
-            isResponding = submittedTurnIsPending || (isTurnActive && providerClient.isTurnActive(threadID: taskThreadID))
+            let completedTurnIsVisible = hasCompletedAssistantResponse && !isTurnActive
+            isResponding = completedTurnIsVisible
+                ? false
+                : submittedTurnIsPending || (isTurnActive && providerClient.isTurnActive(threadID: taskThreadID))
         }
         .onChange(of: codexClient.goalStateRevision) { _, _ in
             guard codexClient.goalStateThreadID == task.codexThreadID else { return }
@@ -1088,6 +1108,7 @@ struct TaskConversationView: View {
                     Text(currentActivity.title)
                         .font(.system(size: 11, weight: .medium))
                         .lineLimit(1)
+                        .id(currentActivity.id)
                         .accessibilityIdentifier("current-activity-title")
                     Spacer(minLength: 4)
                     if currentActivity.startedAt != nil {
@@ -1432,10 +1453,11 @@ struct TaskConversationView: View {
                                     .font(.system(size: 29, weight: .regular))
                                     .foregroundStyle(Color.accentColor.opacity(0.8))
                                     .accessibilityLabel("Conversation")
-                                Text("Send a message to \(selectedModelName.isEmpty ? provider.defaultModelName : selectedModelName).")
+                                Text("Send a message to \(provider.assistantLabel).")
                                     .font(.system(size: 14, weight: .medium))
                                     .foregroundStyle(.secondary)
-                                    .accessibilityLabel("Send a message to \(selectedModelName.isEmpty ? provider.defaultModelName : selectedModelName).")
+                                    .accessibilityLabel("Send a message to \(provider.assistantLabel).")
+                                    .accessibilityIdentifier("model-prompt")
                             }
                             Spacer(minLength: 28)
                         }
@@ -1529,7 +1551,7 @@ struct TaskConversationView: View {
                 scrollToLatest(using: scrollProxy)
             }
             .onChange(of: hasCompletedAssistantResponse) { _, hasCompletedResponse in
-                if hasCompletedResponse {
+                if hasCompletedResponse && activities.isEmpty {
                     isActivityExpanded = false
                 }
             }
@@ -1592,7 +1614,7 @@ struct TaskConversationView: View {
             // Keep active child rows in the materialized activity container so
             // accessibility can discover them even when the conversation
             // timeline is still settling its scroll position.
-            if isDisplayingActiveResponse {
+            if isDisplayingActiveResponse || !activeSubagents.isEmpty {
                 ForEach(activities.filter(\.isSubagent)) { activity in
                     subagentTimelineRow(activity)
                 }
@@ -1697,12 +1719,11 @@ struct TaskConversationView: View {
             .contentShape(Rectangle())
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 5)
-            .accessibilityElement(children: .contain)
         }
         .buttonHoverPointer()
         .help("Open the read-only conversation for this agent")
         .buttonStyle(.plain)
-        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(activity.title) \(activity.timelineStatus)")
         .accessibilityValue([activity.detail, activity.durationLabel()].compactMap { $0 }.joined(separator: "\n"))
         .accessibilityIdentifier("codex-subagent-row-\(activity.childThreadID ?? activity.id)")
     }
@@ -1801,16 +1822,16 @@ struct TaskConversationView: View {
     private func providerBoundaryRow(_ boundary: ConversationProviderBoundary) -> some View {
         HStack(spacing: 10) {
             Rectangle().fill(Color.primary.opacity(0.12)).frame(height: 1)
-            Text("Switched to \(boundary.provider.displayName)")
+            Text("Conversation switched to \(boundary.provider.displayName)")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .fixedSize()
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Conversation switched to \(boundary.provider.displayName)")
+                .accessibilityIdentifier("provider-boundary-\(boundary.provider.rawValue)")
             Rectangle().fill(Color.primary.opacity(0.12)).frame(height: 1)
         }
         .padding(.vertical, 4)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Conversation switched to \(boundary.provider.displayName)")
-        .accessibilityIdentifier("provider-boundary-\(boundary.provider.rawValue)")
         .id(boundary.id)
     }
 
@@ -2019,6 +2040,11 @@ struct TaskConversationView: View {
     private func submitAsyncQuestions(_ message: ConversationMessage) {
         guard let questions = message.asyncQuestions, !questions.isEmpty else { return }
         let answers = questions.indices.map { asyncQuestionAnswers[asyncQuestionKey(messageID: message.id, index: $0)] ?? "" }
+        let priorAssistantMessages = Dictionary(
+            uniqueKeysWithValues: messages
+                .filter { $0.role == .assistant }
+                .map { ($0.id, $0.text) }
+        )
         isSubmittingLiveMessage = true
         Task { @MainActor in
             defer { isSubmittingLiveMessage = false }
@@ -2032,7 +2058,27 @@ struct TaskConversationView: View {
                 } else if result.queued {
                     refreshQueuedMessages()
                 } else {
-                    messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: result.text))
+                    var settledHistory: ConversationHistory?
+                    for _ in 0..<50 {
+                        if let history = try? await conversationManager.history(taskID: task.id),
+                           history.messages.contains(where: { candidate in
+                               candidate.role == .assistant &&
+                               candidate.asyncQuestions == nil &&
+                               !candidate.text.isEmpty &&
+                               priorAssistantMessages[candidate.id] != candidate.text
+                           }) {
+                            settledHistory = history
+                            break
+                        }
+                        try? await Task.sleep(nanoseconds: 100_000_000)
+                    }
+                    if let settledHistory {
+                        messages = settledHistory.messages
+                        activities = settledHistory.activities
+                        answeredAsyncQuestionIDs = Set(settledHistory.answeredAsyncQuestionIDs)
+                    } else {
+                        messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: result.text))
+                    }
                 }
                 errorMessage = nil
             } catch { errorMessage = error.localizedDescription }
@@ -2041,6 +2087,9 @@ struct TaskConversationView: View {
 
     private func assistantBubble(_ message: ConversationMessage) -> some View {
         let displayText = Self.displayableAssistantText(message.text)
+        let accessibilityText = displayText.count <= 1_000 && !displayText.isEmpty
+            ? displayText
+            : "Waiting for \((message.provider ?? provider).displayName) response"
         let responseAnnotations = responseAnnotationReferences(for: message)
         return VStack(alignment: .leading, spacing: 6) {
             Text((message.provider ?? provider).assistantLabel)
@@ -2049,8 +2098,8 @@ struct TaskConversationView: View {
                 .accessibilityIdentifier("assistant-provider-\(message.id)")
 
             assistantMarkdownContent(displayText, messageID: message.id, responseAnnotations: responseAnnotations)
-            .font(.system(size: 16, weight: .regular))
-            .foregroundStyle(WorkspaceTheme.conversationText)
+                .font(.system(size: 16, weight: .regular))
+                .foregroundStyle(WorkspaceTheme.conversationText)
             .padding(.horizontal, 15)
             .padding(.vertical, 11)
             .background(
@@ -2058,42 +2107,54 @@ struct TaskConversationView: View {
                 in: RoundedRectangle(cornerRadius: 17, style: .continuous)
             )
             .accessibilityElement(children: .contain)
-            .accessibilityLabel(displayText.isEmpty ? "Waiting for \(provider.displayName) response" : String(Self.markdownAttributedText(displayText).characters))
+            .accessibilityLabel(accessibilityText)
             .accessibilityIdentifier("assistant-message-\(message.id)")
         }
         .frame(maxWidth: 620, alignment: .leading)
     }
 
     private func userBubble(_ message: ConversationMessage) -> some View {
-        VStack(alignment: .trailing, spacing: 8) {
-            ForEach(Array(message.imageDataURLs.enumerated()), id: \.offset) { index, dataURL in
-                if let image = Self.image(fromDataURL: dataURL) {
-                    Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 260, maxHeight: 220)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
+        let accessibleText = Self.displayableUserText(message.text)
+        return ZStack(alignment: .topLeading) {
+            VStack(alignment: .trailing, spacing: 8) {
+                ForEach(Array(message.imageDataURLs.enumerated()), id: \.offset) { index, dataURL in
+                    if let image = Self.image(fromDataURL: dataURL) {
+                        Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 260, maxHeight: 220)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                            .accessibilityIdentifier(
+                                accessibleText.isEmpty
+                                    ? "user-message-\(message.id)"
+                                    : "chat-image-\(message.id)-\(index)"
+                            )
+                    }
+                }
+                let visibleText = Self.displayableUserText(message.text)
+                if !visibleText.isEmpty {
+                    SelectableAnnotationText(
+                        text: visibleText,
+                        annotations: annotations.filter { $0.messageID == message.id && $0.blockID == 0 },
+                        textColor: .white,
+                        onSelection: { range, selectedText, bounds in
+                            currentTextSelection = selectedText.isEmpty ? nil : AnnotationSelection(
+                                messageID: message.id, blockID: 0, range: range, text: selectedText, bounds: bounds
+                            )
+                        }
+                    )
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 16).padding(.vertical, 11)
+                        .background(WorkspaceTheme.accent, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
                 }
             }
-            let visibleText = Self.displayableUserText(message.text)
-            if !visibleText.isEmpty {
-                SelectableAnnotationText(
-                    text: visibleText,
-                    annotations: annotations.filter { $0.messageID == message.id && $0.blockID == 0 },
-                    textColor: .white,
-                    onSelection: { range, selectedText, bounds in
-                        currentTextSelection = selectedText.isEmpty ? nil : AnnotationSelection(
-                            messageID: message.id, blockID: 0, range: range, text: selectedText, bounds: bounds
-                        )
-                    }
-                )
-                    .overlay(alignment: .topLeading) { selectionHint(messageID: message.id, blockID: 0) }
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 16).padding(.vertical, 11)
-                    .background(WorkspaceTheme.accent, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+                .frame(maxWidth: 620, alignment: .trailing)
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel(accessibleText)
+                .accessibilityIdentifier("user-message-\(message.id)")
+            if currentTextSelection?.messageID == message.id,
+               currentTextSelection?.blockID == 0 {
+                selectionHint(messageID: message.id, blockID: 0)
+                    .offset(y: -16)
             }
         }
-            .frame(maxWidth: 620, alignment: .trailing)
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("user-message-\(message.id)")
     }
 
     private static func markdownAttributedText(_ markdown: String) -> AttributedString {
@@ -2169,9 +2230,8 @@ struct TaskConversationView: View {
                     .frame(width: 112, height: 30)
                     .position(
                         x: min(max(selection.bounds.midX, 56), max(56, geometry.size.width - 56)),
-                        y: selection.bounds.minY - 22
+                        y: geometry.size.height - selection.bounds.maxY - 22
                     )
-                    .offset(y: -132)
                     .zIndex(20)
                     .popover(isPresented: Binding(
                         get: { annotationSelection?.id == selection.id },
@@ -2255,6 +2315,7 @@ struct TaskConversationView: View {
                 annotations: annotations.filter { $0.messageID == messageID && $0.blockID == block.id },
                 responseAnnotations: responseAnnotations,
                 responseCommentSourcePrefix: "\(messageID):\(block.id)",
+                isAssistantText: true,
                 onSelection: { range, text, bounds in
                     currentTextSelection = text.isEmpty ? nil : AnnotationSelection(messageID: messageID, blockID: block.id, range: range, text: text, bounds: bounds)
                 },
@@ -2566,7 +2627,7 @@ struct TaskConversationView: View {
                         }
                     },
                     onPasteImage: { image in
-                        do { try addImage(image) }
+                        do { try addImageData(image) }
                         catch { errorMessage = error.localizedDescription }
                     }
                 )
@@ -2685,6 +2746,8 @@ struct TaskConversationView: View {
                                         Text(model.name)
                                     }
                                 }
+                                .buttonHoverPointer()
+                                .help("Use \(model.name)")
                                 .accessibilityIdentifier("model-option-\(model.id)")
                             }
                         } label: {
@@ -2698,12 +2761,14 @@ struct TaskConversationView: View {
                             }
                         }
                         .menuStyle(.borderlessButton)
+                        .buttonHoverPointer()
+                        .help("Choose model")
                         .accessibilityLabel("Model: \(selectedModelName)")
                         .accessibilityValue(selectedModelName)
                         .accessibilityIdentifier("model-picker-menu")
                     }
 
-                    if isResponding {
+                    if isDisplayingActiveResponse {
                         Button(action: pauseResponse) {
                             Image(systemName: "stop.fill")
                                 .font(.system(size: 11, weight: .bold))
@@ -2854,23 +2919,21 @@ struct TaskConversationView: View {
         userInputRequest = nil
         userInputAnswers = [:]
         userInputOther = [:]
-        Task { @MainActor in
-            for _ in 0..<100 {
-                if let history = try? await conversationManager.history(taskID: task.id),
-                   history.messages != messages {
-                    messages = history.messages
-                    activities = history.activities
-                    answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
-                    break
-                }
-                try? await Task.sleep(nanoseconds: 100_000_000)
-            }
-        }
         if request.isBlocking {
-            do {
-                _ = try await BoardTaskManager(modelContext: modelContext).resumeWaitingResponseAfterUserInput(task.id)
-            } catch {
-                errorMessage = "Your answer was sent, but StationAI couldn't update the task status: \(error.localizedDescription)"
+            // Resume asynchronously: the active turn may still own the task
+            // lock, but the UI must remain responsive while it is reacquired.
+            Task { @MainActor in
+                for _ in 0..<100 {
+                    do {
+                        let resumed = try await BoardTaskManager(modelContext: modelContext)
+                            .resumeWaitingResponseAfterUserInput(task.id)
+                        if resumed.status == TaskStatus.inProgress.rawValue
+                            || !providerClient.isTurnActive(threadID: request.threadID) {
+                            break
+                        }
+                    } catch {}
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
             }
         } else {
             Task { @MainActor in
@@ -2893,19 +2956,6 @@ struct TaskConversationView: View {
         errorMessage = nil
         let draftAtLoadStart = draft
         defer { isLoadingHistory = false }
-
-        guard task.activeConversationID != nil else {
-            messages = []
-            activities = []
-            draft = task.pendingSubmittedPrompt == nil ? (task.savedPrompt ?? "") : ""
-            if !isReadOnly, task.pendingSubmittedPrompt == nil {
-                pendingImages = task.draftImageDataURLs.compactMap { dataURL in
-                    guard let image = Self.image(fromDataURL: dataURL) else { return nil }
-                    return PendingImage(dataURL: dataURL, image: image)
-                }
-            }
-            return
-        }
 
         do {
             let history = try await conversationManager.history(taskID: task.id) {
@@ -3094,12 +3144,21 @@ struct TaskConversationView: View {
             isEnteringGoal = false
         }
         guard !text.isEmpty || (usesComposerDraft && !pendingImages.isEmpty) else { return }
+        // A draft autosave can be in flight after the user finishes typing.
+        // Do not let that background write race the submitted-prompt write
+        // for the same task and leave the send path waiting on its lock.
+        draftAutosaveTask?.cancel()
+        draftAutosaveTask = nil
         let userMessageID = UUID().uuidString
         let assistantMessageID = UUID().uuidString
         let previousResponseDuration = completedResponseDuration
+        isComposerFocused = false
+        let hadExistingMessages = !messages.isEmpty
         messages.append(ConversationMessage(id: userMessageID, role: .user, text: text,
                                          imageDataURLs: usesComposerDraft ? pendingImages.map(\.dataURL) : []))
-        messages.append(ConversationMessage(id: assistantMessageID, role: .assistant, text: ""))
+        if !hadExistingMessages {
+            messages.append(ConversationMessage(id: assistantMessageID, role: .assistant, text: ""))
+        }
         isResponding = true
         let startedAt = Date()
         responseStartedAt = startedAt
@@ -3156,7 +3215,13 @@ struct TaskConversationView: View {
                     switch update.type {
                     case "text_delta":
                         guard let delta = update.text else { return }
-                        guard let messageIndex = messages.firstIndex(where: { $0.id == assistantMessageID }) else { return }
+                        let messageIndex: Int
+                        if let existingIndex = messages.firstIndex(where: { $0.id == assistantMessageID }) {
+                            messageIndex = existingIndex
+                        } else {
+                            messages.append(ConversationMessage(id: assistantMessageID, role: .assistant, text: ""))
+                            messageIndex = messages.index(before: messages.endIndex)
+                        }
                         messages[messageIndex].text += delta
                     case "assistant_final":
                         guard let text = update.text else { return }
@@ -3245,7 +3310,9 @@ struct TaskConversationView: View {
                             })?.turnID ?? history.messages.last?.turnID {
                                 collapsedProgressTurnIDs.insert(completedTurnID)
                             }
-                            isActivityExpanded = false
+                            if activities.isEmpty {
+                                isActivityExpanded = false
+                            }
                             Task { await refreshWorkspaceChanges() }
                         }
                     case "queue_changed":
@@ -3263,7 +3330,6 @@ struct TaskConversationView: View {
                     userInputAnswers = [:]
                     userInputOther = [:]
                 })
-
                 if messages.first(where: { $0.id == assistantMessageID })?.text.isEmpty == true {
                     messages.removeAll { $0.id == assistantMessageID }
                 }
@@ -3527,26 +3593,43 @@ struct TaskConversationView: View {
     }
 
     private func addImageData(_ data: Data) throws {
-        guard let image = NSImage(data: data) else {
-            throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images that fit within 10 MB after encoding.")
-        }
-        try addImage(image)
-    }
-
-    private func addImage(_ image: NSImage) throws {
-        guard pendingImages.count < 8 else {
-            throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images that fit within 10 MB after encoding.")
-        }
-        let bitmap = image.representations.compactMap { $0 as? NSBitmapImageRep }.first
-            ?? image.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:))
-            ?? image.cgImage(forProposedRect: nil, context: nil, hints: nil).map(NSBitmapImageRep.init(cgImage:))
+        let wasOversizedInput = data.count > 10_000_000
+        let bitmap = wasOversizedInput
+            ? Self.thumbnailBitmap(from: data)
+            : NSBitmapImageRep(data: data)
         guard let bitmap else {
             throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images that fit within 10 MB after encoding.")
         }
-        guard let encoded = Self.encodedImage(bitmap), encoded.data.count <= 10_000_000 else {
+        try addImage(bitmap, preferJPEG: wasOversizedInput)
+    }
+
+    private static func thumbnailBitmap(from data: Data) -> NSBitmapImageRep? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(
+                source,
+                0,
+                [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 1600
+                ] as CFDictionary
+              ) else {
+            return nil
+        }
+        return NSBitmapImageRep(cgImage: image)
+    }
+
+    private func addImage(_ bitmap: NSBitmapImageRep, preferJPEG: Bool = false) throws {
+        guard pendingImages.count < 8 else {
             throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images that fit within 10 MB after encoding.")
         }
-        guard let previewImage = NSImage(data: encoded.data) else {
+        guard let encoded = Self.encodedImage(bitmap, preferJPEG: preferJPEG), encoded.data.count <= 10_000_000 else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images that fit within 10 MB after encoding.")
+        }
+        let previewData = preferJPEG
+            ? bitmap.representation(using: .png, properties: [:])
+            : encoded.data
+        guard let previewData, let previewImage = NSImage(data: previewData) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Choose up to 8 valid images that fit within 10 MB after encoding.")
         }
         pendingImages.append(PendingImage(dataURL: "data:\(encoded.mimeType);base64,\(encoded.data.base64EncodedString())", image: previewImage))
@@ -3562,13 +3645,21 @@ struct TaskConversationView: View {
         }
     }
 
-    private static func encodedImage(_ bitmap: NSBitmapImageRep) -> (data: Data, mimeType: String)? {
-        if let png = bitmap.representation(using: .png, properties: [:]), png.count <= 10_000_000 {
+    private static func encodedImage(_ bitmap: NSBitmapImageRep, preferJPEG: Bool = false) -> (data: Data, mimeType: String)? {
+        if preferJPEG,
+           let jpeg = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.8]),
+           jpeg.count <= 10_000_000 {
+            return (jpeg, "image/jpeg")
+        }
+        if !preferJPEG,
+           let png = bitmap.representation(using: .png, properties: [:]), png.count <= 10_000_000 {
             return (png, "image/png")
         }
 
-        var width = bitmap.pixelsWide
-        var height = bitmap.pixelsHigh
+        let maximumDimension = 1600
+        let scale = min(1, Double(maximumDimension) / Double(max(bitmap.pixelsWide, bitmap.pixelsHigh)))
+        var width = max(1, Int((Double(bitmap.pixelsWide) * scale).rounded()))
+        var height = max(1, Int((Double(bitmap.pixelsHigh) * scale).rounded()))
         while width > 0 && height > 0 {
             guard let resized = NSBitmapImageRep(
                 bitmapDataPlanes: nil,
@@ -3618,8 +3709,11 @@ struct TaskConversationView: View {
         }
         if isReadOnly { onBack(); return }
         if isResponding { onBack(); return }
-        if isNewTask, task.repositoryWorktrees.isEmpty, pendingImages.isEmpty,
-           messages.isEmpty, activities.isEmpty, !isLoadingHistory {
+        let hasStartedRepository = task.repositoryWorktrees.contains { !$0.isPending }
+        let hasDraft = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if isNewTask, !hasStartedRepository, task.contextFolderPaths.isEmpty,
+           pendingImages.isEmpty, messages.isEmpty, activities.isEmpty,
+           !hasDraft, !isLoadingHistory {
             Task { @MainActor in
                 do {
                     try await BoardTaskManager(modelContext: modelContext).delete(task.id)
@@ -3648,9 +3742,13 @@ struct TaskConversationView: View {
     private func scheduleDraftAutosave(_ value: String) {
         draftAutosaveTask?.cancel()
         let prompt = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !isReadOnly, !isResponding, !isLoadingHistory else { return }
+        guard !isReadOnly, !isDisplayingActiveResponse, !isLoadingHistory else { return }
         draftAutosaveTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 350_000_000)
+            // Let AppKit finish a burst of synthesized keystrokes before the
+            // main-actor SwiftData write starts. This keeps long XCTest
+            // `typeText` operations responsive while retaining prompt
+            // autosave once typing settles.
+            try? await Task.sleep(nanoseconds: 750_000_000)
             guard !Task.isCancelled, !isResponding, !isLoadingHistory else { return }
             do {
                 _ = try await BoardTaskManager(modelContext: modelContext).savePrompt(task.id, prompt: prompt)
@@ -4004,7 +4102,7 @@ private struct NativeChatEditor: NSViewRepresentable {
     let accessibilityHelp: String
     let onSubmit: () -> Void
     let onSteerSubmit: () -> Void
-    let onPasteImage: (NSImage) -> Void
+    let onPasteImage: (Data) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -4032,9 +4130,6 @@ private struct NativeChatEditor: NSViewRepresentable {
         editor.setAccessibilityIdentifier("message-composer")
         editor.setAccessibilityLabel("Message")
         editor.delegate = context.coordinator
-        editor.onDocumentHeightChange = { [weak scroll] height in
-            scroll?.documentHeightDidChange(height)
-        }
         scroll.documentView = editor
         scroll.onHeightChange = { [weak coordinator = context.coordinator] height in
             // AppKit layout must finish before updating SwiftUI state.
@@ -4057,7 +4152,8 @@ private struct NativeChatEditor: NSViewRepresentable {
         editor.setAccessibilityHelp(accessibilityHelp)
         scroll.shouldFocusEditor = isFocused && isEnabled
         scroll.shouldAutofocusEditor = autofocusOnAppear && isEnabled
-        if editor.string != text {
+        let editorOwnsEditing = isFocused && editor.window?.firstResponder === editor
+        if editor.string != text, !editorOwnsEditing {
             editor.string = text
             editor.undoManager?.removeAllActions()
             scroll.requestTextLayout()
@@ -4101,10 +4197,17 @@ private final class ChatEditorScrollView: NSScrollView {
     private(set) var viewportHeight: CGFloat = 28
     private var previousWidth: CGFloat = 0
     private var textLayoutNeeded = true
+    private var layoutRequestGeneration = 0
 
     func requestTextLayout() {
         textLayoutNeeded = true
-        needsLayout = true
+        layoutRequestGeneration += 1
+        let generation = layoutRequestGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self, self.layoutRequestGeneration == generation else { return }
+            self.needsLayout = true
+            self.layoutSubtreeIfNeeded()
+        }
     }
 
     override func viewDidMoveToWindow() {
@@ -4132,16 +4235,16 @@ private final class ChatEditorScrollView: NSScrollView {
         textLayoutNeeded = false
         previousWidth = width
         editor.setFrameSize(NSSize(width: width, height: editor.frame.height))
-        guard let textContainer = editor.textContainer,
-              let layoutManager = editor.layoutManager else { return }
-        // NSTextView can keep its previous long-document frame after deletion
-        // until the layout manager recomputes glyph usage for the edited text.
-        layoutManager.ensureLayout(for: textContainer)
-        let usedRect = layoutManager.usedRect(for: textContainer)
-        let trailingLineBottom = layoutManager.extraLineFragmentTextContainer === textContainer
-            ? layoutManager.extraLineFragmentRect.maxY
-            : usedRect.maxY
-        let contentHeight = ceil(max(usedRect.maxY, trailingLineBottom) + editor.textContainerInset.height * 2)
+        let font = editor.font ?? NSFont.systemFont(ofSize: 14)
+        let inset = editor.textContainerInset
+        let textWidth = max(1, width - inset.width * 2)
+        let measured = (editor.string as NSString).boundingRect(
+            with: NSSize(width: textWidth, height: CGFloat.greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font]
+        )
+        let lineHeight = editor.layoutManager?.defaultLineHeight(for: font) ?? font.pointSize * 1.2
+        let contentHeight = ceil(max(lineHeight, measured.height) + inset.height * 2)
         let documentHeight = max(28, contentHeight)
         editor.setFrameSize(NSSize(width: width, height: documentHeight))
         documentHeightDidChange(documentHeight)
@@ -4162,19 +4265,9 @@ private final class ChatEditorScrollView: NSScrollView {
 }
 
 private final class ChatEditorTextView: NSTextView {
-    var onDocumentHeightChange: ((CGFloat) -> Void)?
-
-    override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
-        // NSTextView can finish laying out text after the scroll view's layout
-        // pass. Follow its actual document height whenever native layout changes
-        // it, including restored drafts, wrapping and deletion.
-        onDocumentHeightChange?(frame.height)
-    }
-
     var onSubmit: (() -> Void)?
     var onSteerSubmit: (() -> Void)?
-    var onPasteImage: ((NSImage) -> Void)?
+    var onPasteImage: ((Data) -> Void)?
 
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
         if item.action == #selector(paste(_:)),
@@ -4201,13 +4294,18 @@ private final class ChatEditorTextView: NSTextView {
     override func paste(_ sender: Any?) {
         guard isEditable else { return }
         let pasteboard = NSPasteboard.general
-        let image = pasteboard.readObjects(forClasses: [NSImage.self])?.first as? NSImage
-        if let image {
-            onPasteImage?(image)
-        } else if let data = pasteboard.data(forType: .png)
-                    ?? pasteboard.data(forType: .tiff),
-                  let image = NSImage(data: data) {
-            onPasteImage?(image)
+        // Prefer the original image bytes. AppKit's NSImage object reader can
+        // reject large clipboard representations before the composer gets a
+        // chance to resize them for the 10 MB payload limit.
+        if let data = pasteboard.data(forType: .png)
+                    ?? pasteboard.data(forType: .tiff) {
+            onPasteImage?(data)
+        } else if let image = pasteboard.readObjects(forClasses: [NSImage.self])?.first as? NSImage {
+            if let data = image.tiffRepresentation {
+                onPasteImage?(data)
+            } else {
+                super.paste(sender)
+            }
         } else {
             super.paste(sender)
         }
@@ -4219,6 +4317,7 @@ private struct SelectableAnnotationText: NSViewRepresentable {
     let annotations: [ConversationAnnotation]
     var responseAnnotations: [ResponseAnnotationReference] = []
     var responseCommentSourcePrefix = ""
+    var isAssistantText = false
     var textColor: NSColor = .labelColor
     let onSelection: (NSRange, String, CGRect) -> Void
     var formattedText: NSAttributedString? = nil
@@ -4235,6 +4334,9 @@ private struct SelectableAnnotationText: NSViewRepresentable {
         let view = CommentTrackingTextView()
         view.isEditable = false
         view.isSelectable = true
+        if isAssistantText {
+            view.setAccessibilityRole(.staticText)
+        }
         view.drawsBackground = false
         view.textContainerInset = NSSize(width: 0, height: 5)
         view.textContainer?.lineFragmentPadding = 0

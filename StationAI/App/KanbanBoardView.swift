@@ -94,7 +94,7 @@ struct KanbanBoardView: View {
                         do {
                             _ = try await BoardTaskManager(modelContext: modelContext).rename(taskBeingRenamed.id, title: title)
                         } catch {
-                            saveError = error.localizedDescription
+                            presentSaveError(error.localizedDescription)
                         }
                     }
                     self.taskBeingRenamed = nil
@@ -115,7 +115,7 @@ struct KanbanBoardView: View {
                             diagnostics: codexClient.diagnosticFields()
                         )
                     } catch {
-                        saveError = "\(error.localizedDescription)\n\nDiagnostic log: \(StationAIDiagnostics.logURL.path)"
+                        presentSaveError("\(error.localizedDescription)\n\nDiagnostic log: \(StationAIDiagnostics.logURL.path)")
                     }
                     self.taskBeingDeleted = nil
                 }
@@ -183,6 +183,15 @@ struct KanbanBoardView: View {
         } message: {
             Text(lifecycleResetNotice ?? "")
         }
+        .alert("Couldn't save changes", isPresented: isShowingSaveError) {
+            Button("OK", role: .cancel) {
+                saveError = nil
+            }
+            .buttonHoverPointer()
+            .help("Dismiss save error")
+        } message: {
+            Text(saveError ?? "Please try again.")
+        }
     }
 
     private var boardContent: some View {
@@ -225,23 +234,23 @@ struct KanbanBoardView: View {
                     ForEach(TaskStatus.allCases.filter { $0 != .blocked && $0 != .waitingResponse && $0 != .done }) { status in
                         if status == .backlog {
                             let hasBlockedTasks = tasks.contains(where: { $0.status == .blocked })
-                            VStack(spacing: 12) {
+                            VStack(spacing: 28) {
                                 if hasBlockedTasks {
-                                    kanbanColumn(.blocked, minHeight: 220)
+                                    kanbanColumn(.blocked, minHeight: 140)
                                         .transition(.opacity.combined(with: .move(edge: .top)))
                                 }
-                                kanbanColumn(.backlog, minHeight: hasBlockedTasks ? 220 : 480)
+                                kanbanColumn(.backlog, minHeight: hasBlockedTasks ? 140 : 480)
                             }
                             .frame(width: 264)
                             .animation(.easeInOut(duration: 0.2), value: hasBlockedTasks)
                         } else if status == .inProgress {
                             let hasWaitingResponseTasks = tasks.contains(where: { $0.status == .waitingResponse })
-                            VStack(spacing: 12) {
+                            VStack(spacing: 28) {
                                 if hasWaitingResponseTasks {
-                                    kanbanColumn(.waitingResponse, minHeight: 220)
+                                    kanbanColumn(.waitingResponse, minHeight: 140)
                                         .transition(.opacity.combined(with: .move(edge: .top)))
                                 }
-                                kanbanColumn(.inProgress, minHeight: hasWaitingResponseTasks ? 220 : 480)
+                                kanbanColumn(.inProgress, minHeight: hasWaitingResponseTasks ? 140 : 480)
                             }
                             .frame(width: 264)
                             .animation(.easeInOut(duration: 0.2), value: hasWaitingResponseTasks)
@@ -251,7 +260,6 @@ struct KanbanBoardView: View {
                         }
                     }
                 }
-                .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 30)
                 .padding(.top, 22)
                 .padding(.bottom, 28)
@@ -316,18 +324,9 @@ struct KanbanBoardView: View {
             } catch is CancellationError {
                 return
             } catch {
-                saveError = error.localizedDescription
+                presentSaveError(error.localizedDescription)
                 archiveSearchResults = []
             }
-        }
-        .alert("Couldn't save changes", isPresented: isShowingSaveError) {
-            Button("OK", role: .cancel) {
-                saveError = nil
-            }
-            .buttonHoverPointer()
-            .help("Dismiss save error")
-        } message: {
-            Text(saveError ?? "Please try again.")
         }
     }
 
@@ -357,8 +356,7 @@ struct KanbanBoardView: View {
             draggedTaskID: $draggedTaskID,
             minHeight: minHeight
         )
-        .frame(width: 264)
-        .frame(minHeight: minHeight)
+        .frame(width: 264, height: minHeight)
     }
 
     private var boardSearchBar: some View {
@@ -533,9 +531,9 @@ struct KanbanBoardView: View {
                     LazyVStack(spacing: 5) {
                         ForEach(results) { task in
                             Button {
-                                closeDoneArchive()
                                 selectedTask = task
                                 isSelectedTaskNew = false
+                                closeDoneArchive()
                             } label: {
                                 HStack(spacing: 10) {
                                     Image(systemName: "checkmark.circle.fill").foregroundStyle(TaskStatus.done.accent)
@@ -595,6 +593,7 @@ struct KanbanBoardView: View {
             .disabled(taskCreatingPullRequests.contains(task.id))
             .frame(width: 30, height: 30)
             .contentShape(Rectangle())
+            .accessibilityLabel("Create a pull request for each repository linked to this completed task")
             .accessibilityIdentifier("done-archive-create-pr-\(task.id.uuidString)")
         } else {
             HStack(spacing: 5) {
@@ -631,7 +630,7 @@ struct KanbanBoardView: View {
             archiveOffset += page.count
             archiveHasMore = page.count == 40
         } catch {
-            saveError = error.localizedDescription
+            presentSaveError(error.localizedDescription)
             archiveHasMore = false
         }
         isLoadingArchivePage = false
@@ -644,6 +643,10 @@ struct KanbanBoardView: View {
         archiveSearchResults = nil
         archiveOffset = 0
         archiveHasMore = true
+    }
+
+    private func presentSaveError(_ message: String) {
+        saveError = message
     }
 
     private var isShowingSaveError: Binding<Bool> {
@@ -688,7 +691,7 @@ struct KanbanBoardView: View {
                     "errorCode": String(nsError.code),
                     "errorDescription": error.localizedDescription
                 ])
-                saveError = error.localizedDescription
+                presentSaveError(error.localizedDescription)
             }
         }
     }
@@ -895,9 +898,15 @@ private struct KanbanColumnView: View {
     let minHeight: CGFloat
 
     var body: some View {
-        dropTarget
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("column-\(status.accessibilityKey)")
+        ZStack(alignment: .topLeading) {
+            dropTarget
+                .frame(width: 264, height: minHeight, alignment: .topLeading)
+                .clipped()
+        }
+        .frame(width: 264, height: minHeight, alignment: .topLeading)
+        .clipped()
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("column-\(status.accessibilityKey)")
     }
 
     private var columnContent: some View {
@@ -944,14 +953,22 @@ private struct KanbanColumnView: View {
             if tasks.isEmpty {
                 emptyState
             } else {
-                ForEach(tasks) { task in
-                    draggableTaskCard(task)
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(tasks) { task in
+                        draggableTaskCard(task)
+                    }
                 }
+                .frame(
+                    height: max(0, minHeight - (status == .blocked ? 88 : 72)),
+                    alignment: .top
+                )
+                .clipped()
             }
 
         }
         .padding(14)
-        .frame(maxWidth: .infinity, minHeight: minHeight, alignment: .topLeading)
+        .frame(height: minHeight, alignment: .topLeading)
+        .frame(maxWidth: .infinity)
         .background {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(WorkspaceTheme.panelBackground.opacity(0.78))
@@ -984,6 +1001,15 @@ private struct KanbanColumnView: View {
 
     @ViewBuilder
     private func draggableTaskCard(_ task: BoardTask) -> some View {
+        if minHeight <= 140, tasks.count <= 3 {
+            compactTaskCard(task)
+        } else {
+            regularDraggableTaskCard(task)
+        }
+    }
+
+    @ViewBuilder
+    private func regularDraggableTaskCard(_ task: BoardTask) -> some View {
         let card = TaskCardView(
             task: task,
             onOpen: { onOpenTask(task) },
@@ -1006,6 +1032,37 @@ private struct KanbanColumnView: View {
         } else {
             card
         }
+    }
+
+    private func compactTaskCard(_ task: BoardTask) -> some View {
+        Button(action: { onOpenTask(task) }) {
+            HStack(spacing: 7) {
+                Image(systemName: "circle.inset.filled")
+                    .font(.system(size: 9))
+                    .foregroundStyle(task.status.accent)
+                Text(task.title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, minHeight: 52, maxHeight: 52, alignment: .leading)
+            .background {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(WorkspaceTheme.windowBackground)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .buttonHoverPointer()
+        .help("Open task")
+        .accessibilityLabel(task.title)
+        .accessibilityHint("Open task")
+        .accessibilityIdentifier("task-card-\(task.id.uuidString)")
     }
 
     private var emptyState: some View {
@@ -1286,6 +1343,7 @@ private struct TaskCardView: View {
                         .disabled(isCreatingPullRequests)
                         .frame(width: 30, height: 30)
                         .contentShape(Rectangle())
+                        .accessibilityLabel("Create a pull request for each repository linked to this task")
                         .accessibilityIdentifier("task-create-pr-\(task.id.uuidString)")
                     } else {
                         if isPullRequestMerged, let onMoveToDone {
@@ -1315,6 +1373,8 @@ private struct TaskCardView: View {
                                 .help("Resolve pull request conflicts with \(task.conversationProvider.displayName)")
                                 .accessibilityLabel("Resolve pull request conflicts")
                                 .accessibilityIdentifier("task-resolve-pr-conflicts-\(task.id.uuidString)")
+                                .frame(minWidth: 30, minHeight: 30)
+                                .contentShape(Rectangle())
                             }
                             ForEach(linked, id: \.repositoryPath) { record in
                                 if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {

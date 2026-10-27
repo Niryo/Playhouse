@@ -5,6 +5,7 @@ repository_root="${STATIONAI_UI_TART_REPOSITORY_ROOT:-$(cd "$(dirname "${BASH_SO
 script_path="${repository_root}/scripts/test-ui-tart.sh"
 vm_name="${STATIONAI_UI_TART_VM:-stationai-ui}"
 artifact_root="${STATIONAI_UI_TART_ARTIFACTS:-${TMPDIR:-/tmp}/stationai-ui-tart-artifacts}"
+export STATIONAI_UI_LOCK_TIMEOUT_SECONDS="${STATIONAI_UI_LOCK_TIMEOUT_SECONDS:-120}"
 
 # Hold the host checkout's UI-test lock for the entire VM run.
 # test-ui.sh sets the marker only when its caller already owns that host lock.
@@ -130,7 +131,10 @@ mkdir -p "$run_artifacts"
 launch_log="${run_artifacts}/tart-run.log"
 vm_pid=""
 vm_started=0
-session_marker="${TMPDIR:-/tmp}/stationai-ui-tart-${vm_name}.session"
+# VM ownership is global per host VM, not per checkout's TMPDIR. A
+# TMPDIR-scoped marker lets two worktrees both believe they own the same
+# persistent VM and causes Tart guest transport collisions.
+session_marker="${STATIONAI_UI_TART_SESSION_MARKER:-/tmp/stationai-ui-tart-${vm_name}.session}"
 session_value="${repository_root}"$'\n'"${artifact_root}"
 session_marker_owned=0
 if [[ -L "$session_marker" ]]; then

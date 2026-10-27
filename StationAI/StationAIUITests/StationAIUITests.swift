@@ -1624,7 +1624,6 @@ final class StationAIUITests: XCTestCase {
 
         let link = element("task-pr-link-\(taskID)-123")
         let resolveButton = element("task-resolve-pr-conflicts-\(taskID)")
-        let resolveIcon = app.images["task-resolve-pr-conflicts-icon-\(taskID)"]
         XCTAssertTrue(link.waitForExistence(timeout: 10))
         let secondLink = element("task-pr-link-\(secondTaskID)-456")
         XCTAssertTrue(secondLink.waitForExistence(timeout: 10))
@@ -1644,21 +1643,22 @@ final class StationAIUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(resolveButton.frame.height, 30, "The conflict action should have a comfortable vertical hit target.")
         XCTAssertGreaterThanOrEqual(link.frame.width, 30, "A PR link should have a comfortable horizontal hit target.")
         XCTAssertGreaterThanOrEqual(link.frame.height, 30, "A PR link should have a comfortable vertical hit target.")
-        XCTAssertTrue(resolveIcon.waitForExistence(timeout: 5), "The imported conflict indicator artwork should render inside the action.")
-        XCTAssertTrue(resolveButton.frame.contains(resolveIcon.frame), "The conflict indicator artwork should be inside the action button.")
+        assertConflictIndicatorArtwork(resolveButton)
         XCTAssertLessThanOrEqual(resolveButton.frame.maxX, link.frame.minX + 1, "The conflict action should sit beside its PR link.")
         XCTAssertTrue(FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("123").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: startedDirectory.appendingPathComponent("456").path), "Focus refresh should probe separate Review cards concurrently.")
 
         resolveButton.click()
         let initialPrompt = "The PR has conflicts. Fix them, commit, and push."
-        let initialPromptElement = app.staticTexts.matching(NSPredicate(format: "label == %@", initialPrompt)).firstMatch
+        let initialPromptElement = element("conversation-scroll-view").descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", initialPrompt)).firstMatch
         XCTAssertTrue(initialPromptElement.waitForExistence(timeout: 10), "The conflict action should send the corrected instruction into the task conversation.")
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: readyURL.path) }, timeout: 10), "Codex should start the conflict resolution turn.")
         try "Continue after first conflict attempt.\n".write(to: continueURL, atomically: true, encoding: .utf8)
 
         let retryPrompt = "The PR still has conflicts or your latest commit has not reached GitHub. Resolve the remaining conflicts, commit, and push. Verify the PR's merge status before finishing."
-        let retryPromptElement = app.staticTexts.matching(NSPredicate(format: "label == %@", retryPrompt)).firstMatch
+        let retryPromptElement = element("conversation-scroll-view").descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", retryPrompt)).firstMatch
         XCTAssertTrue(retryPromptElement.waitForExistence(timeout: 15), "A still-conflicting PR should receive one follow-up turn.")
         XCTAssertTrue(waitUntil({
             (try? String(contentsOf: startCountURL, encoding: .utf8).split(whereSeparator: \.isNewline).count) == 2
@@ -1746,7 +1746,8 @@ final class StationAIUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.width, 30, "The PR action should have a comfortable horizontal hit target.")
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.height, 30, "The PR action should have a comfortable vertical hit target.")
         assertHoverEmphasis(for: activeCreateButton)
-        assertHelpTag(for: activeCreateButton, equals: "Create a pull request for each repository linked to this task")
+        XCTAssertEqual(activeCreateButton.label, "Create a pull request for each repository linked to this task")
+        assertNativeHelpPresentation(for: activeCreateButton)
         moveTaskToDone(taskID: taskID)
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
         element("done-archive-button").click()
@@ -1755,7 +1756,8 @@ final class StationAIUITests: XCTestCase {
         let createButton = element("done-archive-create-pr-\(taskID)")
         XCTAssertTrue(createButton.waitForExistence(timeout: 5))
         assertHoverEmphasis(for: createButton)
-        assertHelpTag(for: createButton, equals: "Create a pull request for each repository linked to this completed task")
+        XCTAssertEqual(createButton.label, "Create a pull request for each repository linked to this completed task")
+        assertNativeHelpPresentation(for: createButton)
         let operationLock = try TaskOperationLockBarrier(dataDirectory: dataDirectory, taskID: taskID)
         var operationLockReleased = false
         defer { if !operationLockReleased { try? operationLock.release() } }
@@ -1825,9 +1827,16 @@ final class StationAIUITests: XCTestCase {
         let prButton = element("task-create-pr-\(taskID)")
         XCTAssertTrue(prButton.waitForExistence(timeout: 5))
         prButton.click()
-        let blockedAlert = app.alerts["Pull request operation failed"]
+        let blockedAlert = app.sheets.matching(NSPredicate(format: "label == %@", "alert")).firstMatch
         XCTAssertTrue(blockedAlert.waitForExistence(timeout: 10), "PR creation should direct the user to resolve conflicts in the task worktree.")
-        XCTAssertTrue(blockedAlert.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Resolve conflicts in the task worktree")).firstMatch.exists)
+        let alertTitle = blockedAlert.staticTexts.matching(
+            NSPredicate(format: "value == %@", "Pull request operation failed")
+        ).firstMatch
+        XCTAssertTrue(alertTitle.exists, "The conflict sheet should identify the failed pull request operation.")
+        let conflictGuidance = blockedAlert.staticTexts.matching(
+            NSPredicate(format: "value BEGINSWITH %@", "Resolve conflicts")
+        ).firstMatch
+        XCTAssertTrue(conflictGuidance.exists, "The conflict sheet should direct the user to resolve conflicts in the task worktree.")
         blockedAlert.buttons["OK"].click()
         XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), branchHead, "Blocked PR creation must leave the task branch unchanged.")
         XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetHead)
@@ -3064,17 +3073,7 @@ final class StationAIUITests: XCTestCase {
         _ = try runCLI(["task", "create", "--title", dirtyTitle, "--repo", fixture.primary.path])
         let dirtyID = try taskID(named: dirtyTitle)
         openTask(named: dirtyTitle)
-        let composer = element("message-composer")
-        XCTAssertTrue(composer.waitForExistence(timeout: 10))
-        composer.click()
-        composer.typeText("Prepare a task for deletion.")
-        element("send-message-button").click()
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
-        app.buttons["Blue"].click()
-        element("ai-question-answer-token").click()
-        element("ai-question-answer-token").typeText("fixture-secret")
-        element("submit-ai-answers-button").click()
-        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: dirtyTitle, prompt: "Prepare a task for deletion.")
         XCTAssertEqual(try taskRecord(id: dirtyID)?["status"] as? String, "Review")
         element("back-to-board-button").click()
         let dirtyTask = try XCTUnwrap(taskRecord(id: dirtyID))
@@ -3126,15 +3125,7 @@ final class StationAIUITests: XCTestCase {
         let failurePrompt = "PRIVATE_CONVERSATION_TEXT_\(String(UUID().uuidString.prefix(8)))"
         _ = try runCLI(["task", "create", "--title", failureTitle, "--repo", brokenRepository.path])
         openTask(named: failureTitle)
-        element("message-composer").click()
-        element("message-composer").typeText(failurePrompt)
-        element("send-message-button").click()
-        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
-        app.buttons["Blue"].click()
-        element("ai-question-answer-token").click()
-        element("ai-question-answer-token").typeText("fixture-secret")
-        element("submit-ai-answers-button").click()
-        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: failureTitle, prompt: failurePrompt)
         element("back-to-board-button").click()
         let failureTask = try XCTUnwrap(taskRecord(named: failureTitle))
         let failureID = try XCTUnwrap(failureTask["id"] as? String)
@@ -3492,8 +3483,16 @@ final class StationAIUITests: XCTestCase {
         try FileManager.default.createSymbolicLink(at: writeLock, withDestinationURL: missingLockTarget)
 
         element("new-task-button").click()
-        let saveAlert = app.alerts["Couldn't save changes"]
+        let saveAlert = app.sheets.matching(NSPredicate(format: "label == %@", "alert")).firstMatch
         XCTAssertTrue(saveAlert.waitForExistence(timeout: 10), "A real store-lock open failure should be shown to the user.")
+        let alertTitle = saveAlert.staticTexts.matching(
+            NSPredicate(format: "value == %@", "Couldn't save changes")
+        ).firstMatch
+        XCTAssertTrue(alertTitle.exists, "The store-lock failure sheet should identify the failed save.")
+        let alertMessage = saveAlert.staticTexts.matching(
+            NSPredicate(format: "value BEGINSWITH %@", "Couldn't open the")
+        ).firstMatch
+        XCTAssertTrue(alertMessage.exists, "The store-lock failure sheet should explain the real lock-open error.")
         XCTAssertTrue(waitUntil({
             (try? self.diagnosticEvents().contains { $0["event"] as? String == "ui.new_task.failed" }) ?? false
         }, timeout: 2), "The New Task failure should reach the diagnostics file promptly.")
@@ -4095,7 +4094,9 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(((blockedByTurn["error"] as? [String: Any])?["message"] as? String ?? "").contains("current turn"))
         _ = try runCLI(["task", "outcome", taskID, "completed"])
         try "Release the held fixture turn.\n".write(to: release, atomically: true, encoding: .utf8)
-        let codexReply = app.staticTexts["Answers received: Blue / fixture-secret."]
+        let codexReply = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "Answers received: Blue / fixture-secret.")
+        ).firstMatch
         XCTAssertTrue(codexReply.waitForExistence(timeout: 10))
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 10))
         let codexThread = try XCTUnwrap(try taskRecord(id: taskID)?["codexThreadID"] as? String)
@@ -4886,8 +4887,13 @@ final class StationAIUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         assertTaskVisible("Concurrent conversation sends", inColumn: "Waiting Response")
         openTask(named: "Concurrent conversation sends")
-        XCTAssertTrue(app.staticTexts[firstPrompt].waitForExistence(timeout: 10), "Reopening the task should retain the first completed send in conversation history.")
-        XCTAssertTrue(app.staticTexts[secondPrompt].waitForExistence(timeout: 10), "Reopening the task should load the completed second send from the real app-server thread.")
+        let conversation = element("conversation-scroll-view")
+        let firstPersistedMessage = conversation.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", firstPrompt)).firstMatch
+        let secondPersistedMessage = conversation.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", secondPrompt)).firstMatch
+        XCTAssertTrue(firstPersistedMessage.waitForExistence(timeout: 10), "Reopening the task should retain the first completed send in conversation history.")
+        XCTAssertTrue(secondPersistedMessage.waitForExistence(timeout: 10), "Reopening the task should load the completed second send from the real app-server thread.")
     }
 
     // case-contract: test_conversation_steers_and_queues_active_turn | When a steer misses its active turn, CLI/XPC and UI accept it into the durable queue for its own turn; opening an empty task waits for the model-aware prompt and omits the generic Start a conversation heading; with no active turn, a missed queued-row steer dispatches synchronously as its own turn and leaves the queue; queued fallback survives process exit or app relaunch and is drained exactly once; a missed regular or queued-row steer arriving during targeted queue dispatch is drained afterward exactly once; a failed targeted turn remains needs-action and does not drain later messages; malformed steer images fail validation; CLI/XPC steering routes image data to a UI-owned active turn and appears in the conversation. Command-Return steers the active turn with attached text and images, then clears the accepted draft and image preview; if the active turn changes before delivery, it clears the draft and queues the complete message for its own turn. Plain Return queues a follow-up; its row Steer uses the active turn ID, appears in the transcript, and removes the item only after acceptance. The obsolete footer Queue and Steer buttons are absent and the active response control is labeled Stop response. Follow-ups persist across reopening, expose per-row Steer, delete, and more actions, and a distinct after-turn follow-up dispatches once after a matching completion and is removed only after successful delivery; removing an unknown queue ID fails without changing the queue.
@@ -5269,8 +5275,18 @@ final class StationAIUITests: XCTestCase {
         composer.typeText("What is shown in this screenshot?")
         element("send-message-button").click()
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
-        let pickedTurnData = try Data(contentsOf: URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history"))
-        let pickedTurn = try XCTUnwrap(JSONSerialization.jsonObject(with: pickedTurnData) as? [String: Any])
+        let pickedTurnHistoryURL = URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history")
+        var pickedTurnJSON: [String: Any]?
+        XCTAssertTrue(waitUntil({
+            guard let pickedTurnData = try? Data(contentsOf: pickedTurnHistoryURL),
+                  let history = try? JSONSerialization.jsonObject(with: pickedTurnData) as? [String: Any],
+                  history["userMessage"] as? String == "What is shown in this screenshot?" else {
+                return false
+            }
+            pickedTurnJSON = history
+            return true
+        }, timeout: 5), "The fixture should persist the sent text before the question response is inspected.")
+        let pickedTurn = try XCTUnwrap(pickedTurnJSON)
         XCTAssertEqual(pickedTurn["userMessage"] as? String, "What is shown in this screenshot?")
         XCTAssertEqual((pickedTurn["images"] as? [String])?.count, 1, "The fixture should receive the picker image alongside the text prompt.")
         let pickedImage = try XCTUnwrap((pickedTurn["images"] as? [String])?.first)
@@ -5286,23 +5302,35 @@ final class StationAIUITests: XCTestCase {
         element("ai-question-answer-token").click()
         element("ai-question-answer-token").typeText("fixture-secret")
         element("submit-ai-answers-button").click()
-        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        let firstAnswer = element("assistant-message-item_assistant_fixture_1")
+        XCTAssertTrue(firstAnswer.waitForExistence(timeout: 10))
+        XCTAssertEqual(firstAnswer.label, "Answers received: Blue / fixture-secret.")
         XCTAssertTrue(element("user-message-item_user_fixture_1").waitForExistence(timeout: 10), "Reloaded history should retain the picker attachment.")
-        XCTAssertTrue(app.images["user-message-item_user_fixture_1"].waitForExistence(timeout: 10), "Conversation history should render the picker image.")
+        XCTAssertTrue(app.images["chat-image-item_user_fixture_1-0"].waitForExistence(timeout: 10), "Conversation history should render the picker image.")
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: imageTaskID)?["status"] as? String) == "Waiting Response"
+        }, timeout: 10), "The first image turn should settle before the follow-up turn starts.")
 
         let followupPrompt = "Continue using the earlier image as context."
         composer.click()
         composer.typeText(followupPrompt)
+        let composerEnabled = waitUntil({ self.element("send-message-button").isEnabled }, timeout: 10)
+        let recentCodexEvents = ((try? diagnosticEvents()) ?? []).suffix(20).compactMap { $0["event"] as? String }
+        XCTAssertTrue(composerEnabled, "The composer should be enabled after the first image turn settles. Recent events: \(recentCodexEvents)")
         element("send-message-button").click()
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10), "The follow-up turn should refresh the existing conversation history.")
         app.buttons["Blue"].click()
         element("ai-question-answer-token").click()
         element("ai-question-answer-token").typeText("fixture-secret")
         element("submit-ai-answers-button").click()
-        XCTAssertTrue(app.staticTexts[followupPrompt].waitForExistence(timeout: 10))
-        XCTAssertTrue(waitUntil({
-            self.app.staticTexts.matching(NSPredicate(format: "label == %@", "Answers received: Blue / fixture-secret.")).count == 2
-        }, timeout: 10), "The follow-up turn should complete and replace the transcript from Codex history.")
+        let followupMessage = element("conversation-scroll-view")
+            .descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", followupPrompt))
+            .firstMatch
+        XCTAssertTrue(followupMessage.waitForExistence(timeout: 10), "The follow-up prompt should appear in the conversation.")
+        let followupAnswer = element("assistant-message-item_assistant_fixture_2")
+        XCTAssertTrue(followupAnswer.waitForExistence(timeout: 10))
+        XCTAssertEqual(followupAnswer.label, "Answers received: Blue / fixture-secret.")
         XCTAssertTrue(waitUntil({
             self.app.images.matching(NSPredicate(format: "identifier BEGINSWITH %@", "chat-image-")).count == 1
         }, timeout: 10), "Refreshing history after another turn should keep the earlier image visible.")
@@ -5350,7 +5378,10 @@ final class StationAIUITests: XCTestCase {
         element("ai-question-answer-token").click()
         element("ai-question-answer-token").typeText("fixture-secret")
         element("submit-ai-answers-button").click()
-        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        let pastedAnswer = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "Answers received: Blue / fixture-secret.")
+        ).firstMatch
+        XCTAssertTrue(pastedAnswer.waitForExistence(timeout: 10))
         XCTAssertTrue(element("user-message-item_user_fixture_1").waitForExistence(timeout: 10), "History reload should leave the pasted attachment in the conversation.")
         XCTAssertTrue(app.images["user-message-item_user_fixture_1"].waitForExistence(timeout: 10), "Conversation history should render the pasted image itself.")
         let pastedTurnData = try Data(contentsOf: URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history"))
@@ -5424,8 +5455,7 @@ final class StationAIUITests: XCTestCase {
             try? "Release tool completions after assertion failure.\n".write(to: toolRelease, atomically: true, encoding: .utf8)
         }
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: toolReady.path) }, timeout: 20), "The fixture should pause after the tool start notifications.")
-        let currentActivity = element("current-activity-title")
-        XCTAssertTrue(waitUntil({ currentActivity.label == "Tool · legacySummary" }, timeout: 10), "The header should show the most recently started active call.")
+        XCTAssertTrue(waitUntil({ (element("current-activity-title").value as? String) == "Tool · legacySummary" }, timeout: 10), "The header should show the most recently started active call.")
         XCTAssertTrue(element("current-activity-duration").exists, "The current activity should show its elapsed time outside the disclosure.")
         element("codex-activity-disclosure").click()
         let activityDetails = element("codex-activity-details")
@@ -5451,24 +5481,40 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(dynamicRow.label.contains("In progress"))
         XCTAssertTrue(legacyDynamicRow.label.contains("In progress"))
         try "Finish the newest call first.\n".write(to: toolReleaseLatest, atomically: true, encoding: .utf8)
-        XCTAssertTrue(waitUntil({ currentActivity.label == "Tool · summarize" }, timeout: 15), "When the newest call finishes, the header should fall back to the next active call.")
+        XCTAssertTrue(waitUntil({ (element("current-activity-title").value as? String) == "Tool · summarize" }, timeout: 15), "When the newest call finishes, the header should fall back to the next active call.")
         XCTAssertTrue(waitUntil({ legacyDynamicRow.label.contains("Completed") }, timeout: 10))
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").count, 1)
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").count, 1)
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").count, 1)
         try "Release tool completions.\n".write(to: toolRelease, atomically: true, encoding: .utf8)
-        XCTAssertTrue(waitUntil({ mcpRow.label.contains("Completed") && dynamicRow.label.contains("Failed") && legacyDynamicRow.label.contains("Completed") }, timeout: 30), "Lifecycle completions should update the existing rows.")
-        XCTAssertTrue(mcpRow.label.contains("MCP · lookup"))
-        XCTAssertTrue((mcpRow.value as? String ?? "").contains("fixture-server"))
-        XCTAssertTrue((mcpRow.value as? String ?? "").contains("Returned 1 result item"))
-        XCTAssertTrue(containsPositiveDuration(mcpRow.value as? String ?? ""), "The completed MCP call should display its positive measured duration in milliseconds.")
-        XCTAssertTrue((dynamicRow.value as? String ?? "").contains("Tool call failed"))
-        XCTAssertTrue((dynamicRow.value as? String ?? "").contains("Duration · 37 ms"))
-        XCTAssertTrue(dynamicRow.label.contains("Tool · summarize"))
-        XCTAssertTrue(legacyDynamicRow.label.contains("Tool · legacySummary"))
-        XCTAssertTrue((legacyDynamicRow.value as? String ?? "").contains("Returned 1 result item"))
-        XCTAssertTrue(containsPositiveDuration(legacyDynamicRow.value as? String ?? ""), "The completed legacy call should display its positive measured duration in milliseconds.")
-        let renderedToolRows = "\(mcpRow.label) \(mcpRow.value ?? "") \(dynamicRow.label) \(dynamicRow.value ?? "") \(legacyDynamicRow.label) \(legacyDynamicRow.value ?? "")"
+        var reopenedActivityDetails = false
+        func activityRow(_ id: String) -> XCUIElement {
+            element("codex-activity-details").descendants(matching: .any).matching(identifier: "codex-activity-row-\(id)").firstMatch
+        }
+        XCTAssertTrue(waitUntil({
+            if !element("codex-activity-details").exists && !reopenedActivityDetails {
+                element("codex-activity-disclosure").click()
+                reopenedActivityDetails = true
+                return false
+            }
+            return activityRow("item_fixture_mcp_call").label.contains("Completed")
+                && activityRow("item_fixture_dynamic_call").label.contains("Failed")
+                && activityRow("item_fixture_dynamic_legacy").label.contains("Completed")
+        }, timeout: 30), "Lifecycle completions should update the existing rows.")
+        let completedMcpRow = activityRow("item_fixture_mcp_call")
+        let completedDynamicRow = activityRow("item_fixture_dynamic_call")
+        let completedLegacyDynamicRow = activityRow("item_fixture_dynamic_legacy")
+        XCTAssertTrue(completedMcpRow.label.contains("MCP · lookup"))
+        XCTAssertTrue((completedMcpRow.value as? String ?? "").contains("fixture-server"))
+        XCTAssertTrue((completedMcpRow.value as? String ?? "").contains("Returned 1 result item"))
+        XCTAssertTrue(containsPositiveDuration(completedMcpRow.value as? String ?? ""), "The completed MCP call should display its positive measured duration in milliseconds.")
+        XCTAssertTrue((completedDynamicRow.value as? String ?? "").contains("Tool call failed"))
+        XCTAssertTrue((completedDynamicRow.value as? String ?? "").contains("Duration · 37 ms"))
+        XCTAssertTrue(completedDynamicRow.label.contains("Tool · summarize"))
+        XCTAssertTrue(completedLegacyDynamicRow.label.contains("Tool · legacySummary"))
+        XCTAssertTrue((completedLegacyDynamicRow.value as? String ?? "").contains("Returned 1 result item"))
+        XCTAssertTrue(containsPositiveDuration(completedLegacyDynamicRow.value as? String ?? ""), "The completed legacy call should display its positive measured duration in milliseconds.")
+        let renderedToolRows = "\(completedMcpRow.label) \(completedMcpRow.value ?? "") \(completedDynamicRow.label) \(completedDynamicRow.value ?? "") \(completedLegacyDynamicRow.label) \(completedLegacyDynamicRow.value ?? "")"
         XCTAssertFalse(renderedToolRows.contains("RAW_ARGUMENT_SECRET"))
         XCTAssertFalse(renderedToolRows.contains("RAW_RESULT_SECRET"))
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").count, 1)
@@ -7345,6 +7391,41 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(Int((color.blueComponent * 255).rounded()), expected.2, accuracy: accuracy, file: file, line: line)
     }
 
+    private func assertConflictIndicatorArtwork(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        guard let cgImage = element.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            XCTFail("Could not read the PR conflict action screenshot.", file: file, line: line)
+            return
+        }
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        var bluePixels = 0
+        var orangePixels = 0
+        var redPixels = 0
+        for x in 0..<cgImage.width {
+            for y in 0..<cgImage.height {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                if color.blueComponent > 0.55
+                    && color.blueComponent > color.redComponent + 0.15
+                    && color.blueComponent > color.greenComponent + 0.10 {
+                    bluePixels += 1
+                }
+                if color.redComponent > 0.75
+                    && color.greenComponent > 0.25
+                    && color.greenComponent < 0.75
+                    && color.blueComponent < 0.35 {
+                    orangePixels += 1
+                }
+                if color.redComponent > 0.55
+                    && color.redComponent > color.greenComponent + 0.25
+                    && color.redComponent > color.blueComponent + 0.35 {
+                    redPixels += 1
+                }
+            }
+        }
+        XCTAssertGreaterThan(bluePixels, 2, "The conflict indicator should render its blue branch inside the action.", file: file, line: line)
+        XCTAssertGreaterThan(orangePixels, 2, "The conflict indicator should render its orange branch inside the action.", file: file, line: line)
+        XCTAssertGreaterThan(redPixels, 2, "The conflict indicator should render its warning symbol inside the action.", file: file, line: line)
+    }
+
     private func assertContainsRedForeground(in element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
         guard let cgImage = element.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             XCTFail("Could not read the missing-folder warning screenshot.", file: file, line: line)
@@ -7919,6 +8000,35 @@ final class StationAIUITests: XCTestCase {
             }
         }
         XCTAssertGreaterThan(changedPixels, 5, "Hovering a PR control should visibly change its appearance.", file: file, line: line)
+    }
+
+    private func assertNativeHelpPresentation(for control: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        control.hover()
+        Thread.sleep(forTimeInterval: 0.25)
+        let before = XCUIScreen.main.screenshot().image
+        Thread.sleep(forTimeInterval: 1.5)
+        let after = XCUIScreen.main.screenshot().image
+        guard let beforeCG = before.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let afterCG = after.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              beforeCG.width == afterCG.width,
+              beforeCG.height == afterCG.height else {
+            XCTFail("Could not compare app screenshots for native help presentation.", file: file, line: line)
+            return
+        }
+        let beforeBitmap = NSBitmapImageRep(cgImage: beforeCG)
+        let afterBitmap = NSBitmapImageRep(cgImage: afterCG)
+        var changedPixels = 0
+        for x in stride(from: 0, to: beforeCG.width, by: 2) {
+            for y in stride(from: 0, to: beforeCG.height, by: 2) {
+                guard let beforeColor = beforeBitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                      let afterColor = afterBitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                let delta = abs(beforeColor.redComponent - afterColor.redComponent)
+                    + abs(beforeColor.greenComponent - afterColor.greenComponent)
+                    + abs(beforeColor.blueComponent - afterColor.blueComponent)
+                if delta > 0.12 { changedPixels += 1 }
+            }
+        }
+        XCTAssertGreaterThan(changedPixels, 100, "Hovering should visibly present the control's native help.", file: file, line: line)
     }
 
     private func element(containingAccessibilityText text: String) -> XCUIElement {

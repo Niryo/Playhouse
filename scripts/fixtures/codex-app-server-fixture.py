@@ -251,7 +251,7 @@ def main():
                 {"id": "gpt-6-luna", "displayName": "GPT-6 Luna", "isDefault": True},
                 {"id": "gpt-6-sol", "displayName": "GPT-6 Sol", "isDefault": False},
             ]}})
-        elif "-goal" in mode and message.get("method") == "thread/goal/get":
+        elif message.get("method") == "thread/goal/get":
             goal = json.loads(goal_path.read_text(encoding="utf-8")) if goal_path.is_file() else None
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"goal": goal}})
         elif "-goal" in mode and message.get("method") == "thread/goal/set":
@@ -320,6 +320,8 @@ def main():
             turn_message = next((item.get("text") for item in turn_input if item.get("type") == "text"), None)
             is_title_request = (turn_message or "").startswith("Write a concise task title of at most 8 words")
             serial_first_turn = False
+            if not is_title_request and not serial_mode:
+                TURN_ID = f"turn-{uuid.uuid4()}"
             if serial_mode and not is_title_request:
                 TURN_ID = f"turn-{uuid.uuid4()}"
                 first_turn_marker = Path(str(sys.argv[0]) + ".serial-first-turn")
@@ -816,6 +818,7 @@ def main():
                 }})
             elif mode.endswith("-markdown"):
                 plan_item_id = "item_stationai_plan"
+                is_plan_turn = message.get("params", {}).get("collaborationMode", {}).get("mode") == "plan"
                 write({"jsonrpc": "2.0", "method": "item/started", "params": {
                     "threadId": THREAD_ID, "turnId": TURN_ID,
                     "item": {"id": plan_item_id, "type": "plan", "text": ""},
@@ -825,7 +828,7 @@ def main():
                         "threadId": THREAD_ID, "turnId": TURN_ID,
                         "itemId": plan_item_id, "delta": delta,
                     }})
-                    if index == 0 and Path(str(sys.argv[0]) + ".plan-delta-hold").exists():
+                    if index == 0 and is_plan_turn and Path(str(sys.argv[0]) + ".plan-delta-hold").exists():
                         ready = Path(str(sys.argv[0]) + ".plan-delta-ready")
                         release = Path(str(sys.argv[0]) + ".plan-delta-release")
                         ready.write_text("The first plan delta is visible before completion.\n", encoding="utf-8")
@@ -841,8 +844,8 @@ def main():
                     "item": {"id": plan_item_id, "type": "plan", "text": MARKDOWN_PLAN},
                 }})
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
-                    "threadId": "00000000-0000-0000-0000-000000000001",
-                    "turn": {"id": "turn_stationai_fixture", "status": "completed"},
+                    "threadId": THREAD_ID,
+                    "turn": {"id": TURN_ID, "status": "completed"},
                 }})
             elif mode.endswith("-hold"):
                 hold_used = Path(str(sys.argv[0]) + ".hold-used")

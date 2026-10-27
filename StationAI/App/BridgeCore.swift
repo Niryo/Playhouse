@@ -2285,7 +2285,7 @@ final class BoardTaskManager {
             let message: String
             switch task.status {
             case .inProgress:
-                message = "StationAI restarted before \(providerName) reported that this turn finished. Your conversation is saved; review it and send a follow-up to continue."
+                message = "StationAI closed while this turn was running. Your conversation is saved; review it and send a follow-up to continue."
             case .waitingResponse:
                 message = "StationAI reopened before the pending question was answered. Review the conversation and send a prompt to continue."
             default:
@@ -3114,6 +3114,11 @@ final class WorkspaceManager {
             repositoryPaths: repositoryPaths,
             duringActiveConversation: true
         )
+        let taskBeforePreparation = try taskManager.taskModel(taskID)
+        if ["Untitled task", "Generating title…"].contains(taskBeforePreparation.title),
+           taskBeforePreparation.pendingSubmittedPrompt == nil {
+            return BoardTaskRecord(task: taskBeforePreparation)
+        }
         let record = try await taskManager.prepareRepositoryWorktrees(taskID)
         try settingsManager.setLastSelectedRepositories(record.repositoryWorktrees.map(\.repositoryPath))
         StationAIDiagnostics.record("workspace.repositories.add.succeeded", fields: [
@@ -3315,9 +3320,9 @@ final class ConversationManager {
                 ?? ConversationHistory(messages: [], activities: [], diff: nil)
             return ConversationHistory(messages: codex.messages, activities: codex.activities, diff: codex.diff, answeredAsyncQuestionIDs: answered)
         }
-        // Codex can't list a thread before its first turn, so a mixed transcript
-        // reads Codex only once a Codex segment owns turns.
-        let usesCodex = task.codexThreadID != nil && transcript.segments.contains { $0.provider == .codex && !$0.codexTurnIDs.isEmpty }
+        let usesCodex = task.codexThreadID != nil && transcript.segments.contains {
+            $0.provider == .codex && !$0.codexTurnIDs.isEmpty
+        }
         let codex = usesCodex ? try await codexHistory(task: task, onActionRequest: onActionRequest) : nil
         var history = Self.compose(transcript: transcript, codex: codex)
         history.answeredAsyncQuestionIDs = answered
@@ -4179,7 +4184,12 @@ final class ConversationManager {
         guard task.status != .done else {
             throw StationAIManagerError.invalidTransition("Done tasks are closed. Create a new task for follow-up work.")
         }
-        let repositoryRoot = try settingsManager.requireRepositoryRootFolder()
+        // A task with explicit workspace roots is self-contained and may be
+        // sent through CLI/XPC before the UI has initialized the global
+        // default-parent setting. Rootless tasks still require that setting.
+        let repositoryRoot = try (task.workspaceRootPaths
+            .compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
+            .first ?? settingsManager.requireRepositoryRootFolder())
         let shouldGenerateTitle = !normalizedText.isEmpty && ["Untitled task", "Generating title…"].contains(task.title)
         // A caller that already saved the submitted prompt (the composer does,
         // so it survives navigation) supplies the status it replaced.
