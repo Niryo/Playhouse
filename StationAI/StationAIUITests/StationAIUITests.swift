@@ -7729,13 +7729,89 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
     }
 
-    // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode remain in the conversation and move the task to Waiting Response while unanswered; leaving and reopening the conversation preserves the pending question, keyed answers resume the provider turn in In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome.
+    // case-contract: test_pending_question_repair_restores_thread_owner | A misplaced pending question can be repaired through CLI/XPC only into its owning conversation. Repair rejects a wrong owner and a conflicting destination without mutation, backs up both transcripts, preserves request identity and mode, clears only the misplaced source, and is retryable. Fresh history and the visible UI restore the question only on the original task; answering it clears pending state and the safe response survives reopening. Retrying an interrupted repair after the destination question was answered rejects the stale source without resurrecting the question.
+    func test_pending_question_repair_restores_thread_owner() throws {
+        let restartFixture = dataDirectory.appendingPathComponent("codex-fixture-restart-question")
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-restart-question"), to: restartFixture)
+        codexFixtureExecutable = restartFixture.path
+        try "StationAI test owns this Codex protocol fixture (v1).\n".write(to: dataDirectory.appendingPathComponent(".stationai-codex-fixture-owner"), atomically: true, encoding: .utf8)
+        let target = try XCTUnwrap((try runCLI(["task", "create", "--title", "Repair original question", "--root", fixture.primary.path])["result"] as? [String: Any])?["id"] as? String)
+        let source = try XCTUnwrap((try runCLI(["task", "create", "--title", "Repair misplaced question", "--root", fixture.secondary.path])["result"] as? [String: Any])?["id"] as? String)
+        let stranger = try XCTUnwrap((try runCLI(["task", "create", "--title", "Repair wrong destination", "--root", fixture.alternate.path])["result"] as? [String: Any])?["id"] as? String)
+        _ = try runCLI(["conversation", "send", target, "--message", "Ask a restart-safe question.", "--mode", "plan"], expectedStatus: 1)
+        let strangerFixture = dataDirectory.appendingPathComponent("codex-fixture-title-success")
+        try FileManager.default.copyItem(at: restartFixture, to: strangerFixture)
+        _ = try runCLI(["conversation", "send", stranger, "--message", "Start another real conversation."], extraEnvironment: ["STATIONAI_E2E_CODEX_EXECUTABLE": strangerFixture.path])
+        let directory = dataDirectory.appendingPathComponent("conversation-transcripts")
+        let destination = directory.appendingPathComponent("\(target.uppercased()).json")
+        let misplaced = directory.appendingPathComponent("\(source.uppercased()).json")
+        var original = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: destination)) as? [String: Any])
+        let request = try XCTUnwrap(original.removeValue(forKey: "pendingUserInputRequest") as? [String: Any])
+        try JSONSerialization.data(withJSONObject: original).write(to: destination, options: .atomic)
+        let displaced: [String: Any] = ["version": 1, "segments": [], "turns": [], "pendingUserInputRequest": request]
+        try JSONSerialization.data(withJSONObject: displaced).write(to: misplaced, options: .atomic)
+        let originalBytes = try Data(contentsOf: destination)
+        let misplacedBytes = try Data(contentsOf: misplaced)
+        let wrong = try runCLI(["conversation", "repair-user-input", stranger, "--from-task", source], expectedStatus: 1)
+        XCTAssertEqual((wrong["error"] as? [String: Any])?["code"] as? String, "invalid_transition")
+        XCTAssertEqual(try Data(contentsOf: destination), originalBytes)
+        XCTAssertEqual(try Data(contentsOf: misplaced), misplacedBytes)
+        var conflict = request
+        conflict["id"] = "a-different-pending-request"
+        original["pendingUserInputRequest"] = conflict
+        try JSONSerialization.data(withJSONObject: original).write(to: destination, options: .atomic)
+        let conflictBytes = try Data(contentsOf: destination)
+        _ = try runCLI(["conversation", "repair-user-input", target, "--from-task", source], expectedStatus: 1)
+        XCTAssertEqual(try Data(contentsOf: destination), conflictBytes)
+        original.removeValue(forKey: "pendingUserInputRequest")
+        try JSONSerialization.data(withJSONObject: original).write(to: destination, options: .atomic)
+        let repaired = try runCLI(["conversation", "repair-user-input", target, "--from-task", source])
+        XCTAssertEqual((repaired["result"] as? [String: Any])?["id"] as? String, request["id"] as? String)
+        XCTAssertEqual((repaired["result"] as? [String: Any])?["mode"] as? String, "plan")
+        let sourceAfter = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: misplaced)) as? [String: Any])
+        XCTAssertNil(sourceAfter["pendingUserInputRequest"])
+        let backups = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("question-repair-backups"), includingPropertiesForKeys: nil)
+        XCTAssertEqual(backups.count, 1)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(at: backups[0], includingPropertiesForKeys: nil).count, 2)
+        let destinationBackup = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: backups[0].appendingPathComponent(destination.lastPathComponent))) as? NSDictionary)
+        XCTAssertEqual(destinationBackup, original as NSDictionary)
+        let sourceBackup = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: backups[0].appendingPathComponent(misplaced.lastPathComponent))) as? NSDictionary)
+        XCTAssertEqual(sourceBackup, displaced as NSDictionary)
+        _ = try runCLI(["conversation", "repair-user-input", target, "--from-task", source])
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Repair misplaced question")
+        XCTAssertFalse(element("conversation-user-input-request").exists)
+        element("back-to-board-button").click()
+        openTask(named: "Repair original question")
+        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Which color should I use?"].exists)
+        element("ai-question-option-color-Green").click()
+        element("ai-question-answer-token").click()
+        element("ai-question-answer-token").typeText("fixture-secret")
+        element("submit-ai-answers-button").click()
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / [redacted secret answer]."].waitForExistence(timeout: 15))
+        relaunchApp()
+        openTask(named: "Repair original question")
+        XCTAssertFalse(element("ai-question-form-title").exists)
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / [redacted secret answer]."].waitForExistence(timeout: 10))
+        let history = try runCLI(["conversation", "history", target])["result"]
+        let historyBytes = try JSONSerialization.data(withJSONObject: try XCTUnwrap(history))
+        XCTAssertFalse(String(decoding: historyBytes, as: UTF8.self).contains("fixture-secret"))
+        XCTAssertFalse(String(decoding: historyBytes, as: UTF8.self).contains("Continue this conversation by applying"))
+        try misplacedBytes.write(to: misplaced, options: .atomic)
+        _ = try runCLI(["conversation", "repair-user-input", target, "--from-task", source], expectedStatus: 1)
+        let afterRetry = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: destination)) as? [String: Any])
+        XCTAssertNil(afterRetry["pendingUserInputRequest"])
+    }
+
+    // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode remain in the conversation and move the task to Waiting Response while unanswered; leaving and reopening the conversation preserves the pending question, keyed answers resume the provider turn in In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome. A parallel conversation retains its own question and thread; the original conversation receives and answers a second question in its original Plan mode, and completing either conversation preserves the other pending request.
     func test_codex_questions_can_be_answered_over_cli_xpc() throws {
         let created = try runCLI(["task", "create", "--title", "Codex questions", "--root", fixture.primary.path])
         XCTAssertEqual(created["ok"] as? Bool, true)
         let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
-        _ = try runCLI(["task", "create", "--title", "Another conversation", "--root", fixture.primary.path])
-        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-plan-slow").path
+        let parallel = try runCLI(["task", "create", "--title", "Another conversation", "--root", fixture.secondary.path])
+        let parallelID = try XCTUnwrap((parallel["result"] as? [String: Any])?["id"] as? String)
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-question-isolation-plan-slow").path
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Codex questions")
         let modeMenu = element("conversation-mode-menu")
@@ -7758,6 +7834,13 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Pending question remains part of its active conversation")
         openTask(named: "Another conversation")
         XCTAssertTrue(element("message-composer").waitForExistence(timeout: 5), "A different conversation should open while the question is pending.")
+        element("message-composer").click()
+        element("message-composer").typeText("Please ask parallel questions.")
+        element("send-message-button").click()
+        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        let parallelThread = try XCTUnwrap(taskRecord(id: parallelID)?["codexThreadID"] as? String)
+        let originalThread = try XCTUnwrap(taskRecord(id: taskID)?["codexThreadID"] as? String)
+        XCTAssertNotEqual(parallelThread, originalThread)
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
         openTask(named: "Codex questions")
@@ -7788,6 +7871,22 @@ final class StationAIUITests: XCTestCase {
         }
         XCTAssertEqual(resumedStatus, "In Progress", "The unanswered question must not move the active task out of In Progress.")
 
+        XCTAssertTrue(app.staticTexts["Which color should I use next?"].waitForExistence(timeout: 10), "A second question must return to the original task after the other task replaced the shared callback.")
+        let transcriptDirectory = dataDirectory.appendingPathComponent("conversation-transcripts")
+        func pendingQuestion(_ owner: String) throws -> [String: Any] {
+            let url = transcriptDirectory.appendingPathComponent("\(owner.uppercased()).json")
+            let transcript = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+            return try XCTUnwrap(transcript["pendingUserInputRequest"] as? [String: Any])
+        }
+        XCTAssertEqual(try pendingQuestion(taskID)["threadID"] as? String, originalThread)
+        XCTAssertEqual(try pendingQuestion(taskID)["mode"] as? String, "plan")
+        XCTAssertEqual(try pendingQuestion(parallelID)["threadID"] as? String, parallelThread)
+        XCTAssertEqual(try pendingQuestion(parallelID)["mode"] as? String, "default")
+        element("ai-question-option-color-Blue").click()
+        element("ai-question-answer-token").click()
+        element("ai-question-answer-token").typeText("fixture-secret")
+        element("submit-ai-answers-button").click()
+
         let completionDeadline = Date().addingTimeInterval(10)
         var completedStatus: String?
         while Date() < completionDeadline {
@@ -7796,10 +7895,32 @@ final class StationAIUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.05)
         }
         XCTAssertEqual(completedStatus, "Waiting Response", "Without an explicit completed outcome, the submitted answer should leave the task in Waiting Response.")
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10), "Wait for A's completed provider response before checking B still owns its question.")
+        let originalTranscript = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: transcriptDirectory.appendingPathComponent("\(taskID.uppercased()).json"))) as? [String: Any])
+        XCTAssertNil(originalTranscript["pendingUserInputRequest"])
         XCTAssertFalse(element("ai-question-form-title").exists)
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
         assertTaskVisible("Codex questions", inColumn: "Waiting Response")
+        openTask(named: "Another conversation")
+        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 5), "Finishing the first task must preserve the parallel question.")
+        element("ai-question-option-color-Blue").click()
+        element("ai-question-answer-token").click()
+        element("ai-question-answer-token").typeText("fixture-secret")
+        element("submit-ai-answers-button").click()
+        let parallelDeadline = Date().addingTimeInterval(10)
+        while Date() < parallelDeadline, try taskRecord(id: parallelID)?["status"] as? String != "Waiting Response" {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        XCTAssertEqual(try taskRecord(id: parallelID)?["status"] as? String, "Waiting Response")
+        XCTAssertTrue(waitUntil({ !self.element("ai-question-form-title").exists }, timeout: 10))
+        let parallelTranscript = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: transcriptDirectory.appendingPathComponent("\(parallelID.uppercased()).json"))) as? [String: Any])
+        XCTAssertNil(parallelTranscript["pendingUserInputRequest"])
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        element("back-to-board-button").click()
+        openTask(named: "Another conversation")
+        XCTAssertFalse(element("ai-question-form-title").exists)
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
     }
 
     // case-contract: test_codex_empty_question_request_is_rejected | A failed turn preserves its blocked reason and appears in the compact Blocked section above Backlog with a user-intervention indication; retrying clears that section, and the successful retry returns to Waiting Response without an explicit completed outcome.
