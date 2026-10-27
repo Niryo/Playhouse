@@ -1498,7 +1498,7 @@ struct TaskConversationView: View {
                     }
 
                     if let activeProcess {
-                        activityRow(activeProcess)
+                        activityRow(activeProcess, compact: true)
                     }
                     ForEach(activeSubagents) { activity in
                         subagentTimelineRow(activity)
@@ -1706,12 +1706,56 @@ struct TaskConversationView: View {
         .accessibilityIdentifier("codex-subagent-row-\(activity.childThreadID ?? activity.id)")
     }
 
-    private func activityRow(_ activity: ConversationActivity) -> some View {
+    @ViewBuilder
+    private func activityRow(_ activity: ConversationActivity, compact: Bool = false) -> some View {
         let displayDetail = [activity.detail]
             .compactMap { $0 }
             .filter { !$0.isEmpty }
             .joined(separator: "\n")
-        return VStack(alignment: .leading, spacing: 3) {
+        if compact {
+            HStack(spacing: 7) {
+                Image(systemName: activity.status == "completed" ? "checkmark.circle.fill" : activity.status == "interrupted" ? "pause.circle.fill" : "gearshape.2.fill")
+                    .foregroundStyle(activity.status == "completed" ? .green : activity.status == "interrupted" ? .orange : .accentColor)
+                Text(activity.title)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .textSelection(.enabled)
+                if !displayDetail.isEmpty {
+                    Text(displayDetail)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("codex-activity-detail-\(activity.id)")
+                        .accessibilityLabel(displayDetail)
+                } else {
+                    Spacer(minLength: 0)
+                }
+                Text(activity.statusLabel)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                if activity.isActive, activity.startedAt != nil {
+                    TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                        let duration = activity.durationLabel(at: timeline.date) ?? ""
+                        Text(duration)
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .accessibilityValue(duration)
+                            .accessibilityIdentifier("codex-activity-duration-\(activity.id)")
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(9)
+            .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 8))
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("\(activity.title), \(activity.statusLabel)")
+            .accessibilityValue([displayDetail, activity.durationLabel()].compactMap { $0 }.joined(separator: "\n"))
+            .accessibilityIdentifier("codex-activity-row-\(activity.id)")
+        } else {
+        VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 7) {
                 Image(systemName: activity.status == "completed" ? "checkmark.circle.fill" : activity.status == "interrupted" ? "pause.circle.fill" : "gearshape.2.fill")
                     .foregroundStyle(activity.status == "completed" ? .green : activity.status == "interrupted" ? .orange : .accentColor)
@@ -1762,6 +1806,7 @@ struct TaskConversationView: View {
         .accessibilityLabel("\(activity.title), \(activity.statusLabel)")
         .accessibilityValue([displayDetail, activity.durationLabel()].compactMap { $0 }.joined(separator: "\n"))
         .accessibilityIdentifier(activity.isSubagent ? "codex-subagent-row-\(activity.childThreadID ?? activity.id)" : "codex-activity-row-\(activity.id)")
+        }
     }
 
     private func contextCompactionTimelineRow(_ activity: ConversationActivity) -> some View {

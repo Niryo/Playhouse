@@ -3165,7 +3165,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIn("Done tasks are closed", done_switch["error"]["message"])
         self.assertEqual(self.assert_success(self.call_cli("task", "get", done_task["id"])[0])["conversationProvider"], "codex")
 
-    # case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its StationAI progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn without an outcome ends in Waiting Response. After switching to Codex, the first Codex prompt hands off the whole Claude answer and excludes the commentary of answered turns, while a turn that recorded only commentary hands off its last commentary instead.
+    # case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its StationAI progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn without an outcome ends in Waiting Response. After switching to Codex, the first Codex prompt hands off the whole Claude answer and excludes the commentary of answered turns, while a turn that recorded only commentary hands off its last commentary instead. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
     def test_claude_answer_stays_final_around_outcome_report(self):
         story = "BISCUIT-7 waited by the gate every evening. One night the boy finally came home."
         story_answer = story + "\n\nThe story is above."
@@ -3190,6 +3190,9 @@ class StationAIBridgeTests(unittest.TestCase):
         progress = [event["payload"]["text"] for event in events if event["type"] == "assistant_progress"]
         self.assertFalse(any("BISCUIT-7" in text for text in progress), f"The story must not stream as commentary: {progress}")
         recorded = json.loads(Path(str(claude) + ".history").read_text(encoding="utf-8"))["turns"][-1]
+        self.assertIn("--model", recorded["arguments"], "Claude Code should receive an explicit model even when the user hasn't chosen one.")
+        model_argument_index = recorded["arguments"].index("--model")
+        self.assertEqual(recorded["arguments"][model_argument_index + 1], "sonnet", "StationAI should default new Claude turns to Sonnet.")
         self.assertEqual(len(recorded["reportCommands"]), 2, "The fixture should run StationAI's progress-clear and outcome commands.")
         self.assertTrue(all('"ok":true' in command["output"] for command in recorded["reportCommands"]), recorded["reportCommands"])
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Review")
@@ -4271,7 +4274,7 @@ class StationAIBridgeTests(unittest.TestCase):
         history, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(history)["messages"], [])
 
-    # case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. The latest active process appears outside Working for while older active processes remain inside; completion moves it inside. The conversation header has no live activity line while responding. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
+    # case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
     def test_conversation_shows_mcp_and_dynamic_tool_activity(self):
         task_id = self.create_task(title="Tool activity")['id']
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -4294,7 +4297,7 @@ class StationAIBridgeTests(unittest.TestCase):
         stream_buffer = bytearray()
         active_rows = {}
         completed_rows = {}
-        expected_tool_ids = {"item_fixture_mcp_call", "item_fixture_dynamic_call", "item_fixture_dynamic_legacy"}
+        expected_tool_ids = {"item_fixture_mcp_call", "item_fixture_dynamic_call", "item_fixture_dynamic_legacy", "item_fixture_active_long_command"}
         try:
             deadline = time.monotonic() + 20
             while (not ready.exists() or not expected_tool_ids.issubset(active_rows)) and time.monotonic() < deadline:
@@ -4320,10 +4323,12 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assertEqual(active_rows["item_fixture_mcp_call"]["toolKind"], "mcp")
             self.assertEqual(active_rows["item_fixture_dynamic_call"]["toolKind"], "dynamic")
             self.assertEqual(active_rows["item_fixture_dynamic_legacy"]["toolKind"], "dynamic")
+            self.assertTrue(active_rows["item_fixture_active_long_command"]["title"].startswith("Running long-command-name"))
+            self.assertGreater(len(active_rows["item_fixture_active_long_command"]["title"]), 200)
             self.assertTrue(all(row.get("startedAt") for row in active_rows.values()), "Every active call should report its start time.")
             release_latest.write_text("Finish the newest call first.\n", encoding="utf-8")
             latest_deadline = time.monotonic() + 20
-            while "item_fixture_dynamic_legacy" not in completed_rows and time.monotonic() < latest_deadline:
+            while "item_fixture_active_long_command" not in completed_rows and time.monotonic() < latest_deadline:
                 if process.stdout is not None:
                     readable, _, _ = select.select([process.stdout], [], [], 0.02)
                     if readable:
@@ -4339,8 +4344,8 @@ class StationAIBridgeTests(unittest.TestCase):
                             activity = event.get("payload", {}).get("activity", {})
                             if event.get("type") == "activity" and activity.get("status") in {"completed", "failed"}:
                                 completed_rows[activity.get("id")] = activity
-            self.assertIn("item_fixture_dynamic_legacy", completed_rows, "The newest call should finish before older active calls.")
-            self.assertGreater(completed_rows["item_fixture_dynamic_legacy"].get("durationMs", 0), 0)
+            self.assertIn("item_fixture_active_long_command", completed_rows, "The newest command should finish before older active calls.")
+            self.assertGreater(completed_rows["item_fixture_active_long_command"].get("durationMs", 0), 0)
             self.assertNotIn("item_fixture_dynamic_call", completed_rows, "Finishing the newest call must leave older calls active.")
             release.write_text("Release tool completions.\n", encoding="utf-8")
             remaining_stdout, remaining_stderr = process.communicate(timeout=60)

@@ -4215,7 +4215,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(element(containingAccessibilityText: "stationai-handoff-context").exists)
     }
 
-    // case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its StationAI progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn without an outcome ends in Waiting Response. After switching to Codex, the first Codex prompt hands off the whole Claude answer and excludes the commentary of answered turns, while a turn that recorded only commentary hands off its last commentary instead.
+    // case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its StationAI progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn without an outcome ends in Waiting Response. After switching to Codex, the first Codex prompt hands off the whole Claude answer and excludes the commentary of answered turns, while a turn that recorded only commentary hands off its last commentary instead. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
     func test_claude_answer_stays_final_around_outcome_report() throws {
         let claudeExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         let codexExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success")
@@ -4227,6 +4227,8 @@ final class StationAIUITests: XCTestCase {
         let created = try XCTUnwrap(try runCLI(["task", "create", "--title", "Claude answer UI", "--root", fixture.primary.path, "--provider", "claude"])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         openTask(named: "Claude answer UI")
+        let picker = element("model-picker-menu")
+        XCTAssertTrue(waitUntil({ (picker.value as? String)?.contains("Sonnet") == true }, timeout: 10), "A new Claude conversation defaults the picker to Sonnet without an explicit pick.")
         let composer = element("message-composer")
         let story = "BISCUIT-7 waited by the gate every evening. One night the boy finally came home."
         func send(_ text: String) {
@@ -4249,6 +4251,10 @@ final class StationAIUITests: XCTestCase {
         send("Tell me a very short dog story.")
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 20), "Claude's reported outcome should move the task to Review.")
         waitForSettledTurn()
+        let firstTurnHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: claudeExecutable.path + ".history"))) as? [String: Any])
+        let firstTurnArguments = try XCTUnwrap((firstTurnHistory["turns"] as? [[String: Any]])?.first?["arguments"] as? [String])
+        let firstTurnModelArgumentIndex = try XCTUnwrap(firstTurnArguments.firstIndex(of: "--model"))
+        XCTAssertEqual(firstTurnArguments[firstTurnModelArgumentIndex + 1], "sonnet", "Sending without an explicit pick should dispatch to Sonnet.")
         XCTAssertTrue(visibleTexts(containing: story).firstMatch.exists, "The story should be the visible answer, not collapsed commentary.")
         XCTAssertTrue(visibleTexts(containing: "The story is above.").firstMatch.exists, "The closing line belongs to the same answer.")
         element("codex-activity-disclosure").click()
@@ -5899,7 +5905,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
     }
 
-    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. The latest active process appears outside Working for while older active processes remain inside; completion moves it inside. The conversation header has no live activity line while responding. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
+    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
     func test_conversation_shows_mcp_and_dynamic_tool_activity() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-tool-activity").path
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
@@ -5923,8 +5929,9 @@ final class StationAIUITests: XCTestCase {
         }
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: toolReady.path) }, timeout: 20), "The fixture should pause after the tool start notifications.")
         XCTAssertFalse(element("current-activity-indicator").exists, "The conversation header should not show a live activity line while responding.")
-        let latestActiveRow = element("codex-activity-row-item_fixture_dynamic_legacy")
+        let latestActiveRow = element("codex-activity-row-item_fixture_active_long_command")
         XCTAssertTrue(latestActiveRow.waitForExistence(timeout: 10), "The latest active process should appear outside Working for.")
+        XCTAssertLessThan(latestActiveRow.frame.height, 45, "The long active command should remain a single truncated line.")
         XCTAssertFalse(element("codex-activity-row-item_fixture_mcp_call").exists)
         XCTAssertFalse(element("codex-activity-row-item_fixture_dynamic_call").exists)
         element("codex-activity-disclosure").click()
@@ -5939,9 +5946,11 @@ final class StationAIUITests: XCTestCase {
         let mcpRow = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").firstMatch
         let dynamicRow = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").firstMatch
         let legacyDynamicRow = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").firstMatch
+        let commandRow = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_active_long_command").firstMatch
         XCTAssertTrue(mcpRow.waitForExistence(timeout: 10), "Older MCP calls should remain inside expanded Working for.")
         XCTAssertTrue(dynamicRow.waitForExistence(timeout: 10), "Older dynamic calls should remain inside expanded Working for.")
-        XCTAssertFalse(legacyDynamicRow.exists, "The newest active call should stay outside expanded Working for.")
+        XCTAssertTrue(legacyDynamicRow.waitForExistence(timeout: 10), "The legacy dynamic call should remain inside expanded Working for.")
+        XCTAssertFalse(commandRow.exists, "The active command should stay outside expanded Working for.")
         XCTAssertTrue(latestActiveRow.label.contains("In progress"))
         for identifier in ["item_fixture_mcp_call", "item_fixture_dynamic_call"] {
             let liveDuration = activityDetails.descendants(matching: .any).matching(identifier: "codex-activity-duration-\(identifier)").firstMatch
@@ -5952,12 +5961,12 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(dynamicRow.label.contains("In progress"))
         try "Finish the newest call first.\n".write(to: toolReleaseLatest, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({ latestActiveRow.label.contains("Completed") }, timeout: 10))
-        XCTAssertTrue(waitUntil({ legacyDynamicRow.waitForExistence(timeout: 0.1) }, timeout: 10), "A completed process should move inside Working for.")
+        XCTAssertTrue(waitUntil({ commandRow.waitForExistence(timeout: 0.1) }, timeout: 10), "A completed command should move inside Working for.")
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").count, 1)
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").count, 1)
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").count, 1)
         try "Release tool completions.\n".write(to: toolRelease, atomically: true, encoding: .utf8)
-        XCTAssertTrue(waitUntil({ mcpRow.label.contains("Completed") && dynamicRow.label.contains("Failed") && legacyDynamicRow.label.contains("Completed") }, timeout: 30), "Lifecycle completions should update the existing rows.")
+        XCTAssertTrue(waitUntil({ mcpRow.label.contains("Completed") && dynamicRow.label.contains("Failed") && legacyDynamicRow.label.contains("Completed") && commandRow.label.contains("Completed") }, timeout: 30), "Lifecycle completions should update the existing rows.")
         XCTAssertTrue(mcpRow.label.contains("MCP · lookup"))
         XCTAssertTrue((mcpRow.value as? String ?? "").contains("fixture-server"))
         XCTAssertTrue((mcpRow.value as? String ?? "").contains("Returned 1 result item"))
