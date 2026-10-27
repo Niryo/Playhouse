@@ -5977,6 +5977,71 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(app.images["chat-image-\(imageID)-0"].waitForExistence(timeout: 10), "Reopening the Claude conversation should render the exact published image.")
     }
 
+    // case-contract: test_codex_agent_image_published_during_active_turn | While a Codex turn is active, CLI/XPC image publication avoids requesting provider history; the assistant image is tied to that turn, appears after its native response and before the next turn in ordered history, and remains visible after reopening the conversation.
+    func test_codex_agent_image_published_during_active_turn() throws {
+        let source = WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
+        let executable = dataDirectory.appendingPathComponent("codex-fixture-image-serial-success-wait")
+        try FileManager.default.copyItem(at: source, to: executable)
+        codexFixtureExecutable = executable.path
+        try Data("StationAI test owns this Codex protocol fixture (v1).\n".utf8)
+            .write(to: dataDirectory.appendingPathComponent(".stationai-codex-fixture-owner"))
+        let ready = URL(fileURLWithPath: executable.path + ".resolve-ready")
+        let release = URL(fileURLWithPath: executable.path + ".resolve-continue")
+        let observeHistory = URL(fileURLWithPath: executable.path + ".observe-history-while-active")
+        let historyRead = URL(fileURLWithPath: executable.path + ".history-read-while-active")
+        try? FileManager.default.removeItem(at: ready)
+        try? FileManager.default.removeItem(at: release)
+        try? FileManager.default.removeItem(at: observeHistory)
+        try? FileManager.default.removeItem(at: historyRead)
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Codex active image", roots: [fixture.primary.path])
+        openTask(named: "Codex active image")
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText("Please publish-image-during-active-turn.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15), "Codex should hold the active turn before its native response.")
+
+        let image = dataDirectory.appendingPathComponent("active-codex-agent-image.png")
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        try bitmap.representation(using: .png, properties: [:])!.write(to: image)
+        try Data().write(to: observeHistory)
+        let published = try runCLI([
+            "conversation", "present-image", try taskID(named: "Codex active image"), "--image", image.path, "--caption", "Generated while Codex was responding",
+        ])["result"] as? [String: Any]
+        let imageID = try XCTUnwrap(published?["id"] as? String)
+        let publishedTurnID = try XCTUnwrap(published?["turnID"] as? String)
+        XCTAssertFalse(publishedTurnID.isEmpty, "The published image should carry the active Codex turn ID.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: historyRead.path), "Publishing during a Codex turn must not request its busy provider history.")
+        try FileManager.default.removeItem(at: observeHistory)
+        try Data("Release Codex's turn.\n".utf8).write(to: release)
+        XCTAssertTrue(app.images["chat-image-\(imageID)-0"].waitForExistence(timeout: 20), "The image returned during the active turn should render in the transcript.")
+
+        let followupText = "Start a later turn after the generated image."
+        composer.click()
+        composer.typeText(followupText)
+        element("send-message-button").click()
+        let visibleImage = app.images["chat-image-\(imageID)-0"]
+        let visibleFollowup = app.staticTexts[followupText]
+        XCTAssertTrue(visibleFollowup.waitForExistence(timeout: 10), "The later user turn should be visible in the transcript.")
+        XCTAssertLessThan(visibleImage.frame.minY, visibleFollowup.frame.minY, "The rendered generated image should appear before the later user turn.")
+
+        let history = try runCLI(["conversation", "history", try taskID(named: "Codex active image")])["result"] as? [String: Any]
+        let messages = try XCTUnwrap(history?["messages"] as? [[String: Any]])
+        let imageIndex = try XCTUnwrap(messages.firstIndex { $0["id"] as? String == imageID })
+        let answerIndex = try XCTUnwrap(messages.firstIndex { $0["text"] as? String == "Answers received: Blue / fixture-secret." })
+        let followupIndex = try XCTUnwrap(messages.firstIndex { $0["role"] as? String == "user" && $0["text"] as? String == followupText })
+        XCTAssertGreaterThan(imageIndex, answerIndex, "The image should follow the native response in its Codex turn.")
+        XCTAssertEqual(publishedTurnID, messages[answerIndex]["turnID"] as? String, "The published image should share the active Codex response's turn ID.")
+        XCTAssertEqual(messages[imageIndex]["turnID"] as? String, publishedTurnID, "History should preserve the published image's turn ID.")
+        XCTAssertLessThan(imageIndex, followupIndex, "The image should remain before the next Codex turn.")
+        element("back-to-board-button").click()
+        openTask(named: "Codex active image")
+        XCTAssertTrue(app.images["chat-image-\(imageID)-0"].waitForExistence(timeout: 10), "Reopening the Codex conversation should render the exact published image.")
+    }
+
     // case-contract: test_conversation_rejects_invalid_image_attachments | Malformed image data is rejected with a visible composer error and an invalid_argument bridge response, without creating conversation history or advancing task status.
     func test_conversation_rejects_invalid_image_attachments() throws {
         launchApp(defaultParent: fixture.parent.path)
@@ -6004,7 +6069,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
     }
 
-    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
+    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the submitted user message remains visible in the transcript. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
     func test_conversation_shows_mcp_and_dynamic_tool_activity() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-tool-activity").path
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
@@ -6027,6 +6092,7 @@ final class StationAIUITests: XCTestCase {
             try? "Release tool completions after assertion failure.\n".write(to: toolRelease, atomically: true, encoding: .utf8)
         }
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: toolReady.path) }, timeout: 20), "The fixture should pause after the tool start notifications.")
+        XCTAssertTrue(app.staticTexts["Show tool activity."].isHittable, "While the sent turn is still held active, the submitted user message must remain visible instead of leaving the transcript in blank space.")
         XCTAssertFalse(element("current-activity-indicator").exists, "The conversation header should not show a live activity line while responding.")
         let latestActiveRow = element("codex-activity-row-item_fixture_active_long_command")
         XCTAssertTrue(latestActiveRow.waitForExistence(timeout: 10), "The latest active process should appear outside Working for.")
@@ -6421,7 +6487,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Conversation shows and opens a subagent")
     }
 
-    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics.
+    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics.
     func test_plan_mode_renders_markdown_in_conversation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -6504,7 +6570,7 @@ final class StationAIUITests: XCTestCase {
         composer.click()
         composer.typeText("Plan the task.")
         element("send-message-button").click()
-        let markdownReply = "## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening"
+        let markdownReply = "## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening\n\n1. First numbered step: capture the baseline state before changes.\n\n2. Second numbered step: apply the fix and confirm there are no regressions.\n\n```javascript\nconsole.log(\"Hello, world!\");\n```"
         let assistantMarkdown = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-", "Implementation plan"))
             .firstMatch
@@ -6580,8 +6646,34 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(copiedPlan.contains("Implementation detail 01"), "Selecting all should include the first list item.")
         XCTAssertTrue(copiedPlan.contains("Implementation detail 15"), "Selecting all should include content from the middle of the plan.")
         XCTAssertTrue(copiedPlan.contains("Final verification: confirm the latest message is visible after reopening"), "Selecting all should include the final plan item.")
+        XCTAssertTrue(copiedPlan.contains("First numbered step"), "Selecting all should include the first ordered list item.")
+        XCTAssertTrue(copiedPlan.contains("Second numbered step"), "Selecting all should include the second ordered list item.")
+        XCTAssertTrue(copiedPlan.contains("console.log"), "Selecting all should include the fenced code block's content.")
+
+        let firstOrderedItem = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-markdown-ordered-list-item-", "First numbered step"))
+            .firstMatch
+        XCTAssertTrue(firstOrderedItem.waitForExistence(timeout: 5), "The first ordered list item should render as its own block.")
+        XCTAssertFalse(firstOrderedItem.label.contains("Second numbered step"), "Ordered list items should stay on separate lines instead of being merged.")
+        let secondOrderedItem = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-markdown-ordered-list-item-", "Second numbered step"))
+            .firstMatch
+        XCTAssertTrue(secondOrderedItem.exists, "The second ordered list item should render as its own block.")
+
+        let codeBlockLanguageLabel = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "assistant-markdown-code-block-language-"))
+            .firstMatch
+        XCTAssertTrue(codeBlockLanguageLabel.waitForExistence(timeout: 5), "The fenced code block should render with a visible language label.")
+        XCTAssertEqual(codeBlockLanguageLabel.label, "Javascript", "The fenced code block's declared language should be displayed.")
+        let codeBlockCopyButton = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "assistant-markdown-code-block-copy-"))
+            .firstMatch
+        XCTAssertTrue(codeBlockCopyButton.waitForExistence(timeout: 5), "The fenced code block should render with a copy button.")
+        codeBlockCopyButton.click()
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string), "console.log(\"Hello, world!\");", "Copying the code block should place its exact source on the pasteboard, not the Markdown fence or surrounding prose.")
+
         let latestListItem = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label CONTAINS %@", "Final verification: confirm the latest message is visible after reopening"))
+            .matching(NSPredicate(format: "identifier MATCHES %@", "assistant-markdown-code-block-[0-9]+"))
             .firstMatch
         let conversationScrollView = element("conversation-scroll-view")
         XCTAssertTrue(waitUntil({
@@ -7848,7 +7940,7 @@ final class StationAIUITests: XCTestCase {
         assertTaskVisible("Empty Codex questions", inColumn: "Waiting Response")
     }
 
-    // case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation and returning, and keep the task In Progress until answered; after the answered turn finishes without an outcome, StationAI sends two hidden requests explicitly directing a CLI task outcome report and then returns to Waiting Response; questions raised during those reminders are rejected with outcome instructions, and a failed first reminder still permits the second request.
+    // case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation and returning, and keep the task In Progress until answered; choices with free text expose a selectable Other radio option, select Other when text is entered, keep it mutually exclusive with listed answers, and accept the free-text answer through CLI/XPC and the visible UI. After the answered turn finishes without an outcome, StationAI sends two hidden requests explicitly directing a CLI task outcome report and then returns to Waiting Response; questions raised during those reminders are rejected with outcome instructions, and a failed first reminder still permits the second request.
     func test_codex_nonblocking_question_keeps_task_in_progress() throws {
         _ = try runCLI(["task", "create", "--title", "Non-blocking question", "--root", fixture.primary.path])
         _ = try runCLI(["task", "create", "--title", "Another non-blocking conversation", "--root", fixture.primary.path])
@@ -7870,9 +7962,20 @@ final class StationAIUITests: XCTestCase {
         openTask(named: "Non-blocking question")
         XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 5), "Returning should restore the pending question inline.")
         XCTAssertEqual(try taskRecord(named: "Non-blocking question")?["status"] as? String, "In Progress")
-        app.buttons["Blue"].click()
-        element("ai-question-answer-token").click()
-        element("ai-question-answer-token").typeText("fixture-secret")
+        let otherOption = app.buttons["Other"]
+        XCTAssertTrue(otherOption.exists, "An allowed free-text answer must have an explicit Other radio choice.")
+        otherOption.click()
+        XCTAssertEqual(otherOption.value as? String, "selected")
+        let blueOption = element("ai-question-option-color-Blue")
+        XCTAssertEqual(blueOption.value as? String, "not selected")
+        let otherAnswer = app.textFields["Other answer"]
+        otherAnswer.click()
+        otherAnswer.typeText("Custom approach")
+        XCTAssertEqual(otherOption.value as? String, "selected", "Typing an Other answer must select the Other choice.")
+        XCTAssertEqual(blueOption.value as? String, "not selected", "Typing an Other answer must clear listed choices.")
+        let secretAnswer = element("ai-question-answer-token")
+        secretAnswer.click()
+        secretAnswer.typeText("fixture-secret")
         element("submit-ai-answers-button").click()
         let nonblockingDeadline = Date().addingTimeInterval(5)
         var nonblockingStatus: String?
@@ -7882,7 +7985,7 @@ final class StationAIUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.05)
         }
         XCTAssertEqual(nonblockingStatus, "In Progress", "A non-blocking answer should leave the task active until the turn completes.")
-        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Answers received: Custom approach / fixture-secret."].waitForExistence(timeout: 10), "The provider response should reflect the submitted Other answer.")
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(named: "Non-blocking question")?["status"] as? String) == "Waiting Response" }, timeout: 20), "The answered turn should reach Waiting Response after both private reminders.")
         let fixturePath = try XCTUnwrap(codexFixtureExecutable)
         let fixtureHistoryData = try Data(contentsOf: URL(fileURLWithPath: fixturePath + ".history"))
