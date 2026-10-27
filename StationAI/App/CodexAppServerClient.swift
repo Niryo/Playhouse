@@ -245,22 +245,26 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
 
     func availableModels(workspace: ConversationWorkspaceContext) async throws -> [ConversationModelOption] {
         try await ensureInitialized(workspace: workspace)
-        let response = try await request(method: "model/list", params: ["includeHidden": false])
-        let models = (response["data"] as? [[String: Any]] ?? []).compactMap { item -> ConversationModelOption? in
-            guard let id = item["id"] as? String, !id.isEmpty else { return nil }
-            let supportedEfforts = (item["supportedReasoningEfforts"] as? [Any])?.compactMap { value -> ConversationEffort? in
-                let rawValue = (value as? String) ?? (value as? [String: Any])?["reasoningEffort"] as? String
-                guard let rawValue else { return nil }
-                return ConversationEffort(rawValue: rawValue)
+        for attempt in 0..<3 {
+            let response = try await request(method: "model/list", params: ["includeHidden": false])
+            let models = (response["data"] as? [[String: Any]] ?? []).compactMap { item -> ConversationModelOption? in
+                guard let id = item["id"] as? String, !id.isEmpty else { return nil }
+                let supportedEfforts = (item["supportedReasoningEfforts"] as? [Any])?.compactMap { value -> ConversationEffort? in
+                    let rawValue = (value as? String) ?? (value as? [String: Any])?["reasoningEffort"] as? String
+                    guard let rawValue else { return nil }
+                    return ConversationEffort(rawValue: rawValue)
+                }
+                return ConversationModelOption(
+                    id: id,
+                    name: item["displayName"] as? String ?? item["model"] as? String ?? id,
+                    isDefault: item["isDefault"] as? Bool ?? false,
+                    supportedEfforts: supportedEfforts?.isEmpty == false ? supportedEfforts : nil
+                )
             }
-            return ConversationModelOption(
-                id: id,
-                name: item["displayName"] as? String ?? item["model"] as? String ?? id,
-                isDefault: item["isDefault"] as? Bool ?? false,
-                supportedEfforts: supportedEfforts?.isEmpty == false ? supportedEfforts : nil
-            )
+            if !models.isEmpty { return models }
+            if attempt < 2 { try await Task.sleep(for: .milliseconds(200)) }
         }
-        return models.isEmpty ? [ConversationModelOption(id: Self.modelID, name: "GPT-6 Luna", isDefault: true)] : models
+        return [ConversationModelOption(id: Self.modelID, name: "GPT-6 Luna", isDefault: true)]
     }
 
     func validateEffort(_ effort: ConversationEffort, modelID: String, workspace: ConversationWorkspaceContext) async throws {
@@ -564,20 +568,25 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
               let turnID = turn["id"] as? String else {
             throw ClientError.protocolFailure("Codex did not return a turn ID.")
         }
-        activeTurnID = turnID
-        context.turnID = turnID
+        let turnKey = Self.turnKey(threadID: threadID, turnID: turnID)
+        let returnedStatus = turn["status"] as? String
+        let turnAlreadyTerminal = completedTurns[turnKey] != nil
+            || returnedStatus.map { ["completed", "failed", "interrupted"].contains($0) } == true
+        context.turnID = turnAlreadyTerminal ? nil : turnID
+        activeTurnID = turnAlreadyTerminal ? nil : turnID
         onTurnStarted(turnID)
-        isTurnActive = true
-        ConversationSteerMailbox.publishActiveTurn(threadID: threadID, turnID: turnID)
-        Self.processActiveThreadIDs.insert(threadID)
+        isTurnActive = !turnAlreadyTerminal
+        if !turnAlreadyTerminal {
+            ConversationSteerMailbox.publishActiveTurn(threadID: threadID, turnID: turnID)
+            Self.processActiveThreadIDs.insert(threadID)
+        }
         StationAIDiagnostics.record("codex.turn.started", fields: diagnosticFields([
             "threadID": threadID,
             "turnID": turnID,
-            "turnStatus": turn["status"] as? String ?? "unknown",
+            "turnStatus": returnedStatus ?? "unknown",
             "workspaceRootCount": String(workspace.roots.count),
         ]))
 
-        let turnKey = Self.turnKey(threadID: threadID, turnID: turnID)
         switch turn["status"] as? String {
         case "completed":
             break
@@ -1382,12 +1391,16 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 "turnStatus": turn["status"] as? String ?? "unknown",
             ]))
 
-            if goalObservationThreadID == threadID, activeTurnID == turnID {
+            let isMatchingActiveTurn = activeThreadID == threadID && activeTurnID == turnID
+            if isMatchingActiveTurn {
                 activeTurnID = nil
                 isTurnActive = false
-                goalTurnCompletedTurnID = turnID
                 Self.processActiveThreadIDs.remove(threadID)
                 ConversationSteerMailbox.clearActiveTurn(threadID: threadID)
+            }
+
+            if goalObservationThreadID == threadID, isMatchingActiveTurn {
+                goalTurnCompletedTurnID = turnID
                 goalTurnRevision += 1
                 goalTurnCompletedRevision += 1
                 return

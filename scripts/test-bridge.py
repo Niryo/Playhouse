@@ -2887,7 +2887,7 @@ class StationAIBridgeTests(unittest.TestCase):
         serialized_title_events = json.dumps(title_events)
         self.assertNotIn("Explain the delayed title result.", serialized_title_events)
         self.assertNotIn("Generated fixture title", serialized_title_events)
-    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
+    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation; if it is concurrently renamed while title generation is pending, the custom title determines the auto branch. A standalone Untitled task starts and persists its provider thread while background title generation is still pending. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
     def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         task_id = self.create_task(title="Blank conversation send", roots=[self.primary])["id"]
@@ -3087,6 +3087,39 @@ class StationAIBridgeTests(unittest.TestCase):
         self.finish_cli(pending_send, ["conversation", "send", pending_task["id"], "--message", pending_prompt])
         completed_pending, _ = self.call_cli("task", "get", pending_task["id"])
         self.assertIsNone(self.assert_success(completed_pending).get("pendingSubmittedPrompt"))
+
+        renamed_auto_task = self.create_repo_task("Untitled task", [self.secondary])
+        renamed_auto_prompt = "Use the concurrently selected task title for this worktree."
+        renamed_auto_title = "Concurrent custom branch title"
+        renamed_auto_executable = self.data_directory / "codex-fixture-concurrent-title-success-wait"
+        shutil.copyfile(fixture, renamed_auto_executable)
+        renamed_auto_executable.chmod(0o755)
+        renamed_auto_send = self.start_cli(
+            "conversation", "send", renamed_auto_task["id"], "--message", renamed_auto_prompt,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(renamed_auto_executable)},
+        )
+        renamed_title_ready = Path(str(renamed_auto_executable) + ".resolve-ready")
+        renamed_title_release = Path(str(renamed_auto_executable) + ".resolve-continue")
+        try:
+            title_ready_deadline = time.monotonic() + 15
+            while time.monotonic() < title_ready_deadline and not renamed_title_ready.exists():
+                time.sleep(0.02)
+            self.assertTrue(renamed_title_ready.exists(), "Title generation should remain pending during the concurrent rename.")
+            renamed_response, _ = self.call_cli(
+                "task", "rename", renamed_auto_task["id"], "--title", renamed_auto_title
+            )
+            self.assertEqual(self.assert_success(renamed_response)["title"], renamed_auto_title)
+        finally:
+            renamed_title_release.write_text("Continue concurrent title generation.\n", encoding="utf-8")
+        sent_response, _ = self.finish_cli(
+            renamed_auto_send,
+            ("conversation", "send", renamed_auto_task["id"], "--message", renamed_auto_prompt),
+        )
+        self.assert_success(sent_response)
+        renamed_auto_record = self.assert_success(self.call_cli("task", "get", renamed_auto_task["id"])[0])
+        self.assertEqual(renamed_auto_record["title"], renamed_auto_title)
+        self.assertEqual(renamed_auto_record["repositoryWorktrees"][0]["branch"], "concurrent-custom-branch-title")
+        self.assertFalse(renamed_auto_record["repositoryWorktrees"][0]["isPending"])
 
         stale_task = self.create_task("Untitled task", roots=[self.primary])
         stale_prompt = "Restore a stale submitted prompt to the composer."
@@ -5823,7 +5856,7 @@ class StationAIBridgeTests(unittest.TestCase):
         recovered_thread, _ = self.call_cli("task", "get", threaded_restart["id"])
         recovered_thread_record = self.assert_success(recovered_thread)
         self.assertEqual(recovered_thread_record["status"], "Waiting Response")
-        self.assertIn("restarted", recovered_thread_record["statusMessage"].lower())
+        self.assertIn("closed while this turn was running", recovered_thread_record["statusMessage"].lower())
         self.assertIsNone(recovered_thread_record.get("pendingSubmittedPrompt"))
         continued_thread = self.complete_fixture_turn(
             threaded_restart["id"], executable_name=thread_executable,

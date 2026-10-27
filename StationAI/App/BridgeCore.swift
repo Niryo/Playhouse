@@ -1993,7 +1993,15 @@ final class BoardTaskManager {
 
     func reviewPullRequests(_ id: UUID) async throws -> [PullRequestReviewState] {
         let task = try requireTask(id)
-        let records = task.repositoryWorktrees.filter { !$0.isPending && $0.pullRequestNumber != nil }
+        return try await reviewPullRequests(task)
+    }
+
+    func reviewPullRequests(_ task: BoardTask) async throws -> [PullRequestReviewState] {
+        let records = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil }
+        return try await reviewPullRequests(records)
+    }
+
+    func reviewPullRequests(_ records: [RepositoryWorktreeRecord]) async throws -> [PullRequestReviewState] {
         guard !records.isEmpty else { return [] }
         let executable = try pullRequestService.resolveExecutable()
         return try await withThrowingTaskGroup(of: PullRequestReviewState.self) { group in
@@ -2324,7 +2332,7 @@ final class BoardTaskManager {
             let message: String
             switch task.status {
             case .inProgress:
-                message = "StationAI restarted before \(providerName) reported that this turn finished. Your conversation is saved; review it and send a follow-up to continue."
+                message = "StationAI closed while this turn was running. Your conversation is saved; review it and send a follow-up to continue."
             case .waitingResponse:
                 message = "StationAI reopened before the pending question was answered. Review the conversation and send a prompt to continue."
             default:
@@ -2637,13 +2645,19 @@ final class BoardTaskManager {
         }
     }
 
-    func prepareRepositoryWorktrees(_ id: UUID, fallbackPrompt: String? = nil) async throws -> BoardTask {
+    func prepareRepositoryWorktrees(
+        _ id: UUID,
+        fallbackPrompt: String? = nil,
+        resolvedTitle: String? = nil
+    ) async throws -> BoardTask {
         let initialTask = try requireTask(id)
         let initialRecords = initialTask.repositoryWorktrees
         let pending = initialRecords.filter(\.isPending)
         guard !pending.isEmpty else { return initialTask }
         let branchTitle: String
-        if ["Generating title…", "Untitled task"].contains(initialTask.title) {
+        if let resolvedTitle, !resolvedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            branchTitle = resolvedTitle
+        } else if ["Generating title…", "Untitled task"].contains(initialTask.title) {
             let prompt = initialTask.savedPrompt ?? fallbackPrompt ?? initialTask.title
             branchTitle = prompt.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
         } else {
@@ -3162,6 +3176,11 @@ final class WorkspaceManager {
             repositoryPaths: repositoryPaths,
             duringActiveConversation: true
         )
+        let taskBeforePreparation = try taskManager.taskModel(taskID)
+        if ["Untitled task", "Generating title…"].contains(taskBeforePreparation.title),
+           taskBeforePreparation.pendingSubmittedPrompt == nil {
+            return BoardTaskRecord(task: taskBeforePreparation)
+        }
         let record = try await taskManager.prepareRepositoryWorktrees(taskID)
         try settingsManager.setLastSelectedRepositories(record.repositoryWorktrees.map(\.repositoryPath))
         StationAIDiagnostics.record("workspace.repositories.add.succeeded", fields: [
@@ -4702,7 +4721,12 @@ final class ConversationManager {
                 client.clearTurnStarting(threadID: threadID)
             }
         }
-        let repositoryRoot = try settingsManager.requireRepositoryRootFolder()
+        // A task with explicit workspace roots is self-contained and may be
+        // sent through CLI/XPC before the UI has initialized the global
+        // default-parent setting. Rootless tasks still require that setting.
+        let repositoryRoot = try (task.workspaceRootPaths
+            .compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
+            .first ?? settingsManager.requireRepositoryRootFolder())
         let shouldGenerateTitle = !normalizedText.isEmpty && ["Untitled task", "Generating title…"].contains(task.title)
         // A caller that already saved the submitted prompt (the composer does,
         // so it survives navigation) supplies the status it replaced.
@@ -4712,7 +4736,15 @@ final class ConversationManager {
         let resolveTitleBeforeWorktree: Bool
         let workspace: ConversationWorkspaceContext
         let titleGeneration: Task<Void, Never>?
+        var resolvedWorktreeTitle: String? = ["Untitled task", "Generating title…"].contains(task.title)
+            ? nil
+            : task.title
         do {
+            // Resolve the first submitted prompt's title before preparing any
+            // repositories. The app's model context can lag repository changes
+            // made through the bridge, so using this snapshot to detect an auto
+            // branch can otherwise allocate "untitled-task" before the generated
+            // title arrives.
             let titleMustPrecedeAutoWorktree = task.repositoryWorktrees.contains {
                 $0.isPending && $0.branch == "auto"
             }
@@ -4726,7 +4758,7 @@ final class ConversationManager {
                 if reserved != nil {
                     let titleRoots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
                     let titleWorkspace = try ConversationWorkspaceContext(roots: titleRoots)
-                    try await generateAndApplyTitle(
+                    resolvedWorktreeTitle = try await generateAndApplyTitle(
                         taskID: taskID,
                         prompt: persistedText,
                         workspace: titleWorkspace,
@@ -4740,8 +4772,13 @@ final class ConversationManager {
                         message: "The task title changed while it was being prepared. Try sending again."
                     )
                 }
+                resolvedWorktreeTitle = task.title
             }
-            task = try await tasks.prepareRepositoryWorktrees(taskID, fallbackPrompt: persistedText)
+            task = try await tasks.prepareRepositoryWorktrees(
+                taskID,
+                fallbackPrompt: persistedText,
+                resolvedTitle: resolvedWorktreeTitle ?? persistedText
+            )
             if !normalizedText.isEmpty {
                 _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
             }
@@ -4761,7 +4798,7 @@ final class ConversationManager {
                     let titleClients = clients.helperClients(preferring: provider)
                     titleGeneration = Task { @MainActor in
                         do {
-                            try await self.generateAndApplyTitle(
+                            _ = try await self.generateAndApplyTitle(
                                 taskID: taskID,
                                 prompt: persistedText,
                                 workspace: workspace,
@@ -5138,11 +5175,12 @@ final class ConversationManager {
         prompt: String,
         workspace: ConversationWorkspaceContext,
         clients titleClients: [ConversationProviderClient]
-    ) async throws {
+    ) async throws -> String {
         let result = await ConversationTitleGenerator(clients: titleClients)
             .generateTitle(from: prompt, workspace: workspace, taskID: taskID)
         let generated = result?.title
         let fallback = prompt.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
+        let resolvedTitle = generated.flatMap { $0.isEmpty ? nil : $0 } ?? fallback
         let titleSource = result?.provider.rawValue ?? "prompt-fallback"
         let latest: BoardTask
         do {
@@ -5152,7 +5190,7 @@ final class ConversationManager {
             fields["taskID"] = taskID.uuidString
             fields["titleSource"] = titleSource
             StationAIDiagnostics.record("task.title_apply.skipped", fields: fields.merging(["reason": "task_unavailable"]) { _, new in new })
-            return
+            return fallback
         }
         guard latest.title == "Generating title…" else {
             StationAIDiagnostics.record("task.title_apply.skipped", fields: [
@@ -5161,9 +5199,10 @@ final class ConversationManager {
                 "currentTitleState": StationAITaskTitleDiagnostics.state(of: latest.title),
                 "titleSource": titleSource
             ])
-            return
+            return ["Generating title…", "Untitled task"].contains(latest.title)
+                ? resolvedTitle
+                : latest.title
         }
-        let resolvedTitle = generated.flatMap { $0.isEmpty ? nil : $0 } ?? fallback
         do {
             guard try await tasks.renameIfTitleMatches(
                 taskID,
@@ -5177,13 +5216,14 @@ final class ConversationManager {
                     "currentTitleState": StationAITaskTitleDiagnostics.state(of: currentTitle),
                     "titleSource": titleSource
                 ])
-                return
+                return currentTitle
             }
             StationAIDiagnostics.record("task.title_apply.succeeded", fields: [
                 "taskID": taskID.uuidString,
                 "titleSource": titleSource,
                 "fallbackWordCount": generated == nil ? String(fallback.split(whereSeparator: \.isWhitespace).count) : "0"
             ])
+            return resolvedTitle
         } catch {
             var fields = StationAIDiagnostics.errorFields(error, redacting: [resolvedTitle, prompt])
             fields["taskID"] = taskID.uuidString
@@ -5206,13 +5246,14 @@ final class ConversationManager {
                         "currentTitleState": StationAITaskTitleDiagnostics.state(of: currentTitle),
                         "titleSource": "prompt-fallback"
                     ])
-                    return
+                    return currentTitle
                 }
                 StationAIDiagnostics.record("task.title_apply.succeeded", fields: [
                     "taskID": taskID.uuidString,
                     "titleSource": "prompt-fallback",
                     "fallbackWordCount": String(fallback.split(whereSeparator: \.isWhitespace).count)
                 ])
+                return fallback
             } catch {
                 var recoveryFields = StationAIDiagnostics.errorFields(error, redacting: [fallback, prompt])
                 recoveryFields["taskID"] = taskID.uuidString

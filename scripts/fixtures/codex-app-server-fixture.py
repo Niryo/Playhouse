@@ -292,7 +292,7 @@ def main():
                 {"id": "gpt-5.6-luna", "displayName": "GPT-5.6 Luna", "isDefault": False,
                  "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]},
             ]}})
-        elif "-goal" in mode and message.get("method") == "thread/goal/get":
+        elif message.get("method") == "thread/goal/get":
             goal = json.loads(goal_path.read_text(encoding="utf-8")) if goal_path.is_file() else None
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"goal": goal}})
         elif "-goal" in mode and message.get("method") == "thread/goal/set":
@@ -421,7 +421,12 @@ def main():
                     resume.unlink(missing_ok=True)
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID,
-                    "item": {"id": "item_stationai_title", "type": "agentMessage", "text": "Generated fixture title"},
+                    "item": {
+                        "id": "item_stationai_title",
+                        "type": "agentMessage",
+                        "phase": "final_answer",
+                        "text": "Generated fixture title",
+                    },
                 }})
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": THREAD_ID,
@@ -968,6 +973,7 @@ def main():
                 }})
             elif mode.endswith("-markdown"):
                 plan_item_id = "item_stationai_plan"
+                is_plan_turn = message.get("params", {}).get("collaborationMode", {}).get("mode") == "plan"
                 write({"jsonrpc": "2.0", "method": "item/started", "params": {
                     "threadId": THREAD_ID, "turnId": TURN_ID,
                     "item": {"id": plan_item_id, "type": "plan", "text": ""},
@@ -977,7 +983,7 @@ def main():
                         "threadId": THREAD_ID, "turnId": TURN_ID,
                         "itemId": plan_item_id, "delta": delta,
                     }})
-                    if index == 0 and Path(str(sys.argv[0]) + ".plan-delta-hold").exists():
+                    if index == 0 and is_plan_turn and Path(str(sys.argv[0]) + ".plan-delta-hold").exists():
                         ready = Path(str(sys.argv[0]) + ".plan-delta-ready")
                         release = Path(str(sys.argv[0]) + ".plan-delta-release")
                         ready.write_text("The first plan delta is visible before completion.\n", encoding="utf-8")
@@ -993,7 +999,7 @@ def main():
                     "item": {"id": plan_item_id, "type": "plan", "text": MARKDOWN_PLAN},
                 }})
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
-                    "threadId": "00000000-0000-0000-0000-000000000001",
+                    "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
             elif mode.endswith("-hold"):
@@ -1150,6 +1156,18 @@ def main():
                     "threadId": THREAD_ID, "turnId": TURN_ID,
                     "item": {"id": "item_recovered_answer", "type": "agentMessage", "phase": "final_answer", "text": "Recovered answer: Green; private token fixture-secret was applied."},
                 }})
+            else:
+                echoed = echoed_outcome_answer(turn_message)
+                if not failed and echoed:
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                        "threadId": THREAD_ID, "turnId": TURN_ID,
+                        "item": {
+                            "id": "item_stationai_echoed_outcome",
+                            "type": "agentMessage",
+                            "phase": "final_answer",
+                            "text": echoed,
+                        },
+                    }})
             write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                 "threadId": THREAD_ID,
                 "turn": {"id": TURN_ID, "status": "interrupted" if mode.endswith("-interrupted") else ("failed" if failed else "completed"),
@@ -1247,7 +1265,7 @@ def main():
                     if user_content:
                         contents.extend([
                             {"id": f"item_user_fixture_{index}", "type": "userMessage", "content": user_content},
-                            {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": answer_text(user_message)},
+                            {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "phase": "final_answer", "text": answer_text(user_message)},
                         ])
             elif saved_history.get("turns"):
                 contents = []
@@ -1259,12 +1277,12 @@ def main():
                     ]
                     if user_content:
                         echoed = echoed_outcome_answer(user_message)
-                        assistant = {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."}
+                        assistant = {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "phase": "final_answer", "text": "Answers received: Blue / fixture-secret."}
                         if echoed:
                             assistant.update(phase="final_answer", text=echoed)
                         contents.extend([
                             {"id": f"item_user_fixture_{index}", "type": "userMessage", "content": user_content},
-                            assistant if echoed else {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": answer_text(user_message)},
+                            assistant if echoed else {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "phase": "final_answer", "text": answer_text(user_message)},
                         ])
                         if "fixture-secret" in (user_message or ""):
                             contents.append({
@@ -1310,7 +1328,7 @@ def main():
                 ]
                 contents = ([
                     {"id": "item_user_fixture", "type": "userMessage", "content": user_content},
-                    {"id": "item_assistant_fixture", "type": "agentMessage", "text": answer_text(user_message)},
+                    {"id": "item_assistant_fixture", "type": "agentMessage", "phase": "final_answer", "text": answer_text(user_message)},
                 ] if user_content and not mode.endswith("-empty") else [])
             if mode.endswith("-subagent") or mode.endswith("-subagent-wait"):
                 contents = [
