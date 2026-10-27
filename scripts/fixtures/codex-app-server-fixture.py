@@ -78,7 +78,14 @@ def answer_text(user_message):
     return "Answers received: Blue / fixture-secret."
 
 
-def question_request(request_id):
+question_contexts = {}
+question_rounds = {}
+question_sequence = 900
+first_question_thread = None
+
+
+def question_request(request_id, followup=False):
+    global question_sequence, first_question_thread
     mode = os.path.basename(sys.argv[0])
     if mode.endswith("-restart-question") and Path(str(sys.argv[0]) + ".asked").exists():
         questions = [{
@@ -119,6 +126,15 @@ def question_request(request_id):
             "isSecret": True,
         },
         ]
+    if "-question-isolation-" in mode:
+        question_sequence += 1
+        request_id = question_sequence
+        question_contexts[request_id] = (THREAD_ID, TURN_ID)
+        question_rounds[THREAD_ID] = question_rounds.get(THREAD_ID, 0) + 1
+        if first_question_thread is None:
+            first_question_thread = THREAD_ID
+        if followup:
+            questions[0]["question"] = "Which color should I use next?"
     write({
         "jsonrpc": "2.0",
         "id": request_id,
@@ -227,6 +243,7 @@ def main():
     global THREAD_ID, TURN_ID
     mode = os.path.basename(sys.argv[0])
     answers = None
+    isolation_turns = {}
     saw_question = False
     saw_turn = False
     turn_message = None
@@ -252,6 +269,12 @@ def main():
             message = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if "-question-isolation-" in mode and message.get("method") in ("thread/items/list", "thread/turns/list"):
+            requested = message.get("params", {}).get("threadId")
+            if requested in isolation_turns:
+                THREAD_ID = requested
+                TURN_ID, answers = isolation_turns[requested]
+                saw_turn = True
         if message.get("method") == "initialized":
             continue
         if "method" in message and "id" not in message:
@@ -285,6 +308,8 @@ def main():
             goal_path.unlink(missing_ok=True)
             write({"jsonrpc": "2.0", "id": message["id"], "result": {}})
         elif message.get("method") == "thread/start":
+            if "-question-isolation-" in mode:
+                THREAD_ID = str(uuid.uuid4())
             thread_start_instructions = message.get("params", {}).get("developerInstructions")
             if serial_mode:
                 history = serial_history()
@@ -308,6 +333,8 @@ def main():
                 history_path.write_text(json.dumps(history), encoding="utf-8")
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": message.get("params", {}).get("model", "gpt-6-luna")}})
         elif message.get("method") == "thread/resume":
+            if "-question-isolation-" in mode:
+                THREAD_ID = message["params"]["threadId"]
             resume_error = Path(str(sys.argv[0]) + ".resume-error")
             if resume_error.is_file():
                 resume_error.unlink(missing_ok=True)
@@ -340,6 +367,10 @@ def main():
                 history_path.write_text(json.dumps(history), encoding="utf-8")
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": message.get("params", {}).get("model", "gpt-6-luna")}})
         elif message.get("method") == "turn/start":
+            if "-question-isolation-" in mode:
+                THREAD_ID = message["params"]["threadId"]
+                TURN_ID = f"turn-{uuid.uuid4()}"
+                isolation_turns[THREAD_ID] = (TURN_ID, None)
             saw_turn = True
             saw_question = True
             if mode.endswith("-restart-question"):
@@ -1077,7 +1108,9 @@ def main():
                 }})
             else:
                 question_request(901)
-        elif message.get("id") == 901:
+        elif message.get("id") == 901 or message.get("id") in question_contexts:
+            if "-question-isolation-" in mode:
+                THREAD_ID, TURN_ID = question_contexts.pop(message["id"])
             if "error" in message:
                 answers = None
             else:
@@ -1095,6 +1128,11 @@ def main():
             if mode.endswith("-user-question"):
                 expected_answers = {"question_action": {"answers": ["Continue"]}}
             failed = mode.endswith("-empty") or mode.endswith("-fail") or answers != expected_answers
+            if not failed and "-question-isolation-" in mode and THREAD_ID == first_question_thread and question_rounds[THREAD_ID] == 1:
+                question_request(901, followup=True)
+                continue
+            if "-question-isolation-" in mode:
+                isolation_turns[THREAD_ID] = (TURN_ID, answers)
             if not failed and Path(str(sys.argv[0]) + ".outcome-hold").exists():
                 active = Path(str(sys.argv[0]) + ".outcome-active")
                 release = Path(str(sys.argv[0]) + ".outcome-release")
