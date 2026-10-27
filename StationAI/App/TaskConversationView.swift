@@ -220,6 +220,7 @@ struct TaskConversationView: View {
     @State private var userInputRequest: ConversationUserInputRequest?
     @State private var userInputAnswers: [String: [String]] = [:]
     @State private var userInputOther: [String: String] = [:]
+    @State private var userInputOtherSelected: Set<String> = []
     @State private var asyncQuestionAnswers: [String: String] = [:]
     @State private var answeredAsyncQuestionIDs: Set<String> = []
     @State private var errorMessage: String?
@@ -1506,9 +1507,6 @@ struct TaskConversationView: View {
                     ForEach(activities.filter { $0.isContextCompaction && $0.timelineOrder == nil }) { activity in
                         contextCompactionTimelineRow(activity)
                     }
-                    // Keep a stable scroll target outside the LazyVStack. A newly
-                    // loaded last message may not have been materialized yet when
-                    // SwiftUI delivers the messages change notification.
                     Color.clear
                         .frame(height: 1)
                         .id("conversation-latest-anchor")
@@ -2925,6 +2923,7 @@ struct TaskConversationView: View {
                             let isSelected = (userInputAnswers[question.id] ?? []).first == option.label
                             Button {
                                 userInputAnswers[question.id] = [option.label]
+                                userInputOtherSelected.remove(question.id)
                             } label: {
                                 Label(option.label, systemImage: isSelected ? "largecircle.fill.circle" : "circle")
                             }
@@ -2935,10 +2934,25 @@ struct TaskConversationView: View {
                             .accessibilityValue(isSelected ? "selected" : "not selected")
                         }
                         if question.allowsOther {
+                            Button {
+                                userInputAnswers[question.id] = []
+                                userInputOtherSelected.insert(question.id)
+                            } label: {
+                                Label("Other", systemImage: userInputOtherSelected.contains(question.id) ? "largecircle.fill.circle" : "circle")
+                            }
+                            .buttonHoverPointer()
+                            .help("Select a free-text answer")
+                            .buttonStyle(.plain)
+                            .accessibilityValue(userInputOtherSelected.contains(question.id) ? "selected" : "not selected")
                             TextField("Other answer", text: Binding(
                                 get: { userInputOther[question.id] ?? "" },
-                                set: { userInputOther[question.id] = $0 }
-                            )).textFieldStyle(.roundedBorder)
+                                set: {
+                                    userInputOther[question.id] = $0
+                                    userInputAnswers[question.id] = []
+                                    userInputOtherSelected.insert(question.id)
+                                }
+                            ))
+                            .textFieldStyle(.roundedBorder)
                         }
                     }
                 }
@@ -2951,7 +2965,7 @@ struct TaskConversationView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(request.questions.contains { question in
                     let selections = userInputAnswers[question.id] ?? []
-                    return selections.isEmpty && (userInputOther[question.id] ?? "").isEmpty
+                    return selections.isEmpty && (!userInputOtherSelected.contains(question.id) || (userInputOther[question.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 })
                 .accessibilityIdentifier("submit-ai-answers-button")
         }
@@ -2965,7 +2979,9 @@ struct TaskConversationView: View {
         var answers: [String: [String]] = [:]
         for question in request.questions {
             var values = userInputAnswers[question.id] ?? []
-            if let other = userInputOther[question.id]?.trimmingCharacters(in: .whitespacesAndNewlines), !other.isEmpty { values.append(other) }
+            if userInputOtherSelected.contains(question.id), let other = userInputOther[question.id]?.trimmingCharacters(in: .whitespacesAndNewlines), !other.isEmpty {
+                values = [other]
+            }
             answers[question.id] = values
         }
         isResponding = true
@@ -2982,6 +2998,7 @@ struct TaskConversationView: View {
                     userInputRequest = nextRequest
                     userInputAnswers = [:]
                     userInputOther = [:]
+                    userInputOtherSelected = []
                 }
             )
             guard accepted else {
@@ -2992,6 +3009,7 @@ struct TaskConversationView: View {
             userInputRequest = nil
             userInputAnswers = [:]
             userInputOther = [:]
+            userInputOtherSelected = []
             await loadConversation()
         } catch {
             isResponding = providerClient.isTurnActive(threadID: request.threadID)
@@ -3389,6 +3407,7 @@ struct TaskConversationView: View {
                     userInputRequest = request
                     userInputAnswers = [:]
                     userInputOther = [:]
+                    userInputOtherSelected = []
                 })
 
                 if messages.first(where: { $0.id == assistantMessageID })?.text.isEmpty == true {
@@ -3639,6 +3658,7 @@ struct TaskConversationView: View {
                     userInputRequest = request
                     userInputAnswers = [:]
                     userInputOther = [:]
+                    userInputOtherSelected = []
                 })
                 guard retried else {
                     throw BridgeCommandError(code: "operation_failed", message: "The queued follow-up still needs your attention.")
@@ -4102,14 +4122,20 @@ struct TaskConversationView: View {
 
     private func scrollToLatest(using proxy: ScrollViewProxy) {
         guard !messages.isEmpty || !activities.isEmpty || activeGoal?.status == "complete" else { return }
+        // Scroll to the real latest row. A synthetic target after LazyVStack can
+        // be positioned using its estimated content height before the lazy rows
+        // have settled, leaving the viewport in the blank space below the chat.
+        let latestMessageID = renderedConversationMessages.last?.id
         // Defer until the state-driven content update has had a layout pass.
-        // Scrolling synchronously from onChange can run before LazyVStack has
-        // created its final row, which intermittently leaves reopened chats at top.
         Task { @MainActor in
             await Task.yield()
             hasPresentedLatestConversation = true
             withAnimation(.easeOut(duration: 0.2)) {
-                proxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
+                if let latestMessageID {
+                    proxy.scrollTo(latestMessageID, anchor: .bottom)
+                } else {
+                    proxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
+                }
             }
         }
     }

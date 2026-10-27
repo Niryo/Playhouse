@@ -49,6 +49,8 @@ def write(value):
 
 def answer_text(user_message):
     mode = os.path.basename(sys.argv[0])
+    if mode.endswith("-nonblocking-slow"):
+        return "Answers received: Custom approach / fixture-secret."
     if mode.endswith("-restart-question") and not (user_message or "").startswith(
         "Continue this conversation by applying"
     ):
@@ -105,7 +107,7 @@ def question_request(request_id):
                 {"label": "Blue", "description": "Use blue."},
                 {"label": "Green", "description": "Use green."},
             ],
-            "isOther": False,
+            "isOther": True,
             "isSecret": False,
         },
         {
@@ -994,7 +996,8 @@ def main():
                         "threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"},
                     }})
                     continue
-                if not turn_message or "Green" not in turn_message or "fixture-secret" not in turn_message:
+                expected_color_answer = "Custom approach" if "-nonblocking" in mode else "Green"
+                if not turn_message or expected_color_answer not in turn_message or "fixture-secret" not in turn_message:
                     write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                         "threadId": THREAD_ID,
                         "turn": {"id": TURN_ID, "status": "failed", "error": {"message": "Recovery turn omitted a re-entered answer."}},
@@ -1085,6 +1088,8 @@ def main():
                 "color": {"answers": ["Blue"]},
                 "token": {"answers": ["fixture-secret"]},
             }
+            if mode.endswith("-nonblocking-slow"):
+                expected_answers["color"] = {"answers": ["Custom approach"]}
             if mode.endswith("-restart-question"):
                 expected_answers = {"token": {"answers": ["fixture-secret"]}}
             if mode.endswith("-user-question"):
