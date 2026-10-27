@@ -678,12 +678,14 @@ struct KanbanBoardView: View {
     private func moveTask(id: UUID, to status: TaskStatus, allowUnmergedPullRequests: Bool = false) {
         guard let task = tasks.first(where: { $0.id == id }), task.status != status else { return }
         guard status == .done else { return }
+        let skipMergeVerification = mergedReviewTaskIDs.contains(id)
         Task { @MainActor in
             do {
                 _ = try await BoardTaskManager(modelContext: modelContext).move(
                     id,
                     to: status.rawValue,
-                    allowUnmergedPullRequests: allowUnmergedPullRequests
+                    allowUnmergedPullRequests: allowUnmergedPullRequests,
+                    skipMergeVerification: skipMergeVerification
                 )
             } catch StationAIManagerError.unmergedPullRequests {
                 taskAwaitingUnmergedConfirmation = id
