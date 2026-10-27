@@ -375,7 +375,7 @@ struct TaskConversationView: View {
     /// Claude runs conversations in parallel, so a client-wide flag would miss
     /// this task's edge while another conversation keeps running.
     private var providerTurnIsActive: Bool {
-        guard provider == .claude else { return codexClient.isTurnActive }
+        guard provider == .claude else { return codexClient.isTurnActive(threadID: task.activeConversationID ?? "") }
         guard let threadID = task.activeConversationID else { return claudeClient.isTurnActive }
         return claudeClient.activeThreadIDs.contains(threadID)
     }
@@ -386,7 +386,7 @@ struct TaskConversationView: View {
     private var providerPendingUserInputRequest: ConversationUserInputRequest? {
         provider == .claude
             ? claudeClient.pendingUserInputRequest(forThread: task.activeConversationID ?? "")
-            : codexClient.pendingUserInputRequest
+            : codexClient.pendingUserInputRequest(forThread: task.activeConversationID ?? "")
     }
 
     private var isConversationTurnActive: Bool {
@@ -603,6 +603,13 @@ struct TaskConversationView: View {
                 conflictResolutionAttempt = 1
                 sendMessage(overrideText: "The PR has conflicts. Fix them, commit, and push.")
             }
+        }
+        .onChange(of: providerPendingUserInputRequest) { _, request in
+            guard let request, request.threadID == task.activeConversationID, request != userInputRequest else { return }
+            userInputRequest = request
+            userInputAnswers = [:]
+            userInputOther = [:]
+            userInputOtherSelected = []
         }
         .onChange(of: providerTurnIsActive) { _, isTurnActive in
             if !isTurnActive, !isReadOnly {

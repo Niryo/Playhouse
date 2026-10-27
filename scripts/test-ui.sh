@@ -74,7 +74,7 @@ if [[ "$(cat "${fixture_root}/.stationai-bridge-fixture" 2>/dev/null || true)" !
   exit 1
 fi
 codex_fixtures=(
-  ui empty nonblocking slow plan-slow interrupted abort success unique-turns-success goal-success
+  ui empty nonblocking slow plan-slow question-isolation-plan-slow interrupted abort success unique-turns-success goal-success
   title-success title-failure title-success-wait title-archive-ui hold
   hold-interrupt hold-reject-interrupt
   progress-hold-release progress-hold-release-failed progress-hold-release-interrupted

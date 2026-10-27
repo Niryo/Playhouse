@@ -3540,7 +3540,31 @@ final class ConversationManager {
         )
     }
 
+    /// Repairs the historical shared-callback bug without answering the question
+    /// or resuming its provider. The native thread identity determines ownership.
+    func repairPendingUserInput(taskID: UUID, sourceTaskID: UUID) async throws -> ConversationUserInputRequest {
+        let task = try tasks.taskModel(taskID)
+        let source = try tasks.taskModel(sourceTaskID)
+        guard taskID != sourceTaskID, task.status != .done,
+              let threadID = task.activeConversationID,
+              source.activeConversationID != threadID else {
+            throw BridgeCommandError(code: "invalid_transition", message: "Choose the question's original conversation and a different source task.")
+        }
+        let request = try transcripts.reassignPendingUserInput(from: sourceTaskID, to: taskID, threadID: threadID)
+        if request.isBlocking, task.status == .inProgress {
+            _ = try await tasks.transitionLifecycleStatus(taskID, from: .inProgress, to: .waitingResponse)
+        }
+        StationAIDiagnostics.record("conversation.user_input.repaired", fields: [
+            "taskID": taskID.uuidString, "sourceTaskID": sourceTaskID.uuidString,
+            "threadID": threadID, "requestID": request.id
+        ])
+        return request
+    }
+
     private func persistPendingUserInputRequest(_ request: ConversationUserInputRequest, taskID: UUID) throws {
+        guard try tasks.taskModel(taskID).activeConversationID == request.threadID else {
+            throw BridgeCommandError(code: "invalid_transition", message: "The question belongs to another conversation.")
+        }
         try transcripts.mutate(taskID) { transcript in
             transcript.pendingUserInputRequest = request
         }
@@ -5692,6 +5716,11 @@ final class StationAIBridgeRuntime {
                 }
                 let answer = try await conversations.answerAsyncQuestion(taskID: taskID, question: question, answers: answers)
                 result = .object(["text": .string(answer.text), "queued": .boolean(answer.queued)])
+            case "conversation.repair_user_input":
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = try await Self.value(conversations.repairPendingUserInput(
+                    taskID: request.requiredUUID("taskID"), sourceTaskID: request.requiredUUID("sourceTaskID")
+                ))
             case "conversation.answer_user_input":
                 let taskID = try request.requiredUUID("taskID")
                 let requestID = try request.requiredString("requestID")

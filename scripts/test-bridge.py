@@ -5100,66 +5100,119 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, f"Could not read isolated preference {key}: {completed.stderr}")
         return completed.stdout.strip(), completed.stderr
 
-    # case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode remain in the conversation and move the task to Waiting Response while unanswered; leaving and reopening the conversation preserves the pending question, keyed answers resume the provider turn in In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome.
+    # case-contract: test_pending_question_repair_restores_thread_owner | A misplaced pending question can be repaired through CLI/XPC only into its owning conversation. Repair rejects a wrong owner and a conflicting destination without mutation, backs up both transcripts, preserves request identity and mode, clears only the misplaced source, and is retryable. Fresh history and the visible UI restore the question only on the original task; answering it clears pending state and the safe response survives reopening. Retrying an interrupted repair after the destination question was answered rejects the stale source without resurrecting the question.
+    def test_pending_question_repair_restores_thread_owner(self):
+        target = self.create_task("Repair original question", roots=[self.primary])["id"]
+        source = self.create_task("Repair misplaced question", roots=[self.secondary])["id"]
+        stranger = self.create_task("Repair wrong destination", roots=[self.primary])["id"]
+        executable = self.data_directory / "codex-fixture-restart-question"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text("StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8")
+        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        failed, _ = self.call_cli("conversation", "send", target, "--message", "Ask a restart-safe question.", "--mode", "plan", expected_status=1, extra_environment=env)
+        self.assertFalse(failed["ok"])
+        stranger_executable = self.data_directory / "codex-fixture-title-success"
+        shutil.copyfile(executable, stranger_executable)
+        stranger_executable.chmod(0o755)
+        self.assert_success(self.call_cli("conversation", "send", stranger, "--message", "Start another real conversation.", extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(stranger_executable)})[0])
+        directory = self.data_directory / "conversation-transcripts"
+        destination = directory / f"{target.upper()}.json"
+        misplaced = directory / f"{source.upper()}.json"
+        original = json.loads(destination.read_text())
+        request = original.pop("pendingUserInputRequest")
+        destination.write_text(json.dumps(original))
+        misplaced.write_text(json.dumps({"version": 1, "segments": [], "turns": [], "pendingUserInputRequest": request}))
+        before = (destination.read_bytes(), misplaced.read_bytes())
+        rejected, _ = self.call_cli("conversation", "repair-user-input", stranger, "--from-task", source, expected_status=1)
+        self.assert_failure(rejected, "invalid_transition")
+        self.assertEqual(before, (destination.read_bytes(), misplaced.read_bytes()))
+        conflict = dict(request, id="a-different-pending-request")
+        original["pendingUserInputRequest"] = conflict
+        destination.write_text(json.dumps(original))
+        conflict_bytes = destination.read_bytes()
+        rejected, _ = self.call_cli("conversation", "repair-user-input", target, "--from-task", source, expected_status=1)
+        self.assert_failure(rejected, "invalid_transition")
+        self.assertEqual(destination.read_bytes(), conflict_bytes)
+        original.pop("pendingUserInputRequest")
+        destination.write_text(json.dumps(original))
+        repaired, _ = self.call_cli("conversation", "repair-user-input", target, "--from-task", source)
+        self.assertEqual(self.assert_success(repaired), request)
+        self.assertIsNone(json.loads(misplaced.read_text()).get("pendingUserInputRequest"))
+        self.assertEqual(json.loads(destination.read_text())["pendingUserInputRequest"], request)
+        backups = list((directory / "question-repair-backups").glob("*/*.json"))
+        self.assertEqual(len(backups), 2)
+        backup_contents = {p.name: json.loads(p.read_text()) for p in backups}
+        self.assertEqual(backup_contents[destination.name], original)
+        self.assertEqual(backup_contents[misplaced.name]["pendingUserInputRequest"], request)
+        again, _ = self.call_cli("conversation", "repair-user-input", target, "--from-task", source)
+        self.assertEqual(self.assert_success(again), request)
+        fresh, _ = self.call_cli("conversation", "history", target, extra_environment=env)
+        self.assertEqual(self.assert_success(fresh)["pendingUserInputRequest"], request)
+        answered, _ = self.call_cli("conversation", "answer-user-input", target, request["id"], "--answer", "color=Green", "--answer", "token=fixture-secret", extra_environment=env)
+        self.assertTrue(self.assert_success(answered)["accepted"])
+        reopened, _ = self.call_cli("conversation", "history", target, extra_environment=env)
+        history = self.assert_success(reopened)
+        self.assertIsNone(history.get("pendingUserInputRequest"))
+        self.assertTrue(any(item["text"] == "Answers received: Blue / [redacted secret answer]." for item in history["messages"]))
+        self.assertNotIn("fixture-secret", json.dumps(history))
+        self.assertNotIn("Continue this conversation by applying", json.dumps(history))
+        # Destination published and answered before a crashed repair cleared source.
+        misplaced.write_bytes(before[1])
+        retry, _ = self.call_cli("conversation", "repair-user-input", target, "--from-task", source, expected_status=1)
+        self.assert_failure(retry, "invalid_transition")
+        self.assertIsNone(json.loads(destination.read_text()).get("pendingUserInputRequest"))
+
+    # case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode remain in the conversation and move the task to Waiting Response while unanswered; leaving and reopening the conversation preserves the pending question, keyed answers resume the provider turn in In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome. A parallel conversation retains its own question and thread; the original conversation receives and answers a second question in its original Plan mode, and completing either conversation preserves the other pending request.
     def test_codex_questions_can_be_answered_over_cli_xpc(self):
         task_id = self.create_task("Codex questions", roots=[self.primary])["id"]
-        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
-        executable = self.data_directory / "codex-fixture-plan-slow"
-        shutil.copyfile(fixture, executable)
+        other_id = self.create_task("Parallel Codex questions", roots=[self.secondary])["id"]
+        executable = self.data_directory / "codex-fixture-question-isolation-plan-slow"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py", executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
-        )
-        env_overrides = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
-        invalid, _ = self.call_cli(
-            "conversation", "send", task_id, "--message", "Please ask your questions.",
-            "--answer", "color= ", expected_status=2,
-        )
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text("StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8")
+        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        invalid, _ = self.call_cli("conversation", "send", task_id, "--message", "Ask questions.", "--answer", "color= ", expected_status=2)
         self.assert_failure(invalid, "invalid_argument")
-        process_env = os.environ.copy()
-        process_env.update({
-            "STATIONAI_DATA_DIRECTORY": str(self.data_directory),
-            "STATIONAI_E2E_WORKTREE_DIRECTORY": str(self.worktree_directory),
-            "STATIONAI_E2E_DEFAULTS_SUITE": self.defaults_suite,
-            "STATIONAI_BRIDGE_SERVICE_NAME": arguments.service_name,
-            **env_overrides,
-        })
-        process = subprocess.Popen(
-            [str(arguments.cli), "conversation", "send", task_id, "--message", "Please ask your questions.", "--mode", "plan",
-             "--answer", "color=Blue", "--answer", "token=fixture-secret"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, env=process_env,
-        )
-        final = None
-        observed_request = None
-        resumed_status_observed = False
-        assert process.stdout is not None
-        for line in process.stdout:
-            if not line.strip():
-                continue
-            event = json.loads(line)
-            if "type" not in event:
-                final = event
-                continue
-            if event.get("type") == "user_input":
-                observed_request = event.get("payload", {}).get("userInputRequest")
-                self.assertEqual([question["id"] for question in observed_request["questions"]], ["color", "token"])
-                self.assertTrue(observed_request["isBlocking"])
-                self.assertEqual(event.get("payload", {}).get("taskStatus"), "Waiting Response")
-            if event.get("type") == "task_status" and event.get("payload", {}).get("taskStatus") == "In Progress":
-                resumed_status_observed = True
-        stderr = process.stderr.read() if process.stderr else ""
-        self.assertEqual(process.wait(timeout=30), 0, f"Conversation CLI failed: {final}; {stderr}")
-        self.assertIsNotNone(observed_request, "CLI/XPC did not surface Codex's question request.")
-        self.assertTrue(resumed_status_observed, "Submitting answers should resume the active task in In Progress.")
-        self.assertTrue(final and final.get("ok"), final)
-        messages = final["result"]["messages"]
-        self.assertTrue(any("Answers received: Blue / fixture-secret." in message["text"] for message in messages))
-        task, _ = self.call_cli("task", "get", task_id)
-        self.assertEqual(self.assert_success(task)["status"], "Waiting Response")
-        saved_draft, _ = self.call_cli("task", "prompt", task_id, "--text", "A follow-up draft.")
-        saved_task = self.assert_success(saved_draft)
-        self.assertEqual(saved_task["status"], "Waiting Response")
-        self.assertEqual(saved_task["savedPrompt"], "A follow-up draft.")
+
+        # Standalone CLI connections have distinct XPC service processes. Exercise
+        # the GUI's shared-client topology with unchanged production managers,
+        # then read the durable result through the real bundled CLI/XPC.
+        root = Path(__file__).resolve().parent.parent
+        probe = self.data_directory / "codex-question-ownership-probe"
+        core = ["BoardTask", "WorkspaceSupport", "WorkspaceChanges", "CodexAppServerClient",
+                "ConversationModel", "ClaudeCodeClient", "ConversationTranscriptStore", "BridgeCore"]
+        command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone"]
+        for framework in ("Foundation", "AppKit", "SwiftUI", "SwiftData", "Combine"):
+            command.extend(["-framework", framework])
+        command.extend(str(root / "StationAI" / "App" / f"{name}.swift") for name in core)
+        command.extend([str(root / "StationAI/Bridge/BridgeContract.swift"),
+                        str(root / "scripts/test-codex-question-ownership.swift"), "-o", str(probe)])
+        compiled = subprocess.run(command, capture_output=True, text=True, timeout=180)
+        self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+        environment = os.environ.copy()
+        environment.update({"STATIONAI_DATA_DIRECTORY": str(self.data_directory),
+                            "STATIONAI_E2E_WORKTREE_DIRECTORY": str(self.worktree_directory),
+                            "STATIONAI_E2E_DEFAULTS_SUITE": self.defaults_suite,
+                            "STATIONAI_BRIDGE_SERVICE_NAME": arguments.service_name,
+                            "CODEX_HOME": str(self.data_directory / "codex-home"), **env})
+        checked = subprocess.run([str(probe), str(self.data_directory), str(executable), task_id, other_id],
+                                 capture_output=True, text=True, env=environment, timeout=120)
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        summary = json.loads(checked.stdout.splitlines()[-1])
+        self.assertEqual(summary, {"sharedClientQuestionOwnership": True, "originalQuestions": 2, "parallelQuestions": 1})
+
+        def history(owner):
+            return self.assert_success(self.call_cli("conversation", "history", owner, extra_environment=env)[0])
+
+        for owner in (task_id, other_id):
+            saved = history(owner)
+            self.assertIsNone(saved.get("pendingUserInputRequest"))
+            self.assertTrue(any("Answers received: Blue / fixture-secret." in message["text"] for message in saved["messages"]))
+            self.assertEqual(self.assert_success(self.call_cli("task", "get", owner)[0])["status"], "Waiting Response")
+        saved, _ = self.call_cli("task", "prompt", task_id, "--text", "A follow-up draft.")
+        self.assertEqual(self.assert_success(saved)["status"], "Waiting Response")
+        self.assertEqual(self.assert_success(saved)["savedPrompt"], "A follow-up draft.")
 
     # case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the UI renders the question inline, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
     def test_claude_questions_can_be_answered_after_switching_conversations(self):
