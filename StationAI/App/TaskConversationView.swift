@@ -180,6 +180,8 @@ struct TaskConversationView: View {
     @State private var isSwitchingProvider = false
     @State private var providerNotice: String?
     @State private var messages: [ConversationMessage] = []
+    @State private var visibleConversationMessageCount = 40
+    @State private var hasPresentedLatestConversation = false
     @State private var annotations: [ConversationAnnotation] = []
     @State private var annotationSelection: AnnotationSelection?
     @State private var currentTextSelection: AnnotationSelection?
@@ -240,7 +242,7 @@ struct TaskConversationView: View {
     @FocusState private var isRepositorySearchFocused: Bool
 
     private var isSendDisabled: Bool {
-        !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isResponding || isLoadingHistory
+        !isRepositoryRootConfigured || isApplyingSavedRepositories || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pendingImages.isEmpty && !annotations.contains(where: \.pending) && !isEnteringGoal) || isResponding || isLoadingHistory || userInputRequest != nil
     }
 
     private var isRepositoryRootConfigured: Bool {
@@ -263,20 +265,29 @@ struct TaskConversationView: View {
         conversationClients.client(for: provider)
     }
 
-    /// Observed so the view refreshes when either runtime starts or ends a turn.
+    /// Observed so the view refreshes when this task's turn starts or ends.
+    /// Claude runs conversations in parallel, so a client-wide flag would miss
+    /// this task's edge while another conversation keeps running.
     private var providerTurnIsActive: Bool {
-        provider == .claude ? claudeClient.isTurnActive : codexClient.isTurnActive
+        guard provider == .claude else { return codexClient.isTurnActive }
+        guard let threadID = task.activeConversationID else { return claudeClient.isTurnActive }
+        return claudeClient.activeThreadIDs.contains(threadID)
     }
 
+    /// Claude can hold a pending question in several conversations at once, so
+    /// this task reads the question from its own session rather than from the
+    /// client-wide value.
     private var providerPendingUserInputRequest: ConversationUserInputRequest? {
-        provider == .claude ? claudeClient.pendingUserInputRequest : codexClient.pendingUserInputRequest
+        provider == .claude
+            ? claudeClient.pendingUserInputRequest(forThread: task.activeConversationID ?? "")
+            : codexClient.pendingUserInputRequest
     }
 
     private var isConversationTurnActive: Bool {
         providerClient.isTurnActive(threadID: task.activeConversationID ?? "")
     }
 
-    /// A switch waits for the turn, questions, and queued follow-ups to settle.
+    /// Provider switches wait for active turns and queued follow-ups to settle.
     private var canSwitchProvider: Bool {
         !isReadOnly && !isResponding && !isLoadingHistory && !isPreparingSubmittedMessage && !isSwitchingProvider
             && userInputRequest == nil && queuedMessages.isEmpty && task.status != .done
@@ -316,6 +327,26 @@ struct TaskConversationView: View {
     private var conversationMessages: [ConversationMessage] {
         let completedProgressIDs = progressMessageIDs
         return messages.filter { !completedProgressIDs.contains($0.id) }
+    }
+
+    private static let initialVisibleConversationMessageCount = 40
+    private static let olderConversationMessageBatchSize = 40
+
+    private var renderedConversationMessages: [ConversationMessage] {
+        let allMessages = conversationMessages
+        return Array(allMessages.suffix(visibleConversationMessageCount))
+    }
+
+    private var hasOlderConversationMessages: Bool {
+        conversationMessages.count > renderedConversationMessages.count
+    }
+
+    private func revealOlderConversationMessages() {
+        guard hasOlderConversationMessages else { return }
+        visibleConversationMessageCount = min(
+            conversationMessages.count,
+            visibleConversationMessageCount + Self.olderConversationMessageBatchSize
+        )
     }
 
     private func goalAchievementAnchorMessageID(for entry: GoalAchievementTimelineEntry) -> String? {
@@ -409,12 +440,6 @@ struct TaskConversationView: View {
                 repositoryWorktrees: task.repositoryWorktrees,
                 onSave: updateWorkspaceRoots
             )
-        }
-        .sheet(item: $userInputRequest) { request in
-            userInputForm(request)
-                .frame(minWidth: 420, idealWidth: 560, maxWidth: 720, minHeight: 260)
-                .padding(12)
-                .accessibilityIdentifier("ai-question-confirmation-sheet")
         }
         .sheet(isPresented: Binding(
             get: { selectedChatImage != nil },
@@ -1387,7 +1412,7 @@ struct TaskConversationView: View {
                                     .font(.system(size: 29, weight: .regular))
                                     .foregroundStyle(Color.accentColor.opacity(0.8))
                                     .accessibilityLabel("Conversation")
-                                Text("Send a message to \(provider.assistantLabel).")
+                                Text("Send a message to \(provider.assistantLabel(modelName: selectedModelName)).")
                                     .font(.system(size: 14, weight: .medium))
                                     .foregroundStyle(.secondary)
                             }
@@ -1408,7 +1433,16 @@ struct TaskConversationView: View {
                             ForEach(providerBoundaries.filter { $0.afterMessageID == nil }) { boundary in
                                 providerBoundaryRow(boundary)
                             }
-                            ForEach(conversationMessages) { message in
+                            if hasOlderConversationMessages {
+                                Color.clear
+                                    .frame(height: 1)
+                                    .onAppear {
+                                        guard hasPresentedLatestConversation else { return }
+                                        revealOlderConversationMessages()
+                                    }
+                                    .accessibilityIdentifier("conversation-load-older-anchor")
+                            }
+                            ForEach(renderedConversationMessages) { message in
                                 if shouldShowActivityDisclosure, message.id == activityDisclosureAnchorID {
                                     activityList
                                 }
@@ -1457,11 +1491,17 @@ struct TaskConversationView: View {
                                 .id(entry.id)
                         }
                     }
+                    if let request = userInputRequest, request.threadID == task.activeConversationID {
+                        userInputForm(request)
+                            .frame(maxWidth: 620, alignment: .leading)
+                            .accessibilityIdentifier("conversation-user-input-request")
+                    }
 
-                    if isDisplayingActiveResponse {
-                        ForEach(activeSubagents) { activity in
-                            subagentTimelineRow(activity)
-                        }
+                    if let activeProcess {
+                        activityRow(activeProcess, compact: true)
+                    }
+                    ForEach(activeSubagents) { activity in
+                        subagentTimelineRow(activity)
                     }
                     ForEach(activities.filter { $0.isContextCompaction && $0.timelineOrder == nil }) { activity in
                         contextCompactionTimelineRow(activity)
@@ -1480,6 +1520,7 @@ struct TaskConversationView: View {
             }
             .scrollIndicators(.visible)
             .accessibilityIdentifier("conversation-scroll-view")
+            .accessibilityValue("Showing latest \(renderedConversationMessages.count) of \(conversationMessages.count) messages")
             .onChange(of: messages.count) { _, _ in
                 scrollToLatest(using: scrollProxy)
             }
@@ -1520,7 +1561,21 @@ struct TaskConversationView: View {
     }
 
     private var activeSubagents: [ConversationActivity] {
-        activities.filter { $0.isSubagent && ["inprogress", "running"].contains($0.status.lowercased()) }
+        activities.filter { $0.isSubagent && $0.isActive }
+    }
+
+    /// Keep the latest live non-agent operation in the conversation timeline.
+    /// Earlier live operations remain available in the expanded activity list.
+    private var activeProcess: ConversationActivity? {
+        activities
+            .filter { !$0.isSubagent && !$0.isContextCompaction && $0.isActive }
+            .enumerated()
+            .max { left, right in
+                let leftOrder = left.element.timelineOrder ?? left.offset
+                let rightOrder = right.element.timelineOrder ?? right.offset
+                return leftOrder < rightOrder
+            }?
+            .element
     }
 
     private var activityList: some View {
@@ -1562,16 +1617,20 @@ struct TaskConversationView: View {
                                 .accessibilityIdentifier("codex-progress-message-\(message.id)")
                         }
                     }
-                    ForEach(activities.filter { !$0.isSubagent && !$0.isContextCompaction }) { activity in
+                    let activeIDsOutside = Set(activeSubagents.map(\.id) + [activeProcess?.id].compactMap { $0 })
+                    ForEach(activities.filter {
+                        !$0.isSubagent && !$0.isContextCompaction && !activeIDsOutside.contains($0.id)
+                    }) { activity in
                         activityRow(activity)
                     }
                     let agentActivities = activities.filter(\.isSubagent)
-                    if !isDisplayingActiveResponse && !agentActivities.isEmpty {
+                    let completedAgentActivities = agentActivities.filter { !$0.isActive }
+                    if !completedAgentActivities.isEmpty {
                         Text("Agents used")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.secondary)
                             .padding(.top, 4)
-                        ForEach(agentActivities) { activity in
+                        ForEach(completedAgentActivities) { activity in
                             subagentTimelineRow(activity)
                         }
                     }
@@ -1647,12 +1706,56 @@ struct TaskConversationView: View {
         .accessibilityIdentifier("codex-subagent-row-\(activity.childThreadID ?? activity.id)")
     }
 
-    private func activityRow(_ activity: ConversationActivity) -> some View {
+    @ViewBuilder
+    private func activityRow(_ activity: ConversationActivity, compact: Bool = false) -> some View {
         let displayDetail = [activity.detail]
             .compactMap { $0 }
             .filter { !$0.isEmpty }
             .joined(separator: "\n")
-        return VStack(alignment: .leading, spacing: 3) {
+        if compact {
+            HStack(spacing: 7) {
+                Image(systemName: activity.status == "completed" ? "checkmark.circle.fill" : activity.status == "interrupted" ? "pause.circle.fill" : "gearshape.2.fill")
+                    .foregroundStyle(activity.status == "completed" ? .green : activity.status == "interrupted" ? .orange : .accentColor)
+                Text(activity.title)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .textSelection(.enabled)
+                if !displayDetail.isEmpty {
+                    Text(displayDetail)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("codex-activity-detail-\(activity.id)")
+                        .accessibilityLabel(displayDetail)
+                } else {
+                    Spacer(minLength: 0)
+                }
+                Text(activity.statusLabel)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                if activity.isActive, activity.startedAt != nil {
+                    TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                        let duration = activity.durationLabel(at: timeline.date) ?? ""
+                        Text(duration)
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .accessibilityValue(duration)
+                            .accessibilityIdentifier("codex-activity-duration-\(activity.id)")
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(9)
+            .background(WorkspaceTheme.panelBackground, in: RoundedRectangle(cornerRadius: 8))
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("\(activity.title), \(activity.statusLabel)")
+            .accessibilityValue([displayDetail, activity.durationLabel()].compactMap { $0 }.joined(separator: "\n"))
+            .accessibilityIdentifier("codex-activity-row-\(activity.id)")
+        } else {
+        VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 7) {
                 Image(systemName: activity.status == "completed" ? "checkmark.circle.fill" : activity.status == "interrupted" ? "pause.circle.fill" : "gearshape.2.fill")
                     .foregroundStyle(activity.status == "completed" ? .green : activity.status == "interrupted" ? .orange : .accentColor)
@@ -1703,6 +1806,7 @@ struct TaskConversationView: View {
         .accessibilityLabel("\(activity.title), \(activity.statusLabel)")
         .accessibilityValue([displayDetail, activity.durationLabel()].compactMap { $0 }.joined(separator: "\n"))
         .accessibilityIdentifier(activity.isSubagent ? "codex-subagent-row-\(activity.childThreadID ?? activity.id)" : "codex-activity-row-\(activity.id)")
+        }
     }
 
     private func contextCompactionTimelineRow(_ activity: ConversationActivity) -> some View {
@@ -1888,7 +1992,7 @@ struct TaskConversationView: View {
         let questions = message.asyncQuestions ?? []
         let answered = asyncQuestionWasAnswered(message)
         return VStack(alignment: .leading, spacing: 12) {
-            Text((message.provider ?? provider).assistantLabel)
+            Text(assistantLabel(for: message))
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
             ForEach(Array(questions.enumerated()), id: \.offset) { index, question in
@@ -1983,7 +2087,7 @@ struct TaskConversationView: View {
         let displayText = Self.displayableAssistantText(message.text)
         let responseAnnotations = responseAnnotationReferences(for: message)
         return VStack(alignment: .leading, spacing: 6) {
-            Text((message.provider ?? provider).assistantLabel)
+            Text(assistantLabel(for: message))
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("assistant-provider-\(message.id)")
@@ -2005,6 +2109,12 @@ struct TaskConversationView: View {
                     .accessibilityElement(children: .contain)
                     .accessibilityLabel(String(Self.markdownAttributedText(displayText).characters))
                     .accessibilityIdentifier("assistant-message-\(message.id)")
+            }
+            if let createdAt = message.createdAt {
+                Text(createdAt, format: .dateTime.hour().minute())
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityIdentifier("message-time-\(message.id)")
             }
         }
         .frame(maxWidth: 620, alignment: .leading)
@@ -2041,6 +2151,12 @@ struct TaskConversationView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 16).padding(.vertical, 11)
                     .background(WorkspaceTheme.accent, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+            }
+            if let createdAt = message.createdAt {
+                Text(createdAt, format: .dateTime.hour().minute())
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityIdentifier("message-time-\(message.id)")
             }
         }
             .frame(maxWidth: 620, alignment: .trailing)
@@ -2782,7 +2898,7 @@ struct TaskConversationView: View {
 
     private func userInputForm(_ request: ConversationUserInputRequest) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Codex has a few questions")
+            Text("A few questions")
                 .font(.system(size: 14, weight: .semibold))
                 .accessibilityIdentifier("ai-question-form-title")
             ForEach(request.questions) { question in
@@ -2852,30 +2968,34 @@ struct TaskConversationView: View {
             if let other = userInputOther[question.id]?.trimmingCharacters(in: .whitespacesAndNewlines), !other.isEmpty { values.append(other) }
             answers[question.id] = values
         }
-        if request.isBlocking {
-            do {
-                _ = try await BoardTaskManager(modelContext: modelContext).setLifecycleStatus(task.id, to: .inProgress)
-            } catch {
-                errorMessage = error.localizedDescription
+        isResponding = true
+        errorMessage = nil
+        do {
+            let accepted = try await conversationManager.answerUserInput(
+                taskID: task.id,
+                request: request,
+                answers: answers,
+                mode: conversationMode,
+                modelID: selectedModelID.isEmpty ? nil : selectedModelID,
+                onUpdate: { update in
+                    guard update.type == "user_input", let nextRequest = update.userInputRequest else { return }
+                    userInputRequest = nextRequest
+                    userInputAnswers = [:]
+                    userInputOther = [:]
+                }
+            )
+            guard accepted else {
+                isResponding = false
+                errorMessage = "\(provider.displayName) couldn't accept those answers. Please check the responses and try again."
                 return
             }
-        }
-        guard providerClient.answerUserInput(requestID: request.id, threadID: request.threadID, answers: answers) else {
-            if request.isBlocking {
-                _ = try? await BoardTaskManager(modelContext: modelContext).setLifecycleStatus(task.id, to: .waitingResponse)
-            }
-            errorMessage = "\(provider.displayName) couldn't accept those answers. Please check the responses and try again."
-            return
-        }
-        userInputRequest = nil
-        userInputAnswers = [:]
-        userInputOther = [:]
-        if request.isBlocking {
-            do {
-                _ = try await BoardTaskManager(modelContext: modelContext).resumeWaitingResponseAfterUserInput(task.id)
-            } catch {
-                errorMessage = "Your answer was sent, but StationAI couldn't update the task status: \(error.localizedDescription)"
-            }
+            userInputRequest = nil
+            userInputAnswers = [:]
+            userInputOther = [:]
+            await loadConversation()
+        } catch {
+            isResponding = providerClient.isTurnActive(threadID: request.threadID)
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -2889,6 +3009,10 @@ struct TaskConversationView: View {
                 actionNotice = approvalNotice
             }
             messages = history.messages
+            userInputRequest = history.pendingUserInputRequest?.threadID == task.activeConversationID
+                ? history.pendingUserInputRequest
+                : nil
+            visibleConversationMessageCount = Self.initialVisibleConversationMessageCount
             restoreAnnotations(from: history.messages)
             answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
             activities = history.activities
@@ -3024,6 +3148,18 @@ struct TaskConversationView: View {
         return modelName(for: selectedModelID)
     }
 
+    /// The label shown above an assistant message is based on the model ID
+    /// recorded for that turn, so later picker changes do not relabel history.
+    private func assistantLabel(for message: ConversationMessage) -> String {
+        let messageProvider = message.provider ?? provider
+        let modelID = message.modelID
+        let cachedModels = messageProvider == provider
+            ? modelOptions
+            : ((try? conversationManager.cachedModels(taskID: task.id, provider: messageProvider)) ?? [])
+        let modelName = modelID.flatMap { id in cachedModels.first(where: { $0.id == id })?.name }
+        return messageProvider.assistantLabel(modelName: modelName)
+    }
+
     private var pickerEffortChoices: [ConversationEffort] {
         effortChoices(for: pickerModelID)
     }
@@ -3055,7 +3191,7 @@ struct TaskConversationView: View {
         let effortChanged = selectedEffort != pickerEffort
         selectedModelID = pickerModelID
         selectedEffort = pickerEffort
-        Task { try? await conversationManager.setModelID(taskID: task.id, modelID: pickerModelID) }
+        Task { try? conversationManager.setModelID(taskID: task.id, modelID: pickerModelID) }
         guard effortChanged else { return }
         Task { try? await conversationManager.setEffort(taskID: task.id, effort: pickerEffort) }
     }
@@ -3069,7 +3205,7 @@ struct TaskConversationView: View {
         let freeformText = (overrideText ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
         let pendingAnnotations = annotations.filter(\.pending)
         let usesComposerDraft = overrideText == nil
-        guard (!freeformText.isEmpty || (usesComposerDraft && !pendingImages.isEmpty) || !pendingAnnotations.isEmpty), !isResponding, !isLoadingHistory else { return }
+        guard (!freeformText.isEmpty || (usesComposerDraft && !pendingImages.isEmpty) || !pendingAnnotations.isEmpty), !isResponding, !isLoadingHistory, userInputRequest == nil else { return }
         let annotationPrompt: String
         if pendingAnnotations.isEmpty {
             annotationPrompt = freeformText
@@ -3292,7 +3428,7 @@ struct TaskConversationView: View {
                 }
                 responseStartedAt = nil
                 UserDefaults.standard.removeObject(forKey: responseStartedAtDefaultsKey)
-                if providerClient.wasLastTurnInterrupted {
+                if providerClient.wasLastTurnInterrupted(threadID: task.activeConversationID ?? "") {
                     hasPausedResponse = true
                 } else {
                     messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
@@ -3971,6 +4107,7 @@ struct TaskConversationView: View {
         // created its final row, which intermittently leaves reopened chats at top.
         Task { @MainActor in
             await Task.yield()
+            hasPresentedLatestConversation = true
             withAnimation(.easeOut(duration: 0.2)) {
                 proxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
             }

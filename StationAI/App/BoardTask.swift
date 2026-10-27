@@ -78,6 +78,7 @@ final class BoardTask {
     var id: UUID
     var title: String
     var statusRawValue: String
+    var lifecycleRevision: Int = 0
     var statusMessage: String?
     var progressTypeRawValue: String?
     var progressLabel: String?
@@ -90,6 +91,7 @@ final class BoardTask {
     /// Nil for tasks created before provider selection; those use Codex.
     var conversationProviderRawValue: String?
     var conversationEffortRawValue: String?
+    // Retained for one-time migration to the global provider model preference.
     var conversationModelIDsData: Data?
     var savedPrompt: String?
     var pendingSubmittedPrompt: String?
@@ -180,6 +182,7 @@ final class BoardTask {
                 inProgressStartedAt = nil
             }
             statusRawValue = newValue.rawValue
+            lifecycleRevision += 1
             if newValue == .inProgress { inProgressStartedAt = .now }
         }
     }

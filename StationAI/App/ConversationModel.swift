@@ -6,7 +6,7 @@ extension ConversationProvider {
     var defaultModelID: String {
         switch self {
         case .codex: CodexAppServerClient.modelID
-        case .claude: ClaudeCodeClient.defaultModelID
+        case .claude: ClaudeCodeClient.preferredDefaultModelID
         }
     }
 
@@ -25,11 +25,16 @@ extension ConversationProvider {
         }
     }
 
-    /// The short name shown above assistant messages.
-    var assistantLabel: String {
+    /// The short name shown above assistant messages, derived from the model
+    /// that produced the message.
+    func assistantLabel(modelName: String?) -> String {
         switch self {
-        case .codex: "Codex · Luna"
-        case .claude: "Claude"
+        case .codex:
+            guard let modelName else { return "Codex" }
+            let shortName = modelName.split(separator: " ").last.map(String.init) ?? modelName
+            return "Codex · \(shortName)"
+        case .claude:
+            return modelName.map { "Claude · \($0)" } ?? "Claude"
         }
     }
 
@@ -55,6 +60,7 @@ enum ConversationRole: String, Codable, Equatable {
 struct ConversationMessage: Codable, Identifiable, Equatable {
     let id: String
     let role: ConversationRole
+    var createdAt: Date?
     var text: String
     var imageDataURLs: [String]
     var phase: String?
@@ -64,10 +70,13 @@ struct ConversationMessage: Codable, Identifiable, Equatable {
     /// The runtime that produced an assistant message, or received a user message.
     /// Nil for transcripts saved before StationAI supported more than Codex.
     var provider: ConversationProvider?
+    /// Model selected when this message's turn was dispatched, when known.
+    var modelID: String?
 
-    init(id: String, role: ConversationRole, text: String, imageDataURLs: [String] = [], phase: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil, asyncQuestions: [ConversationAsyncQuestion]? = nil, provider: ConversationProvider? = nil) {
+    init(id: String, role: ConversationRole, text: String, imageDataURLs: [String] = [], phase: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil, asyncQuestions: [ConversationAsyncQuestion]? = nil, provider: ConversationProvider? = nil, createdAt: Date? = .now, modelID: String? = nil) {
         self.id = id
         self.role = role
+        self.createdAt = createdAt
         self.text = text
         self.imageDataURLs = imageDataURLs
         self.phase = phase
@@ -75,13 +84,15 @@ struct ConversationMessage: Codable, Identifiable, Equatable {
         self.timelineOrder = timelineOrder
         self.asyncQuestions = asyncQuestions
         self.provider = provider
+        self.modelID = modelID
     }
 
-    private enum CodingKeys: String, CodingKey { case id, role, text, imageDataURLs, phase, turnID, timelineOrder, asyncQuestions, provider }
+    private enum CodingKeys: String, CodingKey { case id, role, createdAt, text, imageDataURLs, phase, turnID, timelineOrder, asyncQuestions, provider, modelID }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
         role = try container.decode(ConversationRole.self, forKey: .role)
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt)
         text = try container.decode(String.self, forKey: .text)
         imageDataURLs = try container.decodeIfPresent([String].self, forKey: .imageDataURLs) ?? []
         phase = try container.decodeIfPresent(String.self, forKey: .phase)
@@ -89,6 +100,7 @@ struct ConversationMessage: Codable, Identifiable, Equatable {
         timelineOrder = try container.decodeIfPresent(Int.self, forKey: .timelineOrder)
         asyncQuestions = try container.decodeIfPresent([ConversationAsyncQuestion].self, forKey: .asyncQuestions)
         provider = try container.decodeIfPresent(ConversationProvider.self, forKey: .provider)
+        modelID = try container.decodeIfPresent(String.self, forKey: .modelID)
     }
 }
 
@@ -259,7 +271,15 @@ protocol ConversationProviderClient: AnyObject {
     var isPreparingForApplicationTermination: Bool { get }
     var lastTurnActivityDurations: [String: Int] { get }
 
+    /// The most recent turn result for one conversation. Providers that can run
+    /// conversations in parallel must answer per thread, not for the client.
+    func wasLastTurnInterrupted(threadID: String) -> Bool
+    func lastTurnActivityDurations(threadID: String) -> [String: Int]
+
     func diagnosticFields(_ additionalFields: [String: String]) -> [String: String]
+    /// Diagnostics for one conversation's turn. A runtime that can run several
+    /// turns at once must not report another conversation's process or turn.
+    func diagnosticFields(forThread threadID: String, _ additionalFields: [String: String]) -> [String: String]
     func startThread(workspace: ConversationWorkspaceContext, modelID: String, developerInstructions: String?) async throws -> String
     func availableModels(workspace: ConversationWorkspaceContext) async throws -> [ConversationModelOption]
     func validateEffort(_ effort: ConversationEffort, modelID: String, workspace: ConversationWorkspaceContext) async throws
@@ -271,6 +291,7 @@ protocol ConversationProviderClient: AnyObject {
         effort: ConversationEffort,
         threadID: String,
         workspace: ConversationWorkspaceContext,
+        sessionRecoveryContext: String?,
         developerInstructions: String?,
         onDelta: @escaping (String) -> Void,
         onFinalMessage: @escaping (String) -> Void,
@@ -280,7 +301,10 @@ protocol ConversationProviderClient: AnyObject {
         onActionRequest: @escaping () -> Void,
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void,
         onSteerMessage: @escaping (String, [String]) -> Void,
-        onProgressMessage: @escaping (ConversationMessage) -> Void
+        onProgressMessage: @escaping (ConversationMessage) -> Void,
+        onTurnStarted: @escaping (String) -> Void,
+        sensitiveUserInputAnswerValues: [String],
+        hideSensitiveRecoveryPrompt: Bool
     ) async throws
     func interruptActiveTurn(threadID: String) async throws -> Bool
     func steerActiveTurn(threadID: String, text: String, imageDataURLs: [String]) async throws -> Bool
@@ -308,6 +332,16 @@ extension ConversationProviderClient {
 
     func diagnosticFields() -> [String: String] { diagnosticFields([:]) }
 
+    /// A runtime that runs one turn at a time already describes that turn.
+    func diagnosticFields(forThread threadID: String, _ additionalFields: [String: String]) -> [String: String] {
+        diagnosticFields(additionalFields)
+    }
+
+    /// A runtime that runs one turn at a time has only one last turn to report.
+    func wasLastTurnInterrupted(threadID: String) -> Bool { wasLastTurnInterrupted }
+
+    func lastTurnActivityDurations(threadID: String) -> [String: Int] { lastTurnActivityDurations }
+
     func sendMessage(
         _ text: String,
         imageDataURLs: [String] = [],
@@ -316,16 +350,18 @@ extension ConversationProviderClient {
         effort: ConversationEffort = .medium,
         threadID: String,
         workspace: ConversationWorkspaceContext,
+        sessionRecoveryContext: String? = nil,
         developerInstructions: String? = nil,
         onFinalMessage: @escaping (String) -> Void,
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void = { _ in }
     ) async throws {
         try await sendMessage(
             text, imageDataURLs: imageDataURLs, mode: mode, modelID: modelID, effort: effort, threadID: threadID,
-            workspace: workspace, developerInstructions: developerInstructions,
+            workspace: workspace, sessionRecoveryContext: sessionRecoveryContext, developerInstructions: developerInstructions,
             onDelta: { _ in }, onFinalMessage: onFinalMessage, onActivity: { _ in }, onDiff: { _ in },
             onHistory: { _ in }, onActionRequest: {}, onUserInput: onUserInput,
-            onSteerMessage: { _, _ in }, onProgressMessage: { _ in }
+            onSteerMessage: { _, _ in }, onProgressMessage: { _ in }, onTurnStarted: { _ in },
+            sensitiveUserInputAnswerValues: [], hideSensitiveRecoveryPrompt: false
         )
     }
 }

@@ -17,9 +17,43 @@ struct ConversationTranscript: Codable, Equatable {
         /// the task switched away from Codex. Later Codex turns belong to the
         /// last Codex segment.
         var codexTurnIDs: [String] = []
+        /// Selected models keyed by the Codex turn IDs above. Older transcripts
+        /// omit this map and render provider-only labels for those turns.
+        var codexTurnModelIDs: [String: String] = [:]
         /// Whether the first prompt of this segment already carried the visible
         /// turns this provider had not seen.
         var handoffDelivered = false
+
+        private enum CodingKeys: String, CodingKey { case id, provider, startedAt, codexTurnIDs, codexTurnModelIDs, handoffDelivered }
+
+        init(id: String, provider: ConversationProvider, startedAt: Date, codexTurnIDs: [String] = [], codexTurnModelIDs: [String: String] = [:], handoffDelivered: Bool = false) {
+            self.id = id
+            self.provider = provider
+            self.startedAt = startedAt
+            self.codexTurnIDs = codexTurnIDs
+            self.codexTurnModelIDs = codexTurnModelIDs
+            self.handoffDelivered = handoffDelivered
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            id = try container.decode(String.self, forKey: .id)
+            provider = try container.decode(ConversationProvider.self, forKey: .provider)
+            startedAt = try container.decode(Date.self, forKey: .startedAt)
+            codexTurnIDs = try container.decodeIfPresent([String].self, forKey: .codexTurnIDs) ?? []
+            codexTurnModelIDs = try container.decodeIfPresent([String: String].self, forKey: .codexTurnModelIDs) ?? [:]
+            handoffDelivered = try container.decodeIfPresent(Bool.self, forKey: .handoffDelivered) ?? false
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(id, forKey: .id)
+            try container.encode(provider, forKey: .provider)
+            try container.encode(startedAt, forKey: .startedAt)
+            try container.encode(codexTurnIDs, forKey: .codexTurnIDs)
+            try container.encode(codexTurnModelIDs, forKey: .codexTurnModelIDs)
+            try container.encode(handoffDelivered, forKey: .handoffDelivered)
+        }
     }
 
     struct Turn: Codable, Equatable, Identifiable {
@@ -32,6 +66,21 @@ struct ConversationTranscript: Codable, Equatable {
     var version = 1
     var segments: [Segment] = []
     var turns: [Turn] = []
+    /// A provider question that is waiting for user input. The native request
+    /// ID is useful only while its provider process is alive; this durable copy
+    /// lets the UI restore the question and continue the saved session later.
+    var pendingUserInputRequest: ConversationUserInputRequest?
+    /// Private recovery turns. The submitted answers and prompt are never stored
+    /// raw; provider activity and diffs for these turns stay hidden.
+    var sensitiveTurnIDs: [String]?
+    /// Codex turn IDs containing private recovery prompts. Codex-only tasks may
+    /// not have a transcript segment to associate these IDs with.
+    var sensitiveCodexTurnIDs: [String]?
+    /// Locally sanitized message copies for private Codex recovery turns. Raw
+    /// provider messages can be replaced after restart without losing safe text.
+    var sensitiveCodexTurnMessages: [String: [ConversationMessage]]?
+    /// Fail-closed marker written before a private recovery prompt is sent.
+    var pendingSensitiveUserInputRedaction: Bool?
 
     var isEmpty: Bool { segments.isEmpty && turns.isEmpty }
 

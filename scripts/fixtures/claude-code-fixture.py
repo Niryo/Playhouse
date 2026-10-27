@@ -13,6 +13,7 @@ Every turn is recorded in `<executable>.history` for test assertions.
 
 import json
 import os
+import select
 import subprocess
 import sys
 import time
@@ -71,7 +72,105 @@ def run_tool(tool_id, name, tool_input, command=None):
 
 def respond(user_text, instructions):
     commands = []
-    if "publish-image-during-active-turn" in user_text.lower():
+    if "answer to the pending question from the prior stationai session" in user_text.lower():
+        answer = user_text.split("Answer: ", 1)[-1].splitlines()[0].strip()
+        text("msg_recovered_question_answer", f"Recovered answer: {answer}.")
+    elif "ask a restart-safe structured question" in user_text.lower():
+        question_input = {
+            "questions": [{
+                "header": "Color",
+                "question": "Which color should I use?",
+                "options": [{"label": "Blue"}, {"label": "Green"}],
+                "multiSelect": False,
+            }]
+        }
+        assistant("msg_ask_restart_safe", [{"type": "tool_use", "id": "toolu_question", "name": "AskUserQuestion", "input": question_input}])
+        write({"type": "control_request", "request_id": "question-request-1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
+        }})
+        time.sleep(0.1)
+        write({"type": "result", "subtype": "error", "is_error": True, "result": "Fixture process ended with a pending question."})
+    elif "ask an empty structured question" in user_text.lower():
+        question_input = {"questions": []}
+        assistant("msg_ask_user", [{"type": "tool_use", "id": "toolu_question", "name": "AskUserQuestion", "input": question_input}])
+        write({"type": "control_request", "request_id": "question-request-1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
+        }})
+    elif "ask a structured question" in user_text.lower():
+        question_input = {
+            "questions": [{
+                "header": "Color",
+                "question": "Which color should I use?",
+                "options": [
+                    {"label": "Blue", "description": "Use blue."},
+                    {"label": "Green", "description": "Use green."},
+                ],
+                "multiSelect": False,
+            }]
+        }
+        assistant("msg_ask_user", [{"type": "tool_use", "id": "toolu_question", "name": "AskUserQuestion", "input": question_input}])
+        write({"type": "control_request", "request_id": "question-request-1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
+        }})
+    elif "hold until stopped" in user_text.lower() or "hold-until-stopped" in user_text.lower():
+        ready = Path(str(sys.argv[0]) + ".interrupt-ready")
+        ready.write_text("The Claude fixture turn is active and waiting for an interrupt.\n", encoding="utf-8")
+        deadline = time.monotonic() + 30
+        received_interrupt = False
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([sys.stdin], [], [], 0.02)
+            if not readable:
+                continue
+            control = json.loads(sys.stdin.readline())
+            if control.get("type") != "control_request" or control.get("request", {}).get("subtype") != "interrupt":
+                continue
+            received_interrupt = True
+            Path(str(sys.argv[0]) + ".interrupt-received").write_text("control interrupt\n", encoding="utf-8")
+            interrupt_release = Path(str(sys.argv[0]) + ".interrupt-release")
+            if Path(sys.argv[0]).name.endswith("-hold-reject-interrupt"):
+                reject = Path(str(sys.argv[0]) + ".interrupt-reject")
+                reject_deadline = time.monotonic() + 15
+                while not reject.exists() and time.monotonic() < reject_deadline:
+                    time.sleep(0.02)
+                reject.unlink(missing_ok=True)
+                write({"type": "control_response", "response": {
+                    "subtype": "error", "request_id": control.get("request_id"),
+                    "error": "Fixture rejected the interrupt while the turn remains active.",
+                }})
+                ack_deadline = time.monotonic() + 15
+                while not interrupt_release.exists() and time.monotonic() < ack_deadline:
+                    time.sleep(0.02)
+                interrupt_release.unlink(missing_ok=True)
+                text("msg_after_rejected_interrupt", "The turn completed after Stop was rejected.")
+                write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+                break
+            ack_deadline = time.monotonic() + 15
+            while not interrupt_release.exists() and time.monotonic() < ack_deadline:
+                time.sleep(0.02)
+            interrupt_release.unlink(missing_ok=True)
+            write({"type": "control_response", "response": {
+                "subtype": "success", "request_id": control.get("request_id"), "response": {},
+            }})
+            write({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                   "result": "Claude interrupted this turn."})
+            break
+        ready.unlink(missing_ok=True)
+        if not received_interrupt:
+            raise TimeoutError("Timed out waiting for Claude interrupt.")
+        commands.append({"interruptReceived": True})
+    elif "hold-claude-turn-for-concurrency" in user_text.lower():
+        ready = Path(str(sys.argv[0]) + ".concurrent-turn-ready")
+        release = Path(str(sys.argv[0]) + ".concurrent-turn-release")
+        ready.write_text("Claude turn is active.\n", encoding="utf-8")
+        deadline = time.monotonic() + 60
+        while not release.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not release.exists():
+            raise TimeoutError("Timed out waiting for the concurrent Claude turn test.")
+        if "fail-after-hold" in user_text.lower():
+            raise RuntimeError("Claude fixture failed after releasing the held turn.")
+        text("msg_concurrent", SIMPLE_ANSWER)
+    elif "publish-image-during-active-turn" in user_text.lower():
         ready = Path(str(sys.argv[0]) + ".image-turn-ready")
         release = Path(str(sys.argv[0]) + ".image-turn-release")
         ready.write_text("Claude turn is active.\n", encoding="utf-8")
@@ -92,6 +191,8 @@ def respond(user_text, instructions):
             for index, item in enumerate(comments)
         )
         text("msg_comments", answer)
+    elif user_text.rstrip().endswith("What happened earlier?"):
+        text("msg_recovered", SIMPLE_ANSWER)
     elif "story" in user_text.lower():
         text("msg_story", STORY)
         progress_clear = report_command(instructions, " task progress clear ")
@@ -112,7 +213,6 @@ def respond(user_text, instructions):
         run_tool("toolu_checks_last", "Read", {"file_path": os.path.join(os.getcwd(), "README.md")})
     else:
         text("msg_simple", SIMPLE_ANSWER)
-    write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
     return commands
 
 
@@ -134,6 +234,12 @@ def main():
         if message.get("type") == "control_request":
             request = message.get("request", {})
             if request.get("subtype") == "initialize":
+                missing_resume = Path(str(sys.argv[0]) + ".missing-resume")
+                if "--resume" in sys.argv and missing_resume.exists():
+                    missing_resume.unlink()
+                    write({"type": "result", "subtype": "error", "is_error": True,
+                           "result": "No conversation found with session ID"})
+                    return 1
                 models = [
                     {"value": "default", "displayName": "Default"},
                     {"value": "opus", "displayName": "Opus"},
@@ -159,14 +265,52 @@ def main():
             write({"type": "control_response", "response": {
                 "subtype": "success", "request_id": message.get("request_id"), "response": response,
             }})
+        elif message.get("type") == "control_response" and (message.get("response") or {}).get("request_id") == "question-request-1":
+            response = message.get("response", {}).get("response", {})
+            updated_input = response.get("updatedInput", {})
+            answers = updated_input.get("answers", {})
+            if response.get("behavior") != "allow" or not isinstance(answers, dict) or not answers:
+                write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_question", "content": response.get("message", "Question was rejected."), "is_error": True},
+                ]}})
+                write({"type": "result", "subtype": "error", "is_error": True, "result": response.get("message", "Question was rejected.")})
+                continue
+            if set(answers) != {"Which color should I use?"} or not isinstance(answers["Which color should I use?"], str) or not answers["Which color should I use?"].strip():
+                raise ValueError(f"Malformed Claude question answer: {answers!r}")
+            answer = answers.get("Which color should I use?", "")
+            write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_question", "content": json.dumps(answers), "is_error": False},
+            ]}})
+            text("msg_question_answer", f"Answer received: {answer}.")
+            write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+            history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else {"turns": []}
+            if history.get("turns"):
+                history["turns"][-1]["questionAnswers"] = answers
+            history_path.write_text(json.dumps(history), encoding="utf-8")
         elif message.get("type") == "user":
             content = message.get("message", {}).get("content", [])
             user_text = "".join(block.get("text", "") for block in content if block.get("type") == "text")
             turn["userText"] = user_text
+            recovery_error = Path(str(sys.argv[0]) + ".recovery-error")
+            if "answer to the pending question from the prior stationai session" in user_text.lower() and recovery_error.exists():
+                recovery_error.unlink(missing_ok=True)
+                turn["failure"] = "Fixture provider echoed Answer: Green and the private recovery prompt."
+                history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else {"turns": []}
+                history["turns"].append(turn)
+                history_path.write_text(json.dumps(history), encoding="utf-8")
+                write({"type": "result", "subtype": "error", "is_error": True,
+                       "result": "Fixture provider echoed Answer: Green and the private recovery prompt."})
+                continue
             turn["reportCommands"] = respond(user_text, instructions)
             history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else {"turns": []}
             history["turns"].append(turn)
             history_path.write_text(json.dumps(history), encoding="utf-8")
+            if "structured question" in user_text.lower():
+                # Keep the provider turn alive until StationAI answers or rejects
+                # the control request; otherwise a pending question races with
+                # an already successful result.
+                continue
+            write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
     return 0
 
 
