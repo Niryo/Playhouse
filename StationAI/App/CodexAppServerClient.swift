@@ -1414,7 +1414,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 id: requestIDString,
                 threadID: threadID,
                 questions: questions,
-                isBlocking: activeConversationMode == .plan || (params["isBlocking"] as? Bool ?? true)
+                isBlocking: activeConversationMode == .plan || (params["isBlocking"] as? Bool ?? true),
+                mode: activeConversationMode
             )
             pendingUserInputRequest = request
             await userInputHandler?(request)

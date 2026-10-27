@@ -3433,7 +3433,6 @@ final class ConversationManager {
         taskID: UUID,
         request: ConversationUserInputRequest,
         answers: [String: [String]],
-        mode: ConversationMode = .code,
         modelID: String? = nil,
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in }
     ) async throws -> Bool {
@@ -3496,7 +3495,7 @@ final class ConversationManager {
         _ = try await send(
             taskID: taskID,
             text: recoveryPrompt,
-            mode: mode,
+            mode: request.mode,
             modelID: modelID,
             onUpdate: onUpdate,
             sensitiveUserInputAnswerValues: sensitiveValues,
@@ -3510,7 +3509,6 @@ final class ConversationManager {
         taskID: UUID,
         requestID: String,
         answers: [String: [String]],
-        mode: ConversationMode = .code,
         modelID: String? = nil,
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in }
     ) async throws -> Bool {
@@ -3519,7 +3517,7 @@ final class ConversationManager {
             throw BridgeCommandError(code: "not_found", message: "That pending question is no longer available.")
         }
         return try await answerUserInput(
-            taskID: taskID, request: request, answers: answers, mode: mode, modelID: modelID, onUpdate: onUpdate
+            taskID: taskID, request: request, answers: answers, modelID: modelID, onUpdate: onUpdate
         )
     }
 
@@ -4524,6 +4522,32 @@ final class ConversationManager {
     private func recordClaudeActivity(taskID: UUID, turnID: String, _ activity: ConversationActivity) {
         do {
             try transcripts.mutate(taskID) { transcript in
+                // A background Agent/Task call can still be running (or get a terminal
+                // notification) after the turn that launched it ends, and after a
+                // restart its new turn has no in-memory record of the launch at all.
+                // Resolve by the provider's durable backgroundTaskID first, wherever in
+                // the transcript that activity actually lives, before falling back to
+                // an id match scoped to this turn.
+                if let backgroundTaskID = activity.backgroundTaskID {
+                    for turnIndex in transcript.turns.indices {
+                        guard let existingIndex = transcript.turns[turnIndex].activities.firstIndex(where: {
+                            $0.backgroundTaskID == backgroundTaskID
+                        }) else { continue }
+                        let existing = transcript.turns[turnIndex].activities[existingIndex]
+                        transcript.turns[turnIndex].activities[existingIndex] = ConversationActivity(
+                            id: existing.id, title: existing.title,
+                            detail: activity.detail.isEmpty ? existing.detail : activity.detail,
+                            status: activity.status,
+                            childThreadID: existing.childThreadID, agentPath: existing.agentPath, model: existing.model,
+                            reasoningEffort: existing.reasoningEffort, toolKind: existing.toolKind,
+                            server: existing.server, tool: existing.tool,
+                            durationMs: activity.durationMs ?? existing.durationMs, startedAt: existing.startedAt,
+                            isContextCompaction: existing.isContextCompaction, turnID: existing.turnID,
+                            timelineOrder: existing.timelineOrder, backgroundTaskID: existing.backgroundTaskID
+                        )
+                        return
+                    }
+                }
                 guard let index = transcript.turns.lastIndex(where: { $0.id == turnID }) else { return }
                 var activity = activity
                 activity.turnID = turnID
@@ -5631,16 +5655,11 @@ final class StationAIBridgeRuntime {
                 let taskID = try request.requiredUUID("taskID")
                 let requestID = try request.requiredString("requestID")
                 let answers = try request.optionalStringArrays("answers")
-                let modeValue = request.arguments["mode"]?.string ?? ConversationMode.code.rawValue
-                guard let mode = ConversationMode(rawValue: modeValue) else {
-                    throw BridgeCommandError(code: "invalid_argument", message: "Unknown conversation mode '\(modeValue)'. Valid modes: default, plan.")
-                }
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 let accepted = try await conversations.answerUserInput(
                     taskID: taskID,
                     requestID: requestID,
                     answers: answers,
-                    mode: mode,
                     modelID: request.arguments["model"]?.string,
                     onUpdate: { update in
                         if let payload = try? Self.value(update) {

@@ -5224,6 +5224,88 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIsNone(resumed_history.get("pendingUserInputRequest"))
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
 
+    # case-contract: test_claude_pending_plan_mode_question_recovers_in_plan_mode | A Claude AskUserQuestion asked during a Plan mode turn persists its mode; after its provider process ends, answering resumes the saved Claude session in Plan mode rather than silently downgrading to Code mode, relaunching the recovery turn with --permission-mode plan.
+    def test_claude_pending_plan_mode_question_recovers_in_plan_mode(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / "claude-fixture-restart-plan-question"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
+            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        task, _ = self.call_cli(
+            "task", "create", "--title", "Restart-safe Claude plan question", "--root", self.primary, "--provider", "claude"
+        )
+        task_id = self.assert_success(task)["id"]
+        failed, _ = self.call_cli(
+            "conversation", "send", task_id, "--mode", "plan", "--message", "Ask a restart-safe structured question.",
+            expected_status=1,
+            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+        )
+        self.assertFalse(failed.get("ok", True), failed)
+        restored, _ = self.call_cli("conversation", "history", task_id)
+        pending = self.assert_success(restored).get("pendingUserInputRequest")
+        self.assertEqual(pending["mode"], "plan")
+        accepted, _ = self.call_cli(
+            "conversation", "answer-user-input", task_id, pending["id"], "--answer", "question-1=Green",
+            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+        )
+        self.assertTrue(self.assert_success(accepted)["accepted"])
+        recovery_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        recovery_arguments = recovery_history["turns"][-1]["arguments"]
+        self.assertIn("--permission-mode", recovery_arguments)
+        self.assertEqual(
+            recovery_arguments[recovery_arguments.index("--permission-mode") + 1],
+            "plan",
+            "The recovered turn must continue in Plan mode, not silently downgrade to Code mode.",
+        )
+        resumed, _ = self.call_cli("conversation", "history", task_id)
+        self.assertIsNone(self.assert_success(resumed).get("pendingUserInputRequest"))
+
+    # case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early.
+    def test_claude_background_agent_keeps_turn_open_until_resolved(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / "claude-fixture-background-agent"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
+            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        task, _ = self.call_cli(
+            "task", "create", "--title", "Claude background agent", "--root", self.primary, "--provider", "claude"
+        )
+        task_id = self.assert_success(task)["id"]
+        response, events = self.call_cli(
+            "conversation", "send", task_id, "--message", "Launch a background agent for this turn.",
+            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+        )
+        result = self.assert_success(response)
+        activity_updates = [
+            event["payload"]["activity"] for event in events
+            if event.get("type") == "activity" and event["payload"]["activity"].get("childThreadID") == "toolu_background_agent"
+        ]
+        self.assertGreaterEqual(len(activity_updates), 3, activity_updates)
+        # The launch confirmation and the live task_progress update must leave the
+        # activity running; only a terminal task_updated/task_notification may
+        # resolve it, and once resolved it must not revert to inProgress.
+        resolved_index = next(i for i, update in enumerate(activity_updates) if update["status"] != "inProgress")
+        self.assertGreater(resolved_index, 0, "The launch confirmation must not resolve the activity: " + str(activity_updates))
+        self.assertTrue(
+            all(update["status"] == "inProgress" for update in activity_updates[:resolved_index]),
+            activity_updates,
+        )
+        self.assertTrue(
+            all(update["status"] == "completed" for update in activity_updates[resolved_index:]),
+            activity_updates,
+        )
+        self.assertEqual(activity_updates[-1]["backgroundTaskID"], "bgtask-fixture-1")
+        self.assertEqual(activity_updates[-1]["detail"], "Background check finished.")
+        self.assertTrue(any(message["text"] == "STARTED" for message in result["messages"]))
+        history = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+        activity = next(a for a in history["activities"] if a["childThreadID"] == "toolu_background_agent")
+        self.assertEqual(activity["status"], "completed")
+        self.assertEqual(activity["backgroundTaskID"], "bgtask-fixture-1")
+
     # case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, StationAI returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics.
     def test_claude_private_recovery_failure_fails_closed(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"

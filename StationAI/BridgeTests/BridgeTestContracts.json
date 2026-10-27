@@ -252,6 +252,14 @@
     "expectation": "Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from StationAI history, clears pending state, and returns to Waiting Response."
   },
   {
+    "id": "test_claude_pending_plan_mode_question_recovers_in_plan_mode",
+    "expectation": "A Claude AskUserQuestion asked during a Plan mode turn persists its mode; after its provider process ends, answering resumes the saved Claude session in Plan mode rather than silently downgrading to Code mode, relaunching the recovery turn with --permission-mode plan."
+  },
+  {
+    "id": "test_claude_background_agent_keeps_turn_open_until_resolved",
+    "expectation": "A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early."
+  },
+  {
     "id": "test_claude_private_recovery_failure_fails_closed",
     "expectation": "If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, StationAI returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics."
   },
