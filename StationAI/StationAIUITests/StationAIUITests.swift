@@ -2258,7 +2258,7 @@ final class StationAIUITests: XCTestCase {
         assertTaskVisible("Progress reports", inColumn: "Review")
     }
 
-    // case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; a staged completed outcome is discarded if its turn fails, leaving the task Blocked. The task card removes the report while lifecycle states remain Blocked or In Progress. A generic structured question appears inline in the conversation while the task remains In Progress; its answer reaches Codex, and the answered turn finishes in Waiting Response. First-thread instructions distinguish source repository paths from active task worktree paths, allow read-only inspection without attaching a repo, and reserve repository add APIs for changes that need a worktree.
+    // case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; a staged completed outcome is discarded if its turn fails, leaving the task Blocked. The task card removes the report while lifecycle states remain Blocked or In Progress. A blocking structured question appears inline and moves the task to Waiting Response; its answer resumes the active turn in In Progress, and the answered turn finishes in Waiting Response. First-thread instructions distinguish source repository paths from active task worktree paths, allow read-only inspection without attaching a repo, and reserve repository add APIs for changes that need a worktree.
     func test_task_progress_reports_clear_on_failed_turns_and_questions() throws {
         launchApp(defaultParent: fixture.parent.path)
         var heldTurns: [(Process, URL, URL)] = []
@@ -2362,7 +2362,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(threadInstructions.contains("Do not interrupt the user or ask them to confirm the selection merely because the task appears unrelated."))
         XCTAssertFalse(FileManager.default.fileExists(atPath: questionFixture.path + ".assessment.history"), "A question should not spawn a parallel repository-assessment thread.")
         XCTAssertTrue(element("ai-question-form-title").exists)
-        XCTAssertEqual(try taskRecord(id: questionTaskID)?["status"] as? String, "In Progress")
+        XCTAssertEqual(try taskRecord(id: questionTaskID)?["status"] as? String, "Waiting Response")
         XCTAssertNil(try taskRecord(id: questionTaskID)?["progressLabel"] as? String, "Progress should clear as soon as Codex requests user input.")
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5), "The board should reopen after leaving the question.")
@@ -2376,6 +2376,10 @@ final class StationAIUITests: XCTestCase {
         element("submit-ai-answers-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: outcomeActive.path) }, timeout: 10), "The fixture should acknowledge the answer and hold final completion.")
         XCTAssertEqual(try taskRecord(id: questionTaskID)?["status"] as? String, "In Progress", "Answering should leave the active turn In Progress until it finishes.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        assertTaskVisible("Progress question", inColumn: "In Progress")
+        openTask(named: "Progress question")
         try "Release final turn completion.\n".write(to: outcomeRelease, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({ !element("conversation-user-input-request").exists }, timeout: 5), "Submitting the answer should remove the inline question.")
         XCTAssertTrue(app.staticTexts["Answer received: Continue."].waitForExistence(timeout: 10), "The resumed turn should receive the submitted answer.")
@@ -7302,7 +7306,7 @@ final class StationAIUITests: XCTestCase {
         assertTaskVisible("Empty Claude question", inColumn: "Blocked")
     }
 
-    // case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains In Progress, and answering resumes the saved Claude session, delivers the answer, hides the private recovery prompt and redacts secret answers from StationAI history, clears pending state, and returns to Waiting Response.
+    // case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from StationAI history, clears pending state, and returns to Waiting Response.
     func test_claude_pending_question_recovers_after_provider_process_restarts() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-restart-question")
         try FileManager.default.copyItem(
@@ -7326,7 +7330,13 @@ final class StationAIUITests: XCTestCase {
         element("message-composer").typeText("Ask a structured question.")
         element("send-message-button").click()
         XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
-        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        assertTaskVisible("Restart-safe Claude question", inColumn: "Waiting Response")
+        openTask(named: "Restart-safe Claude question")
+        XCTAssertTrue(element("conversation-user-input-request").exists)
 
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12), "StationAI should finish its bounded shutdown before relaunch.")
@@ -7334,7 +7344,11 @@ final class StationAIUITests: XCTestCase {
         openTask(named: "Restart-safe Claude question")
         XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10), "The saved question should return after the app and provider process restart.")
         XCTAssertTrue(app.staticTexts["Which color should I use?"].exists)
-        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        assertTaskVisible("Restart-safe Claude question", inColumn: "Waiting Response")
+        openTask(named: "Restart-safe Claude question")
         element("ai-question-option-question-1-Green").click()
         element("submit-ai-answers-button").click()
         XCTAssertTrue(app.staticTexts["Recovered answer: Green."].waitForExistence(timeout: 15))
@@ -7343,7 +7357,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
     }
 
-    // case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, StationAI returns a generic error, preserves the pending question for retry while the task stays In Progress, and keeps the prompt out of history, saved task state, and diagnostics.
+    // case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, StationAI returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics.
     func test_claude_private_recovery_failure_fails_closed() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-recovery-failure")
         try FileManager.default.copyItem(
@@ -7385,17 +7399,27 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("conversation-user-input-request").exists)
         XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Answer: Green")).firstMatch.exists)
         XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "private recovery prompt")).firstMatch.exists)
-        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress",
-                       "An unanswered question stays active and retryable after a failed recovery attempt.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response",
+                       "An unanswered question stays available for retry after a failed recovery attempt.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        assertTaskVisible("Claude private recovery failure", inColumn: "Waiting Response")
+        openTask(named: "Claude private recovery failure")
+        XCTAssertTrue(element("conversation-user-input-request").exists)
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
         relaunchApp()
         openTask(named: "Claude private recovery failure")
         XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 15))
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        assertTaskVisible("Claude private recovery failure", inColumn: "Waiting Response")
+        openTask(named: "Claude private recovery failure")
+        XCTAssertTrue(element("conversation-user-input-request").exists)
         XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Answer: Green")).firstMatch.exists)
     }
 
-    // case-contract: test_codex_pending_question_recovers_after_provider_process_restarts | Codex's pending structured question persists after its provider process exits; StationAI restores it from fresh CLI/XPC history, keeps provider switching blocked, requires the user to re-enter the secret once, and applies the answers in one recovery turn. CLI history and the live recovery event stream retain safe assistant text while redacting secret echoes and hiding provider activities and file-change diffs; a later non-sensitive Codex turn keeps its own diff, and the visible UI shows the safe response immediately and after app restart.
+    // case-contract: test_codex_pending_question_recovers_after_provider_process_restarts | Codex's pending structured question persists after its provider process exits and leaves the task in Waiting Response while unanswered; StationAI restores it from fresh CLI/XPC history, keeps provider switching blocked, requires the user to re-enter the secret once, and applies the answers in one recovery turn. CLI history and the live recovery event stream retain safe assistant text while redacting secret echoes and hiding provider activities and file-change diffs; a later non-sensitive Codex turn keeps its own diff, and the visible UI shows the safe response immediately and after app restart.
     func test_codex_pending_question_recovers_after_provider_process_restarts() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-restart-question")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
@@ -7415,6 +7439,7 @@ final class StationAIUITests: XCTestCase {
         element("message-composer").typeText("Ask a restart-safe structured question.")
         element("send-message-button").click()
         XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
         relaunchApp()
@@ -7422,7 +7447,12 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["Which color should I use?"].exists)
         XCTAssertFalse(element("conversation-provider-menu").isEnabled, "A saved structured question must block provider switching after restart.")
-        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        assertTaskVisible("Restart-safe Codex question", inColumn: "Waiting Response")
+        openTask(named: "Restart-safe Codex question")
+        XCTAssertTrue(element("conversation-user-input-request").exists)
 
         element("ai-question-option-color-Green").click()
         let secretAnswer = element("ai-question-answer-token")
@@ -7452,7 +7482,7 @@ final class StationAIUITests: XCTestCase {
             "The secret must remain redacted from messages, activities, and diffs after StationAI reloads provider history.")
     }
 
-    // case-contract: test_codex_secret_recovery_redaction_fails_closed | When Codex recovery and a later thread-resume/history read error echo the full recovery prompt and answers, StationAI preserves the pending question while the task stays In Progress, uses a generic visible error, and redacts private content from returned history, saved task state, diagnostics, and error text across fresh CLI/XPC reads and app restarts.
+    // case-contract: test_codex_secret_recovery_redaction_fails_closed | When Codex recovery and a later thread-resume/history read error echo the full recovery prompt and answers, StationAI preserves the pending question while the task stays in Waiting Response, uses a generic visible error, and redacts private content from returned history, saved task state, diagnostics, and error text across fresh CLI/XPC reads and app restarts.
     func test_codex_secret_recovery_redaction_fails_closed() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-unassociated-restart-question")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
@@ -7492,9 +7522,14 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "fixture-secret")).firstMatch.exists)
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Answer: Green")).firstMatch.exists)
         XCTAssertTrue(element("conversation-user-input-request").exists, "A failed redaction association must leave the question available to retry.")
-        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress",
-                       "An unanswered question stays active and retryable after a failed recovery attempt.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response",
+                       "An unanswered question stays available for retry after a failed recovery attempt.")
         XCTAssertFalse((try taskRecord(id: taskID)?["statusMessage"] as? String ?? "").contains("fixture-secret"))
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        assertTaskVisible("Fail-closed secret recovery", inColumn: "Waiting Response")
+        openTask(named: "Fail-closed secret recovery")
+        XCTAssertTrue(element("conversation-user-input-request").exists)
 
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
@@ -7520,7 +7555,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("conversation-user-input-request").exists, "A history failure must leave the unanswered recovery request visible.")
     }
 
-    // case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and leave the task In Progress while pending; the UI renders the question inline, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
+    // case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the UI renders the question inline, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
     func test_claude_questions_can_be_answered_after_switching_conversations() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-question")
         try FileManager.default.copyItem(
@@ -7545,13 +7580,15 @@ final class StationAIUITests: XCTestCase {
         element("message-composer").typeText("Ask a structured question.")
         element("send-message-button").click()
         XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
-        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        assertTaskVisible("Claude question", inColumn: "Waiting Response")
         openTask(named: "Other provider conversation")
         XCTAssertTrue(element("message-composer").waitForExistence(timeout: 5))
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        assertTaskVisible("Claude question", inColumn: "Waiting Response")
         openTask(named: "Claude question")
         XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Which color should I use?"].exists)
@@ -7561,7 +7598,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
     }
 
-    // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode remain in the conversation and keep the task In Progress while unanswered; leaving and reopening the conversation preserves the pending question, keyed answers resume the provider turn without a lifecycle status transition, and the answered turn returns to Waiting Response without an explicit completed outcome.
+    // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode remain in the conversation and move the task to Waiting Response while unanswered; leaving and reopening the conversation preserves the pending question, keyed answers resume the provider turn in In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome.
     func test_codex_questions_can_be_answered_over_cli_xpc() throws {
         let created = try runCLI(["task", "create", "--title", "Codex questions", "--root", fixture.primary.path])
         XCTAssertEqual(created["ok"] as? Bool, true)
@@ -7582,11 +7619,11 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["Which color should I use?"].exists)
         XCTAssertTrue(element("conversation-user-input-request").exists, "The question should appear inline in the conversation.")
-        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
-        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
-        assertTaskVisible("Codex questions", inColumn: "In Progress")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+        assertTaskVisible("Codex questions", inColumn: "Waiting Response")
         attachScreenshot(named: "Pending question remains part of its active conversation")
         openTask(named: "Another conversation")
         XCTAssertTrue(element("message-composer").waitForExistence(timeout: 5), "A different conversation should open while the question is pending.")
@@ -7594,7 +7631,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
         openTask(named: "Codex questions")
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 5), "Returning should restore the pending question inline.")
-        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         XCTAssertFalse(element("submit-ai-answers-button").isEnabled, "Blank answers must not be submitted.")
         let greenOption = element("ai-question-option-color-Green")
         let blueOption = element("ai-question-option-color-Blue")
@@ -7668,11 +7705,11 @@ final class StationAIUITests: XCTestCase {
         assertTaskVisible("Empty Codex questions", inColumn: "Waiting Response")
     }
 
-    // case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation and returning, and keep the task In Progress until answered; the answered turn returns to Waiting Response without an explicit completed outcome.
+    // case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation and returning, and keep the task In Progress through a fresh CLI/XPC history reconciliation after provider exit until answered; the answered turn returns to Waiting Response without an explicit completed outcome.
     func test_codex_nonblocking_question_keeps_task_in_progress() throws {
         _ = try runCLI(["task", "create", "--title", "Non-blocking question", "--root", fixture.primary.path])
         _ = try runCLI(["task", "create", "--title", "Another non-blocking conversation", "--root", fixture.primary.path])
-        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-nonblocking-slow").path
+        codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-nonblocking-restart-question").path
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Non-blocking question")
         element("message-composer").click()
@@ -7683,14 +7720,21 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(named: "Non-blocking question")?["status"] as? String, "In Progress")
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        assertTaskVisible("Non-blocking question", inColumn: "In Progress")
         openTask(named: "Another non-blocking conversation")
         XCTAssertTrue(element("message-composer").waitForExistence(timeout: 5))
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        assertTaskVisible("Non-blocking question", inColumn: "In Progress")
         openTask(named: "Non-blocking question")
         XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 5), "Returning should restore the pending question inline.")
         XCTAssertEqual(try taskRecord(named: "Non-blocking question")?["status"] as? String, "In Progress")
-        app.buttons["Blue"].click()
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        assertTaskVisible("Non-blocking question", inColumn: "In Progress")
+        openTask(named: "Non-blocking question")
+        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 5))
+        app.buttons["Green"].click()
         element("ai-question-answer-token").click()
         element("ai-question-answer-token").typeText("fixture-secret")
         element("submit-ai-answers-button").click()
@@ -7701,8 +7745,8 @@ final class StationAIUITests: XCTestCase {
             if nonblockingStatus == "In Progress" { break }
             Thread.sleep(forTimeInterval: 0.05)
         }
-        XCTAssertEqual(nonblockingStatus, "In Progress", "A non-blocking answer should leave the task active until the turn completes.")
-        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        XCTAssertEqual(nonblockingStatus, "In Progress", "A non-blocking recovery answer should leave the task active until the resumed turn completes.")
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / [redacted secret answer]."].waitForExistence(timeout: 10))
         XCTAssertEqual(try taskRecord(named: "Non-blocking question")?["status"] as? String, "Waiting Response")
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
