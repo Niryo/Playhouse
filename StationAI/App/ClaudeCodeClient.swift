@@ -110,6 +110,10 @@ struct ConversationProviderCapabilities: Codable, Equatable {
 @MainActor
 final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     nonisolated static let defaultModelID = "default"
+    /// The model family StationAI prefers when the user hasn't picked one, so new
+    /// conversations default to Sonnet rather than whatever Claude Code's own
+    /// account-level default currently resolves to.
+    nonisolated static let preferredDefaultModelID = "sonnet"
     nonisolated static let titleModelID = "haiku"
     /// The first Claude Code release StationAI verified for active-turn steering
     /// (`priority: "next"`) and command lifecycle events.
@@ -263,7 +267,8 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         let response = try await withMetadataSession(workspace: workspace) { _ in [:] }
         let models = (response.initialize["models"] as? [[String: Any]] ?? []).compactMap { item -> ConversationModelOption? in
             guard let value = item["value"] as? String, !value.isEmpty else { return nil }
-            return ConversationModelOption(id: value, name: item["displayName"] as? String ?? value, isDefault: value == Self.defaultModelID)
+            let isPreferredDefault = value == Self.defaultModelID || value.lowercased().contains(Self.preferredDefaultModelID)
+            return ConversationModelOption(id: value, name: item["displayName"] as? String ?? value, isDefault: isPreferredDefault)
         }
         return models.isEmpty ? [ConversationModelOption(id: Self.defaultModelID, name: "Default", isDefault: true)] : models
     }

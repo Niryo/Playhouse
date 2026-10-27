@@ -6,7 +6,7 @@ extension ConversationProvider {
     var defaultModelID: String {
         switch self {
         case .codex: CodexAppServerClient.modelID
-        case .claude: ClaudeCodeClient.defaultModelID
+        case .claude: ClaudeCodeClient.preferredDefaultModelID
         }
     }
 
