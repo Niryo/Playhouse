@@ -4162,7 +4162,7 @@ class StationAIBridgeTests(unittest.TestCase):
         history, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(history)["messages"], [])
 
-    # case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. The latest active process appears outside Working for while older active processes remain inside; completion moves it inside. The conversation header has no live activity line while responding. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
+    # case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
     def test_conversation_shows_mcp_and_dynamic_tool_activity(self):
         task_id = self.create_task(title="Tool activity")['id']
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -4185,7 +4185,7 @@ class StationAIBridgeTests(unittest.TestCase):
         stream_buffer = bytearray()
         active_rows = {}
         completed_rows = {}
-        expected_tool_ids = {"item_fixture_mcp_call", "item_fixture_dynamic_call", "item_fixture_dynamic_legacy"}
+        expected_tool_ids = {"item_fixture_mcp_call", "item_fixture_dynamic_call", "item_fixture_dynamic_legacy", "item_fixture_active_long_command"}
         try:
             deadline = time.monotonic() + 20
             while (not ready.exists() or not expected_tool_ids.issubset(active_rows)) and time.monotonic() < deadline:
@@ -4211,10 +4211,12 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assertEqual(active_rows["item_fixture_mcp_call"]["toolKind"], "mcp")
             self.assertEqual(active_rows["item_fixture_dynamic_call"]["toolKind"], "dynamic")
             self.assertEqual(active_rows["item_fixture_dynamic_legacy"]["toolKind"], "dynamic")
+            self.assertTrue(active_rows["item_fixture_active_long_command"]["title"].startswith("Running long-command-name"))
+            self.assertGreater(len(active_rows["item_fixture_active_long_command"]["title"]), 200)
             self.assertTrue(all(row.get("startedAt") for row in active_rows.values()), "Every active call should report its start time.")
             release_latest.write_text("Finish the newest call first.\n", encoding="utf-8")
             latest_deadline = time.monotonic() + 20
-            while "item_fixture_dynamic_legacy" not in completed_rows and time.monotonic() < latest_deadline:
+            while "item_fixture_active_long_command" not in completed_rows and time.monotonic() < latest_deadline:
                 if process.stdout is not None:
                     readable, _, _ = select.select([process.stdout], [], [], 0.02)
                     if readable:
@@ -4230,8 +4232,8 @@ class StationAIBridgeTests(unittest.TestCase):
                             activity = event.get("payload", {}).get("activity", {})
                             if event.get("type") == "activity" and activity.get("status") in {"completed", "failed"}:
                                 completed_rows[activity.get("id")] = activity
-            self.assertIn("item_fixture_dynamic_legacy", completed_rows, "The newest call should finish before older active calls.")
-            self.assertGreater(completed_rows["item_fixture_dynamic_legacy"].get("durationMs", 0), 0)
+            self.assertIn("item_fixture_active_long_command", completed_rows, "The newest command should finish before older active calls.")
+            self.assertGreater(completed_rows["item_fixture_active_long_command"].get("durationMs", 0), 0)
             self.assertNotIn("item_fixture_dynamic_call", completed_rows, "Finishing the newest call must leave older calls active.")
             release.write_text("Release tool completions.\n", encoding="utf-8")
             remaining_stdout, remaining_stderr = process.communicate(timeout=60)
