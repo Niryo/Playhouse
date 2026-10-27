@@ -128,9 +128,10 @@ struct ConversationUserInputRequest: Identifiable, Codable, Equatable {
     let threadID: String
     let questions: [ConversationUserQuestion]
     let isBlocking: Bool
+    let mode: ConversationMode
 }
 
-enum ConversationMode: String, CaseIterable, Hashable {
+enum ConversationMode: String, CaseIterable, Hashable, Codable {
     case code = "default"
     case plan
 

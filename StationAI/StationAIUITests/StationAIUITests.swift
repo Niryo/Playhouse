@@ -7278,6 +7278,110 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
     }
 
+    // case-contract: test_claude_pending_plan_mode_question_recovers_in_plan_mode | A Claude AskUserQuestion asked during a Plan mode turn persists its mode; after its provider process ends, answering resumes the saved Claude session in Plan mode rather than silently downgrading to Code mode, relaunching the recovery turn with --permission-mode plan.
+    func test_claude_pending_plan_mode_question_recovers_in_plan_mode() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-restart-plan-question")
+        try FileManager.default.copyItem(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try "StationAI test owns this Claude Code protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".stationai-claude-fixture-owner"),
+            atomically: true,
+            encoding: .utf8
+        )
+        claudeFixtureExecutable = executable.path
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Restart-safe Claude plan question", "--root", fixture.primary.path, "--provider", "claude"
+        ]) ["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Restart-safe Claude plan question")
+        let modeMenu = element("conversation-mode-menu")
+        XCTAssertTrue(modeMenu.waitForExistence(timeout: 10))
+        modeMenu.click()
+        let planMode = app.menuItems["Plan mode"]
+        XCTAssertTrue(planMode.waitForExistence(timeout: 5))
+        planMode.click()
+        XCTAssertTrue(modeMenu.label.contains("Plan mode"))
+        element("message-composer").click()
+        element("message-composer").typeText("Ask a structured question.")
+        element("send-message-button").click()
+        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10))
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+
+        app.terminate()
+        XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12), "StationAI should finish its bounded shutdown before relaunch.")
+        relaunchApp()
+        openTask(named: "Restart-safe Claude plan question")
+        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10), "The saved question should return after the app and provider process restart.")
+        XCTAssertTrue(app.staticTexts["Which color should I use?"].exists)
+        element("ai-question-option-question-1-Green").click()
+        element("submit-ai-answers-button").click()
+        XCTAssertTrue(app.staticTexts["Recovered answer: Green."].waitForExistence(timeout: 15))
+        XCTAssertFalse(element("conversation-user-input-request").exists)
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+
+        let recoveryHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any])
+        let recoveryArguments = try XCTUnwrap((recoveryHistory["turns"] as? [[String: Any]])?.last?["arguments"] as? [String])
+        let permissionModeIndex = try XCTUnwrap(
+            recoveryArguments.firstIndex(of: "--permission-mode"),
+            "The recovered turn must relaunch Claude with an explicit permission mode."
+        )
+        XCTAssertEqual(
+            recoveryArguments[permissionModeIndex + 1],
+            "plan",
+            "The recovered turn must continue in Plan mode, not silently downgrade to Code mode."
+        )
+    }
+
+    // case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early.
+    func test_claude_background_agent_keeps_turn_open_until_resolved() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-background-agent")
+        try FileManager.default.copyItem(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try "StationAI test owns this Claude Code protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".stationai-claude-fixture-owner"),
+            atomically: true,
+            encoding: .utf8
+        )
+        claudeFixtureExecutable = executable.path
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude background agent", "--root", fixture.primary.path, "--provider", "claude"
+        ]) ["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Claude background agent")
+        element("message-composer").click()
+        element("message-composer").typeText("Launch a background agent for this turn.")
+        element("send-message-button").click()
+
+        let subagentRow = element("codex-subagent-row-toolu_background_agent")
+        XCTAssertTrue(subagentRow.waitForExistence(timeout: 10), "A background Agent/Task call should render a live subagent row.")
+        XCTAssertTrue(subagentRow.label.contains("started working"), subagentRow.label)
+        XCTAssertTrue(
+            app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "STARTED")).firstMatch.waitForExistence(timeout: 15),
+            "The visible answer should still render while the background agent keeps the turn open."
+        )
+        XCTAssertTrue(
+            waitUntil({ subagentRow.label.contains("finished working") }, timeout: 15),
+            "The row must resolve to completed only once the real notification arrives, not the launch confirmation."
+        )
+
+        let history = try XCTUnwrap(try runCLI(
+            ["conversation", "history", taskID],
+            extraEnvironment: ["STATIONAI_E2E_CLAUDE_EXECUTABLE": executable.path]
+        )["result"] as? [String: Any])
+        let activities = try XCTUnwrap(history["activities"] as? [[String: Any]])
+        let activity = try XCTUnwrap(activities.first { $0["childThreadID"] as? String == "toolu_background_agent" })
+        XCTAssertEqual(activity["status"] as? String, "completed")
+        XCTAssertEqual(activity["backgroundTaskID"] as? String, "bgtask-fixture-1")
+    }
+
     // case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, StationAI returns a generic error, preserves the pending question for retry while the task stays In Progress, and keeps the prompt out of history, saved task state, and diagnostics.
     func test_claude_private_recovery_failure_fails_closed() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-recovery-failure")

@@ -1714,8 +1714,8 @@ struct TaskConversationView: View {
             .joined(separator: "\n")
         if compact {
             HStack(spacing: 7) {
-                Image(systemName: activity.status == "completed" ? "checkmark.circle.fill" : activity.status == "interrupted" ? "pause.circle.fill" : "gearshape.2.fill")
-                    .foregroundStyle(activity.status == "completed" ? .green : activity.status == "interrupted" ? .orange : .accentColor)
+                Image(systemName: activity.status == "completed" ? "checkmark.circle.fill" : ["interrupted", "stopped"].contains(activity.status) ? "pause.circle.fill" : "gearshape.2.fill")
+                    .foregroundStyle(activity.status == "completed" ? .green : ["interrupted", "stopped"].contains(activity.status) ? .orange : .accentColor)
                 Text(activity.title)
                     .font(.system(size: 11, weight: .medium))
                     .lineLimit(1)
@@ -1757,8 +1757,8 @@ struct TaskConversationView: View {
         } else {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 7) {
-                Image(systemName: activity.status == "completed" ? "checkmark.circle.fill" : activity.status == "interrupted" ? "pause.circle.fill" : "gearshape.2.fill")
-                    .foregroundStyle(activity.status == "completed" ? .green : activity.status == "interrupted" ? .orange : .accentColor)
+                Image(systemName: activity.status == "completed" ? "checkmark.circle.fill" : ["interrupted", "stopped"].contains(activity.status) ? "pause.circle.fill" : "gearshape.2.fill")
+                    .foregroundStyle(activity.status == "completed" ? .green : ["interrupted", "stopped"].contains(activity.status) ? .orange : .accentColor)
                 Text(activity.title)
                     .font(.system(size: 11, weight: .medium))
                     .textSelection(.enabled)
@@ -2975,7 +2975,6 @@ struct TaskConversationView: View {
                 taskID: task.id,
                 request: request,
                 answers: answers,
-                mode: conversationMode,
                 modelID: selectedModelID.isEmpty ? nil : selectedModelID,
                 onUpdate: { update in
                     guard update.type == "user_input", let nextRequest = update.userInputRequest else { return }
