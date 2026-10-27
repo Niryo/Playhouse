@@ -1947,7 +1947,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Lifecycle rollout clears tasks and reports a retained dirty worktree")
     }
 
-    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; the Search action reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing.
+    // case-contract: test_task_status_transitions_and_rejects_unknown_status | With both pairs populated, the board keeps Blocked above Backlog and Waiting Response above In Progress, allows vertical scrolling to reach lower backlog tasks, leaves Review as its own column, hides empty status sections, removes Done from the columns, and rejects manual changes to Codex-owned task status; ⌘F reveals and focuses a prominent board search that filters task cards by title as text changes, while close restores all cards. Answering a question without an explicit completed outcome leaves the task in Waiting Response. Task card titles use slightly expanded letter spacing and line spacing.
     func test_task_status_transitions_and_rejects_unknown_status() throws {
         let waitingFixture = WorkspaceFixture.root.appendingPathComponent("codex-fixture-status-transition-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: waitingFixture.path))
@@ -1981,9 +1981,9 @@ final class StationAIUITests: XCTestCase {
             "Wrapped task titles should have visible spacing between lines."
         )
         XCTAssertFalse(element("board-search-field").exists, "Board search should stay hidden until requested.")
-        element("board-search-button").click()
+        app.typeKey("f", modifierFlags: .command)
         let boardSearch = element("board-search-field")
-        XCTAssertTrue(boardSearch.waitForExistence(timeout: 5), "The Search action should reveal the prominent board search.")
+        XCTAssertTrue(boardSearch.waitForExistence(timeout: 5), "Command+F should reveal the prominent board search.")
         XCTAssertLessThan(element("board-search-bar").frame.maxY, element("board-columns-scroll-view").frame.minY, "Board search should sit above the task columns.")
         boardSearch.typeText("Searchable")
         XCTAssertTrue(app.buttons["Searchable board card"].waitForExistence(timeout: 5))
@@ -2046,16 +2046,19 @@ final class StationAIUITests: XCTestCase {
 
         try createTaskFixture(title: "Waiting layout", roots: [fixture.secondary.path])
         let waitingTaskID = try taskID(named: "Waiting layout")
-        _ = try runCLI([
-            "conversation", "send", waitingTaskID,
-            "--message", "Please share your plan.",
-            "--mode", "plan",
-            "--answer", "color=Blue",
-            "--answer", "token=fixture-secret"
-        ])
+        openTask(named: "Waiting layout")
+        let modeMenu = element("conversation-mode-menu")
+        XCTAssertTrue(modeMenu.waitForExistence(timeout: 5))
+        modeMenu.click()
+        app.menuItems["Plan mode"].click()
+        XCTAssertTrue(modeMenu.label.contains("Plan mode"))
+        element("message-composer").click()
+        element("message-composer").typeText("Please share your plan.")
+        element("send-message-button").click()
+        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
         XCTAssertEqual(try taskRecord(id: waitingTaskID)?["status"] as? String, "Waiting Response")
-        relaunchApp()
-        XCTAssertTrue(waitUntil({ self.app.buttons["Waiting layout"].exists }, timeout: 10))
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
 
         assertTaskVisible("Blocked layout", inColumn: "Blocked")
         assertTaskVisible("Status transitions", inColumn: "Backlog")
@@ -2073,13 +2076,29 @@ final class StationAIUITests: XCTestCase {
             XCTAssertGreaterThanOrEqual(topColumn.frame.minY, boardViewport.frame.minY)
         }
         for bottomColumn in [backlogColumn, inProgressColumn, reviewColumn] {
-            XCTAssertLessThanOrEqual(bottomColumn.frame.maxY, boardViewport.frame.maxY + 12)
+            XCTAssertLessThanOrEqual(bottomColumn.frame.maxY, boardViewport.frame.maxY)
         }
         XCTAssertLessThan(inProgressColumn.frame.maxX, reviewColumn.frame.minX, "Review should remain a separate column after the stacked pair.")
         XCTAssertFalse(element("column-heading-done").exists, "Done tasks should remain outside the board columns.")
         XCTAssertEqual(try taskRecord(id: activeTaskID)?["status"] as? String, "In Progress")
         attachScreenshot(named: "Blocked and Waiting Response stacks fit with their active columns and Review")
 
+        let blockedCard = element("task-card-\(blockedTaskID)")
+        blockedCard.rightClick()
+        XCTAssertTrue(element("rename-task-menu-item").waitForExistence(timeout: 5), "Stacked columns should retain full task-card actions.")
+        XCTAssertTrue(element("delete-task-menu-item").exists)
+        app.typeKey(.escape, modifierFlags: [])
+
+        openTask(named: "Waiting layout")
+        XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 5))
+        app.buttons["Blue"].click()
+        element("ai-question-answer-token").click()
+        element("ai-question-answer-token").typeText("fixture-secret")
+        element("submit-ai-answers-button").click()
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        XCTAssertEqual(try taskRecord(id: waitingTaskID)?["status"] as? String, "Waiting Response")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
         assertTaskVisible("Waiting layout", inColumn: "Waiting Response")
 
         try "Release the active turn.\n".write(to: activeTurn.releaseMarker, atomically: true, encoding: .utf8)
@@ -2104,7 +2123,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ lowestTask.exists && lowestTask.isHittable }, timeout: 10), "Vertical board scrolling should make lower backlog tasks reachable.")
     }
 
-    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review.
+    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task; without an outcome call, a successful turn ends in Waiting Response. The board shows progress details and places completed tasks in Review and waiting or omitted outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task.
     func test_task_progress_reports_publish_persist_and_clear() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Progress reports", roots: [fixture.primary.path])
@@ -2260,8 +2279,48 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(resumeInstructions.isEmpty, "Resumed task threads should receive updated task instructions.")
         XCTAssertTrue(resumeInstructions.allSatisfy { ($0 as? String)?.contains("task outcome") == true })
 
+        // A composer turn runs its provider from the app process, which must hand
+        // the provider this app's bridge service and store for in-turn outcomes.
+        let bridgeEnvironmentURL = URL(fileURLWithPath: executable.path + ".bridge-environment")
+        try? FileManager.default.removeItem(at: bridgeEnvironmentURL)
         relaunchApp()
-        assertTaskVisible("Progress reports", inColumn: "Waiting Response")
+        openTask(named: "Progress reports")
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.isEnabled && composer.isHittable }, timeout: 15), "The composer should be available for a follow-up.")
+        composer.click()
+        composer.typeText("Finish this task from the app.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 15), "The composer turn should hold the fixture turn open.")
+        let bridgeEnvironment = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: bridgeEnvironmentURL)) as? [String: String],
+            "The provider process should receive the bridge service name and store directory."
+        )
+        XCTAssertEqual(bridgeEnvironment["STATIONAI_BRIDGE_SERVICE_NAME"], serviceName)
+        XCTAssertEqual(
+            URL(fileURLWithPath: try XCTUnwrap(bridgeEnvironment["STATIONAI_DATA_DIRECTORY"])).resolvingSymlinksInPath().path,
+            dataDirectory.resolvingSymlinksInPath().path
+        )
+        let appOutcome = try runCLI(["task", "outcome", taskID, "completed"], extraEnvironment: bridgeEnvironment)
+        XCTAssertEqual((appOutcome["result"] as? [String: Any])?["outcome"] as? String, "completed")
+        try "Release the composer turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 15), "An outcome reported with the provider's inherited environment should move the app-started turn to Review.")
+
+        // A model can write its outcome command as answer text instead of running
+        // it. The echo is hidden, and it counts only when it names this task.
+        let echoedAnswers = app.staticTexts.matching(NSPredicate(format: "label == %@", "Fixture answer with an echoed outcome."))
+        for (turnIndex, (echoedTaskID, expectedColumn)) in [(UUID().uuidString, "Waiting Response"), (taskID, "Review")].enumerated() {
+            XCTAssertTrue(waitUntil({ composer.isEnabled && composer.isHittable }, timeout: 15), "The composer should accept the echoed-outcome turn.")
+            composer.click()
+            composer.typeText("Echo the outcome command for \(echoedTaskID).")
+            element("send-message-button").click()
+            XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 15), "The echoed-outcome turn should hold the fixture turn open.")
+            try "Release the echoed-outcome turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+            XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == expectedColumn }, timeout: 15), "An echoed outcome for \(echoedTaskID) should leave the task in \(expectedColumn).")
+            XCTAssertTrue(waitUntil({ echoedAnswers.count == turnIndex + 1 }, timeout: 10), "The transcript should show this turn's answer without the echoed command.")
+            XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "task outcome")).count, 0, "The transcript must not show the echoed outcome command.")
+        }
+        relaunchApp()
+        assertTaskVisible("Progress reports", inColumn: "Review")
     }
 
     // case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; a staged completed outcome is discarded if its turn fails, leaving the task Blocked. The task card removes the report while lifecycle states remain Blocked or In Progress. A blocking structured question appears inline and moves the task to Waiting Response; its answer resumes the active turn in In Progress, and the answered turn finishes in Waiting Response. First-thread instructions distinguish source repository paths from active task worktree paths, allow read-only inspection without attaching a repo, and reserve repository add APIs for changes that need a worktree.
@@ -3553,7 +3612,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Unsent task prompt is saved after returning to backlog")
     }
 
-    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
+    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation; if it is concurrently renamed while title generation is pending, the custom title determines the auto branch. A standalone Untitled task starts and persists its provider thread while background title generation is still pending. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
     func test_conversation_composer_rejects_blank_and_supports_live_turn_controls() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -3764,6 +3823,77 @@ final class StationAIUITests: XCTestCase {
             transcriptScrollView.swipeUp()
             XCTAssertTrue(waitUntil({ longPromptMessage.frame.minY < earlierPosition - 20 }, timeout: 5), "Scrolling down should return to later content in the long message.")
             _ = try runCLI(["task", "rename", titleTaskID, "--title", "Generated title success"])
+            element("back-to-board-button").click()
+
+            app.terminate()
+            let activeTitleFixtureExecutable = WorkspaceFixture.root
+                .appendingPathComponent("codex-fixture-root-title-success-wait").path
+            try? FileManager.default.removeItem(atPath: activeTitleFixtureExecutable)
+            try FileManager.default.copyItem(
+                atPath: titleFixtureExecutable,
+                toPath: activeTitleFixtureExecutable
+            )
+            codexFixtureExecutable = activeTitleFixtureExecutable
+            launchApp(defaultParent: fixture.parent.path)
+            let standaloneTitleTask = try XCTUnwrap(
+                (try runCLI([
+                    "task", "create", "--title", "Untitled task", "--root", fixture.primary.path
+                ])["result"] as? [String: Any])
+            )
+            let standaloneTitleTaskID = try XCTUnwrap(standaloneTitleTask["id"] as? String)
+            openTask(named: "Untitled task")
+            let standaloneComposer = element("message-composer")
+            XCTAssertTrue(standaloneComposer.waitForExistence(timeout: 10))
+            standaloneComposer.click()
+            standaloneComposer.typeText("Persist the provider thread before this background title finishes.")
+            standaloneComposer.typeKey(.return, modifierFlags: [])
+            let standaloneTitleReady = URL(fileURLWithPath: activeTitleFixtureExecutable + ".resolve-ready")
+            XCTAssertTrue(waitUntil({
+                FileManager.default.fileExists(atPath: standaloneTitleReady.path)
+            }, timeout: 15), "The standalone title fixture should hold background title generation.")
+            XCTAssertEqual(try taskRecord(id: standaloneTitleTaskID)?["title"] as? String, "Generating title…")
+            XCTAssertNotNil(
+                try taskRecord(id: standaloneTitleTaskID)?["codexThreadID"] as? String,
+                "A standalone task should persist its provider thread before background title generation finishes."
+            )
+            try Data("continue standalone title\n".utf8).write(
+                to: URL(fileURLWithPath: activeTitleFixtureExecutable + ".resolve-continue")
+            )
+            XCTAssertTrue(waitUntil({
+                ((try? self.taskRecord(id: standaloneTitleTaskID)?["title"] as? String) ?? nil) == "Generated fixture title"
+            }, timeout: 20))
+            element("back-to-board-button").click()
+
+            let concurrentTitleTask = try XCTUnwrap(
+                (try runCLI(["task", "create", "--title", "Untitled task", "--repo", fixture.secondary.path])["result"] as? [String: Any])
+            )
+            let concurrentTitleTaskID = try XCTUnwrap(concurrentTitleTask["id"] as? String)
+            let concurrentTitle = "Concurrent custom branch title"
+            let concurrentPrompt = "Use the concurrently selected task title for this worktree."
+            let concurrentTitleReady = URL(fileURLWithPath: activeTitleFixtureExecutable + ".resolve-ready")
+            let concurrentTitleRelease = URL(fileURLWithPath: activeTitleFixtureExecutable + ".resolve-continue")
+            try? FileManager.default.removeItem(at: concurrentTitleReady)
+            try? FileManager.default.removeItem(at: concurrentTitleRelease)
+            openTask(named: "Untitled task")
+            let concurrentComposer = element("message-composer")
+            XCTAssertTrue(concurrentComposer.waitForExistence(timeout: 10))
+            concurrentComposer.click()
+            concurrentComposer.typeText(concurrentPrompt)
+            concurrentComposer.typeKey(.return, modifierFlags: [])
+            XCTAssertTrue(waitUntil({
+                FileManager.default.fileExists(atPath: concurrentTitleReady.path)
+            }, timeout: 15), "Title generation should remain pending during the concurrent rename.")
+            let renameResult = try runCLI([
+                "task", "rename", concurrentTitleTaskID, "--title", concurrentTitle
+            ])
+            XCTAssertEqual((renameResult["result"] as? [String: Any])?["title"] as? String, concurrentTitle)
+            try Data("continue concurrent rename\n".utf8).write(to: concurrentTitleRelease)
+            XCTAssertTrue(waitUntil({
+                guard let repository = try? self.repositoryRecord(taskID: concurrentTitleTaskID, repositoryPath: self.fixture.secondary.path) else { return false }
+                return repository["branch"] as? String == "concurrent-custom-branch-title"
+                    && repository["isPending"] as? Bool == false
+            }, timeout: 20), "A concurrent custom title should determine the prepared auto-worktree branch.")
+            XCTAssertEqual(try taskRecord(id: concurrentTitleTaskID)?["title"] as? String, concurrentTitle)
             element("back-to-board-button").click()
 
             let recoveryTask = try XCTUnwrap(
@@ -8571,7 +8701,7 @@ final class StationAIUITests: XCTestCase {
         let startedDirectory = directory.appendingPathComponent("started", isDirectory: true)
         try FileManager.default.createDirectory(at: startedDirectory, withIntermediateDirectories: true)
         let expectedIDs = expectedNumbers.map(String.init).joined(separator: " ")
-        let executable = WorkspaceFixture.root.appendingPathComponent("gh-fixture-\(UUID().uuidString)")
+        let executable = directory.appendingPathComponent("gh")
         let script = """
         #!/bin/sh
         call_log="\(callLogURL.path)"
@@ -8633,7 +8763,6 @@ final class StationAIUITests: XCTestCase {
         let inheritedPath = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
         return [
             "PATH": "\(directory.path):\(inheritedPath)",
-            "STATIONAI_E2E_GH_EXECUTABLE": executable.path,
             "STATIONAI_E2E_GH_STATE_PATH": stateURL.path,
             "STATIONAI_E2E_GH_CALL_LOG": callLogURL.path,
             "STATIONAI_E2E_GH_STARTED_DIRECTORY": startedDirectory.path,

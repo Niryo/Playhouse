@@ -537,16 +537,20 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             throw ClientError.protocolFailure("Codex did not return a turn ID.")
         }
         let turnKey = Self.turnKey(threadID: threadID, turnID: turnID)
-        let turnAlreadyCompleted = completedTurns[turnKey] != nil
-        activeTurnID = turnAlreadyCompleted ? nil : turnID
+        let returnedStatus = turn["status"] as? String
+        let turnAlreadyTerminal = completedTurns[turnKey] != nil
+            || returnedStatus.map { ["completed", "failed", "interrupted"].contains($0) } == true
+        activeTurnID = turnAlreadyTerminal ? nil : turnID
         onTurnStarted(turnID)
-        isTurnActive = !turnAlreadyCompleted
-        ConversationSteerMailbox.publishActiveTurn(threadID: threadID, turnID: turnID)
-        Self.processActiveThreadIDs.insert(threadID)
+        isTurnActive = !turnAlreadyTerminal
+        if !turnAlreadyTerminal {
+            ConversationSteerMailbox.publishActiveTurn(threadID: threadID, turnID: turnID)
+            Self.processActiveThreadIDs.insert(threadID)
+        }
         StationAIDiagnostics.record("codex.turn.started", fields: diagnosticFields([
             "threadID": threadID,
             "turnID": turnID,
-            "turnStatus": turn["status"] as? String ?? "unknown",
+            "turnStatus": returnedStatus ?? "unknown",
             "workspaceRootCount": String(workspace.roots.count),
         ]))
 

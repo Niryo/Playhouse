@@ -22,6 +22,7 @@ if [[ "${STATIONAI_UI_TART_IMMUTABLE:-0}" != "1" ]]; then
 		STATIONAI_UI_TART_REPOSITORY_ROOT="${repository_root}" \
 		bash "${immutable_runner}" "$@"
 fi
+original_args=("$@")
 
 usage() {
 	cat <<'USAGE'
@@ -114,6 +115,16 @@ done
 # variable. Pass an explicit sentinel so full-suite runs remain portable.
 if ((${#ui_cases[@]} == 0)); then
 	ui_cases=(--all-cases)
+fi
+
+# Repository locks are worktree-local, while a Tart VM is shared host-wide.
+# Serialize ownership checks, startup, execution, and cleanup for each VM.
+if [[ "${STATIONAI_UI_TART_VM_LOCKED:-0}" != "1" ]]; then
+	vm_lock_name="${vm_name//\//_}"
+	runner="${STATIONAI_UI_TART_IMMUTABLE_PATH:-${script_path}}"
+	exec python3 "${repository_root}/scripts/with-file-lock.py" \
+		"/tmp/stationai-ui-tart-${vm_lock_name}.lock" \
+		env STATIONAI_UI_TART_VM_LOCKED=1 bash "${runner}" "${original_args[@]}"
 fi
 
 if ! command -v tart >/dev/null 2>&1; then

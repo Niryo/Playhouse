@@ -450,4 +450,29 @@ Additional history for `test_done_archive_displays_existing_pull_request_link`:
 
 ## Not yet verified
 
-No contract cases remain unverified. The ledger contains all 67 cases.
+These 23 cases arrived when the branch merged the current 90-case contract and
+do not yet have focused Tart evidence recorded in this ledger:
+
+- `test_codex_stop_interrupts_thinking_turn_and_waits_for_response`
+- `test_claude_stop_interrupts_thinking_turn_and_waits_for_response`
+- `test_codex_stop_rejection_restores_active_task`
+- `test_claude_stop_rejection_restores_active_task`
+- `test_claude_resume_recovers_visible_history`
+- `test_conversation_runs_concurrent_claude_sends_in_parallel`
+- `test_conversation_isolates_failing_claude_turn_from_parallel_send`
+- `test_claude_stop_leaves_parallel_conversation_running`
+- `test_claude_agent_image_published_during_active_turn`
+- `test_codex_agent_image_published_during_active_turn`
+- `test_conversation_loads_newest_messages_before_older_history`
+- `test_claude_empty_question_request_is_rejected`
+- `test_claude_pending_question_recovers_after_provider_process_restarts`
+- `test_claude_pending_plan_mode_question_recovers_in_plan_mode`
+- `test_claude_background_agent_keeps_turn_open_until_resolved`
+- `test_claude_private_recovery_failure_fails_closed`
+- `test_codex_pending_question_recovers_after_provider_process_restarts`
+- `test_codex_secret_recovery_redaction_fails_closed`
+- `test_claude_questions_can_be_answered_after_switching_conversations`
+- `test_conversation_models_keep_newest_version_per_family`
+- `test_conversation_effort_dispatches_to_codex`
+- `test_conversation_effort_dispatches_to_claude`
+- `test_conversation_models_cache_and_refresh`

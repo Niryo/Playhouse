@@ -751,11 +751,7 @@ enum GitHubPullRequestManager {
     }
 
     static func resolveExecutable() throws -> String {
-        let explicit = ProcessInfo.processInfo.environment["STATIONAI_E2E_GH_EXECUTABLE"]
-        let localFixture = ProcessInfo.processInfo.environment["STATIONAI_DATA_DIRECTORY"].map {
-            URL(fileURLWithPath: $0, isDirectory: true).appendingPathComponent("gh-fixture/gh").path
-        }
-        let paths = (explicit.map { [$0] } ?? []) + (localFixture.map { [$0] } ?? []) + (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map {
+        let paths = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map {
             URL(fileURLWithPath: String($0)).appendingPathComponent("gh").path
         } + ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
         guard let path = paths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
@@ -817,12 +813,9 @@ enum GitHubPullRequestManager {
     private static func run(_ executable: String, _ arguments: [String], directory: String) throws -> String {
         let result: StationAIProcessResult
         do {
-            let fixture = ProcessInfo.processInfo.environment["STATIONAI_E2E_GH_EXECUTABLE"]
-            let processExecutable = fixture == executable ? "/bin/sh" : executable
-            let processArguments = fixture == executable ? [executable] + arguments : arguments
             result = try StationAIProcessRunner.run(
-                executable: processExecutable,
-                arguments: processArguments,
+                executable: executable,
+                arguments: arguments,
                 directory: directory
             )
         } catch {
@@ -4728,21 +4721,26 @@ final class ConversationManager {
             // made through the bridge, so using this snapshot to detect an auto
             // branch can otherwise allocate "untitled-task" before the generated
             // title arrives.
-            resolveTitleBeforeWorktree = shouldGenerateTitle
+            let titleMustPrecedeAutoWorktree = task.repositoryWorktrees.contains {
+                $0.isPending && $0.branch == "auto"
+            }
+            resolveTitleBeforeWorktree = shouldGenerateTitle && titleMustPrecedeAutoWorktree
             if resolveTitleBeforeWorktree {
-                _ = try await tasks.renameIfTitleMatches(
+                let reserved = try await tasks.renameIfTitleMatches(
                     taskID,
                     expectedTitle: task.title,
                     title: "Generating title…"
                 )
-                let titleRoots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
-                let titleWorkspace = try ConversationWorkspaceContext(roots: titleRoots)
-                resolvedWorktreeTitle = try await generateAndApplyTitle(
-                    taskID: taskID,
-                    prompt: persistedText,
-                    workspace: titleWorkspace,
-                    clients: clients.helperClients(preferring: provider)
-                )
+                if reserved != nil {
+                    let titleRoots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
+                    let titleWorkspace = try ConversationWorkspaceContext(roots: titleRoots)
+                    resolvedWorktreeTitle = try await generateAndApplyTitle(
+                        taskID: taskID,
+                        prompt: persistedText,
+                        workspace: titleWorkspace,
+                        clients: clients.helperClients(preferring: provider)
+                    )
+                }
                 task = try tasks.taskModel(taskID)
                 if ["Untitled task", "Generating title…"].contains(task.title) {
                     throw BridgeCommandError(
@@ -4750,6 +4748,7 @@ final class ConversationManager {
                         message: "The task title changed while it was being prepared. Try sending again."
                     )
                 }
+                resolvedWorktreeTitle = task.title
             }
             task = try await tasks.prepareRepositoryWorktrees(
                 taskID,
@@ -5083,19 +5082,7 @@ final class ConversationManager {
             phase = "review-status-persistence"
             let reportedOutcome = try await tasks.finishConversationTurnOutcome(taskID) ?? leakedOutcome
             let finalStatus: TaskStatus = reportedOutcome == "completed" ? .review : .waitingResponse
-            var persistedFinalStatus = false
-            for _ in 0..<100 {
-                do {
-                    _ = try await tasks.setLifecycleStatus(taskID, to: finalStatus)
-                    persistedFinalStatus = true
-                    break
-                } catch {
-                    try? await Task.sleep(nanoseconds: 100_000_000)
-                }
-            }
-            if !persistedFinalStatus {
-                throw BridgeFileLockError(message: "Couldn't persist the completed conversation status.")
-            }
+            _ = try await tasks.setLifecycleStatus(taskID, to: finalStatus)
         } catch {
             await titleGeneration?.value
             for (activityID, durationMs) in persistedThreadID.map({ client.lastTurnActivityDurations(threadID: $0) }) ?? [:] {
@@ -5134,20 +5121,13 @@ final class ConversationManager {
             } else {
                 failureStatus = .blocked
             }
-            for _ in 0..<100 {
-                do {
-                    _ = try await tasks.setLifecycleStatus(
-                        taskID,
-                        to: failureStatus,
-                        message: shouldKeepResumable
-                            ? shutdownMessage
-                            : (wasUserInterrupted ? nil : (hasPendingBlockingQuestion ? "Waiting for your saved question to be answered." : safeFailureMessage))
-                    )
-                    break
-                } catch {
-                    try? await Task.sleep(nanoseconds: 100_000_000)
-                }
-            }
+            _ = try? await tasks.setLifecycleStatus(
+                taskID,
+                to: failureStatus,
+                message: shouldKeepResumable
+                    ? shutdownMessage
+                    : (wasUserInterrupted ? nil : (hasPendingBlockingQuestion ? "Waiting for your saved question to be answered." : safeFailureMessage))
+            )
             StationAIDiagnostics.record("conversation.send.failed", fields: fields)
             if hideSensitiveRecoveryPrompt || !sensitiveUserInputAnswerValues.isEmpty {
                 throw BridgeCommandError(code: "operation_failed", message: safeFailureMessage)
