@@ -665,6 +665,11 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             || pendingUserInputThreadID == threadID
     }
 
+    func activeTurnID(for threadID: String) -> String? {
+        guard activeThreadID == threadID else { return nil }
+        return activeTurnID
+    }
+
     func isObservingGoal(threadID: String) -> Bool {
         goalObservationThreadID == threadID
     }

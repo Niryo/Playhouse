@@ -3533,6 +3533,8 @@ final class ConversationManager {
     /// the same transcript path.
     func publishImage(taskID: UUID, path: String, caption: String = "") async throws -> ConversationMessage {
         let task = try tasks.taskModel(taskID)
+        let provider = task.conversationProvider
+        let codexClient = clients.codex
         let url = URL(fileURLWithPath: path)
         let data = try Data(contentsOf: url)
         guard data.count <= 10_000_000 else {
@@ -3548,15 +3550,26 @@ final class ConversationManager {
         guard Self.isValidImageDataURL(image) else {
             throw BridgeCommandError(code: "invalid_argument", message: "The file is not a valid PNG or JPEG image.")
         }
-        let existingHistory = try await history(taskID: taskID)
-        let provider = task.conversationProvider
+        let activeCodexThreadID = provider == .codex ? task.activeConversationID : nil
+        let activeCodexTurnID = activeCodexThreadID.flatMap { threadID in
+            codexClient.activeTurnID(for: threadID)
+                ?? ConversationSteerMailbox.activeTurnID(threadID: threadID)
+        }
+        let isActiveCodexPublication = activeCodexThreadID != nil && activeCodexTurnID != nil
+        // A Codex thread can reject a history read while its turn is writing.
+        // An agent publishes its generated image from inside that turn, so use
+        // the active turn identity and attach the image to StationAI's transcript.
+        // History composition positions it after that turn's native messages.
+        let existingHistory = isActiveCodexPublication ? nil : try await history(taskID: taskID)
         let message = ConversationMessage(
             id: UUID().uuidString.lowercased(), role: .assistant,
             text: caption.trimmingCharacters(in: .whitespacesAndNewlines),
-            imageDataURLs: [image], phase: "agent_image",
-            timelineOrder: provider == .codex
-                ? (existingHistory.messages.compactMap(\.timelineOrder).max() ?? existingHistory.messages.count - 1) + 1
-                : nil,
+            imageDataURLs: [image], phase: "agent_image", turnID: activeCodexTurnID,
+            timelineOrder: existingHistory.flatMap { history in
+                provider == .codex
+                    ? (history.messages.compactMap(\.timelineOrder).max() ?? history.messages.count - 1) + 1
+                    : nil
+            },
             provider: provider
         )
         let activeClaudeTurn = provider == .claude
@@ -3574,8 +3587,11 @@ final class ConversationManager {
             }
             guard let segment else { return }
             if provider == .codex, let index = transcript.segments.firstIndex(where: { $0.id == segment.id }) {
+                if let activeCodexTurnID, !transcript.segments[index].codexTurnIDs.contains(activeCodexTurnID) {
+                    transcript.segments[index].codexTurnIDs.append(activeCodexTurnID)
+                }
                 let claimed = Set(transcript.segments.flatMap(\.codexTurnIDs))
-                let ids = Self.orderedTurnIDs(existingHistory.messages)
+                let ids = Self.orderedTurnIDs(existingHistory?.messages ?? [])
                 transcript.segments[index].codexTurnIDs += ids.filter { !claimed.contains($0) }
             }
             if activeClaudeTurn,
@@ -3676,7 +3692,7 @@ final class ConversationManager {
             case message(ConversationMessage)
             case compaction(ConversationActivity)
         }
-        var elements: [(segment: Int, order: Int, element: Element)] = []
+        var elements: [(segment: Int, order: Int, tieBreak: Int, element: Element)] = []
         let segments = transcript.segments
         let lastCodexSegment = segments.lastIndex { $0.provider == .codex } ?? -1
         var codexSegmentByTurn: [String: Int] = [:]
@@ -3691,6 +3707,21 @@ final class ConversationManager {
         var codexTurnSegment: Int?
         let sensitiveTurnIDs = Self.sensitiveCodexTurnIDs(transcript)
         let safeCodexMessages = Self.codexMessagesForDisplay(codex?.messages ?? [], transcript: transcript)
+        func transcriptOrder(for message: ConversationMessage, fallback: Int) -> (order: Int, tieBreak: Int) {
+            guard message.provider == .codex, message.phase == "agent_image" else {
+                return (message.timelineOrder ?? fallback, 0)
+            }
+            if let order = message.timelineOrder { return (order, 0) }
+            let relevantMessages = message.turnID.map { turnID in
+                safeCodexMessages.filter { $0.turnID == turnID }
+            } ?? safeCodexMessages
+            guard let lastTurnOrder = relevantMessages.compactMap(\.timelineOrder).max() else {
+                return (fallback, 0)
+            }
+            // Keep the image just after the final native item of its turn and
+            // ahead of the next turn's first item, even when their orders touch.
+            return (lastTurnOrder, fallback + 1)
+        }
         for (offset, message) in safeCodexMessages.enumerated() {
             let segment = message.turnID.map(codexSegment) ?? codexTurnSegment ?? lastCodexSegment
             codexTurnSegment = segment
@@ -3699,7 +3730,7 @@ final class ConversationManager {
             if attributed.modelID == nil, let turnID = attributed.turnID {
                 attributed.modelID = segments.compactMap { $0.codexTurnModelIDs[turnID] }.first
             }
-            elements.append((segment, message.timelineOrder ?? offset, .message(attributed)))
+            elements.append((segment, message.timelineOrder ?? offset, 0, .message(attributed)))
         }
         let allSensitiveTurnIDs = Set(transcript.sensitiveTurnIDs ?? [])
         let codexActivities = transcript.pendingSensitiveUserInputRedaction == true
@@ -3708,23 +3739,24 @@ final class ConversationManager {
         for activity in codexActivities where activity.isContextCompaction {
             let order = activity.timelineOrder ?? Int.max
             let precedingTurn = codex?.messages.last { ($0.timelineOrder ?? 0) < order }?.turnID
-            elements.append((codexSegment(activity.turnID ?? precedingTurn), order, .compaction(activity)))
+            elements.append((codexSegment(activity.turnID ?? precedingTurn), order, 0, .compaction(activity)))
         }
         var localOrder = 0
         for turn in transcript.turns {
             let segment = transcript.segmentIndex(of: turn.segmentID) ?? segments.count
             for message in turn.messages {
-                elements.append((segment, message.timelineOrder ?? localOrder, .message(message)))
+                let position = transcriptOrder(for: message, fallback: localOrder)
+                elements.append((segment, position.order, position.tieBreak, .message(message)))
                 localOrder += 1
             }
             for activity in turn.activities where activity.turnID.map(allSensitiveTurnIDs.contains) != true {
                 if activity.isContextCompaction {
-                    elements.append((segment, activity.timelineOrder ?? localOrder, .compaction(activity)))
+                    elements.append((segment, activity.timelineOrder ?? localOrder, 0, .compaction(activity)))
                 }
                 localOrder += 1
             }
         }
-        elements.sort { ($0.segment, $0.order) < ($1.segment, $1.order) }
+        elements.sort { ($0.segment, $0.order, $0.tieBreak) < ($1.segment, $1.order, $1.tieBreak) }
 
         var messages: [ConversationMessage] = []
         var compactions: [ConversationActivity] = []

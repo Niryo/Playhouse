@@ -4260,6 +4260,61 @@ class StationAIBridgeTests(unittest.TestCase):
         answer_index = next(index for index, message in enumerate(messages) if message["text"] == "Claude answer after the image.")
         self.assertLess(image_index, answer_index, "The image should precede Claude's later answer in transcript order.")
 
+    # case-contract: test_codex_agent_image_published_during_active_turn | While a Codex turn is active, CLI/XPC image publication avoids requesting provider history; the assistant image is tied to that turn, appears after its native response and before the next turn in ordered history, and remains visible after reopening the conversation.
+    def test_codex_agent_image_published_during_active_turn(self):
+        source = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-image-serial-success-wait"
+        shutil.copyfile(source, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        created, _ = self.call_cli("task", "create", "--title", "Codex active image", "--root", self.primary)
+        task_id = self.assert_success(created)["id"]
+        environment = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        prompt = "Please publish-image-during-active-turn."
+        send = self.start_cli("conversation", "send", task_id, "--message", prompt, extra_environment=environment)
+        ready = Path(str(executable) + ".resolve-ready")
+        resume = Path(str(executable) + ".resolve-continue")
+        observe_history = Path(str(executable) + ".observe-history-while-active")
+        history_read = Path(str(executable) + ".history-read-while-active")
+        try:
+            deadline = time.monotonic() + 20
+            while not ready.exists() and send.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "Codex should hold the active turn before its native response.")
+            image = self.data_directory / "active-codex-agent-image.png"
+            image.write_bytes(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"))
+            observe_history.touch()
+            published, _ = self.call_cli(
+                "conversation", "present-image", task_id, "--image", str(image), "--caption", "Generated while Codex was responding",
+                extra_environment=environment,
+            )
+            image_message = self.assert_success(published)
+            self.assertEqual(image_message["role"], "assistant")
+            self.assertEqual(image_message["text"], "Generated while Codex was responding")
+            self.assertTrue(image_message.get("turnID"), "The published image should carry the active Codex turn ID.")
+            self.assertFalse(history_read.exists(), "Publishing during a Codex turn must not request its busy provider history.")
+        finally:
+            observe_history.unlink(missing_ok=True)
+            resume.write_text("Release Codex's turn.\n", encoding="utf-8")
+        self.finish_cli(send, ("conversation", "send", task_id, "--message", prompt), timeout=30)
+        followup_text = "Start a later turn after the generated image."
+        followup, _ = self.call_cli(
+            "conversation", "send", task_id, "--message", followup_text,
+            extra_environment=environment,
+        )
+        self.assert_success(followup)
+        history, _ = self.call_cli("conversation", "history", task_id, extra_environment=environment)
+        messages = self.assert_success(history)["messages"]
+        image_index = next(index for index, message in enumerate(messages) if message["id"] == image_message["id"])
+        answer_index = next(index for index, message in enumerate(messages) if message["text"] == "Answers received: Blue / fixture-secret.")
+        followup_index = next(index for index, message in enumerate(messages) if message["role"] == "user" and message["text"] == followup_text)
+        self.assertEqual(messages[image_index]["turnID"], messages[answer_index]["turnID"], "The image should share the active Codex response's turn ID.")
+        self.assertGreater(image_index, answer_index, "The image should follow the native response in its Codex turn.")
+        self.assertLess(image_index, followup_index, "The image should remain before the next Codex turn.")
+        self.assertEqual(messages[image_index]["imageDataURLs"], image_message["imageDataURLs"])
+
     # case-contract: test_conversation_rejects_invalid_image_attachments | Malformed image data is rejected with a visible composer error and an invalid_argument bridge response, without creating conversation history or advancing task status.
     def test_conversation_rejects_invalid_image_attachments(self):
         task_id = self.create_task(title="Invalid image conversation")["id"]

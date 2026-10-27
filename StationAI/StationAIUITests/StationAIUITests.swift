@@ -5873,6 +5873,71 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(app.images["chat-image-\(imageID)-0"].waitForExistence(timeout: 10), "Reopening the Claude conversation should render the exact published image.")
     }
 
+    // case-contract: test_codex_agent_image_published_during_active_turn | While a Codex turn is active, CLI/XPC image publication avoids requesting provider history; the assistant image is tied to that turn, appears after its native response and before the next turn in ordered history, and remains visible after reopening the conversation.
+    func test_codex_agent_image_published_during_active_turn() throws {
+        let source = WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
+        let executable = dataDirectory.appendingPathComponent("codex-fixture-image-serial-success-wait")
+        try FileManager.default.copyItem(at: source, to: executable)
+        codexFixtureExecutable = executable.path
+        try Data("StationAI test owns this Codex protocol fixture (v1).\n".utf8)
+            .write(to: dataDirectory.appendingPathComponent(".stationai-codex-fixture-owner"))
+        let ready = URL(fileURLWithPath: executable.path + ".resolve-ready")
+        let release = URL(fileURLWithPath: executable.path + ".resolve-continue")
+        let observeHistory = URL(fileURLWithPath: executable.path + ".observe-history-while-active")
+        let historyRead = URL(fileURLWithPath: executable.path + ".history-read-while-active")
+        try? FileManager.default.removeItem(at: ready)
+        try? FileManager.default.removeItem(at: release)
+        try? FileManager.default.removeItem(at: observeHistory)
+        try? FileManager.default.removeItem(at: historyRead)
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Codex active image", roots: [fixture.primary.path])
+        openTask(named: "Codex active image")
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText("Please publish-image-during-active-turn.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15), "Codex should hold the active turn before its native response.")
+
+        let image = dataDirectory.appendingPathComponent("active-codex-agent-image.png")
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        try bitmap.representation(using: .png, properties: [:])!.write(to: image)
+        try Data().write(to: observeHistory)
+        let published = try runCLI([
+            "conversation", "present-image", try taskID(named: "Codex active image"), "--image", image.path, "--caption", "Generated while Codex was responding",
+        ])["result"] as? [String: Any]
+        let imageID = try XCTUnwrap(published?["id"] as? String)
+        let publishedTurnID = try XCTUnwrap(published?["turnID"] as? String)
+        XCTAssertFalse(publishedTurnID.isEmpty, "The published image should carry the active Codex turn ID.")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: historyRead.path), "Publishing during a Codex turn must not request its busy provider history.")
+        try FileManager.default.removeItem(at: observeHistory)
+        try Data("Release Codex's turn.\n".utf8).write(to: release)
+        XCTAssertTrue(app.images["chat-image-\(imageID)-0"].waitForExistence(timeout: 20), "The image returned during the active turn should render in the transcript.")
+
+        let followupText = "Start a later turn after the generated image."
+        composer.click()
+        composer.typeText(followupText)
+        element("send-message-button").click()
+        let visibleImage = app.images["chat-image-\(imageID)-0"]
+        let visibleFollowup = app.staticTexts[followupText]
+        XCTAssertTrue(visibleFollowup.waitForExistence(timeout: 10), "The later user turn should be visible in the transcript.")
+        XCTAssertLessThan(visibleImage.frame.minY, visibleFollowup.frame.minY, "The rendered generated image should appear before the later user turn.")
+
+        let history = try runCLI(["conversation", "history", try taskID(named: "Codex active image")])["result"] as? [String: Any]
+        let messages = try XCTUnwrap(history?["messages"] as? [[String: Any]])
+        let imageIndex = try XCTUnwrap(messages.firstIndex { $0["id"] as? String == imageID })
+        let answerIndex = try XCTUnwrap(messages.firstIndex { $0["text"] as? String == "Answers received: Blue / fixture-secret." })
+        let followupIndex = try XCTUnwrap(messages.firstIndex { $0["role"] as? String == "user" && $0["text"] as? String == followupText })
+        XCTAssertGreaterThan(imageIndex, answerIndex, "The image should follow the native response in its Codex turn.")
+        XCTAssertEqual(publishedTurnID, messages[answerIndex]["turnID"] as? String, "The published image should share the active Codex response's turn ID.")
+        XCTAssertEqual(messages[imageIndex]["turnID"] as? String, publishedTurnID, "History should preserve the published image's turn ID.")
+        XCTAssertLessThan(imageIndex, followupIndex, "The image should remain before the next Codex turn.")
+        element("back-to-board-button").click()
+        openTask(named: "Codex active image")
+        XCTAssertTrue(app.images["chat-image-\(imageID)-0"].waitForExistence(timeout: 10), "Reopening the Codex conversation should render the exact published image.")
+    }
+
     // case-contract: test_conversation_rejects_invalid_image_attachments | Malformed image data is rejected with a visible composer error and an invalid_argument bridge response, without creating conversation history or advancing task status.
     func test_conversation_rejects_invalid_image_attachments() throws {
         launchApp(defaultParent: fixture.parent.path)

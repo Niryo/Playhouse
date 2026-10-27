@@ -617,6 +617,9 @@ def main():
                         except json.JSONDecodeError:
                             continue
                         if steer_request.get("method") == "thread/items/list":
+                            observe_history = Path(str(sys.argv[0]) + ".observe-history-while-active")
+                            if observe_history.exists():
+                                Path(str(sys.argv[0]) + ".history-read-while-active").touch()
                             write({"jsonrpc": "2.0", "id": steer_request.get("id"), "result": {"data": [], "nextCursor": None}})
                         elif steer_request.get("method") == "turn/steer":
                             params = steer_request.get("params", {})
