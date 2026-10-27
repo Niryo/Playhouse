@@ -29,6 +29,7 @@ The service accepts a versioned JSON request, returns a versioned JSON response,
 | `settings set-default-provider <codex\|claude>` | Change the provider new tasks start with |
 | `conversation history <task-id>` | Load the task's transcript, including turns from every provider it has used |
 | `conversation send <task-id> --message <text>` | Send a turn to the task's current provider and stream JSON event lines |
+| `conversation answer-user-input <task-id> <request-id> --answer <question-id>=<answer> [--answer ...]` | Answer a saved structured question, resuming the task's provider session when its original process has ended |
 | `conversation stop <task-id>` | Stop the active turn, including one started by another process |
 | `conversation provider <task-id>` / `conversation provider <task-id> set <codex\|claude>` | Read or switch the task's provider; switching requires a settled conversation and records a boundary |
 | `conversation provider <task-id> capabilities` | Report the provider's availability, version, and capabilities |

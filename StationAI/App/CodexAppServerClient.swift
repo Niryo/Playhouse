@@ -140,6 +140,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         id threadID: String,
         workspace: ConversationWorkspaceContext,
         developerInstructions: String? = nil,
+        sensitiveUserInputAnswerValues: [String] = [],
+        sensitiveConversation: Bool = false,
         onActionRequest: @escaping () -> Void
     ) async throws -> ConversationHistory {
         actionRequestHandler = onActionRequest
@@ -152,7 +154,13 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             goalObservationThreadID = threadID
             Self.activeClientsByThreadID[threadID] = self
         }
-        try await resumeThreadIfNeeded(id: threadID, workspace: workspace, developerInstructions: developerInstructions)
+        try await resumeThreadIfNeeded(
+            id: threadID,
+            workspace: workspace,
+            developerInstructions: developerInstructions,
+            sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
+            sensitiveConversation: sensitiveConversation
+        )
         return try await readMessages(threadID: threadID)
     }
 
@@ -449,7 +457,9 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void,
         onSteerMessage: @escaping (String, [String]) -> Void = { _, _ in },
         onProgressMessage: @escaping (ConversationMessage) -> Void = { _ in },
-        onTurnStarted: @escaping (String) -> Void
+        onTurnStarted: @escaping (String) -> Void,
+        sensitiveUserInputAnswerValues: [String] = [],
+        hideSensitiveRecoveryPrompt: Bool = false
     ) async throws {
         actionRequestHandler = onActionRequest
         userInputHandler = onUserInput
@@ -457,7 +467,9 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             id: threadID,
             workspace: workspace,
             modelID: modelID,
-            developerInstructions: developerInstructions
+            developerInstructions: developerInstructions,
+            sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
+            sensitiveConversation: hideSensitiveRecoveryPrompt || !sensitiveUserInputAnswerValues.isEmpty
         )
         goalObservationThreadID = nil
         activeThreadID = threadID
@@ -554,7 +566,9 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             do {
                 try await waitForTurn(turnKey)
             } catch {
-                var fields = StationAIDiagnostics.errorFields(error)
+                var fields = hideSensitiveRecoveryPrompt
+                    ? ["errorDescription": "Private conversation recovery turn failed."]
+                    : StationAIDiagnostics.errorFields(error)
                 fields["threadID"] = threadID
                 fields["turnID"] = turnID
                 fields.merge(diagnosticFields()) { _, new in new }
@@ -805,7 +819,9 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         id threadID: String,
         workspace: ConversationWorkspaceContext,
         modelID: String = CodexAppServerClient.modelID,
-        developerInstructions: String? = nil
+        developerInstructions: String? = nil,
+        sensitiveUserInputAnswerValues: [String] = [],
+        sensitiveConversation: Bool = false
     ) async throws {
         if resumedThreadIDs.contains(threadID), process?.isRunning == true, initialized {
             return
@@ -831,7 +847,9 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             }
             response = try await request(method: "thread/resume", params: params)
         } catch {
-            var fields = StationAIDiagnostics.errorFields(error)
+            var fields = sensitiveConversation
+                ? ["errorDescription": "History for a private recovery conversation could not be loaded."]
+                : StationAIDiagnostics.errorFields(error, redacting: sensitiveUserInputAnswerValues)
             fields["threadID"] = threadID
             fields.merge(diagnosticFields()) { _, new in new }
             StationAIDiagnostics.record("codex.thread.resume_failed", fields: fields)
@@ -882,18 +900,22 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 }
                 if ["mcpToolCall", "dynamicToolCall"].contains(item["type"] as? String ?? ""),
                    let itemID = item["id"] as? String {
+                    var historicalItem = item
+                    historicalItem["_stationaiTurnID"] = entry["turnId"]
                     if let index = toolItemIndexes[itemID] {
-                        historicalToolItems[index] = item
+                        historicalToolItems[index] = historicalItem
                     } else {
                         toolItemIndexes[itemID] = historicalToolItems.count
-                        historicalToolItems.append(item)
+                        historicalToolItems.append(historicalItem)
                     }
                 }
+                var historicalSubagentItem = item
+                historicalSubagentItem["_stationaiTurnID"] = entry["turnId"]
                 if item["type"] as? String == "subAgentActivity",
-                   let activity = ConversationActivity.from(item: item),
+                   let activity = ConversationActivity.from(item: historicalSubagentItem),
                    let childThreadID = activity.childThreadID {
                     if let index = subagentIndexes[childThreadID] {
-                        var mergedItem = item
+                        var mergedItem = historicalSubagentItem
                         for metadataKey in ["agentPath", "model", "reasoningEffort"]
                         where mergedItem[metadataKey] == nil {
                             mergedItem[metadataKey] = historicalSubagentItems[index][metadataKey]
@@ -901,7 +923,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                         historicalSubagentItems[index] = mergedItem
                     } else {
                         subagentIndexes[childThreadID] = historicalSubagentItems.count
-                        historicalSubagentItems.append(item)
+                        historicalSubagentItems.append(historicalSubagentItem)
                     }
                 }
                 if item["type"] as? String == "userMessage" {
@@ -909,7 +931,9 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                     lastAssistantTurnID = nil
                     lastAssistantPhase = nil
                 }
-                latestTurnItems.append(item)
+                var latestTurnItem = item
+                latestTurnItem["_stationaiTurnID"] = entry["turnId"]
+                latestTurnItems.append(latestTurnItem)
                 if var message = Self.chatMessage(from: entry) {
                     message.timelineOrder = historyItemOrder
                     if message.role == .assistant,
@@ -950,20 +974,28 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 activities.append(activity)
             }
         }
-        for activity in historicalToolItems.compactMap({ ConversationActivity.from(item: $0) }) {
+        for item in historicalToolItems {
+            guard var activity = ConversationActivity.from(item: item) else { continue }
+            activity.turnID = item["_stationaiTurnID"] as? String
             let key = activity.childThreadID ?? activity.id
             if let index = activityIndexes[key] { activities[index] = activity }
             else { activityIndexes[key] = activities.count; activities.append(activity) }
         }
-        for activity in latestTurnItems
-            .filter({ $0["type"] as? String != "contextCompaction" })
-            .filter({ !["mcpToolCall", "dynamicToolCall"].contains($0["type"] as? String ?? "") })
-            .compactMap({ ConversationActivity.from(item: $0) }) {
+        for item in latestTurnItems
+            where item["type"] as? String != "contextCompaction"
+                && !["mcpToolCall", "dynamicToolCall"].contains(item["type"] as? String ?? "") {
+            guard var activity = ConversationActivity.from(item: item) else { continue }
+            // Several activity item types don't currently map the optional
+            // turnID themselves. Apply it here so sensitive-turn filtering
+            // covers every content-bearing activity type.
+            activity.turnID = item["_stationaiTurnID"] as? String
             let key = activity.childThreadID ?? activity.id
             if let index = activityIndexes[key] { activities[index] = activity }
             else { activityIndexes[key] = activities.count; activities.append(activity) }
         }
-        for activity in historicalSubagentItems.compactMap({ ConversationActivity.from(item: $0) }) {
+        for item in historicalSubagentItems {
+            guard var activity = ConversationActivity.from(item: item) else { continue }
+            activity.turnID = item["_stationaiTurnID"] as? String
             let key = activity.childThreadID ?? activity.id
             if let index = activityIndexes[key] { activities[index] = activity }
             else { activityIndexes[key] = activities.count; activities.append(activity) }

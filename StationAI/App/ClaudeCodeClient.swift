@@ -310,7 +310,9 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void,
         onSteerMessage: @escaping (String, [String]) -> Void = { _, _ in },
         onProgressMessage: @escaping (ConversationMessage) -> Void = { _ in },
-        onTurnStarted: @escaping (String) -> Void
+        onTurnStarted: @escaping (String) -> Void,
+        sensitiveUserInputAnswerValues: [String] = [],
+        hideSensitiveRecoveryPrompt: Bool = false
     ) async throws {
         let wasQueued: Bool
         do {
@@ -440,7 +442,9 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
                 "threadID": sessionID, "turnID": turnID, "turnStatus": "completed"
             ]))
         } catch {
-            var fields = StationAIDiagnostics.errorFields(error)
+            var fields = hideSensitiveRecoveryPrompt
+                ? ["error": "Private conversation recovery turn failed."]
+                : StationAIDiagnostics.errorFields(error, redacting: sensitiveUserInputAnswerValues)
             fields["threadID"] = sessionID
             fields["turnID"] = turnID
             fields["turnStatus"] = wasLastTurnInterrupted ? "interrupted" : "failed"

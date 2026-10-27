@@ -294,7 +294,9 @@ protocol ConversationProviderClient: AnyObject {
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void,
         onSteerMessage: @escaping (String, [String]) -> Void,
         onProgressMessage: @escaping (ConversationMessage) -> Void,
-        onTurnStarted: @escaping (String) -> Void
+        onTurnStarted: @escaping (String) -> Void,
+        sensitiveUserInputAnswerValues: [String],
+        hideSensitiveRecoveryPrompt: Bool
     ) async throws
     func interruptActiveTurn(threadID: String) async throws -> Bool
     func steerActiveTurn(threadID: String, text: String, imageDataURLs: [String]) async throws -> Bool
@@ -340,7 +342,8 @@ extension ConversationProviderClient {
             workspace: workspace, sessionRecoveryContext: sessionRecoveryContext, developerInstructions: developerInstructions,
             onDelta: { _ in }, onFinalMessage: onFinalMessage, onActivity: { _ in }, onDiff: { _ in },
             onHistory: { _ in }, onActionRequest: {}, onUserInput: onUserInput,
-            onSteerMessage: { _, _ in }, onProgressMessage: { _ in }, onTurnStarted: { _ in }
+            onSteerMessage: { _, _ in }, onProgressMessage: { _ in }, onTurnStarted: { _ in },
+            sensitiveUserInputAnswerValues: [], hideSensitiveRecoveryPrompt: false
         )
     }
 }
