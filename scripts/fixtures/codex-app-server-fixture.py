@@ -818,7 +818,12 @@ def main():
                         "id": "item_fixture_dynamic_legacy", "type": "dynamicToolCall", "tool": "legacySummary",
                         "status": "inProgress", "arguments": {"input": "RAW_ARGUMENT_SECRET"},
                     }
-                    for tool_item in [mcp_item, dynamic_item, legacy_dynamic_item]:
+                    active_command_item = {
+                        "id": "item_fixture_active_long_command", "type": "commandExecution",
+                        "command": "long-command-name " + "argument-" * 40,
+                        "cwd": "/tmp/stationai-fixture", "status": "inProgress",
+                    }
+                    for tool_item in [mcp_item, dynamic_item, legacy_dynamic_item, active_command_item]:
                         write({"jsonrpc": "2.0", "method": "item/started", "params": {"threadId": THREAD_ID, "item": tool_item}})
                     ready = Path(str(sys.argv[0]) + ".tool-ready")
                     release = Path(str(sys.argv[0]) + ".tool-release")
@@ -834,7 +839,7 @@ def main():
                         return 3
                     release_latest.unlink(missing_ok=True)
                     write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
-                        **legacy_dynamic_item, "status": "completed", "success": True, "contentItems": [{"type": "inputText", "text": "RAW_RESULT_SECRET"}],
+                        **active_command_item, "status": "completed", "durationMs": 37,
                     }}})
                     while not release.exists() and time.monotonic() < deadline:
                         time.sleep(0.02)
@@ -842,6 +847,10 @@ def main():
                     if not release.exists():
                         return 3
                     release.unlink(missing_ok=True)
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
+                        **legacy_dynamic_item, "status": "completed", "success": True,
+                        "contentItems": [{"type": "inputText", "text": "RAW_RESULT_SECRET"}], "durationMs": 41,
+                    }}})
                     write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
                         **mcp_item, "status": "completed", "result": {"content": [{"type": "text", "text": "RAW_RESULT_SECRET"}]},
                     }}})
