@@ -1811,12 +1811,14 @@ final class BoardTaskManager {
     func move(
         _ id: UUID,
         to statusName: String,
-        allowUnmergedPullRequests: Bool = false
+        allowUnmergedPullRequests: Bool = false,
+        skipMergeVerification: Bool = false
     ) async throws -> BoardTaskRecord {
         StationAIDiagnostics.record("task.move.started", fields: [
             "taskID": id.uuidString,
             "requestedStatus": statusName,
-            "allowUnmergedPullRequests": String(allowUnmergedPullRequests)
+            "allowUnmergedPullRequests": String(allowUnmergedPullRequests),
+            "skipMergeVerification": String(skipMergeVerification)
         ])
         guard let status = TaskStatus(rawValue: statusName) else {
             throw StationAIManagerError.invalidStatus(statusName)
@@ -1833,7 +1835,7 @@ final class BoardTaskManager {
 
             let originalRepositories = initialTask.repositoryWorktrees
             let linkedRecords = originalRepositories.filter { $0.pullRequestNumber != nil }
-            if !linkedRecords.isEmpty && !allowUnmergedPullRequests {
+            if !linkedRecords.isEmpty && !allowUnmergedPullRequests && !skipMergeVerification {
                 let executable = try pullRequestService.resolveExecutable()
                 var unmerged: [RepositoryWorktreeRecord] = []
                 for record in linkedRecords {
