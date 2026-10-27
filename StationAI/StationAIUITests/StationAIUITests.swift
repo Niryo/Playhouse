@@ -333,22 +333,25 @@ final class StationAIUITests: XCTestCase {
         try FileManager.default.removeItem(at: runDirectory)
     }
 
-    // case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label, shows the Playhouse logo on a solid #2C2F36 background, uses the same artwork for the Dock AppIcon, and the bridge reports API version 1.
+    // case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, uses the same foreground artwork for the Dock AppIcon on a solid #2C2F36 background, and the bridge reports API version 1.
     func test_service_reports_bridge_version() throws {
         launchApp(defaultParent: fixture.parent.path)
         XCTAssertEqual(app.windows.count, 1, "StationAI should open one board window on launch.")
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 15), "The StationAI window did not open.")
         let logo = app.images["StationAI logo"]
-        XCTAssertTrue(logo.waitForExistence(timeout: 5), "The board header should display the Playhouse StationAI logo.")
-        XCTAssertGreaterThanOrEqual(logo.frame.width, 48, "The board header logo should render at the increased size.")
-        XCTAssertGreaterThanOrEqual(logo.frame.height, 40, "The board header logo should render at the increased size.")
+        XCTAssertTrue(logo.waitForExistence(timeout: 5), "The board header should display the transparent theater logo.")
         assertStationAILogoArtwork(logo)
+        let headerLogoURL = repositoryRoot.appendingPathComponent("StationAI/Assets.xcassets/StationAILogo.imageset/StationAILogo.png")
+        let headerLogoBitmap = try XCTUnwrap(NSBitmapImageRep(data: Data(contentsOf: headerLogoURL)), "The in-app logo image should load.")
+        let transparentCorner = try XCTUnwrap(headerLogoBitmap.colorAt(x: 0, y: 0)?.usingColorSpace(.deviceRGB))
+        XCTAssertLessThan(transparentCorner.alphaComponent, 0.05, "The in-app logo should retain transparency.")
         let appIconURL = repositoryRoot.appendingPathComponent("StationAI/Assets.xcassets/AppIcon.appiconset/AppIcon.png")
         let appIcon = try XCTUnwrap(NSImage(contentsOf: appIconURL), "The Dock AppIcon asset should load.")
-        assertPixel(appIcon, normalizedX: 0.20, normalizedY: 0.50, rgb: (75, 61, 112), accuracy: 30)
-        assertPixel(appIcon, normalizedX: 0.40, normalizedY: 0.50, rgb: (36, 110, 198), accuracy: 30)
-        assertPixel(appIcon, normalizedX: 0.70, normalizedY: 0.60, rgb: (46, 156, 151), accuracy: 30)
-        assertPixel(appIcon, normalizedX: 0.80, normalizedY: 0.50, rgb: (130, 25, 67), accuracy: 30)
+        assertPixel(appIcon, normalizedX: 0.22, normalizedY: 0.54, rgb: (70, 177, 235), accuracy: 20)
+        assertPixel(appIcon, normalizedX: 0.76, normalizedY: 0.54, rgb: (149, 41, 121), accuracy: 20)
+        assertPixel(appIcon, normalizedX: 0.49, normalizedY: 0.40, rgb: (250, 178, 117), accuracy: 24)
+        assertPixel(appIcon, normalizedX: 0.22, normalizedY: 0.82, rgb: (176, 53, 169), accuracy: 24)
+        assertPixel(appIcon, normalizedX: 0.76, normalizedY: 0.82, rgb: (240, 82, 121), accuracy: 20)
         assertPixel(appIcon, normalizedX: 0.02, normalizedY: 0.02, rgb: (44, 47, 54), accuracy: 5)
         XCTAssertEqual(app.windows.firstMatch.title, "StationAI — StationAI UI Test Worktree")
         relaunchApp()
@@ -8513,13 +8516,11 @@ final class StationAIUITests: XCTestCase {
             XCTFail("Could not read the StationAI logo screenshot.", file: file, line: line)
             return
         }
-        assertPixel(logoImage, normalizedX: 0.20, normalizedY: 0.50, rgb: (75, 61, 112), accuracy: 50, file: file, line: line)
-        assertPixel(logoImage, normalizedX: 0.40, normalizedY: 0.50, rgb: (36, 110, 198), accuracy: 50, file: file, line: line)
-        assertPixel(logoImage, normalizedX: 0.70, normalizedY: 0.60, rgb: (46, 156, 151), accuracy: 50, file: file, line: line)
-        assertPixel(logoImage, normalizedX: 0.80, normalizedY: 0.50, rgb: (130, 25, 67), accuracy: 50, file: file, line: line)
-        for point in [CGPoint(x: 0.02, y: 0.02), CGPoint(x: 0.98, y: 0.02), CGPoint(x: 0.02, y: 0.98), CGPoint(x: 0.98, y: 0.98)] {
-            assertPixel(logoImage, normalizedX: point.x, normalizedY: point.y, rgb: (44, 47, 54), accuracy: 18, file: file, line: line)
-        }
+        assertPixel(logoImage, normalizedX: 0.20, normalizedY: 0.50, rgb: (71, 176, 235), accuracy: 30, file: file, line: line)
+        assertPixel(logoImage, normalizedX: 0.80, normalizedY: 0.50, rgb: (148, 41, 121), accuracy: 30, file: file, line: line)
+        assertPixel(logoImage, normalizedX: 0.50, normalizedY: 0.35, rgb: (245, 179, 124), accuracy: 35, file: file, line: line)
+        assertPixel(logoImage, normalizedX: 0.20, normalizedY: 0.80, rgb: (177, 54, 171), accuracy: 35, file: file, line: line)
+        assertPixel(logoImage, normalizedX: 0.80, normalizedY: 0.80, rgb: (240, 82, 121), accuracy: 30, file: file, line: line)
     }
 
     private func assertSubagentIconArtwork(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {

@@ -643,7 +643,7 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         return response
 
-    # case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label, shows the Playhouse logo on a solid #2C2F36 background, uses the same artwork for the Dock AppIcon, and the bridge reports API version 1.
+    # case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, uses the same foreground artwork for the Dock AppIcon on a solid #2C2F36 background, and the bridge reports API version 1.
     def test_service_reports_bridge_version(self):
         response, _ = self.call_cli("status")
         self.assertEqual(self.assert_success(response), {"bridgeVersion": 1, "service": "StationAI"})
@@ -690,6 +690,7 @@ class StationAIBridgeTests(unittest.TestCase):
             logo_width, logo_height, logo_pixel = bitmap(header_logo, Path(directory) / "logo.bmp")
             background = icon_pixel(0, 0)[:3]
             self.assertEqual(background, (44, 47, 54), "The Dock icon should use the board's solid background.")
+            self.assertLess(logo_pixel(0, 0)[3], 255, "The in-app logo should retain its transparent background.")
 
             def bounds(width, height, pixel, visible):
                 points = ((x, y) for y in range(height) for x in range(width) if visible(pixel(x, y)))
