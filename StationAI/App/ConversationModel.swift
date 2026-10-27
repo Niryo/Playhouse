@@ -6,7 +6,7 @@ extension ConversationProvider {
     var defaultModelID: String {
         switch self {
         case .codex: CodexAppServerClient.modelID
-        case .claude: ClaudeCodeClient.defaultModelID
+        case .claude: ClaudeCodeClient.preferredDefaultModelID
         }
     }
 
@@ -25,11 +25,16 @@ extension ConversationProvider {
         }
     }
 
-    /// The short name shown above assistant messages.
-    var assistantLabel: String {
+    /// The short name shown above assistant messages, derived from the model
+    /// that produced the message.
+    func assistantLabel(modelName: String?) -> String {
         switch self {
-        case .codex: "Codex · Luna"
-        case .claude: "Claude"
+        case .codex:
+            guard let modelName else { return "Codex" }
+            let shortName = modelName.split(separator: " ").last.map(String.init) ?? modelName
+            return "Codex · \(shortName)"
+        case .claude:
+            return modelName.map { "Claude · \($0)" } ?? "Claude"
         }
     }
 
@@ -55,6 +60,7 @@ enum ConversationRole: String, Codable, Equatable {
 struct ConversationMessage: Codable, Identifiable, Equatable {
     let id: String
     let role: ConversationRole
+    var createdAt: Date?
     var text: String
     var imageDataURLs: [String]
     var phase: String?
@@ -64,10 +70,13 @@ struct ConversationMessage: Codable, Identifiable, Equatable {
     /// The runtime that produced an assistant message, or received a user message.
     /// Nil for transcripts saved before StationAI supported more than Codex.
     var provider: ConversationProvider?
+    /// Model selected when this message's turn was dispatched, when known.
+    var modelID: String?
 
-    init(id: String, role: ConversationRole, text: String, imageDataURLs: [String] = [], phase: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil, asyncQuestions: [ConversationAsyncQuestion]? = nil, provider: ConversationProvider? = nil) {
+    init(id: String, role: ConversationRole, text: String, imageDataURLs: [String] = [], phase: String? = nil, turnID: String? = nil, timelineOrder: Int? = nil, asyncQuestions: [ConversationAsyncQuestion]? = nil, provider: ConversationProvider? = nil, createdAt: Date? = .now, modelID: String? = nil) {
         self.id = id
         self.role = role
+        self.createdAt = createdAt
         self.text = text
         self.imageDataURLs = imageDataURLs
         self.phase = phase
@@ -75,13 +84,15 @@ struct ConversationMessage: Codable, Identifiable, Equatable {
         self.timelineOrder = timelineOrder
         self.asyncQuestions = asyncQuestions
         self.provider = provider
+        self.modelID = modelID
     }
 
-    private enum CodingKeys: String, CodingKey { case id, role, text, imageDataURLs, phase, turnID, timelineOrder, asyncQuestions, provider }
+    private enum CodingKeys: String, CodingKey { case id, role, createdAt, text, imageDataURLs, phase, turnID, timelineOrder, asyncQuestions, provider, modelID }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
         role = try container.decode(ConversationRole.self, forKey: .role)
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt)
         text = try container.decode(String.self, forKey: .text)
         imageDataURLs = try container.decodeIfPresent([String].self, forKey: .imageDataURLs) ?? []
         phase = try container.decodeIfPresent(String.self, forKey: .phase)
@@ -89,6 +100,7 @@ struct ConversationMessage: Codable, Identifiable, Equatable {
         timelineOrder = try container.decodeIfPresent(Int.self, forKey: .timelineOrder)
         asyncQuestions = try container.decodeIfPresent([ConversationAsyncQuestion].self, forKey: .asyncQuestions)
         provider = try container.decodeIfPresent(ConversationProvider.self, forKey: .provider)
+        modelID = try container.decodeIfPresent(String.self, forKey: .modelID)
     }
 }
 
@@ -116,9 +128,10 @@ struct ConversationUserInputRequest: Identifiable, Codable, Equatable {
     let threadID: String
     let questions: [ConversationUserQuestion]
     let isBlocking: Bool
+    let mode: ConversationMode
 }
 
-enum ConversationMode: String, CaseIterable, Hashable {
+enum ConversationMode: String, CaseIterable, Hashable, Codable {
     case code = "default"
     case plan
 
@@ -130,10 +143,115 @@ enum ConversationMode: String, CaseIterable, Hashable {
     }
 }
 
+enum ConversationEffort: String, CaseIterable, Codable, Hashable, Identifiable, Sendable {
+    case low
+    case medium
+    case high
+    case xhigh
+
+    var id: String { rawValue }
+    var title: String { rawValue == "xhigh" ? "Extra High" : rawValue.capitalized }
+    var sliderPosition: Double { Double(Self.allCases.firstIndex(of: self) ?? 1) }
+
+    static func from(sliderPosition: Double) -> ConversationEffort {
+        allCases[min(max(Int(sliderPosition.rounded()), 0), allCases.count - 1)]
+    }
+}
+
 struct ConversationModelOption: Codable, Identifiable, Hashable {
     let id: String
     let name: String
     let isDefault: Bool
+    var supportedEfforts: [ConversationEffort]? = nil
+}
+
+extension Array where Element == ConversationModelOption {
+    /// Keeps the newest concrete model in each family and drops aliases superseded by a versioned model.
+    func newestVersionPerFamily() -> [ConversationModelOption] {
+        let visibleModels = filter { $0.id.caseInsensitiveCompare("default") != .orderedSame }
+        var newestVersions: [String: VersionedModel] = [:]
+        for model in visibleModels {
+            guard let version = ModelVersion(id: model.id) else { continue }
+            guard let current = newestVersions[version.family] else {
+                newestVersions[version.family] = VersionedModel(id: model.id, version: version)
+                continue
+            }
+            if version.isPreferred(over: current.version, id: model.id, otherID: current.id) {
+                newestVersions[version.family] = VersionedModel(id: model.id, version: version)
+            }
+        }
+        var retainedFamilies = Set<String>()
+        return visibleModels.filter { model in
+            let family = ModelVersion.familyName(for: model.id)
+            if let newest = newestVersions[family] {
+                guard model.id == newest.id else { return false }
+                return retainedFamilies.insert(family).inserted
+            }
+            guard !ModelVersion.isAlias(model.id) else { return false }
+            return retainedFamilies.insert(family).inserted
+        }
+    }
+}
+
+private struct VersionedModel {
+    let id: String
+    let version: ModelVersion
+}
+
+/// A model ID split into its family name and numeric version, such as `gpt-sol` and `[6, 1]` for `gpt-6.1-sol`.
+private struct ModelVersion {
+    let family: String
+    let numbers: [Int]
+    let snapshotDate: Int?
+
+    var isSnapshot: Bool { snapshotDate != nil }
+
+    init?(id: String) {
+        var familyTokens: [String] = []
+        var numbers: [Int] = []
+        var snapshotDate: Int?
+        for token in id.lowercased().split(separator: "-") {
+            // Eight-digit date stamps such as `20251001` identify a snapshot, not a version.
+            if token.count == 8, token.allSatisfy({ $0.isASCII && $0.isNumber }) {
+                snapshotDate = Int(token)
+                continue
+            }
+            let parts = token.split(separator: ".", omittingEmptySubsequences: false).map { Int($0) }
+            if !parts.isEmpty, parts.allSatisfy({ $0 != nil }) {
+                numbers += parts.compactMap { $0 }
+            } else {
+                familyTokens.append(String(token))
+            }
+        }
+        guard !numbers.isEmpty else { return nil }
+        if familyTokens.first == "claude" { familyTokens.removeFirst() }
+        self.family = familyTokens.joined(separator: "-")
+        self.numbers = numbers
+        self.snapshotDate = snapshotDate
+    }
+
+    static func familyName(for id: String) -> String {
+        guard let version = ModelVersion(id: id) else {
+            let tokens = id.lowercased().split(separator: "-").map(String.init)
+            return tokens.first == "claude" ? tokens.dropFirst().joined(separator: "-") : tokens.joined(separator: "-")
+        }
+        return version.family
+    }
+
+    static func isAlias(_ id: String) -> Bool {
+        let normalizedID = id.lowercased().hasPrefix("claude-") ? String(id.dropFirst("claude-".count)).lowercased() : id.lowercased()
+        return ["opus", "sonnet", "haiku", "default"].contains(normalizedID)
+    }
+
+    func isPreferred(over other: ModelVersion, id: String, otherID: String) -> Bool {
+        if numbers != other.numbers { return other.numbers.lexicographicallyPrecedes(numbers) }
+        switch (snapshotDate, other.snapshotDate) {
+        case (nil, .some): return true
+        case (.some, nil): return false
+        case let (.some(date), .some(otherDate)) where date != otherDate: return date > otherDate
+        default: return id.localizedStandardCompare(otherID) == .orderedAscending
+        }
+    }
 }
 
 /// A divider shown where a task's conversation moved to another provider.
@@ -154,16 +272,27 @@ protocol ConversationProviderClient: AnyObject {
     var isPreparingForApplicationTermination: Bool { get }
     var lastTurnActivityDurations: [String: Int] { get }
 
+    /// The most recent turn result for one conversation. Providers that can run
+    /// conversations in parallel must answer per thread, not for the client.
+    func wasLastTurnInterrupted(threadID: String) -> Bool
+    func lastTurnActivityDurations(threadID: String) -> [String: Int]
+
     func diagnosticFields(_ additionalFields: [String: String]) -> [String: String]
+    /// Diagnostics for one conversation's turn. A runtime that can run several
+    /// turns at once must not report another conversation's process or turn.
+    func diagnosticFields(forThread threadID: String, _ additionalFields: [String: String]) -> [String: String]
     func startThread(workspace: ConversationWorkspaceContext, modelID: String, developerInstructions: String?) async throws -> String
     func availableModels(workspace: ConversationWorkspaceContext) async throws -> [ConversationModelOption]
+    func validateEffort(_ effort: ConversationEffort, modelID: String, workspace: ConversationWorkspaceContext) async throws
     func sendMessage(
         _ text: String,
         imageDataURLs: [String],
         mode: ConversationMode,
         modelID: String,
+        effort: ConversationEffort,
         threadID: String,
         workspace: ConversationWorkspaceContext,
+        sessionRecoveryContext: String?,
         developerInstructions: String?,
         onDelta: @escaping (String) -> Void,
         onFinalMessage: @escaping (String) -> Void,
@@ -173,7 +302,10 @@ protocol ConversationProviderClient: AnyObject {
         onActionRequest: @escaping () -> Void,
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void,
         onSteerMessage: @escaping (String, [String]) -> Void,
-        onProgressMessage: @escaping (ConversationMessage) -> Void
+        onProgressMessage: @escaping (ConversationMessage) -> Void,
+        onTurnStarted: @escaping (String) -> Void,
+        sensitiveUserInputAnswerValues: [String],
+        hideSensitiveRecoveryPrompt: Bool
     ) async throws
     func interruptActiveTurn(threadID: String) async throws -> Bool
     func steerActiveTurn(threadID: String, text: String, imageDataURLs: [String]) async throws -> Bool
@@ -197,25 +329,40 @@ protocol ConversationProviderClient: AnyObject {
 }
 
 extension ConversationProviderClient {
+    func validateEffort(_ effort: ConversationEffort, modelID: String, workspace: ConversationWorkspaceContext) async throws {}
+
     func diagnosticFields() -> [String: String] { diagnosticFields([:]) }
+
+    /// A runtime that runs one turn at a time already describes that turn.
+    func diagnosticFields(forThread threadID: String, _ additionalFields: [String: String]) -> [String: String] {
+        diagnosticFields(additionalFields)
+    }
+
+    /// A runtime that runs one turn at a time has only one last turn to report.
+    func wasLastTurnInterrupted(threadID: String) -> Bool { wasLastTurnInterrupted }
+
+    func lastTurnActivityDurations(threadID: String) -> [String: Int] { lastTurnActivityDurations }
 
     func sendMessage(
         _ text: String,
         imageDataURLs: [String] = [],
         mode: ConversationMode,
         modelID: String,
+        effort: ConversationEffort = .medium,
         threadID: String,
         workspace: ConversationWorkspaceContext,
+        sessionRecoveryContext: String? = nil,
         developerInstructions: String? = nil,
         onFinalMessage: @escaping (String) -> Void,
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void = { _ in }
     ) async throws {
         try await sendMessage(
-            text, imageDataURLs: imageDataURLs, mode: mode, modelID: modelID, threadID: threadID,
-            workspace: workspace, developerInstructions: developerInstructions,
+            text, imageDataURLs: imageDataURLs, mode: mode, modelID: modelID, effort: effort, threadID: threadID,
+            workspace: workspace, sessionRecoveryContext: sessionRecoveryContext, developerInstructions: developerInstructions,
             onDelta: { _ in }, onFinalMessage: onFinalMessage, onActivity: { _ in }, onDiff: { _ in },
             onHistory: { _ in }, onActionRequest: {}, onUserInput: onUserInput,
-            onSteerMessage: { _, _ in }, onProgressMessage: { _ in }
+            onSteerMessage: { _, _ in }, onProgressMessage: { _ in }, onTurnStarted: { _ in },
+            sensitiveUserInputAnswerValues: [], hideSensitiveRecoveryPrompt: false
         )
     }
 }
@@ -390,6 +537,14 @@ enum ConversationSteerMailbox {
 
     /// The live process that published an active turn for this thread, if any.
     static func activeTurnOwnerProcessID(threadID: String) -> Int32? {
+        activeTurn(threadID: threadID)?.processID
+    }
+
+    static func activeTurnID(threadID: String) -> String? {
+        activeTurn(threadID: threadID)?.turnID
+    }
+
+    private static func activeTurn(threadID: String) -> ConversationSteerMailboxActiveTurn? {
         guard let directory else { return nil }
         let activeURL = activeTurnURL(threadID: threadID, directory: directory)
         guard let active = try? JSONDecoder().decode(ConversationSteerMailboxActiveTurn.self, from: Data(contentsOf: activeURL)),
@@ -398,7 +553,7 @@ enum ConversationSteerMailbox {
             try? FileManager.default.removeItem(at: activeURL)
             return nil
         }
-        return active.processID
+        return active
     }
 
     private static func activeTurnURL(threadID: String, directory: URL) -> URL {

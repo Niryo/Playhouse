@@ -28,7 +28,7 @@ else:
     TURN_ID = "turn_stationai_fixture"
 
 
-MARKDOWN_PLAN = '## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening'
+MARKDOWN_PLAN = '## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening\n\n1. First numbered step: capture the baseline state before changes.\n\n2. Second numbered step: apply the fix and confirm there are no regressions.\n\n```javascript\nconsole.log("Hello, world!");\n```'
 
 ECHOED_OUTCOME_PREFIX = "Echo the outcome command for "
 ECHOED_OUTCOME_ANSWER = "Fixture answer with an echoed outcome."
@@ -48,6 +48,13 @@ def write(value):
 
 
 def answer_text(user_message):
+    mode = os.path.basename(sys.argv[0])
+    if mode.endswith("-nonblocking-slow"):
+        return "Answers received: Custom approach / fixture-secret."
+    if mode.endswith("-restart-question") and not (user_message or "").startswith(
+        "Continue this conversation by applying"
+    ):
+        return "I am waiting for the pending question to be answered."
     if Path(sys.argv[0]).name.endswith("-user-question"):
         return "Answer received: Continue."
     if isinstance(user_message, str) and user_message.startswith("Long response fixture input."):
@@ -73,7 +80,12 @@ def answer_text(user_message):
 
 def question_request(request_id):
     mode = os.path.basename(sys.argv[0])
-    if mode.endswith("-user-question"):
+    if mode.endswith("-restart-question") and Path(str(sys.argv[0]) + ".asked").exists():
+        questions = [{
+            "id": "token", "header": "Private token", "question": "What is the private token?",
+            "options": None, "isOther": False, "isSecret": True,
+        }]
+    elif mode.endswith("-user-question"):
         questions = [{
             "id": "question_action",
             "header": "Next step",
@@ -95,7 +107,7 @@ def question_request(request_id):
                 {"label": "Blue", "description": "Use blue."},
                 {"label": "Green", "description": "Use green."},
             ],
-            "isOther": False,
+            "isOther": True,
             "isSecret": False,
         },
         {
@@ -248,8 +260,14 @@ def main():
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"serverInfo": {"name": "stationai-fixture", "version": "1"}}})
         elif message.get("method") == "model/list":
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"data": [
-                {"id": "gpt-6-luna", "displayName": "GPT-6 Luna", "isDefault": True},
-                {"id": "gpt-6-sol", "displayName": "GPT-6 Sol", "isDefault": False},
+                {"id": "gpt-6-luna", "displayName": "GPT-6 Luna", "isDefault": True,
+                 "supportedReasoningEfforts": [{"reasoningEffort": level} for level in ["low", "medium", "high", "xhigh"]]},
+                {"id": "gpt-6-sol", "displayName": "GPT-6 Sol", "isDefault": False,
+                 "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]},
+                {"id": "gpt-6-mini", "displayName": "GPT-6 Mini", "isDefault": False,
+                 "supportedReasoningEfforts": ["low", "medium"]},
+                {"id": "gpt-5.6-luna", "displayName": "GPT-5.6 Luna", "isDefault": False,
+                 "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]},
             ]}})
         elif message.get("method") == "thread/goal/get":
             goal = json.loads(goal_path.read_text(encoding="utf-8")) if goal_path.is_file() else None
@@ -288,8 +306,16 @@ def main():
                     "threadStartCount": history.get("threadStartCount", 0) + 1,
                 })
                 history_path.write_text(json.dumps(history), encoding="utf-8")
-            write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": "gpt-6-luna"}})
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": message.get("params", {}).get("model", "gpt-6-luna")}})
         elif message.get("method") == "thread/resume":
+            resume_error = Path(str(sys.argv[0]) + ".resume-error")
+            if resume_error.is_file():
+                resume_error.unlink(missing_ok=True)
+                write({"jsonrpc": "2.0", "id": message["id"], "error": {
+                    "code": -32010,
+                    "message": "Fixture thread resume failed after receiving fixture-secret.",
+                }})
+                continue
             if serial_mode:
                 requested_thread_id = message.get("params", {}).get("threadId")
                 history = serial_history()
@@ -312,15 +338,17 @@ def main():
                     message.get("params", {}).get("developerInstructions")
                 )
                 history_path.write_text(json.dumps(history), encoding="utf-8")
-            write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": "gpt-6-luna"}})
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": message.get("params", {}).get("model", "gpt-6-luna")}})
         elif message.get("method") == "turn/start":
             saw_turn = True
             saw_question = True
+            if mode.endswith("-restart-question"):
+                TURN_ID = f"turn-{uuid.uuid4()}"
             turn_input = message.get("params", {}).get("input", [])
             turn_message = next((item.get("text") for item in turn_input if item.get("type") == "text"), None)
             is_title_request = (turn_message or "").startswith("Write a concise task title of at most 8 words")
             serial_first_turn = False
-            if not is_title_request and not serial_mode:
+            if "-unique-turns-" in mode and not is_title_request:
                 TURN_ID = f"turn-{uuid.uuid4()}"
             if serial_mode and not is_title_request:
                 TURN_ID = f"turn-{uuid.uuid4()}"
@@ -381,6 +409,7 @@ def main():
                 "images": [item.get("url") for item in image_inputs],
                 "imageInputs": image_inputs,
                 "conversationMode": message.get("params", {}).get("collaborationMode", {}).get("mode"),
+                "reasoningEffort": message.get("params", {}).get("collaborationMode", {}).get("settings", {}).get("reasoningEffort"),
                 "developerInstructions": message.get("params", {}).get("collaborationMode", {}).get("settings", {}).get("developerInstructions"),
                 "cwd": message.get("params", {}).get("cwd"),
                 "runtimeWorkspaceRoots": message.get("params", {}).get("runtimeWorkspaceRoots", []),
@@ -401,8 +430,22 @@ def main():
                 turns.append(turn_history)
                 saved_history["turns"] = turns
                 history_path.write_text(json.dumps(saved_history), encoding="utf-8")
+            provider_error = Path(str(sys.argv[0]) + ".provider-error")
+            if provider_error.exists():
+                provider_error.unlink(missing_ok=True)
+                write({"jsonrpc": "2.0", "id": message["id"], "result": {
+                    "turn": {"id": TURN_ID, "status": "failed", "error": {"message": "Fixture provider failed after receiving fixture-secret. Answer: Green. Continue this conversation by applying the user's answer to the pending question."}},
+                }})
+                continue
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": TURN_ID, "status": "inProgress"}}})
-            if Path(str(sys.argv[0]) + ".hold-release").exists():
+            async_provider_error = Path(str(sys.argv[0]) + ".provider-error-async")
+            if async_provider_error.exists():
+                async_provider_error.unlink(missing_ok=True)
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": THREAD_ID,
+                    "turn": {"id": TURN_ID, "status": "failed", "error": {"message": "Fixture async failure echoed fixture-secret, Answer: Green, and the private recovery prompt."}},
+                }})
+            elif Path(str(sys.argv[0]) + ".hold-release").exists():
                 active = Path(str(sys.argv[0]) + ".turn-active")
                 release = Path(str(sys.argv[0]) + ".turn-release")
                 active.write_text("The fixture turn is active for a CLI outcome report.\n", encoding="utf-8")
@@ -418,6 +461,60 @@ def main():
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
+            elif mode.endswith("-hold-interrupt") or mode.endswith("-hold-reject-interrupt"):
+                active = Path(str(sys.argv[0]) + ".interrupt-ready")
+                active.write_text("The fixture turn is active and waiting for an interrupt.\n", encoding="utf-8")
+                deadline = time.monotonic() + 30
+                received_interrupt = False
+                while time.monotonic() < deadline:
+                    ready, _, _ = select.select([sys.stdin], [], [], 0.02)
+                    if not ready:
+                        continue
+                    interrupt_message = json.loads(sys.stdin.readline())
+                    if interrupt_message.get("method") != "turn/interrupt":
+                        continue
+                    received_interrupt = True
+                    saved_history = serial_history()
+                    saved_history["interruptReceived"] = True
+                    history_path.write_text(json.dumps(saved_history), encoding="utf-8")
+                    Path(str(sys.argv[0]) + ".interrupt-received").write_text("turn/interrupt\n", encoding="utf-8")
+                    if mode.endswith("-hold-reject-interrupt"):
+                        reject = Path(str(sys.argv[0]) + ".interrupt-reject")
+                        reject_deadline = time.monotonic() + 15
+                        while not reject.exists() and time.monotonic() < reject_deadline:
+                            time.sleep(0.02)
+                        reject.unlink(missing_ok=True)
+                        write({"jsonrpc": "2.0", "id": interrupt_message["id"], "error": {
+                            "code": -32044, "message": "Fixture rejected the interrupt while the turn remains active.",
+                        }})
+                        interrupt_release = Path(str(sys.argv[0]) + ".interrupt-release")
+                        ack_deadline = time.monotonic() + 15
+                        while not interrupt_release.exists() and time.monotonic() < ack_deadline:
+                            time.sleep(0.02)
+                        interrupt_release.unlink(missing_ok=True)
+                        write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                            "threadId": THREAD_ID,
+                            "item": {"id": "item_stationai_message", "type": "agentMessage", "text": "The turn completed after Stop was rejected."},
+                        }})
+                        write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                            "threadId": THREAD_ID,
+                            "turn": {"id": TURN_ID, "status": "completed"},
+                        }})
+                        break
+                    interrupt_release = Path(str(sys.argv[0]) + ".interrupt-release")
+                    ack_deadline = time.monotonic() + 15
+                    while not interrupt_release.exists() and time.monotonic() < ack_deadline:
+                        time.sleep(0.02)
+                    interrupt_release.unlink(missing_ok=True)
+                    write({"jsonrpc": "2.0", "id": interrupt_message["id"], "result": {}})
+                    write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                        "threadId": THREAD_ID,
+                        "turn": {"id": TURN_ID, "status": "interrupted", "error": {"message": "Codex interrupted this turn."}},
+                    }})
+                    break
+                active.unlink(missing_ok=True)
+                if not received_interrupt:
+                    return 3
             elif mode.endswith("-abort"):
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": THREAD_ID,
@@ -467,7 +564,22 @@ def main():
                             continue
                         incoming = json.loads(sys.stdin.readline())
                         if incoming.get("method") == "thread/items/list":
-                            write({"jsonrpc": "2.0", "id": incoming["id"], "result": {"data": [], "nextCursor": None}})
+                            entries = []
+                            for index, saved_turn in enumerate(serial_history().get("messages", []), start=1):
+                                turn_id = saved_turn["turnID"]
+                                entries.append({"turnId": turn_id, "item": {
+                                    "id": f"item_stationai_async_user_{index}", "type": "userMessage",
+                                    "content": [{"type": "text", "text": saved_turn["userMessage"]}],
+                                }})
+                                if index == 1:
+                                    entries.extend([
+                                        {"turnId": turn_id, "item": async_question_item()},
+                                        {"turnId": turn_id, "item": {
+                                            "id": "item_stationai_async_followup", "type": "agentMessage",
+                                            "phase": "final_answer", "text": "I can continue while you decide.",
+                                        }},
+                                    ])
+                            write({"jsonrpc": "2.0", "id": incoming["id"], "result": {"data": entries, "nextCursor": None}})
                         elif incoming.get("method") == "turn/steer":
                             params = incoming.get("params", {})
                             if params.get("threadId") != THREAD_ID or params.get("expectedTurnId") != TURN_ID:
@@ -512,6 +624,9 @@ def main():
                         except json.JSONDecodeError:
                             continue
                         if steer_request.get("method") == "thread/items/list":
+                            observe_history = Path(str(sys.argv[0]) + ".observe-history-while-active")
+                            if observe_history.exists():
+                                Path(str(sys.argv[0]) + ".history-read-while-active").touch()
                             write({"jsonrpc": "2.0", "id": steer_request.get("id"), "result": {"data": [], "nextCursor": None}})
                         elif steer_request.get("method") == "turn/steer":
                             params = steer_request.get("params", {})
@@ -713,7 +828,12 @@ def main():
                         "id": "item_fixture_dynamic_legacy", "type": "dynamicToolCall", "tool": "legacySummary",
                         "status": "inProgress", "arguments": {"input": "RAW_ARGUMENT_SECRET"},
                     }
-                    for tool_item in [mcp_item, dynamic_item, legacy_dynamic_item]:
+                    active_command_item = {
+                        "id": "item_fixture_active_long_command", "type": "commandExecution",
+                        "command": "long-command-name " + "argument-" * 40,
+                        "cwd": "/tmp/stationai-fixture", "status": "inProgress",
+                    }
+                    for tool_item in [mcp_item, dynamic_item, legacy_dynamic_item, active_command_item]:
                         write({"jsonrpc": "2.0", "method": "item/started", "params": {"threadId": THREAD_ID, "item": tool_item}})
                     ready = Path(str(sys.argv[0]) + ".tool-ready")
                     release = Path(str(sys.argv[0]) + ".tool-release")
@@ -729,7 +849,7 @@ def main():
                         return 3
                     release_latest.unlink(missing_ok=True)
                     write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
-                        **legacy_dynamic_item, "status": "completed", "success": True, "contentItems": [{"type": "inputText", "text": "RAW_RESULT_SECRET"}],
+                        **active_command_item, "status": "completed", "durationMs": 37,
                     }}})
                     while not release.exists() and time.monotonic() < deadline:
                         time.sleep(0.02)
@@ -737,6 +857,10 @@ def main():
                     if not release.exists():
                         return 3
                     release.unlink(missing_ok=True)
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
+                        **legacy_dynamic_item, "status": "completed", "success": True,
+                        "contentItems": [{"type": "inputText", "text": "RAW_RESULT_SECRET"}], "durationMs": 41,
+                    }}})
                     write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
                         **mcp_item, "status": "completed", "result": {"content": [{"type": "text", "text": "RAW_RESULT_SECRET"}]},
                     }}})
@@ -863,6 +987,63 @@ def main():
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
+            elif mode.endswith("-restart-question"):
+                asked = Path(str(sys.argv[0]) + ".asked")
+                if not asked.exists():
+                    question_request(901)
+                    asked.write_text("Provider process ended with a pending question.\n", encoding="utf-8")
+                    return 0
+                if turn_message and not turn_message.startswith("Continue this conversation by applying"):
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                        "threadId": THREAD_ID, "turnId": TURN_ID,
+                        "item": {"id": "item_followup_answer", "type": "agentMessage", "phase": "final_answer", "text": "Follow-up after private recovery."},
+                    }})
+                    write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                        "threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"},
+                    }})
+                    continue
+                expected_color_answer = "Custom approach" if "-nonblocking" in mode else "Green"
+                if not turn_message or expected_color_answer not in turn_message or "fixture-secret" not in turn_message:
+                    write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                        "threadId": THREAD_ID,
+                        "turn": {"id": TURN_ID, "status": "failed", "error": {"message": "Recovery turn omitted a re-entered answer."}},
+                    }})
+                    continue
+                private_activity = {
+                    "id": "item_private_recovery_command",
+                    "type": "commandExecution",
+                    "command": "printf fixture-secret",
+                    "cwd": "/tmp",
+                    "aggregatedOutput": "fixture-secret",
+                    "exitCode": 0,
+                    "status": "completed",
+                }
+                write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID, "item": private_activity,
+                }})
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID, "item": private_activity,
+                }})
+                write({"jsonrpc": "2.0", "method": "turn/diff/updated", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID,
+                    "diff": "diff --git a/private.txt b/private.txt\n+fixture-secret\n",
+                }})
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID,
+                    "item": {
+                        "id": "item_private_recovery_live_async", "type": "agentMessage",
+                        "phase": "final_answer", "delivery": "async", "text": "Private follow-up question",
+                        "questions": [{"title": "fixture-secret?", "options": ["fixture-secret"]}],
+                    },
+                }})
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID,
+                    "item": {"id": "item_recovered_answer", "type": "agentMessage", "phase": "final_answer", "text": "Recovered answer: Green; private token fixture-secret was applied."},
+                }})
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"},
+                }})
+                continue
             elif mode.endswith("-question"):
                 active = Path(str(sys.argv[0]) + ".turn-active")
                 release = Path(str(sys.argv[0]) + ".turn-release")
@@ -898,7 +1079,7 @@ def main():
                 turn_error = {"error": {"message": "Codex interrupted this turn." if turn_status == "interrupted" else "Codex failed this turn."}} if turn_status != "completed" else {}
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": "00000000-0000-0000-0000-000000000001",
-                    "turn": {"id": "turn_stationai_fixture", "status": turn_status, **turn_error},
+                    "turn": {"id": TURN_ID, "status": turn_status, **turn_error},
                 }})
             else:
                 question_request(901)
@@ -913,6 +1094,10 @@ def main():
                 "color": {"answers": ["Blue"]},
                 "token": {"answers": ["fixture-secret"]},
             }
+            if mode.endswith("-nonblocking-slow"):
+                expected_answers["color"] = {"answers": ["Custom approach"]}
+            if mode.endswith("-restart-question"):
+                expected_answers = {"token": {"answers": ["fixture-secret"]}}
             if mode.endswith("-user-question"):
                 expected_answers = {"question_action": {"answers": ["Continue"]}}
             failed = mode.endswith("-empty") or mode.endswith("-fail") or answers != expected_answers
@@ -928,17 +1113,23 @@ def main():
                 release.unlink(missing_ok=True)
                 if not was_released:
                     return 3
-            echoed = echoed_outcome_answer(turn_message)
-            if not failed and echoed:
+            if not failed and mode.endswith("-restart-question"):
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID, "turnId": TURN_ID,
-                    "item": {
-                        "id": "item_stationai_echoed_outcome",
-                        "type": "agentMessage",
-                        "phase": "final_answer",
-                        "text": echoed,
-                    },
+                    "item": {"id": "item_recovered_answer", "type": "agentMessage", "phase": "final_answer", "text": "Recovered answer: Green; private token fixture-secret was applied."},
                 }})
+            else:
+                echoed = echoed_outcome_answer(turn_message)
+                if not failed and echoed:
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                        "threadId": THREAD_ID, "turnId": TURN_ID,
+                        "item": {
+                            "id": "item_stationai_echoed_outcome",
+                            "type": "agentMessage",
+                            "phase": "final_answer",
+                            "text": echoed,
+                        },
+                    }})
             write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                 "threadId": THREAD_ID,
                 "turn": {"id": TURN_ID, "status": "interrupted" if mode.endswith("-interrupted") else ("failed" if failed else "completed"),
@@ -973,6 +1164,12 @@ def main():
                 write({"jsonrpc": "2.0", "id": message["id"], "result": {
                     "data": [{"item": item, "turnId": CHILD_TURN_ID} for item in CHILD_MESSAGES],
                     "nextCursor": None,
+                }})
+                continue
+            if Path(str(sys.argv[0]) + ".history-error").is_file():
+                write({"jsonrpc": "2.0", "id": message["id"], "error": {
+                    "code": -32009,
+                    "message": "Fixture history failed after receiving fixture-secret.",
                 }})
                 continue
             saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
@@ -1049,6 +1246,42 @@ def main():
                             {"id": f"item_user_fixture_{index}", "type": "userMessage", "content": user_content},
                             assistant if echoed else {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "phase": "final_answer", "text": answer_text(user_message)},
                         ])
+                        if "fixture-secret" in (user_message or ""):
+                            contents.append({
+                                "id": f"item_private_recovery_file_change_{index}",
+                                "type": "fileChange",
+                                "changes": [{"path": "private.txt", "kind": "update", "diff": "+fixture-secret"}],
+                                "status": "completed",
+                            })
+                            contents.append({
+                                "id": f"item_private_recovery_agent_{index}",
+                                "type": "collabAgentToolCall",
+                                "tool": "spawnAgent",
+                                "prompt": "Keep this private: fixture-secret",
+                                "status": "completed",
+                            })
+                            contents.append({
+                                "id": f"item_private_recovery_subagent_{index}",
+                                "type": "subAgentActivity",
+                                "agentThreadId": f"fixture-private-subagent-{index}",
+                                "kind": "completed",
+                                "agentPath": "/agents/fixture-secret",
+                            })
+                            contents.append({
+                                "id": f"item_private_recovery_async_{index}",
+                                "type": "agentMessage",
+                                "phase": "final_answer",
+                                "delivery": "async",
+                                "text": "Private follow-up question",
+                                "questions": [{"title": "fixture-secret?", "options": ["fixture-secret"]}],
+                            })
+                        elif user_message == "Follow up after private recovery.":
+                            contents.append({
+                                "id": f"item_followup_file_change_{index}",
+                                "type": "fileChange",
+                                "changes": [{"path": "follow-up.txt", "kind": "update", "diff": "+follow-up-visible-diff"}],
+                                "status": "completed",
+                            })
             else:
                 user_message = saved_history.get("userMessage") or (turn_message if answers else None)
                 user_images = saved_history.get("images", [])
@@ -1076,6 +1309,13 @@ def main():
                     {"id": "item_stationai_compaction", "type": "contextCompaction", "payload": {"opaque": "COMPACTION_OPAQUE_SENTINEL"}},
                     {"id": "item_stationai_final", "type": "agentMessage", "phase": "final_answer", "text": "Context compaction completed."},
                 ]
+            if "-long-history-" in mode:
+                contents = []
+                for index in range(1, 61):
+                    contents.extend([
+                        {"id": f"item_long_history_user_{index}", "type": "userMessage", "content": [{"type": "text", "text": f"Long history user {index:02d}."}]},
+                        {"id": f"item_long_history_assistant_{index}", "type": "agentMessage", "phase": "final_answer", "text": f"Long history assistant {index:02d}."},
+                    ])
             if mode.endswith("-tool-activity"):
                 contents.extend([
                     {"id": "item_fixture_mcp_call", "type": "mcpToolCall", "server": "fixture-server", "tool": "lookup", "status": "completed", "arguments": {"token": "RAW_ARGUMENT_SECRET"}, "result": {"content": [{"type": "text", "text": "RAW_RESULT_SECRET"}]}},
@@ -1090,8 +1330,32 @@ def main():
                     {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": saved_history.get("userMessage", "Plan the task.")} ]},
                     {"id": "item_stationai_plan", "type": "plan", "text": MARKDOWN_PLAN},
                 ]
+            entries = []
+            saved_turns = saved_history.get("messages") or saved_history.get("turns") or []
+            unassociated_restart_question = os.path.basename(sys.argv[0]).endswith("-unassociated-restart-question")
+            for index, item in enumerate(contents):
+                item_id = item.get("id", "")
+                turn_id = TURN_ID
+                if saved_turns:
+                    try:
+                        if item_id.startswith("item_long_history_"):
+                            turn_index = int(item_id.rsplit("_", 1)[1]) - 1
+                        elif item_id.rsplit("_", 1)[-1].isdigit():
+                            turn_index = int(item_id.rsplit("_", 1)[1]) - 1
+                        else:
+                            turn_index = min(index // 2, len(saved_turns) - 1)
+                    except (ValueError, IndexError):
+                        turn_index = -1
+                    if 0 <= turn_index < len(saved_turns):
+                        turn_id = saved_turns[turn_index].get("turnID", TURN_ID)
+                        if turn_index == 1:
+                            item["createdAt"] = "2026-10-26T12:34:00Z"
+                if unassociated_restart_question and item.get("type") == "userMessage":
+                    entries.append({"item": item})
+                else:
+                    entries.append({"item": item, "turnId": turn_id})
             write({"jsonrpc": "2.0", "id": message["id"], "result": {
-                "data": [{"item": item, "turnId": TURN_ID} for item in contents],
+                "data": entries,
                 "nextCursor": None,
             }})
     if not saw_turn:

@@ -317,7 +317,46 @@ enum StationAICLI {
             guard let id = tail.first else { throw CLIError.usage("A task ID is required.") }
             switch operation {
             case "history": return BridgeRequest(command: "conversation.history", arguments: ["taskID": .string(id)])
-            case "models": return BridgeRequest(command: "conversation.models", arguments: ["taskID": .string(id)])
+            case "present-image":
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--image", "--caption"])
+                guard let path = flags["--image"]?.first, !path.isEmpty else {
+                    throw CLIError.usage("Use: stationai conversation present-image <task-id> --image <path> [--caption <text>]")
+                }
+                let url = URL(fileURLWithPath: path)
+                let data = try Data(contentsOf: url)
+                guard data.count <= 10_000_000 else { throw CLIError.usage("The image must be smaller than 10 MB.") }
+                return BridgeRequest(command: "conversation.present-image", arguments: [
+                    "taskID": .string(id), "path": .string(path),
+                    "caption": .string(flags["--caption"]?.first ?? "")
+                ])
+            case "models":
+                switch Array(tail.dropFirst()) {
+                case []: return BridgeRequest(command: "conversation.models", arguments: ["taskID": .string(id)])
+                case ["--cached"]: return BridgeRequest(command: "conversation.models.cached", arguments: ["taskID": .string(id)])
+                default: throw CLIError.usage("Use: stationai conversation models <task-id> [--cached]")
+                }
+            case "effort":
+                let effortArguments = Array(tail.dropFirst())
+                if effortArguments.isEmpty {
+                    return BridgeRequest(command: "conversation.effort.get", arguments: ["taskID": .string(id)])
+                }
+                if effortArguments.count == 2, effortArguments[0] == "set" {
+                    return BridgeRequest(command: "conversation.effort.set", arguments: [
+                        "taskID": .string(id), "effort": .string(effortArguments[1]),
+                    ])
+                }
+                throw CLIError.usage("Use: stationai conversation effort <task-id> [set <low|medium|high|xhigh>]")
+            case "model":
+                let modelArguments = Array(tail.dropFirst())
+                if modelArguments.isEmpty {
+                    return BridgeRequest(command: "conversation.model.get", arguments: ["taskID": .string(id)])
+                }
+                if modelArguments.count == 2, modelArguments[0] == "set" {
+                    return BridgeRequest(command: "conversation.model.set", arguments: [
+                        "taskID": .string(id), "modelID": .string(modelArguments[1]),
+                    ])
+                }
+                throw CLIError.usage("Use: stationai conversation model <task-id> [set <model-id>]")
             case "stop": return BridgeRequest(command: "conversation.stop", arguments: ["taskID": .string(id)])
             case "provider":
                 switch Array(tail.dropFirst()) {
@@ -365,6 +404,25 @@ enum StationAICLI {
                 return BridgeRequest(command: "conversation.answer_async", arguments: [
                     "taskID": .string(id), "itemID": .string(tail[1]),
                     "answers": .array((flags["--answer"] ?? []).map(BridgeValue.string))
+                ])
+            case "answer-user-input":
+                guard tail.count >= 2 else { throw CLIError.usage("Use: stationai conversation answer-user-input <task-id> <request-id> --answer <question-id>=<answer> [--answer <question-id>=<answer>]...") }
+                let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--answer"])
+                var answers: [String: [String]] = [:]
+                for pair in flags["--answer"] ?? [] {
+                    guard let separator = pair.firstIndex(of: "="), separator != pair.startIndex else {
+                        throw CLIError.usage("Use --answer <question-id>=<answer>.")
+                    }
+                    let questionID = String(pair[..<separator])
+                    let answer = String(pair[pair.index(after: separator)...])
+                    guard !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        throw CLIError.usage("Question answers can't be blank.")
+                    }
+                    answers[questionID, default: []].append(answer)
+                }
+                return BridgeRequest(command: "conversation.answer_user_input", arguments: [
+                    "taskID": .string(id), "requestID": .string(tail[1]),
+                    "answers": .object(answers.mapValues { .array($0.map(BridgeValue.string)) })
                 ])
             case "send":
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode", "--model", "--answer", "--image"])
@@ -498,6 +556,7 @@ enum StationAICLI {
       stationai workspace repos list
       stationai settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>
       stationai conversation history <task-id>
+      stationai conversation present-image <task-id> --image <path> [--caption <text>]
       stationai conversation queue <task-id> --message <text>
       stationai conversation queue-list <task-id>
       stationai conversation queue-retry <task-id> <message-id>
@@ -505,7 +564,11 @@ enum StationAICLI {
       stationai conversation queue-steer <task-id> <message-id>
       stationai conversation steer <task-id> --message <text> [--image <path>]...
       stationai conversation answer-async <task-id> <item-id> --answer <text> [--answer <text>]...
+      stationai conversation answer-user-input <task-id> <request-id> --answer <question-id>=<answer> [--answer <question-id>=<answer>]...
       stationai conversation models <task-id>
+      stationai conversation effort <task-id> [set <low|medium|high|xhigh>]
+      stationai conversation model <task-id> [set <model-id>]
+      stationai conversation models <task-id> --cached
       stationai conversation stop <task-id>
       stationai conversation provider <task-id> [set <codex|claude>|capabilities]
       stationai conversation goal <task-id> <get|set|pause|resume|clear> [--text <objective>]
@@ -513,6 +576,7 @@ enum StationAICLI {
 
     Results are JSON. Conversation send emits JSON event lines followed by a final response.
     Conversation commands use the task's provider; tasks without one use Codex.
+    Conversation models --cached reads the last saved list without contacting the provider.
     """
 }
 

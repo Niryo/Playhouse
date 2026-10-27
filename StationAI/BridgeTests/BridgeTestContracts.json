@@ -1,7 +1,23 @@
 [
   {
+    "id": "test_codex_stop_interrupts_thinking_turn_and_waits_for_response",
+    "expectation": "Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted."
+  },
+  {
+    "id": "test_claude_stop_interrupts_thinking_turn_and_waits_for_response",
+    "expectation": "Clicking Stop during Claude reasoning immediately moves the task to Waiting Response and sends Claude's session-scoped control interrupt. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted."
+  },
+  {
+    "id": "test_codex_stop_rejection_restores_active_task",
+    "expectation": "If Codex rejects turn/interrupt while its turn is still active, Stop reports the provider failure and the task returns to In Progress; releasing the fixture lets the original turn complete normally into Waiting Response."
+  },
+  {
+    "id": "test_claude_stop_rejection_restores_active_task",
+    "expectation": "If Claude rejects its session control interrupt while its turn is still active, Stop reports the provider failure and the task returns to In Progress; releasing the fixture lets the original turn complete normally into Waiting Response."
+  },
+  {
     "id": "test_service_reports_bridge_version",
-    "expectation": "StationAI opens one main board window titled with its worktree label, shows the Playhouse logo on a solid #2C2F36 background, uses the same artwork for the Dock AppIcon, and the bridge reports API version 1."
+    "expectation": "StationAI opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, uses the same foreground artwork for the Dock AppIcon on a solid #2C2F36 background, and the bridge reports API version 1."
   },
   {
     "id": "test_worktree_app_profiles_isolate_identity_and_store",
@@ -61,7 +77,7 @@
   },
   {
     "id": "test_task_done_preserves_worktree_and_branch",
-    "expectation": "Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 10 seconds; rapid focus changes are suppressed. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button, whose click waits for the task lock, rechecks merge state, and moves the task to Done. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls."
+    "expectation": "Sending the first message derives an auto branch from the generated task title, with a prompt fallback when title generation fails. Every linked PR must be merged before the task can move to Done. App focus checks each linked PR no more than once per 20 seconds; rapid focus changes are coalesced into one refresh after the cooldown. An unmerged PR keeps its link and suppresses the completion button. PR links and the green completion button have hit targets of at least 30×30 points. After all PRs merge, a later focus check replaces their links with a green completion button; clicking it waits for the task lock and then trusts that already-confirmed merge state, moving the task to Done immediately without re-querying GitHub even if merge status changed while the lock was held. The CLI's task move command has no such cached state, so it always verifies merge status directly with GitHub before completing, including rechecking after waiting for a contended task lock, and reports unmerged pull requests instead of completing when a PR is not actually merged. Completion preserves the source branch and worktree without merging into the local target, retains conversation history, and exposes the task in the searchable read-only archive; the CLI searches matching local Codex JSONL session files, including current input_text and output_text message content, without loading conversation histories, while the visible archive searches both user input_text and assistant output_text, loads the newest 40 first, and reveals older tasks as the user scrolls."
   },
   {
     "id": "test_task_done_preserves_dirty_worktree",
@@ -81,7 +97,7 @@
   },
   {
     "id": "test_task_progress_reports_clear_on_failed_turns_and_questions",
-    "expectation": "Progress reports clear when turns fail or are interrupted and when Codex requests user input; a staged completed outcome is discarded if its turn fails, leaving the task Blocked. The task card removes the report while lifecycle states remain Blocked or Waiting Response. A generic blocking question appears in a confirmation sheet; the answer reaches Codex and the task resumes while its turn is active. A late UI answer callback preserves Waiting Response after the active-turn marker clears, verified after the helper records its skipped transition. First-thread instructions distinguish source repository paths from active task worktree paths, allow read-only inspection without attaching a repo, and reserve repository add APIs for changes that need a worktree."
+    "expectation": "Progress reports clear when turns fail or are interrupted and when Codex requests user input; a staged completed outcome is discarded if its turn fails, leaving the task Blocked. The task card removes the report while lifecycle states remain Blocked or In Progress. A blocking structured question appears inline and moves the task to Waiting Response; its answer resumes the active turn in In Progress, and the answered turn finishes in Waiting Response. First-thread instructions distinguish source repository paths from active task worktree paths, allow read-only inspection without attaching a repo, and reserve repository add APIs for changes that need a worktree."
   },
   {
     "id": "test_task_rename_persists_and_rejects_blank_title",
@@ -156,8 +172,24 @@
     "expectation": "Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details."
   },
   {
+    "id": "test_claude_resume_recovers_visible_history",
+    "expectation": "After a Claude turn and StationAI restart, if Claude cannot find its native resumed session, the retried fresh session receives the prior visible conversation from StationAI's persisted transcript together with the new prompt. Claude completes the turn, and fresh CLI/XPC history and the visible UI retain both turns. A normal Claude resume continues using the native session without receiving duplicate handoff context."
+  },
+  {
     "id": "test_claude_auto_branch_uses_generated_title_and_fallback",
     "expectation": "An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree."
+  },
+  {
+    "id": "test_conversation_runs_concurrent_claude_sends_in_parallel",
+    "expectation": "Claude turns for different conversations run at the same time instead of queueing on a shared turn slot. While one task's turn is held active, a second task's send starts in its own Claude process, runs its own tool, and completes with its own user and assistant messages before the held turn is released. Each turn's process uses its own task working directory, each conversation keeps only its own activity rows and measured durations, diagnostics record no queued-slot event and no prompt text, and the second conversation's answer is available while the first turn is still running."
+  },
+  {
+    "id": "test_conversation_isolates_failing_claude_turn_from_parallel_send",
+    "expectation": "A failing Claude turn does not disturb a conversation running in parallel. While one task's turn is held and then fails, a second task's send from a separate process completes on its own session and reaches Waiting Response; the failing task keeps its user message, records no final answer, and its provider process exit is the only failure in diagnostics. The UI shows the parallel answer after reopening its task with fresh history."
+  },
+  {
+    "id": "test_claude_stop_leaves_parallel_conversation_running",
+    "expectation": "Stopping one Claude turn pauses only that conversation while a second Claude conversation runs in parallel. The parallel conversation answers and keeps its own activity rows and measured durations while the first turn is still thinking; the stopped task moves to Waiting Response with no failure reason, records no answer, and leaves the parallel task's Waiting Response result untouched. A fresh CLI/XPC read confirms both results."
   },
   {
     "id": "test_conversation_serializes_concurrent_sends",
@@ -169,19 +201,31 @@
   },
   {
     "id": "test_conversation_sends_image_attachments",
-    "expectation": "Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. Diagnostics record image MIME and encoded size without storing image payloads."
+    "expectation": "Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a composer or transcript attachment opens the original image in a large viewer, which can be closed to return to the conversation."
   },
   {
     "id": "test_conversation_rejects_invalid_image_attachments",
     "expectation": "Malformed image data is rejected with a visible composer error and an invalid_argument bridge response, without creating conversation history or advancing task status."
   },
   {
+    "id": "test_claude_agent_image_published_during_active_turn",
+    "expectation": "While a Claude Code turn is active in the app process, the agent's CLI/XPC image publication joins that active Claude transcript turn; after the provider finishes, history places the image before the later assistant answer, and reopening the conversation renders the exact published image. This active-turn attribution is Claude-specific: Codex history is composed from ordered timeline entries, so published images are standalone assistant messages verified for persistence and rendering in test_conversation_sends_image_attachments."
+  },
+  {
+    "id": "test_codex_agent_image_published_during_active_turn",
+    "expectation": "While a Codex turn is active, CLI/XPC image publication avoids requesting provider history; the assistant image is tied to that turn, appears after its native response and before the next turn in ordered history, and remains visible after reopening the conversation."
+  },
+  {
     "id": "test_conversation_shows_mcp_and_dynamic_tool_activity",
-    "expectation": "MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. The conversation header shows only the newest active call; when it completes, the indicator falls back to the next still-active call. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed."
+    "expectation": "MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the submitted user message remains visible in the transcript. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed."
   },
   {
     "id": "test_conversation_shows_context_compaction",
     "expectation": "contextCompaction item/started and item/completed coalesce into one concise timeline event; missing summaries ignore malformed opaque payload fields and never render their data, and the event survives thread history reload with correct prompt/response ordering."
+  },
+  {
+    "id": "test_conversation_loads_newest_messages_before_older_history",
+    "expectation": "A 120-message conversation initially presents its newest 40 messages; scrolling to the top reveals older messages in batches without losing the newest messages or changing order. CLI/XPC history remains complete and ordered across fresh reads."
   },
   {
     "id": "test_conversation_shows_subagent_delegation",
@@ -189,27 +233,59 @@
   },
   {
     "id": "test_plan_mode_renders_markdown_in_conversation",
-    "expectation": "Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics."
+    "expectation": "Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics."
   },
   {
     "id": "test_conversation_mode_rejects_unknown_mode_without_starting_a_turn",
-    "expectation": "The composer and empty-state prompt show the selected Codex-reported model and update when the user changes it, while unsupported modes and malformed model IDs are rejected before creating history."
+    "expectation": "The composer keeps the committed model and effort stable while the picker is open, then updates when it is dismissed. Its popover lists provider models and includes an accessible discrete effort slider with Low, Medium, High, and Extra High choices, constrained by model-reported effort support when available; the visible opaque white knob has no focus border, the 6-point track is visibly thick, and the slider responds to dragging and keyboard arrows. The selected model is global across conversations for the active provider, persists through fresh CLI/XPC reads and reopening, and remains isolated between providers; a saved per-conversation model migrates into the global preference on first read; effort persists per conversation. Malformed model IDs and unsupported efforts are rejected without replacing prior choices. The UI opens a second conversation and shows the global model selection; unsupported modes and malformed model IDs are rejected before creating history."
   },
   {
     "id": "test_thread_goal_lifecycle_persists_through_cli_xpc",
     "expectation": "CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime."
   },
   {
+    "id": "test_claude_empty_question_request_is_rejected",
+    "expectation": "Claude AskUserQuestion requests with no questions are rejected through the control protocol, fail the turn, and mark the task Blocked; the UI shows the blocked task and its intervention indicator."
+  },
+  {
+    "id": "test_claude_pending_question_recovers_after_provider_process_restarts",
+    "expectation": "Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from StationAI history, clears pending state, and returns to Waiting Response."
+  },
+  {
+    "id": "test_claude_pending_plan_mode_question_recovers_in_plan_mode",
+    "expectation": "A Claude AskUserQuestion asked during a Plan mode turn persists its mode; after its provider process ends, answering resumes the saved Claude session in Plan mode rather than silently downgrading to Code mode, relaunching the recovery turn with --permission-mode plan."
+  },
+  {
+    "id": "test_claude_background_agent_keeps_turn_open_until_resolved",
+    "expectation": "A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early."
+  },
+  {
+    "id": "test_claude_private_recovery_failure_fails_closed",
+    "expectation": "If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, StationAI returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics."
+  },
+  {
+    "id": "test_codex_pending_question_recovers_after_provider_process_restarts",
+    "expectation": "Codex's pending structured question persists after its provider process exits and leaves the task in Waiting Response while unanswered; StationAI restores it from fresh CLI/XPC history, keeps provider switching blocked, requires the user to re-enter the secret once, and applies the answers in one recovery turn. CLI history and the live recovery event stream retain safe assistant text while redacting secret echoes and hiding provider activities and file-change diffs; a later non-sensitive Codex turn keeps its own diff, and the visible UI shows the safe response immediately and after app restart."
+  },
+  {
+    "id": "test_codex_secret_recovery_redaction_fails_closed",
+    "expectation": "When Codex recovery and a later thread-resume/history read error echo the full recovery prompt and answers, StationAI preserves the pending question while the task stays in Waiting Response, uses a generic visible error, and redacts private content from returned history, saved task state, diagnostics, and error text across fresh CLI/XPC reads and app restarts."
+  },
+  {
+    "id": "test_claude_questions_can_be_answered_after_switching_conversations",
+    "expectation": "Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the UI renders the question inline, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response."
+  },
+  {
     "id": "test_codex_questions_can_be_answered_over_cli_xpc",
-    "expectation": "MCP tool/requestUserInput structured questions raised in Plan mode use the existing question path, move the task into the conditional Waiting Response board section even when Codex marks the request non-blocking; reopening preserves its status, keyed answers resume In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome."
+    "expectation": "MCP tool/requestUserInput structured questions raised in Plan mode remain in the conversation and move the task to Waiting Response while unanswered; leaving and reopening the conversation preserves the pending question, keyed answers resume the provider turn in In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome."
   },
   {
     "id": "test_codex_nonblocking_question_keeps_task_in_progress",
-    "expectation": "Non-blocking structured questions remain visible without moving the task out of In Progress, then the answered turn returns to Waiting Response without an explicit completed outcome."
+    "expectation": "Non-blocking structured questions render inline, remain pending after switching to another conversation and returning, and keep the task In Progress through a fresh CLI/XPC history reconciliation after provider exit until answered; the resumed turn returns to Waiting Response. Free-text questions expose a selectable Other choice, select it when text is entered, keep it exclusive of listed answers, and deliver the free-text answer through CLI/XPC and the visible UI."
   },
   {
     "id": "test_codex_async_questions_render_and_reply_as_followup",
-    "expectation": "Async agentMessage questions retain choices and a free-text prompt in live updates and fresh CLI/XPC history, stay separate from later assistant text, and receive validated answers through the shared manager during and after an active turn. The UI shows inline answer cards instead of raw bullet text, blocks incomplete answers, preserves answered cards across reopening, and displays both submitted answers and responses."
+    "expectation": "Async agentMessage questions retain choices and a free-text prompt in live updates and fresh CLI/XPC history, retain accepted-turn model attribution during an active history reload, stay separate from later assistant text, and receive validated answers through the shared manager during and after an active turn. The UI shows inline answer cards instead of raw bullet text, blocks incomplete answers, preserves answered cards across reopening, and displays both submitted answers and responses."
   },
   {
     "id": "test_codex_async_question_queued_answer_retries",
@@ -241,7 +317,7 @@
   },
   {
     "id": "test_review_pr_conflicts_probe_and_verify",
-    "expectation": "Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 10 seconds. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action with its indicator artwork beside its PR link; the UI renders the artwork inside the action, keeps it beside the PR link, and gives both controls hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head."
+    "expectation": "Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 20 seconds, with focus events during cooldown coalesced into one trailing refresh. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action with its indicator artwork beside its PR link; the UI renders the artwork inside the action, keeps it beside the PR link, and gives both controls hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head."
   },
   {
     "id": "test_done_archive_displays_existing_pull_request_link",
@@ -257,7 +333,7 @@
   },
   {
     "id": "test_conversation_provider_selection_persists_and_validates",
-    "expectation": "New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; the choice persists across fresh CLI/XPC reads and an app relaunch, unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC."
+    "expectation": "New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC."
   },
   {
     "id": "test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary",
@@ -265,6 +341,22 @@
   },
   {
     "id": "test_claude_answer_stays_final_around_outcome_report",
-    "expectation": "Against the Claude Code protocol fixture, the answer Claude writes before running its StationAI progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn without an outcome ends in Waiting Response. After switching to Codex, the first Codex prompt hands off the whole Claude answer and excludes the commentary of answered turns, while a turn that recorded only commentary hands off its last commentary instead."
+    "expectation": "Against the Claude Code protocol fixture, the answer Claude writes before running its StationAI progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn without an outcome ends in Waiting Response. After switching to Codex, the first Codex prompt hands off the whole Claude answer and excludes the commentary of answered turns, while a turn that recorded only commentary hands off its last commentary instead. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default."
+  },
+  {
+    "id": "test_conversation_models_keep_newest_version_per_family",
+    "expectation": "The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Alias-only Claude entries are omitted. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control."
+  },
+  {
+    "id": "test_conversation_effort_dispatches_to_codex",
+    "expectation": "The selected effort persists through CLI/XPC reads and reaches Codex turn/start collaborationMode.settings.reasoningEffort; a model's advertised effort limit rejects unsupported requests before history is created. The UI selects Extra High and sends a Sol turn, then simulates a legacy transcript with no Codex turn metadata and sends a Luna turn; the old reply remains provider-only and the new reply is attributed to Luna. The latest reply shows its provider timestamp, while a legacy history item without createdAt has no timestamp label."
+  },
+  {
+    "id": "test_conversation_effort_dispatches_to_claude",
+    "expectation": "Claude's model picker omits Default and aliases, showing Opus 5.5 as the concrete latest choice. Selecting it changes the prompt and reply label to Claude · Opus 5.5, and later model changes preserve the old reply's model attribution. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh."
+  },
+  {
+    "id": "test_conversation_models_cache_and_refresh",
+    "expectation": "Codex and Claude filtered model lists persist across fresh CLI/XPC requests; an unavailable workspace fails refresh without clearing the previous cache. The visible Claude picker shows the seeded cached option before replacing it with the filtered versioned provider list, and retains an offline cached option when the provider executable is unavailable."
   }
 ]

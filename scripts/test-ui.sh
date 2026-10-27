@@ -74,11 +74,12 @@ if [[ "$(cat "${fixture_root}/.stationai-bridge-fixture" 2>/dev/null || true)" !
   exit 1
 fi
 codex_fixtures=(
-  ui empty nonblocking slow plan-slow interrupted abort success success-wait goal-success
+  ui empty nonblocking slow plan-slow interrupted abort success unique-turns-success goal-success
   title-success title-failure title-success-wait title-archive-ui hold
+  hold-interrupt hold-reject-interrupt
   progress-hold-release progress-hold-release-failed progress-hold-release-interrupted
-  progress-question progress-user-question store-write-success-wait concurrent-serial-success-wait
-  status-transition-ui nonblocking-slow async-question async-question-queued subagent context-compaction tool-activity markdown steer-queue-serial-success-wait
+  progress-question progress-user-question success-wait store-write-success-wait concurrent-serial-success-wait restart-question unassociated-restart-question
+  status-transition-ui nonblocking-slow nonblocking-restart-question async-question async-question-queued subagent context-compaction tool-activity long-history-success markdown steer-queue-serial-success-wait
 )
 for fixture in "${codex_fixtures[@]}"; do
   fixture_path="${fixture_root}/codex-fixture-${fixture}"
@@ -87,7 +88,9 @@ for fixture in "${codex_fixtures[@]}"; do
 done
 cp "${repository_root}/scripts/fixtures/claude-code-fixture.py" "${fixture_root}/claude-fixture-ui"
 chmod 755 "${fixture_root}/claude-fixture-ui"
-for fixture in subagent context-compaction tool-activity markdown async-question async-question-queued goal-success; do
+cp "${repository_root}/scripts/fixtures/claude-code-fixture.py" "${fixture_root}/claude-fixture-hold-reject-interrupt"
+chmod 755 "${fixture_root}/claude-fixture-hold-reject-interrupt"
+for fixture in subagent context-compaction tool-activity long-history-success markdown async-question async-question-queued goal-success; do
   fixture_path="${fixture_root}/codex-fixture-${fixture}"
   xattr -d com.apple.quarantine "${fixture_path}" 2>/dev/null || true
   xattr -d com.apple.provenance "${fixture_path}" 2>/dev/null || true
