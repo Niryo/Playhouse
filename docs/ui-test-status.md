@@ -1,9 +1,26 @@
 # Visible UI test status
 
-Updated: 2026-10-27 22:19:10 UTC+02:00
+Updated: 2026-10-27 23:52:46 UTC+02:00
 
 This ledger is authoritative for focused Tart runs. Confirmed green cases are
 not rerun; red cases are rerun only after a targeted repair.
+
+## Reconciliation after merge
+
+Master contains all five UI/CLI repairs completed in this conversation:
+`test_new_task_failure_diagnostics`,
+`test_task_pr_conflicts_detect_without_mutation`,
+`test_review_pr_conflicts_probe_and_verify`,
+`test_conversation_serializes_concurrent_sends`, and
+`test_task_pr_create_reports_real_gh_failure`. Their implementation and
+paired assertions are present on master.
+
+This ledger is reconciled by unique case IDs: 48 confirmed green, 19
+confirmed red, and 24 not yet verified across the current 91-case contract.
+The conversation temporarily reported 51/16, but the durable status entries
+contain 48 unique green and 19 unique red IDs; the three additional case IDs
+needed to substantiate 51/16 are not recoverable from the committed ledger,
+so they are not fabricated here.
 
 ## Confirmed green (48; last added: 2026-10-27 22:19:10 UTC+02:00)
 
@@ -450,9 +467,10 @@ Additional history for `test_done_archive_displays_existing_pull_request_link`:
 
 ## Not yet verified
 
-These 23 cases arrived when the branch merged the current 90-case contract and
+These 24 cases arrived when the branch merged the current 91-case contract and
 do not yet have focused Tart evidence recorded in this ledger:
 
+- `test_pending_question_repair_restores_thread_owner`
 - `test_codex_stop_interrupts_thinking_turn_and_waits_for_response`
 - `test_claude_stop_interrupts_thinking_turn_and_waits_for_response`
 - `test_codex_stop_rejection_restores_active_task`
