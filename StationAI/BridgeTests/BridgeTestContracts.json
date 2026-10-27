@@ -273,7 +273,7 @@
   },
   {
     "id": "test_codex_nonblocking_question_keeps_task_in_progress",
-    "expectation": "Non-blocking structured questions render inline, remain pending after switching to another conversation and returning, and keep the task In Progress until answered; the answered turn returns to Waiting Response without an explicit completed outcome."
+    "expectation": "Non-blocking structured questions render inline, remain pending after switching to another conversation and returning, and keep the task In Progress until answered; the answered turn returns to Waiting Response without an explicit completed outcome. Choices with free text expose a selectable Other radio option, select Other when text is entered, keep it mutually exclusive with listed answers, and accept the free-text answer through CLI/XPC and the visible UI."
   },
   {
     "id": "test_codex_async_questions_render_and_reply_as_followup",
