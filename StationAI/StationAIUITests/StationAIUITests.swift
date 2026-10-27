@@ -4215,7 +4215,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(element(containingAccessibilityText: "stationai-handoff-context").exists)
     }
 
-    // case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its StationAI progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn without an outcome ends in Waiting Response. After switching to Codex, the first Codex prompt hands off the whole Claude answer and excludes the commentary of answered turns, while a turn that recorded only commentary hands off its last commentary instead.
+    // case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its StationAI progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn without an outcome ends in Waiting Response. After switching to Codex, the first Codex prompt hands off the whole Claude answer and excludes the commentary of answered turns, while a turn that recorded only commentary hands off its last commentary instead. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
     func test_claude_answer_stays_final_around_outcome_report() throws {
         let claudeExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         let codexExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success")
@@ -4227,6 +4227,8 @@ final class StationAIUITests: XCTestCase {
         let created = try XCTUnwrap(try runCLI(["task", "create", "--title", "Claude answer UI", "--root", fixture.primary.path, "--provider", "claude"])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         openTask(named: "Claude answer UI")
+        let picker = element("model-picker-menu")
+        XCTAssertTrue(waitUntil({ (picker.value as? String)?.contains("Sonnet") == true }, timeout: 10), "A new Claude conversation defaults the picker to Sonnet without an explicit pick.")
         let composer = element("message-composer")
         let story = "BISCUIT-7 waited by the gate every evening. One night the boy finally came home."
         func send(_ text: String) {
@@ -4249,6 +4251,10 @@ final class StationAIUITests: XCTestCase {
         send("Tell me a very short dog story.")
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 20), "Claude's reported outcome should move the task to Review.")
         waitForSettledTurn()
+        let firstTurnHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: claudeExecutable.path + ".history"))) as? [String: Any])
+        let firstTurnArguments = try XCTUnwrap((firstTurnHistory["turns"] as? [[String: Any]])?.first?["arguments"] as? [String])
+        let firstTurnModelArgumentIndex = try XCTUnwrap(firstTurnArguments.firstIndex(of: "--model"))
+        XCTAssertEqual(firstTurnArguments[firstTurnModelArgumentIndex + 1], "sonnet", "Sending without an explicit pick should dispatch to Sonnet.")
         XCTAssertTrue(visibleTexts(containing: story).firstMatch.exists, "The story should be the visible answer, not collapsed commentary.")
         XCTAssertTrue(visibleTexts(containing: "The story is above.").firstMatch.exists, "The closing line belongs to the same answer.")
         element("codex-activity-disclosure").click()
