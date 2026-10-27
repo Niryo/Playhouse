@@ -3009,9 +3009,17 @@ struct TaskConversationView: View {
                 actionNotice = approvalNotice
             }
             messages = history.messages
-            userInputRequest = history.pendingUserInputRequest?.threadID == task.activeConversationID
+            let savedUserInputRequest = history.pendingUserInputRequest?.threadID == task.activeConversationID
                 ? history.pendingUserInputRequest
                 : nil
+            let currentProviderRequest = providerPendingUserInputRequest
+            let liveUserInputRequest = currentProviderRequest?.threadID == task.activeConversationID
+                ? currentProviderRequest
+                : nil
+            // A history read can finish after the provider has raised a question
+            // but before that request has been persisted. Keep the live request
+            // visible instead of letting that older snapshot clear it.
+            userInputRequest = savedUserInputRequest ?? liveUserInputRequest
             visibleConversationMessageCount = Self.initialVisibleConversationMessageCount
             restoreAnnotations(from: history.messages)
             answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
