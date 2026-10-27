@@ -5424,7 +5424,7 @@ class StationAIBridgeTests(unittest.TestCase):
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Waiting Response")
 
-    # case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation and returning, and keep the task In Progress until answered; the answered turn returns to Waiting Response without an explicit completed outcome.
+    # case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation and returning, and keep the task In Progress until answered; the answered turn returns to Waiting Response without an explicit completed outcome. Choices with free text expose a selectable Other radio option, select Other when text is entered, keep it mutually exclusive with listed answers, and accept the free-text answer through CLI/XPC and the visible UI.
     def test_codex_nonblocking_question_keeps_task_in_progress(self):
         task_id = self.create_task("Non-blocking question", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -5444,7 +5444,7 @@ class StationAIBridgeTests(unittest.TestCase):
         })
         process = subprocess.Popen(
             [str(arguments.cli), "conversation", "send", task_id, "--message", "Ask non-blocking questions.",
-             "--answer", "color=Blue", "--answer", "token=fixture-secret"],
+             "--answer", "color=Custom approach", "--answer", "token=fixture-secret"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, env=env,
         )
         events = []
@@ -5460,6 +5460,11 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(user_input_events[0]["payload"].get("taskStatus"), "In Progress")
         result = next(event for event in reversed(events) if "ok" in event)
         self.assertTrue(result["ok"], result)
+        self.assertTrue(
+            any(message.get("text") == "Answers received: Custom approach / fixture-secret."
+                for message in result.get("result", {}).get("messages", [])),
+            "The Codex provider path must receive the free-text Other answer.",
+        )
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Waiting Response")
 

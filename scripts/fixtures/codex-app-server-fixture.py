@@ -49,6 +49,8 @@ def write(value):
 
 def answer_text(user_message):
     mode = os.path.basename(sys.argv[0])
+    if mode.endswith("-nonblocking-slow"):
+        return "Answers received: Custom approach / fixture-secret."
     if mode.endswith("-restart-question") and not (user_message or "").startswith(
         "Continue this conversation by applying"
     ):
@@ -105,7 +107,7 @@ def question_request(request_id):
                 {"label": "Blue", "description": "Use blue."},
                 {"label": "Green", "description": "Use green."},
             ],
-            "isOther": False,
+            "isOther": True,
             "isSecret": False,
         },
         {
@@ -1085,6 +1087,8 @@ def main():
                 "color": {"answers": ["Blue"]},
                 "token": {"answers": ["fixture-secret"]},
             }
+            if mode.endswith("-nonblocking-slow"):
+                expected_answers["color"] = {"answers": ["Custom approach"]}
             if mode.endswith("-restart-question"):
                 expected_answers = {"token": {"answers": ["fixture-secret"]}}
             if mode.endswith("-user-question"):

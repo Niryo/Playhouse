@@ -7668,7 +7668,7 @@ final class StationAIUITests: XCTestCase {
         assertTaskVisible("Empty Codex questions", inColumn: "Waiting Response")
     }
 
-    // case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation and returning, and keep the task In Progress until answered; the answered turn returns to Waiting Response without an explicit completed outcome.
+    // case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation and returning, and keep the task In Progress until answered; the answered turn returns to Waiting Response without an explicit completed outcome. Choices with free text expose a selectable Other radio option, select Other when text is entered, keep it mutually exclusive with listed answers, and accept the free-text answer through CLI/XPC and the visible UI.
     func test_codex_nonblocking_question_keeps_task_in_progress() throws {
         _ = try runCLI(["task", "create", "--title", "Non-blocking question", "--root", fixture.primary.path])
         _ = try runCLI(["task", "create", "--title", "Another non-blocking conversation", "--root", fixture.primary.path])
@@ -7690,9 +7690,20 @@ final class StationAIUITests: XCTestCase {
         openTask(named: "Non-blocking question")
         XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 5), "Returning should restore the pending question inline.")
         XCTAssertEqual(try taskRecord(named: "Non-blocking question")?["status"] as? String, "In Progress")
-        app.buttons["Blue"].click()
-        element("ai-question-answer-token").click()
-        element("ai-question-answer-token").typeText("fixture-secret")
+        let otherOption = app.buttons["Other"]
+        XCTAssertTrue(otherOption.exists, "An allowed free-text answer must have an explicit Other radio choice.")
+        otherOption.click()
+        XCTAssertEqual(otherOption.value as? String, "selected")
+        let blueOption = element("ai-question-option-color-Blue")
+        XCTAssertEqual(blueOption.value as? String, "not selected")
+        let otherAnswer = app.textFields["Other answer"]
+        otherAnswer.click()
+        otherAnswer.typeText("Custom approach")
+        XCTAssertEqual(otherOption.value as? String, "selected", "Typing an Other answer must select the Other choice.")
+        XCTAssertEqual(blueOption.value as? String, "not selected", "Typing an Other answer must clear listed choices.")
+        let secretAnswer = element("ai-question-answer-token")
+        secretAnswer.click()
+        secretAnswer.typeText("fixture-secret")
         element("submit-ai-answers-button").click()
         let nonblockingDeadline = Date().addingTimeInterval(5)
         var nonblockingStatus: String?
@@ -7702,7 +7713,7 @@ final class StationAIUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.05)
         }
         XCTAssertEqual(nonblockingStatus, "In Progress", "A non-blocking answer should leave the task active until the turn completes.")
-        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Answers received: Custom approach / fixture-secret."].waitForExistence(timeout: 10), "The provider response should reflect the submitted Other answer.")
         XCTAssertEqual(try taskRecord(named: "Non-blocking question")?["status"] as? String, "Waiting Response")
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
