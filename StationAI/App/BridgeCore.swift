@@ -5646,7 +5646,7 @@ final class StationAIBridgeRuntime {
             return .failure(request, code: code, message: error.localizedDescription)
         } catch {
             var fields = requestFields
-            fields.merge(StationAIDiagnostics.errorFields(error)) { _, new in new }
+            fields.merge(StationAIDiagnostics.errorFields(error, includeUserInfoDetails: true)) { _, new in new }
             fields["errorCode"] = "operation_failed"
             fields["durationMilliseconds"] = Self.elapsedMilliseconds(since: requestStartedAt)
             StationAIDiagnostics.record("bridge.request.failed", fields: fields)
