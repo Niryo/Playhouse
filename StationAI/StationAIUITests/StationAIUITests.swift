@@ -6387,7 +6387,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Conversation shows and opens a subagent")
     }
 
-    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics.
+    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in, the question that started it stays pinned near the top of the transcript instead of being auto-scrolled past as the answer grows, consistent with the user message preceding its final answer in CLI/XPC history.
     func test_plan_mode_renders_markdown_in_conversation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -6479,6 +6479,13 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(assistantMarkdown.label.contains("workspace model"), "The partial plan should show its streamed content.")
         XCTAssertTrue(assistantMarkdown.label.contains("\n\n"), "Distinct Markdown paragraphs should retain visible spacing.")
         XCTAssertFalse(assistantMarkdown.label.contains("Final verification"), "The rest of the plan should wait for the fixture release.")
+        let planQuestion = app.staticTexts["Plan the task."]
+        let planTranscriptScrollView = element("conversation-scroll-view")
+        XCTAssertTrue(planQuestion.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitUntil({
+            planQuestion.frame.minY >= planTranscriptScrollView.frame.minY - 4
+                && planQuestion.frame.minY <= planTranscriptScrollView.frame.minY + 120
+        }, timeout: 5), "While the long plan is still streaming in below it, the question that started the turn should stay pinned near the top of the transcript instead of being auto-scrolled past; question=\(planQuestion.frame), viewport=\(planTranscriptScrollView.frame).")
         try Data().write(to: deltaRelease)
         XCTAssertTrue(waitUntil({ assistantMarkdown.label.contains("Final verification") }, timeout: 30), "The completed plan should replace the partial plan.")
         try FileManager.default.removeItem(at: deltaHold)
