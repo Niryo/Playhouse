@@ -31,6 +31,7 @@ struct KanbanBoardView: View {
     @State private var conflictResolutionTaskID: UUID?
     @State private var checkingMergedPullRequests = false
     @State private var mergedPullRequestCheckPending = false
+    @State private var mergedPullRequestCheckTimerScheduled = false
     @State private var lastMergedPullRequestCheckAt: Date?
     @State private var taskAwaitingUnmergedConfirmation: UUID?
     @State private var pullRequestError: String?
@@ -695,13 +696,27 @@ struct KanbanBoardView: View {
 
     private func checkReviewPullRequests() {
         let now = Date()
+        let minimumInterval: TimeInterval = 20
         if checkingMergedPullRequests {
-            if lastMergedPullRequestCheckAt.map({ now.timeIntervalSince($0) >= 10 }) ?? false {
-                mergedPullRequestCheckPending = true
-            }
+            mergedPullRequestCheckPending = true
             return
         }
-        guard lastMergedPullRequestCheckAt.map({ now.timeIntervalSince($0) >= 10 }) ?? true else { return }
+        if let lastMergedPullRequestCheckAt {
+            let remaining = minimumInterval - now.timeIntervalSince(lastMergedPullRequestCheckAt)
+            if remaining > 0 {
+                mergedPullRequestCheckPending = true
+                guard !mergedPullRequestCheckTimerScheduled else { return }
+                mergedPullRequestCheckTimerScheduled = true
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(remaining))
+                    mergedPullRequestCheckTimerScheduled = false
+                    guard mergedPullRequestCheckPending else { return }
+                    mergedPullRequestCheckPending = false
+                    checkReviewPullRequests()
+                }
+                return
+            }
+        }
         lastMergedPullRequestCheckAt = now
         checkingMergedPullRequests = true
         Task { @MainActor in
