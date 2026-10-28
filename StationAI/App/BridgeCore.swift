@@ -1362,11 +1362,14 @@ final class BoardTaskManager {
         if let status {
             let statusRawValue = status.rawValue
             descriptor = FetchDescriptor(
-                predicate: #Predicate { $0.statusRawValue == statusRawValue },
+                predicate: #Predicate { $0.statusRawValue == statusRawValue && !$0.isStandaloneChat },
                 sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
             )
         } else {
-            descriptor = FetchDescriptor(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+            descriptor = FetchDescriptor(
+                predicate: #Predicate { !$0.isStandaloneChat },
+                sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
+            )
         }
         let readFields = persistenceReadFields(operation: "BoardTaskManager.list")
         let readStartedAt = DispatchTime.now().uptimeNanoseconds
@@ -1443,6 +1446,23 @@ final class BoardTaskManager {
             ])
             return BoardTaskRecord(task: task)
         }
+    }
+
+    /// Returns the single hidden task backing the standalone chat sidebar, creating it the
+    /// first time it's needed. It has no repositories/worktree roots and never appears in
+    /// board.list/Kanban columns (see `list()`'s `isStandaloneChat` filter).
+    @discardableResult
+    func getOrCreateStandaloneChatTask(provider: ConversationProvider) async throws -> BoardTaskRecord {
+        let descriptor = FetchDescriptor<BoardTask>(predicate: #Predicate { $0.isStandaloneChat })
+        if let existing = try modelContext.fetch(descriptor).first {
+            return BoardTaskRecord(task: existing)
+        }
+        let task = BoardTask(title: "Chat", status: .backlog, workspaceRootPaths: [], conversationProvider: provider)
+        task.isStandaloneChat = true
+        modelContext.insert(task)
+        try await saveTaskContext(taskID: task.id)
+        StationAIDiagnostics.record("chat.task.created", fields: ["taskID": task.id.uuidString, "provider": provider.rawValue])
+        return BoardTaskRecord(task: task)
     }
 
     @discardableResult
@@ -3622,7 +3642,8 @@ final class ConversationManager {
                     taskID: taskID,
                     repositories: task.repositoryWorktrees,
                     contextFolders: task.contextFolderPaths,
-                    repositoryRootPath: repositoryRoot?.path
+                    repositoryRootPath: repositoryRoot?.path,
+                    isStandaloneChat: task.isStandaloneChat
                 ),
                 sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
                 sensitiveConversation: hasSensitiveRecoveryState,
@@ -4119,7 +4140,8 @@ final class ConversationManager {
                     taskID: taskID,
                     repositories: task.repositoryWorktrees,
                     contextFolders: task.contextFolderPaths,
-                    repositoryRootPath: settingsManager.defaultParentFolderURL?.path
+                    repositoryRootPath: settingsManager.defaultParentFolderURL?.path,
+                    isStandaloneChat: task.isStandaloneChat
                 )
             )
             _ = try await tasks.persistConversationID(taskID, provider: .codex, id: id)
@@ -4721,7 +4743,8 @@ final class ConversationManager {
                         taskID: taskID,
                         repositories: task.repositoryWorktrees,
                         contextFolders: task.contextFolderPaths,
-                        repositoryRootPath: repositoryRoot.path
+                        repositoryRootPath: repositoryRoot.path,
+                        isStandaloneChat: task.isStandaloneChat
                     )
                 )
                 phase = "thread-persistence"
@@ -4764,7 +4787,8 @@ final class ConversationManager {
                     taskID: taskID,
                     repositories: task.repositoryWorktrees,
                     contextFolders: task.contextFolderPaths,
-                    repositoryRootPath: repositoryRoot.path
+                    repositoryRootPath: repositoryRoot.path,
+                    isStandaloneChat: task.isStandaloneChat
                 ),
                 onDelta: { delta in
                     guard !hideSensitiveRecoveryPrompt else { return }
@@ -5362,6 +5386,46 @@ final class StationAIBridgeRuntime {
                     "outcome": .string(outcome),
                     "taskStatus": .string(try taskManager.taskModel(taskID).status.rawValue)
                 ])
+            case "chat.open":
+                result = try Self.value(await taskManager.getOrCreateStandaloneChatTask(provider: settings.defaultConversationProvider))
+            case "chat.page.list":
+                let chatManager = try StandaloneChatManager(dataDirectory: dataDirectory)
+                let limit = request.arguments["limit"]?.string.flatMap(Int.init) ?? 50
+                result = try Self.value(["pages": chatManager.listPages(limit: limit)])
+            case "chat.page.search":
+                let chatManager = try StandaloneChatManager(dataDirectory: dataDirectory)
+                result = try Self.value(["matches": chatManager.searchPages(query: request.requiredString("query"))])
+            case "chat.page.read":
+                let chatManager = try StandaloneChatManager(dataDirectory: dataDirectory)
+                let pageID = try request.requiredString("pageID")
+                let page = try chatManager.page(id: pageID)
+                result = .object([
+                    "page": try Self.value(page),
+                    "messages": try Self.value(chatManager.messages(pageID: pageID)),
+                ])
+            case "chat.page.new":
+                let chatManager = try StandaloneChatManager(dataDirectory: dataDirectory)
+                let page = try chatManager.createPage(title: request.requiredString("title"), provider: settings.defaultConversationProvider.rawValue)
+                result = try Self.value(["page": page])
+            case "chat.page.close-turn":
+                let chatManager = try StandaloneChatManager(dataDirectory: dataDirectory)
+                // The chat-id argument identifies which hidden task's turn this is (for logs/future
+                // multi-chat support); v1 has a single page store, so pages are always scoped to
+                // StandaloneChatManager.defaultChatID regardless of which task passed this signal.
+                _ = try request.requiredString("chatID")
+                let continues = request.arguments["continues"]?.bool ?? true
+                if !continues, (request.arguments["newTitle"]?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    throw BridgeCommandError(code: "invalid_argument", message: "A new page requires --new-title when --continues is false.")
+                }
+                let page = try chatManager.resolveTurnPage(
+                    provider: settings.defaultConversationProvider.rawValue,
+                    continues: continues,
+                    newTitle: request.arguments["newTitle"]?.string
+                )
+                if let summaryHint = request.arguments["summaryHint"]?.string, !summaryHint.isEmpty {
+                    try chatManager.setSummary(pageID: page.id, summary: summaryHint)
+                }
+                result = try Self.value(["page": page])
             case "task.rename":
                 let taskID = try request.requiredUUID("taskID")
                 let title = try request.requiredString("title")
@@ -5609,6 +5673,22 @@ final class StationAIBridgeRuntime {
                         eventHandler(BridgeEvent(requestID: request.id, type: update.type, payload: payload))
                     }
                 })
+                if try taskManager.taskModel(taskID).isStandaloneChat, let latestTurnID = history.messages.last?.turnID {
+                    // The agent's mandatory `chat page close-turn` tool call usually already ran
+                    // during the turn above, resolving the active page these messages belong to.
+                    // Fall back to creating one (mirroring resolveTurnPage's own default) so a
+                    // turn where the agent skipped or failed to call close-turn never silently
+                    // drops its messages from the searchable index.
+                    let chatManager = try StandaloneChatManager(dataDirectory: dataDirectory)
+                    let page = try chatManager.activePage() ?? chatManager.createPage(
+                        title: "New conversation",
+                        provider: settings.defaultConversationProvider.rawValue,
+                        closingCurrentActivePage: false
+                    )
+                    for message in history.messages where message.turnID == latestTurnID {
+                        try chatManager.appendMessage(pageID: page.id, turnID: latestTurnID, role: message.role.rawValue, text: message.text)
+                    }
+                }
                 result = try Self.value(history)
             default:
                 throw BridgeCommandError(code: "unknown_command", message: "Unknown command '\(request.command)'. Run 'stationai help' to list commands.")

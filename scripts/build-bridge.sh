@@ -41,6 +41,7 @@ shared_sources=(
   "${repository_root}/StationAI/App/ConversationModel.swift"
   "${repository_root}/StationAI/App/ClaudeCodeClient.swift"
   "${repository_root}/StationAI/App/ConversationTranscriptStore.swift"
+  "${repository_root}/StationAI/App/StandaloneChatStore.swift"
   "${repository_root}/StationAI/App/BridgeCore.swift"
   "${repository_root}/StationAI/Bridge/BridgeContract.swift"
 )

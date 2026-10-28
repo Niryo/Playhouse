@@ -1666,11 +1666,23 @@ enum TaskThreadDeveloperInstructions {
         taskID: UUID,
         repositories: [RepositoryWorktreeRecord] = [],
         contextFolders: [String] = [],
-        repositoryRootPath: String? = nil
+        repositoryRootPath: String? = nil,
+        isStandaloneChat: Bool = false
     ) -> String {
         let executable = cliExecutableURL().path
         let quotedExecutable = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
         let id = taskID.uuidString
+        if isStandaloneChat {
+            return """
+            This is a standalone, repo/worktree-free chat (not a task on the board) — do not call task progress, task outcome, or repository commands here. The conversation is split behind the scenes into titled "pages" so your live context stays small while the full history stays searchable. Decide this yourself as part of each normal reply; there is no separate classification step:
+            - If the user's message clearly starts a new, unrelated topic from what you were just discussing, call \(quotedExecutable) chat page new --title "<short title>" before replying, so this turn is filed under a fresh page.
+            - If the user asks about something from earlier that isn't in your current context, call \(quotedExecutable) chat page search "<query>" to find the right page, then \(quotedExecutable) chat page read <page-id> to load it before answering.
+            - At the end of every turn, record whether this message continued the active page or started a new one by running exactly one of:
+              \(quotedExecutable) chat page close-turn \(id) --continues true
+              \(quotedExecutable) chat page close-turn \(id) --continues false --new-title "<short title>"
+              Run this as a real command, not as text in your reply. If you already called chat page new above, use --continues false with the same title here.
+            """
+        }
         return """
         Report your current work on the StationAI task board using the StationAI CLI. Publish at every phase change, when starting or finishing a substantial tool call, and at least every 30 seconds during long commands, builds, tests, waits, or investigation. Keep the report current while a tool runs; after it finishes, replace it with the next active action. During tests, identify the active suite/case and position when known (for example, "CLI/XPC 3/8: task progress persistence"); during other work, name the concrete action and useful target. Keep each detail to a short subtitle, ideally under 80 characters. Do not report every tiny edit. Use these commands for this task:
         \(quotedExecutable) task progress publish \(id) --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail \"short detail\"]

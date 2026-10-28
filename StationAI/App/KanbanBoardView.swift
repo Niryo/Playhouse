@@ -39,12 +39,36 @@ struct KanbanBoardView: View {
     @State private var isShowingBoardSearch = false
     @State private var boardSearchText = ""
     @FocusState private var isBoardSearchFocused: Bool
+    @State private var isShowingChatSidebar = false
+    @State private var chatTask: BoardTask?
+    @State private var isOpeningChatSidebar = false
 
     private var conversationClients: ConversationClients {
         ConversationClients(codex: codexClient, claude: claudeClient)
     }
 
     var body: some View {
+        HStack(spacing: 0) {
+            mainContent
+            if isShowingChatSidebar, let chatTask {
+                Divider()
+                TaskConversationView(
+                    task: chatTask, isNewTask: false, isReadOnly: false,
+                    conflictResolutionRequested: false,
+                    onConflictResolutionChecked: { _ in }
+                ) {
+                    withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = false }
+                }
+                .frame(width: 420)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+                .id(chatTask.id)
+                .accessibilityIdentifier("chat-sidebar")
+            }
+        }
+        .animation(.easeInOut(duration: 0.22), value: isShowingChatSidebar)
+    }
+
+    private var mainContent: some View {
         Group {
             if let selectedTask {
                 TaskConversationView(
@@ -464,6 +488,20 @@ struct KanbanBoardView: View {
                 .accessibilityIdentifier("done-archive-button")
 
                 Button {
+                    openChatSidebar()
+                } label: {
+                    Label("Chat", systemImage: "bubble.left.and.bubble.right")
+                        .font(.system(size: 13, weight: .semibold))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                }
+                .buttonHoverPointer()
+                .help("Open the standalone chat")
+                .buttonStyle(.bordered)
+                .disabled(isOpeningChatSidebar)
+                .accessibilityIdentifier("chat-sidebar-button")
+
+                Button {
                     openNewTask()
                 } label: {
                     Label("New Task", systemImage: "plus")
@@ -634,6 +672,36 @@ struct KanbanBoardView: View {
             get: { saveError != nil },
             set: { if !$0 { saveError = nil } }
         )
+    }
+
+    private func openChatSidebar() {
+        if isShowingChatSidebar {
+            withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = false }
+            return
+        }
+        guard !isOpeningChatSidebar else { return }
+        if let chatTask {
+            withAnimation(.easeInOut(duration: 0.22)) {
+                self.chatTask = chatTask
+                isShowingChatSidebar = true
+            }
+            return
+        }
+        isOpeningChatSidebar = true
+        Task { @MainActor in
+            defer { isOpeningChatSidebar = false }
+            do {
+                let manager = BoardTaskManager(modelContext: modelContext)
+                let record = try await manager.getOrCreateStandaloneChatTask(
+                    provider: WorkspaceSettingsManager().defaultConversationProvider
+                )
+                let task = try manager.taskModel(record.id)
+                chatTask = task
+                withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = true }
+            } catch {
+                saveError = error.localizedDescription
+            }
+        }
     }
 
     private func openNewTask() {

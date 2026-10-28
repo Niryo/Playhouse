@@ -101,6 +101,10 @@ final class BoardTask {
     var draftImageDataURLsData: Data?
     var conversationActivityDurationsData: Data?
     var answeredAsyncQuestionIDsData: Data?
+    /// True for the single hidden task backing the standalone chat sidebar: excluded from
+    /// board.list/Kanban columns, has no repositories/worktrees, and uses chat-page developer
+    /// instructions instead of the repo-management/task-outcome ones.
+    var isStandaloneChat: Bool = false
 
     var answeredAsyncQuestionIDs: [String] {
         get {

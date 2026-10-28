@@ -1,5 +1,9 @@
 [
   {
+    "id": "test_standalone_chat_hidden_task_and_pages_round_trip",
+    "expectation": "The Chat button opens a hidden, repo/worktree-free task in a sliding sidebar that never appears on the board. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search."
+  },
+  {
     "id": "test_codex_stop_interrupts_thinking_turn_and_waits_for_response",
     "expectation": "Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted."
   },

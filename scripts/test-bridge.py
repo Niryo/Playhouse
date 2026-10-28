@@ -540,6 +540,52 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(current)["status"], "Review")
         return result
 
+    def complete_standalone_chat_fixture_turn(self, chat_task_id, message, continues=True, new_title=None, executable_name="codex-fixture-chat"):
+        """Drive one real provider turn on the hidden standalone chat task, simulating the
+        agent's mandatory `chat page close-turn` tool call instead of `task outcome`."""
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / executable_name
+        hold_marker = Path(str(executable) + ".hold-release")
+        hold_marker.touch()
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        environment = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        command = ["conversation", "send", chat_task_id, "--message", message]
+        active = Path(str(executable) + ".turn-active")
+        release = Path(str(executable) + ".turn-release")
+        active.unlink(missing_ok=True)
+        release.unlink(missing_ok=True)
+        process = self.start_cli(*command, extra_environment=environment)
+        try:
+            deadline = time.monotonic() + 90
+            close_turn_count = 0
+            while process.poll() is None and time.monotonic() < deadline:
+                if active.exists() and not release.exists():
+                    close_turn_args = [
+                        "chat", "page", "close-turn", chat_task_id,
+                        "--continues", "true" if continues else "false",
+                    ]
+                    if new_title:
+                        close_turn_args += ["--new-title", new_title]
+                    response, _ = self.call_cli(*close_turn_args, extra_environment=environment)
+                    self.assert_success(response)
+                    close_turn_count += 1
+                    release.write_text("Release the completed fixture turn.\n", encoding="utf-8")
+                time.sleep(0.02)
+            self.assertGreater(close_turn_count, 0, "The fixture should hold the turn until its chat page close-turn signal.")
+            response, _ = self.finish_cli(process, command)
+        finally:
+            if process.poll() is None:
+                release.write_text("Release the fixture turn.\n", encoding="utf-8")
+                process.communicate(timeout=20)
+            active.unlink(missing_ok=True)
+            release.unlink(missing_ok=True)
+            hold_marker.unlink(missing_ok=True)
+        return self.assert_success(response)
+
     def seed_done_task_pull_request(self, task_id, number=123, repository_index=0):
         repository_root = Path(__file__).resolve().parent.parent
         executable = self.data_directory / "seed-task-pr-link"
@@ -642,6 +688,78 @@ class StationAIBridgeTests(unittest.TestCase):
             expected_status=expected_status,
         )
         return response
+
+    # case-contract: test_standalone_chat_hidden_task_and_pages_round_trip | The Chat button opens a hidden, repo/worktree-free task in a sliding sidebar that never appears on the board. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search.
+    def test_standalone_chat_hidden_task_and_pages_round_trip(self):
+        opened = self.assert_success(self.call_cli("chat", "open")[0])
+        self.assertEqual(opened["title"], "Chat")
+        self.assertEqual(opened["repositoryWorktrees"], [])
+        self.assertEqual(opened["workspaceRoots"], [])
+        chat_task_id = opened["id"]
+
+        reopened = self.assert_success(self.call_cli("chat", "open")[0])
+        self.assertEqual(reopened["id"], chat_task_id, "Opening chat twice must reuse the same hidden task.")
+
+        tasks = self.assert_success(self.call_cli("task", "list")[0])["tasks"]
+        self.assertFalse(
+            any(task["id"] == chat_task_id for task in tasks),
+            "The hidden standalone chat task must never appear in board.list/task.list.",
+        )
+        fetched = self.assert_success(self.call_cli("task", "get", chat_task_id)[0])
+        self.assertEqual(fetched["id"], chat_task_id, "Reading the hidden task directly by ID still works.")
+
+        kyoto = self.assert_success(self.call_cli("chat", "page", "new", "--title", "Trip to Kyoto")[0])["page"]
+        self.assertEqual(kyoto["title"], "Trip to Kyoto")
+        self.assertEqual(kyoto["messageCount"], 0)
+
+        continued = self.assert_success(
+            self.call_cli("chat", "page", "close-turn", chat_task_id, "--continues", "true")[0]
+        )["page"]
+        self.assertEqual(continued["id"], kyoto["id"], "Continuing must append to the already-active page.")
+
+        recipes = self.assert_success(
+            self.call_cli(
+                "chat", "page", "close-turn", chat_task_id,
+                "--continues", "false", "--new-title", "Dinner recipes",
+            )[0]
+        )["page"]
+        self.assertNotEqual(recipes["id"], kyoto["id"], "A topic change must start a new page.")
+        self.assertEqual(recipes["title"], "Dinner recipes")
+
+        self.call_cli(
+            "chat", "page", "close-turn", chat_task_id, "--continues", "false",
+            expected_status=2,
+        )
+
+        pages = self.assert_success(self.call_cli("chat", "page", "list")[0])["pages"]
+        self.assertEqual({page["id"] for page in pages}, {kyoto["id"], recipes["id"]})
+
+        matches = self.assert_success(self.call_cli("chat", "page", "search", "Kyoto")[0])["matches"]
+        self.assertTrue(
+            any(match["page"]["id"] == kyoto["id"] for match in matches),
+            "Searching the old page's title should find it even after a newer page is active.",
+        )
+
+        read_back = self.assert_success(self.call_cli("chat", "page", "read", kyoto["id"])[0])
+        self.assertEqual(read_back["page"]["id"], kyoto["id"])
+        self.assertEqual(read_back["messages"], [])
+
+        # A real provider turn that continues the active page ("Dinner recipes") must persist
+        # both the user's message and the assistant's reply into that page, not just bookkeeping.
+        self.complete_standalone_chat_fixture_turn(chat_task_id, "What's a good side dish?", continues=True)
+        recipes_messages = self.assert_success(self.call_cli("chat", "page", "read", recipes["id"])[0])["messages"]
+        self.assertTrue(
+            any(message["role"] == "user" and message["text"] == "What's a good side dish?" for message in recipes_messages),
+            "The user's message should be persisted on the page the agent's close-turn call selected.",
+        )
+        self.assertTrue(
+            any(message["role"] == "assistant" and message["text"] for message in recipes_messages),
+            "The assistant's reply should also be persisted on that page.",
+        )
+        self.assertEqual(
+            self.assert_success(self.call_cli("chat", "page", "read", kyoto["id"])[0])["messages"], [],
+            "Messages from the recipes turn must not leak onto an unrelated page.",
+        )
 
     # case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, uses the same foreground artwork for the Dock AppIcon on a solid #2C2F36 background, and the bridge reports API version 1.
     def test_service_reports_bridge_version(self):

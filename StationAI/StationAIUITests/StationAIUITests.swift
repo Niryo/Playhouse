@@ -3469,6 +3469,111 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(try tasksFromBoardList().isEmpty, "A failed create must not leave a persisted task.")
     }
 
+    // case-contract: test_standalone_chat_hidden_task_and_pages_round_trip | The Chat button opens a hidden, repo/worktree-free task in a sliding sidebar that never appears on the board. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search.
+    func test_standalone_chat_hidden_task_and_pages_round_trip() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        XCTAssertTrue(element("chat-sidebar-button").exists, "The board header should offer a Chat button next to New Task.")
+        XCTAssertFalse(element("chat-sidebar").exists, "The chat sidebar should be closed by default.")
+
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10), "Clicking Chat should slide in the sidebar.")
+        XCTAssertTrue(element("message-composer").waitForExistence(timeout: 10), "The sidebar should reuse the standard chat composer.")
+        attachScreenshot(named: "Standalone chat sidebar opened")
+
+        XCTAssertTrue(try tasksFromBoardList().isEmpty, "The hidden standalone chat task must never appear on the board.")
+
+        let opened = try runCLI(["chat", "open"])["result"] as? [String: Any]
+        let chatTaskID = try XCTUnwrap(opened?["id"] as? String)
+        XCTAssertEqual(opened?["title"] as? String, "Chat")
+        XCTAssertEqual((opened?["repositoryWorktrees"] as? [Any])?.count, 0)
+
+        let kyoto = try XCTUnwrap(
+            (try runCLI(["chat", "page", "new", "--title", "Trip to Kyoto"])["result"] as? [String: Any])?["page"] as? [String: Any]
+        )
+        let continued = try XCTUnwrap(
+            (try runCLI(["chat", "page", "close-turn", chatTaskID, "--continues", "true"])["result"] as? [String: Any])?["page"] as? [String: Any]
+        )
+        XCTAssertEqual(continued["id"] as? String, kyoto["id"] as? String, "Continuing must append to the already-active page.")
+
+        let recipes = try XCTUnwrap(
+            (try runCLI(["chat", "page", "close-turn", chatTaskID, "--continues", "false", "--new-title", "Dinner recipes"])["result"] as? [String: Any])?["page"] as? [String: Any]
+        )
+        XCTAssertNotEqual(recipes["id"] as? String, kyoto["id"] as? String, "A topic change must start a new page.")
+
+        _ = try runCLI(["chat", "page", "close-turn", chatTaskID, "--continues", "false"], expectedStatus: 2)
+
+        let matches = try XCTUnwrap(
+            (try runCLI(["chat", "page", "search", "Kyoto"])["result"] as? [String: Any])?["matches"] as? [[String: Any]]
+        )
+        XCTAssertTrue(
+            matches.contains { (($0["page"] as? [String: Any])?["id"] as? String) == kyoto["id"] as? String },
+            "Searching the old page's title should find it even after a newer page is active."
+        )
+
+        // Drive one real provider turn and verify the user/assistant text actually lands on
+        // the active page via chat page read, and does not leak onto an unrelated page.
+        let fixtureSource = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureSource.path), "The prepared Codex fixture is missing or not executable.")
+        let chatFixtureExecutable = dataDirectory.appendingPathComponent("codex-fixture-chat-hold-release")
+        try FileManager.default.copyItem(at: fixtureSource, to: chatFixtureExecutable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: chatFixtureExecutable.path)
+        try Data().write(to: URL(fileURLWithPath: chatFixtureExecutable.path + ".hold-release"))
+        let activeMarker = URL(fileURLWithPath: chatFixtureExecutable.path + ".turn-active")
+        let releaseMarker = URL(fileURLWithPath: chatFixtureExecutable.path + ".turn-release")
+        try? FileManager.default.removeItem(at: activeMarker)
+        try? FileManager.default.removeItem(at: releaseMarker)
+
+        let sendProcess = Process()
+        sendProcess.executableURL = cliURL
+        sendProcess.arguments = ["conversation", "send", chatTaskID, "--message", "What's a good side dish?"]
+        var sendEnvironment = ProcessInfo.processInfo.environment
+        sendEnvironment["STATIONAI_DATA_DIRECTORY"] = dataDirectory.path
+        sendEnvironment["CODEX_HOME"] = dataDirectory.appendingPathComponent("codex-home").path
+        sendEnvironment["STATIONAI_WORKTREE_LABEL"] = "StationAI UI Test Worktree"
+        sendEnvironment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
+        sendEnvironment["STATIONAI_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
+        sendEnvironment["STATIONAI_BRIDGE_SERVICE_NAME"] = serviceName
+        sendEnvironment["STATIONAI_E2E_CODEX_EXECUTABLE"] = chatFixtureExecutable.path
+        sendProcess.environment = sendEnvironment
+        let sendStdout = Pipe()
+        let sendStderr = Pipe()
+        sendProcess.standardOutput = sendStdout
+        sendProcess.standardError = sendStderr
+        try sendProcess.run()
+        defer {
+            if sendProcess.isRunning {
+                try? "Release the active turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+                sendProcess.waitUntilExit()
+            }
+            try? FileManager.default.removeItem(at: activeMarker)
+            try? FileManager.default.removeItem(at: releaseMarker)
+        }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The fixture should hold the standalone chat turn open for a close-turn report.")
+        _ = try runCLI(["chat", "page", "close-turn", chatTaskID, "--continues", "true"])
+        try "Release the completed fixture turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+        sendProcess.waitUntilExit()
+        XCTAssertEqual(sendProcess.terminationStatus, 0, "The standalone chat turn should complete successfully.")
+
+        let recipesMessages = try XCTUnwrap(
+            (try runCLI(["chat", "page", "read", try XCTUnwrap(recipes["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
+        )
+        XCTAssertTrue(
+            recipesMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == "What's a good side dish?" },
+            "The user's message should be persisted on the page the agent's close-turn call selected."
+        )
+        XCTAssertTrue(
+            recipesMessages.contains { ($0["role"] as? String) == "assistant" && !(($0["text"] as? String) ?? "").isEmpty },
+            "The assistant's reply should also be persisted on that page."
+        )
+        let kyotoMessages = try XCTUnwrap(
+            (try runCLI(["chat", "page", "read", try XCTUnwrap(kyoto["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
+        )
+        XCTAssertTrue(kyotoMessages.isEmpty, "Messages from the recipes turn must not leak onto an unrelated page.")
+
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(waitUntil({ !element("chat-sidebar").exists }, timeout: 5), "Clicking Chat again should slide the sidebar back out.")
+    }
+
     // case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while the composer automatically saves an unsent prompt as it is typed; clearing the composer clears the stored draft, backing out needs no Save button, and reopening restores the draft without creating a branch or worktree. Blank drafts cannot be stored, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
     func test_task_prompt_draft_persists_after_back() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-title-success-wait").path

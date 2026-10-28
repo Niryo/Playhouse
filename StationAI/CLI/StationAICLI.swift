@@ -279,6 +279,49 @@ enum StationAICLI {
             default:
                 throw CLIError.usage("Unknown task operation '\(operation)'.")
             }
+        case "chat":
+            if rest == ["open"] {
+                return BridgeRequest(command: "chat.open")
+            }
+            guard rest.first == "page", rest.count >= 2 else {
+                throw CLIError.usage("Use: stationai chat open or stationai chat page list|search|read|new|close-turn ...")
+            }
+            let tail = Array(rest.dropFirst(2))
+            switch rest[1] {
+            case "list":
+                let flags = try parseFlags(tail, valueFlags: ["--limit"])
+                var arguments: [String: BridgeValue] = [:]
+                if let limit = flags["--limit"]?.first { arguments["limit"] = .string(limit) }
+                return BridgeRequest(command: "chat.page.list", arguments: arguments)
+            case "search":
+                let query = try firstPositional(tail)
+                return BridgeRequest(command: "chat.page.search", arguments: ["query": .string(query)])
+            case "read":
+                let id = try firstPositional(tail)
+                return BridgeRequest(command: "chat.page.read", arguments: ["pageID": .string(id)])
+            case "new":
+                let flags = try parseFlags(tail, valueFlags: ["--title"])
+                let title = try requiredFlag("--title", flags: flags).first!
+                return BridgeRequest(command: "chat.page.new", arguments: ["title": .string(title)])
+            case "close-turn":
+                guard let chatID = tail.first else {
+                    throw CLIError.usage("Use: stationai chat page close-turn <chat-id> --continues <true|false> [--new-title <title>]")
+                }
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--continues", "--new-title", "--summary-hint"])
+                let continuesValue = try requiredFlag("--continues", flags: flags).first!
+                guard continuesValue == "true" || continuesValue == "false" else {
+                    throw CLIError.usage("Use --continues true or --continues false.")
+                }
+                var arguments: [String: BridgeValue] = [
+                    "chatID": .string(chatID),
+                    "continues": .boolean(continuesValue == "true"),
+                ]
+                if let newTitle = flags["--new-title"]?.first { arguments["newTitle"] = .string(newTitle) }
+                if let summaryHint = flags["--summary-hint"]?.first { arguments["summaryHint"] = .string(summaryHint) }
+                return BridgeRequest(command: "chat.page.close-turn", arguments: arguments)
+            default:
+                throw CLIError.usage("Unknown chat page operation '\(rest[1])'.")
+            }
         case "workspace":
             if rest == ["repos", "list"] {
                 return BridgeRequest(command: "workspace.repositories.list")
@@ -552,6 +595,12 @@ enum StationAICLI {
       stationai task changes diff <task-id> --repository <path> --path <relative-path> --group <staged|working>
       stationai task delete <task-id>
       stationai task delete-check <task-id>
+      stationai chat open
+      stationai chat page list [--limit <n>]
+      stationai chat page search <query>
+      stationai chat page read <page-id>
+      stationai chat page new --title <title>
+      stationai chat page close-turn <chat-id> --continues <true|false> [--new-title <title>] [--summary-hint <text>]
       stationai workspace suggest --parent <path>
       stationai workspace repos list
       stationai settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>
