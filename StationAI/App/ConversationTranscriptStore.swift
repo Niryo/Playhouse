@@ -83,6 +83,9 @@ struct ConversationTranscript: Codable, Equatable {
     /// Codex turn IDs containing private recovery prompts. Codex-only tasks may
     /// not have a transcript segment to associate these IDs with.
     var sensitiveCodexTurnIDs: [String]?
+    /// Codex recovery turns whose assistant responses must stay hidden because
+    /// their recovered user input included a secret answer.
+    var sensitiveCodexSecretTurnIDs: [String]?
     /// Locally sanitized message copies for private Codex recovery turns. Raw
     /// provider messages can be replaced after restart without losing safe text.
     var sensitiveCodexTurnMessages: [String: [ConversationMessage]]?

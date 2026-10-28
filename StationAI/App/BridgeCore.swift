@@ -3334,6 +3334,7 @@ struct ConversationUpdate: Codable {
 
 @MainActor
 final class ConversationManager {
+    private var lastReportedTurnOutcomeByTaskID: [UUID: String] = [:]
     private let tasks: BoardTaskManager
     private let clients: ConversationClients
     private let settingsManager: WorkspaceSettingsManager
@@ -3498,6 +3499,11 @@ final class ConversationManager {
         let sensitiveValues = request.questions
             .filter(\.isSecret)
             .flatMap { answers[$0.id] ?? [] }
+            .map { value in
+                value.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        let requiresSensitiveAnswerRedaction = request.questions.contains(where: \.isSecret)
+        let sensitiveCodexTurnIDsBeforeRecovery = Set(try transcripts.read(taskID).sensitiveCodexTurnIDs ?? [])
         try transcripts.mutate(taskID) { transcript in
             transcript.pendingSensitiveUserInputRedaction = true
         }
@@ -3518,8 +3524,25 @@ final class ConversationManager {
             modelID: modelID,
             onUpdate: onUpdate,
             sensitiveUserInputAnswerValues: sensitiveValues,
+            requiresSensitiveAnswerRedaction: requiresSensitiveAnswerRedaction,
             hideSensitiveRecoveryPrompt: true
         )
+        if requiresSensitiveAnswerRedaction {
+            try transcripts.mutate(taskID) { transcript in
+                let recoveryTurnIDs = Set(transcript.sensitiveCodexTurnIDs ?? []).subtracting(sensitiveCodexTurnIDsBeforeRecovery)
+                var storedMessages = transcript.sensitiveCodexTurnMessages ?? [:]
+                for turnID in recoveryTurnIDs {
+                    storedMessages[turnID] = storedMessages[turnID]?.map { message in
+                        guard message.role == .assistant else { return message }
+                        var hidden = message
+                        hidden.text = "[Response to private answer hidden]"
+                        hidden.asyncQuestions = nil
+                        return hidden
+                    }
+                }
+                transcript.sensitiveCodexTurnMessages = storedMessages
+            }
+        }
         try clearPendingUserInputRequest(taskID: taskID, requestID: request.id)
         return true
     }
@@ -3781,10 +3804,18 @@ final class ConversationManager {
             }
             elements.append((segment, message.timelineOrder ?? offset, 0, .message(attributed)))
         }
+        let privateReminderTurnIDs = Set(codex?.messages.filter {
+            $0.role == .user && Self.isPrivateOutcomeReminderPrompt($0.text)
+        }.compactMap(\.turnID) ?? [])
+        let privateTranscriptReminderTurnIDs = Set(transcript.turns.compactMap { turn in
+            turn.messages.contains { $0.role == .user && Self.isPrivateOutcomeReminderPrompt($0.text) } ? turn.id : nil
+        })
         let allSensitiveTurnIDs = Set(transcript.sensitiveTurnIDs ?? [])
         let codexActivities = transcript.pendingSensitiveUserInputRedaction == true
             ? []
-            : (codex?.activities ?? []).filter { $0.turnID.map(sensitiveTurnIDs.contains) != true }
+            : (codex?.activities ?? []).filter {
+                $0.turnID.map { sensitiveTurnIDs.contains($0) || privateReminderTurnIDs.contains($0) } != true
+            }
         for activity in codexActivities where activity.isContextCompaction {
             let order = activity.timelineOrder ?? Int.max
             let precedingTurn = codex?.messages.last { ($0.timelineOrder ?? 0) < order }?.turnID
@@ -3792,6 +3823,7 @@ final class ConversationManager {
         }
         var localOrder = 0
         for turn in transcript.turns {
+            if privateTranscriptReminderTurnIDs.contains(turn.id) { continue }
             let segment = transcript.segmentIndex(of: turn.segmentID) ?? segments.count
             for message in turn.messages {
                 let position = transcriptOrder(for: message, fallback: localOrder)
@@ -3844,8 +3876,9 @@ final class ConversationManager {
         let activities: [ConversationActivity]
         let diff: ConversationTurnDiff?
         if segments.last?.provider == .claude {
-            let latestTurn = transcript.turns.last
-            let subagents = transcript.turns.dropLast().flatMap { $0.activities.filter(\.isSubagent) }
+            let visibleTurns = transcript.turns.filter { !privateTranscriptReminderTurnIDs.contains($0.id) }
+            let latestTurn = visibleTurns.last
+            let subagents = visibleTurns.dropLast().flatMap { $0.activities.filter(\.isSubagent) }
             activities = subagents + (latestTurn?.activities ?? []) + compactions
             diff = nil
         } else {
@@ -4433,7 +4466,9 @@ final class ConversationManager {
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in },
         onUserInput: @escaping (ConversationUserInputRequest) async -> Void = { _ in },
         sensitiveUserInputAnswerValues: [String] = [],
-        hideSensitiveRecoveryPrompt: Bool = false
+        requiresSensitiveAnswerRedaction: Bool = false,
+        hideSensitiveRecoveryPrompt: Bool = false,
+        hideInternalOutcomeReminder: Bool = false
     ) async throws -> ConversationHistory {
         let operationClient = client(for: try tasks.taskModel(taskID))
         operationClient.beginConversationOperation()
@@ -4444,6 +4479,7 @@ final class ConversationManager {
         do {
             history = try await tasks.withConversationTurnReservation(taskID) {
                 do {
+                    self.lastReportedTurnOutcomeByTaskID.removeValue(forKey: taskID)
                     let result = try await self.sendReserved(
                         taskID: taskID,
                         text: text,
@@ -4452,12 +4488,48 @@ final class ConversationManager {
                         requestedModelID: modelID,
                         userInputAnswers: userInputAnswers,
                         sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
+                        requiresSensitiveAnswerRedaction: requiresSensitiveAnswerRedaction,
                         hideSensitiveRecoveryPrompt: hideSensitiveRecoveryPrompt,
+                        hideInternalOutcomeReminder: hideInternalOutcomeReminder,
+                        deferMissingOutcomeStatus: true,
                         statusBeforeSubmission: statusBeforeSubmission,
                         onTurnStarting: onTurnStarting,
                         onUpdate: onUpdate,
                         onUserInput: onUserInput
                     )
+                    let hasPendingUserInput = (try? self.transcripts.read(taskID).pendingUserInputRequest) != nil
+                    for reminderNumber in 1...2 where self.lastReportedTurnOutcomeByTaskID[taskID] == nil && !hasPendingUserInput {
+                        let reminder = """
+                        \(Self.privateOutcomeReminderMarker)
+
+                        StationAI's previous request finished without reporting a task outcome. Do not repeat or change the completed work. If all requested work is finished and no user decision is needed, explicitly run the StationAI CLI task outcome command for this task with `completed`. If you need the user to answer or make a decision before work can continue, explicitly report `waiting-response`. This is reminder \(reminderNumber) of 2; report the outcome now.
+                        """
+                        do {
+                            _ = try await self.sendReserved(
+                                taskID: taskID,
+                                text: reminder,
+                                imageDataURLs: [],
+                                mode: mode,
+                                requestedModelID: modelID,
+                                userInputAnswers: [:],
+                                sensitiveUserInputAnswerValues: [],
+                                hideSensitiveRecoveryPrompt: true,
+                                hideInternalOutcomeReminder: true,
+                                deferMissingOutcomeStatus: true,
+                                statusBeforeSubmission: nil,
+                                onTurnStarting: nil,
+                                onUpdate: onUpdate,
+                                onUserInput: onUserInput
+                            )
+                        } catch {
+                            // A failed private reminder must not fail the original user turn;
+                            // the second explicit request still needs to be attempted.
+                        }
+                    }
+                    if self.lastReportedTurnOutcomeByTaskID[taskID] == nil && !hasPendingUserInput {
+                        _ = try await self.tasks.setLifecycleStatus(taskID, to: .waitingResponse)
+                    }
+                    self.lastReportedTurnOutcomeByTaskID.removeValue(forKey: taskID)
                     try? await self.tasks.clearPendingSubmittedPrompt(taskID)
                     return result
                 } catch {
@@ -4707,7 +4779,10 @@ final class ConversationManager {
             let ownTurnIDs = Set(transcript.turns(in: transcript.segments[index]).map(\.id) + transcript.segments[index].codexTurnIDs)
             return (history.messages.lastIndex { $0.turnID.map(ownTurnIDs.contains) == true } ?? -1) + 1
         } ?? 0
-        let unseen = history.messages.dropFirst(unseenStart).filter { $0.provider != provider }
+        let unseen = history.messages.dropFirst(unseenStart).filter {
+            $0.provider != provider && !Self.isPrivateOutcomeReminderPrompt($0.text)
+                && $0.text != Self.privateOutcomeReminderResponsePlaceholder
+        }
         return (segment.id, ConversationHandoff.context(for: provider, messages: Array(unseen)))
     }
 
@@ -4719,7 +4794,10 @@ final class ConversationManager {
         requestedModelID: String?,
         userInputAnswers: [String: [String]],
         sensitiveUserInputAnswerValues: [String],
+        requiresSensitiveAnswerRedaction: Bool = false,
         hideSensitiveRecoveryPrompt: Bool,
+        hideInternalOutcomeReminder: Bool,
+        deferMissingOutcomeStatus: Bool,
         statusBeforeSubmission: TaskStatus?,
         onTurnStarting: (() -> Void)?,
         onUpdate: @escaping (ConversationUpdate) -> Void,
@@ -4727,7 +4805,7 @@ final class ConversationManager {
     ) async throws -> ConversationHistory {
         let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let persistedText = hideSensitiveRecoveryPrompt
-            ? "[Private answer sent after restart]"
+            ? Self.privatePromptPlaceholder(for: normalizedText)
             : Self.redactingSensitiveText(normalizedText, values: sensitiveUserInputAnswerValues)
         guard !normalizedText.isEmpty || !imageDataURLs.isEmpty else { throw StationAIManagerError.invalidMessage }
         guard imageDataURLs.count <= 8, imageDataURLs.allSatisfy(Self.isValidImageDataURL) else {
@@ -4750,7 +4828,7 @@ final class ConversationManager {
         try tasks.prepareConversationTurnOutcome(taskID)
         defer { tasks.clearConversationTurnOutcome(taskID) }
         var persistedThreadID = task.activeConversationID
-        StationAIDiagnostics.record("conversation.send.started", fields: client.diagnosticFields(forThread: persistedThreadID ?? "", [
+        StationAIDiagnostics.recordAndFlush("conversation.send.started", fields: client.diagnosticFields(forThread: persistedThreadID ?? "", [
             "taskID": taskID.uuidString,
             "threadID": task.activeConversationID ?? "new",
             "taskStatus": task.status.rawValue,
@@ -4767,12 +4845,16 @@ final class ConversationManager {
         let repositoryRoot = try (task.workspaceRootPaths
             .compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
             .first ?? settingsManager.requireRepositoryRootFolder())
-        let shouldGenerateTitle = !normalizedText.isEmpty && ["Untitled task", "Generating title…"].contains(task.title)
+        let shouldGenerateTitle = !hideInternalOutcomeReminder
+            && !normalizedText.isEmpty
+            && ["Untitled task", "Generating title…"].contains(task.title)
         // A caller that already saved the submitted prompt (the composer does,
         // so it survives navigation) supplies the status it replaced.
         let priorStatus = statusBeforeSubmission ?? task.status
         let priorStatusMessage = task.statusMessage
-        _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
+        if !hideInternalOutcomeReminder {
+            _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
+        }
         let resolveTitleBeforeWorktree: Bool
         let workspace: ConversationWorkspaceContext
         let titleGeneration: Task<Void, Never>?
@@ -4816,10 +4898,10 @@ final class ConversationManager {
             }
             task = try await tasks.prepareRepositoryWorktrees(
                 taskID,
-                fallbackPrompt: persistedText,
+                fallbackPrompt: hideInternalOutcomeReminder ? (task.savedPrompt ?? persistedText) : persistedText,
                 resolvedTitle: resolvedWorktreeTitle ?? persistedText
             )
-            if !normalizedText.isEmpty {
+            if !hideInternalOutcomeReminder, !normalizedText.isEmpty {
                 _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
             }
             let roots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
@@ -4910,6 +4992,7 @@ final class ConversationManager {
             }
             var finalMessageCount = 0
             var leakedOutcome: String?
+            var pendingQuestionLifecycleRevision: Int?
             if onTurnStarting != nil {
                 client.markTurnStarting(threadID: threadID)
                 onTurnStarting?()
@@ -4932,12 +5015,13 @@ final class ConversationManager {
                     repositoryRootPath: repositoryRoot.path
                 ),
                 onDelta: { delta in
-                    guard !hideSensitiveRecoveryPrompt else { return }
+                    guard !hideSensitiveRecoveryPrompt, !hideInternalOutcomeReminder else { return }
                     onUpdate(ConversationUpdate(type: "text_delta", text: delta))
                 },
                 onFinalMessage: { answer in
                     let split = LeakedTurnOutcome.split(answer)
                     if split.taskID == taskID { leakedOutcome = split.outcome }
+                    guard !hideInternalOutcomeReminder else { return }
                     let message = Self.redactingSensitiveText(split.text, values: sensitiveUserInputAnswerValues)
                     // An answer that was only the echo still replaces the streamed text.
                     if let claudeTurnID, !message.isEmpty {
@@ -4949,7 +5033,7 @@ final class ConversationManager {
                     onUpdate(ConversationUpdate(type: "assistant_final", text: message))
                 },
                 onActivity: { activity in
-                    guard !hideSensitiveRecoveryPrompt else { return }
+                    guard !hideSensitiveRecoveryPrompt, !hideInternalOutcomeReminder else { return }
                     if let claudeTurnID { self.recordClaudeActivity(taskID: taskID, turnID: claudeTurnID, activity) }
                     if let durationMs = activity.durationMs {
                         Task { @MainActor in
@@ -4963,7 +5047,7 @@ final class ConversationManager {
                     onUpdate(ConversationUpdate(type: "activity", activity: activity))
                 },
                 onDiff: { diff in
-                    guard !hideSensitiveRecoveryPrompt else { return }
+                    guard !hideSensitiveRecoveryPrompt, !hideInternalOutcomeReminder else { return }
                     onUpdate(ConversationUpdate(type: "diff", diff: diff.unifiedDiff))
                 },
                 onHistory: { history in
@@ -4971,14 +5055,33 @@ final class ConversationManager {
                     var history = history
                     let matchedPrivateRecoveryTurnIDs = Set(history.messages.filter { message in
                         guard message.role == .user else { return false }
-                        let containsRecoveryPrompt = hideSensitiveRecoveryPrompt
-                            && message.text.contains(Self.privateRecoveryPromptMarker)
+                        let containsPrivatePrompt = hideSensitiveRecoveryPrompt
+                            && Self.isPrivateTaskPrompt(message.text)
+                            && !Self.isPrivateOutcomeReminderPrompt(message.text)
                         let containsSecretAnswer = sensitiveUserInputAnswerValues.contains {
                             !$0.isEmpty && message.text.contains($0)
                         }
-                        return containsRecoveryPrompt || containsSecretAnswer
+                        return containsPrivatePrompt || containsSecretAnswer
                     }.compactMap(\.turnID))
-                    if !matchedPrivateRecoveryTurnIDs.isEmpty {
+                    let privateOutcomeReminderTurnIDs = Set(history.messages.filter {
+                        $0.role == .user && Self.isPrivateOutcomeReminderPrompt($0.text)
+                    }.compactMap(\.turnID))
+                    let previousTranscript = try? self.transcripts.read(taskID)
+                    let previouslyPrivateTurnIDs = Set(previousTranscript?.sensitiveCodexTurnIDs ?? [])
+                    let previouslySecretRecoveryTurnIDs = Set(previousTranscript?.sensitiveCodexSecretTurnIDs ?? [])
+                    let currentSecretRecoveryTurnIDs = Set(history.messages.filter { message in
+                        guard message.role == .user else { return false }
+                        return sensitiveUserInputAnswerValues.contains { !$0.isEmpty && message.text.contains($0) }
+                    }.compactMap(\.turnID))
+                    let privateSecretRecoveryTurnIDs = previouslySecretRecoveryTurnIDs.union(currentSecretRecoveryTurnIDs)
+                    let previouslyPrivateReminderTurnIDs = Set((previousTranscript?.sensitiveCodexTurnMessages ?? [:]).compactMap { turnID, messages in
+                        messages.contains { $0.role == .user && Self.isPrivateOutcomeReminderPrompt($0.text) } ? turnID : nil
+                    })
+                    let allPrivateTurnIDs = matchedPrivateRecoveryTurnIDs
+                        .union(previouslyPrivateTurnIDs)
+                        .union(privateOutcomeReminderTurnIDs)
+                    let allPrivateReminderTurnIDs = privateOutcomeReminderTurnIDs.union(previouslyPrivateReminderTurnIDs)
+                    if !matchedPrivateRecoveryTurnIDs.isEmpty, previousTranscript != nil {
                         do {
                             var safeCodexMessages: [String: [ConversationMessage]] = [:]
                             if provider == .codex {
@@ -4987,10 +5090,19 @@ final class ConversationManager {
                                         .filter { $0.turnID == turnID }
                                         .map { message -> ConversationMessage in
                                             var safe = Self.redactingSensitiveMessages(
-                                                [message], turnIDs: [], values: sensitiveUserInputAnswerValues
+                                                [message], turnIDs: matchedPrivateRecoveryTurnIDs, values: sensitiveUserInputAnswerValues
                                             )[0]
                                             if message.role == .user {
-                                                safe.text = "[Private answer sent after restart]"
+                                                safe.text = Self.privatePromptPlaceholder(for: message.text)
+                                                safe.asyncQuestions = nil
+                                            } else {
+                                                let redactedText = Self.redactingSensitiveText(message.text, values: sensitiveUserInputAnswerValues)
+                                                let stillContainsSecret = sensitiveUserInputAnswerValues.contains {
+                                                    !$0.isEmpty && redactedText.contains($0)
+                                                }
+                                                safe.text = privateSecretRecoveryTurnIDs.contains(turnID) || stillContainsSecret
+                                                    ? "[Response to private answer hidden]"
+                                                    : redactedText
                                                 safe.asyncQuestions = nil
                                             }
                                             return safe
@@ -5001,6 +5113,7 @@ final class ConversationManager {
                                 transcript.sensitiveTurnIDs = Array(Set(transcript.sensitiveTurnIDs ?? []).union(matchedPrivateRecoveryTurnIDs)).sorted()
                                 if provider == .codex {
                                     transcript.sensitiveCodexTurnIDs = Array(Set(transcript.sensitiveCodexTurnIDs ?? []).union(matchedPrivateRecoveryTurnIDs)).sorted()
+                                    transcript.sensitiveCodexSecretTurnIDs = Array(Set(transcript.sensitiveCodexSecretTurnIDs ?? []).union(currentSecretRecoveryTurnIDs)).sorted()
                                     var storedMessages = transcript.sensitiveCodexTurnMessages ?? [:]
                                     storedMessages.merge(safeCodexMessages) { _, new in new }
                                     transcript.sensitiveCodexTurnMessages = storedMessages
@@ -5012,12 +5125,25 @@ final class ConversationManager {
                         }
                     }
                     let currentTranscript = try? self.transcripts.read(taskID)
-                    let safeMessages = history.messages.map { message -> ConversationMessage in
+                    let safeMessages = history.messages.filter { message in
+                        guard let turnID = message.turnID else { return true }
+                        return !privateOutcomeReminderTurnIDs.contains(turnID)
+                    }.map { message -> ConversationMessage in
+                        if let turnID = message.turnID, allPrivateTurnIDs.contains(turnID) {
+                            var privateMessage = message
+                            privateMessage.text = message.role == .user
+                                ? Self.privatePromptPlaceholder(for: message.text)
+                                : (allPrivateReminderTurnIDs.contains(turnID)
+                                    ? Self.privateOutcomeReminderResponsePlaceholder
+                                    : "[Response to private answer hidden]")
+                            privateMessage.asyncQuestions = nil
+                            return privateMessage
+                        }
                         if hideSensitiveRecoveryPrompt,
                            message.role == .user,
-                           message.text.contains(Self.privateRecoveryPromptMarker) {
+                           Self.isPrivateTaskPrompt(message.text) {
                             var privatePrompt = message
-                            privatePrompt.text = "[Private answer sent after restart]"
+                            privatePrompt.text = Self.privatePromptPlaceholder(for: message.text)
                             privatePrompt.asyncQuestions = nil
                             return privatePrompt
                         }
@@ -5026,7 +5152,7 @@ final class ConversationManager {
                             redactAllMessages: currentTranscript?.pendingSensitiveUserInputRedaction == true
                         )[0]
                     }
-                    let hideProviderDetails = hideSensitiveRecoveryPrompt
+                    let hideProviderDetails = hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder
                         || currentTranscript?.pendingSensitiveUserInputRedaction == true
                     let modelIDs = currentTranscript?.segments.reduce(into: [String: String]()) { result, segment in
                         result.merge(segment.codexTurnModelIDs) { existing, _ in existing }
@@ -5041,7 +5167,11 @@ final class ConversationManager {
                     }
                     history = ConversationHistory(
                         messages: attributedMessages,
-                        activities: hideProviderDetails ? [] : history.activities,
+                        activities: hideProviderDetails
+                            ? []
+                            : history.activities.filter { activity in
+                                activity.turnID.map { !allPrivateTurnIDs.contains($0) } ?? true
+                            },
                         diff: hideProviderDetails ? nil : history.diff,
                         answeredAsyncQuestionIDs: (try? self.tasks.answeredAsyncQuestionIDs(taskID: taskID)) ?? [],
                         pendingUserInputRequest: history.pendingUserInputRequest,
@@ -5053,6 +5183,14 @@ final class ConversationManager {
                     onUpdate(ConversationUpdate(type: "action_notice", message: approvalNotice))
                 },
                 onUserInput: { request async in
+                    if hideInternalOutcomeReminder {
+                        client.rejectUserInput(
+                            requestID: request.id,
+                            threadID: request.threadID,
+                            message: "This is a private StationAI outcome reminder. Do not ask the user here; report `waiting-response` if you need an answer, or `completed` if the work is finished."
+                        )
+                        return
+                    }
                     do {
                         try self.persistPendingUserInputRequest(request, taskID: taskID)
                     } catch {
@@ -5066,6 +5204,9 @@ final class ConversationManager {
                     let lifecycle = request.isBlocking
                         ? try? await self.tasks.transitionLifecycleStatus(taskID, from: .inProgress, to: .waitingResponse)
                         : nil
+                    if let revision = lifecycle ?? nil {
+                        pendingQuestionLifecycleRevision = revision
+                    }
                     let status = try? await self.tasks.clearProgressReport(taskID)
                     onUpdate(ConversationUpdate(
                         type: "user_input",
@@ -5087,6 +5228,7 @@ final class ConversationManager {
                     await onUserInput(request)
                 },
                 onSteerMessage: { message, images in
+                    guard !hideInternalOutcomeReminder else { return }
                     if claudeTurnID != nil {
                         self.recordClaudeMessage(taskID: taskID, turnID: claudeTurnID, modelID: modelID, ConversationMessage(
                             id: UUID().uuidString.lowercased(), role: .user, text: message, imageDataURLs: images
@@ -5095,6 +5237,7 @@ final class ConversationManager {
                     onUpdate(ConversationUpdate(type: "steered_message", message: message, imageDataURLs: images))
                 },
                 onProgressMessage: { message in
+                    guard !hideInternalOutcomeReminder else { return }
                     var safeMessage = message
                     safeMessage.text = Self.redactingSensitiveText(message.text, values: sensitiveUserInputAnswerValues)
                     safeMessage.asyncQuestions = message.asyncQuestions?.map { question in
@@ -5145,8 +5288,31 @@ final class ConversationManager {
             phase = "worktree-finalization"
             phase = "review-status-persistence"
             let reportedOutcome = try await tasks.finishConversationTurnOutcome(taskID) ?? leakedOutcome
-            let finalStatus: TaskStatus = reportedOutcome == "completed" ? .review : .waitingResponse
-            _ = try await tasks.setLifecycleStatus(taskID, to: finalStatus)
+            lastReportedTurnOutcomeByTaskID[taskID] = reportedOutcome
+            if reportedOutcome == nil, deferMissingOutcomeStatus, let revision = pendingQuestionLifecycleRevision,
+               let stillPending = try? transcripts.read(taskID).pendingUserInputRequest {
+                // The turn completed without reporting an outcome while a structured
+                // question it raised is still unanswered. Undo the immediate
+                // waiting-response flip so the outcome reminder loop — not a stray
+                // unanswered question — decides this task's fate, and downgrade the
+                // saved request so reopening the conversation doesn't re-force it.
+                _ = try? await tasks.restoreLifecycleStatus(taskID, to: .inProgress, ifRevision: revision)
+                if stillPending.isBlocking {
+                    try? transcripts.mutate(taskID) { transcript in
+                        guard transcript.pendingUserInputRequest?.id == stillPending.id else { return }
+                        transcript.pendingUserInputRequest = ConversationUserInputRequest(
+                            id: stillPending.id,
+                            threadID: stillPending.threadID,
+                            questions: stillPending.questions,
+                            isBlocking: false,
+                            mode: stillPending.mode
+                        )
+                    }
+                }
+            } else if reportedOutcome != nil || !deferMissingOutcomeStatus {
+                let finalStatus: TaskStatus = reportedOutcome == "completed" ? .review : .waitingResponse
+                _ = try await tasks.setLifecycleStatus(taskID, to: finalStatus)
+            }
         } catch {
             await titleGeneration?.value
             for (activityID, durationMs) in persistedThreadID.map({ client.lastTurnActivityDurations(threadID: $0) }) ?? [:] {
@@ -5156,7 +5322,8 @@ final class ConversationManager {
                     durationMs: durationMs
                 )
             }
-            var fields = hideSensitiveRecoveryPrompt
+            let hideInternalReminderDetails = hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder
+            var fields = hideInternalReminderDetails
                 ? ["error": "Private conversation recovery turn failed."]
                 : StationAIDiagnostics.errorFields(
                     error,
@@ -5172,15 +5339,17 @@ final class ConversationManager {
             let shouldKeepResumable = client.isPreparingForApplicationTermination
             let wasUserInterrupted = persistedThreadID.map { client.wasLastTurnInterrupted(threadID: $0) } ?? false
             let shouldKeepWaiting = shouldKeepResumable || wasUserInterrupted
-            let safeFailureMessage = hideSensitiveRecoveryPrompt
-                ? "The private answer could not be applied. Please answer the question again."
+            let safeFailureMessage = hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder
+                ? (hideInternalOutcomeReminder
+                    ? "The private outcome reminder could not be completed."
+                    : "The private answer could not be applied. Please answer the question again.")
                 : Self.redactingSensitiveText(error.localizedDescription, values: sensitiveUserInputAnswerValues)
             let pendingQuestion = try? transcripts.read(taskID).pendingUserInputRequest
             let hasPendingBlockingQuestion = pendingQuestion?.isBlocking == true
             let failureStatus: TaskStatus
             if hasPendingBlockingQuestion || shouldKeepWaiting {
                 failureStatus = .waitingResponse
-            } else if hideSensitiveRecoveryPrompt {
+            } else if hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder {
                 failureStatus = .inProgress
             } else {
                 failureStatus = .blocked
@@ -5193,7 +5362,7 @@ final class ConversationManager {
                     : (wasUserInterrupted ? nil : (hasPendingBlockingQuestion ? "Waiting for your saved question to be answered." : safeFailureMessage))
             )
             StationAIDiagnostics.record("conversation.send.failed", fields: fields)
-            if hideSensitiveRecoveryPrompt || !sensitiveUserInputAnswerValues.isEmpty {
+            if hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder || !sensitiveUserInputAnswerValues.isEmpty {
                 throw BridgeCommandError(code: "operation_failed", message: safeFailureMessage)
             }
             throw error
@@ -5306,6 +5475,23 @@ final class ConversationManager {
     }
 
     private static let privateRecoveryPromptMarker = "Continue this conversation by applying the user's answer to the pending question"
+    private static let privateOutcomeReminderMarker = "StationAI internal outcome reminder:"
+    private static let privateOutcomeReminderPlaceholder = "[StationAI private outcome reminder hidden]"
+    private static let privateOutcomeReminderResponsePlaceholder = "[StationAI private outcome response hidden]"
+
+    private static func isPrivateTaskPrompt(_ text: String) -> Bool {
+        text.contains(privateRecoveryPromptMarker) || text.contains(privateOutcomeReminderMarker)
+    }
+
+    private static func privatePromptPlaceholder(for text: String) -> String {
+        isPrivateOutcomeReminderPrompt(text)
+            ? privateOutcomeReminderPlaceholder
+            : "[Private answer sent after restart]"
+    }
+
+    private static func isPrivateOutcomeReminderPrompt(_ text: String) -> Bool {
+        text.contains(privateOutcomeReminderMarker) || text.contains(privateOutcomeReminderPlaceholder)
+    }
 
     private static func redactingSensitiveText(_ text: String, values: [String]) -> String {
         values.filter { !$0.isEmpty }.sorted { $0.count > $1.count }.reduce(text) { result, value in
@@ -5324,10 +5510,14 @@ final class ConversationManager {
         transcript: ConversationTranscript
     ) -> [ConversationMessage] {
         let privateTurnIDs = sensitiveCodexTurnIDs(transcript)
+        let privateReminderTurnIDs = Set(messages.filter {
+            $0.role == .user && isPrivateOutcomeReminderPrompt($0.text)
+        }.compactMap(\.turnID))
         let safeMessagesByTurn = transcript.sensitiveCodexTurnMessages ?? [:]
         var emittedSafeTurnIDs = Set<String>()
         var visible: [ConversationMessage] = []
         for message in messages {
+            if message.turnID.map(privateReminderTurnIDs.contains) == true { continue }
             guard let turnID = message.turnID, privateTurnIDs.contains(turnID) else {
                 visible.append(message)
                 continue
@@ -5339,8 +5529,10 @@ final class ConversationManager {
             } else {
                 var placeholder = message
                 placeholder.text = message.role == .user
-                    ? "[Private answer sent after restart]"
-                    : "[Response to private answer hidden]"
+                    ? privatePromptPlaceholder(for: message.text)
+                    : (privateReminderTurnIDs.contains(turnID)
+                        ? privateOutcomeReminderResponsePlaceholder
+                        : "[Response to private answer hidden]")
                 placeholder.asyncQuestions = nil
                 visible.append(placeholder)
             }
@@ -5364,14 +5556,19 @@ final class ConversationManager {
         values: [String] = [],
         redactAllMessages: Bool = false
     ) -> [ConversationMessage] {
-        messages.map { message in
+        let privateReminderTurnIDs = Set(messages.filter {
+            $0.role == .user && isPrivateOutcomeReminderPrompt($0.text)
+        }.compactMap(\.turnID))
+        return messages.map { message in
             let matchesTurn = message.turnID.map(turnIDs.contains) ?? false
             let matchesValue = values.contains { !$0.isEmpty && message.text.contains($0) }
             var redacted = message
             if redactAllMessages || matchesTurn {
                 redacted.text = message.role == .user
-                    ? "[Private answer sent after restart]"
-                    : "[Response to private answer hidden]"
+                    ? privatePromptPlaceholder(for: message.text)
+                    : (message.turnID.map { privateReminderTurnIDs.contains($0) } == true
+                        ? privateOutcomeReminderResponsePlaceholder
+                        : "[Response to private answer hidden]")
                 redacted.asyncQuestions = nil
             } else if matchesValue {
                 redacted.text = Self.redactingSensitiveText(message.text, values: values)
