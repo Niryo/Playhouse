@@ -2264,10 +2264,18 @@ struct TaskConversationView: View {
             : "Response from \((message.provider ?? provider).displayName)"
         let responseAnnotations = responseAnnotationReferences(for: message)
         return VStack(alignment: .leading, spacing: 6) {
-            Text(assistantLabel(for: message))
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("assistant-provider-\(message.id)")
+            HStack(spacing: 6) {
+                if let createdAt = message.createdAt {
+                    Text(createdAt, format: .dateTime.hour().minute())
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .accessibilityIdentifier("message-time-\(message.id)")
+                }
+                Text(assistantLabel(for: message))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("assistant-provider-\(message.id)")
+            }
 
             ForEach(Array(message.imageDataURLs.enumerated()), id: \.offset) { index, dataURL in
                 if let image = Self.image(fromDataURL: dataURL) {
@@ -2286,12 +2294,6 @@ struct TaskConversationView: View {
                     .accessibilityElement(children: .contain)
                     .accessibilityLabel(accessibilityText)
                     .accessibilityIdentifier("assistant-message-\(message.id)")
-            }
-            if let createdAt = message.createdAt {
-                Text(createdAt, format: .dateTime.hour().minute())
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .accessibilityIdentifier("message-time-\(message.id)")
             }
         }
         .frame(maxWidth: 620, alignment: .leading)
