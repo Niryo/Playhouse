@@ -6427,7 +6427,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertLessThan(reloaded.frame.minY, app.staticTexts["Context compaction completed."].frame.minY)
     }
 
-    // case-contract: test_conversation_loads_newest_messages_before_older_history | A 120-message conversation initially presents its newest 40 messages; scrolling to the top reveals older messages in batches without losing the newest messages or changing order. CLI/XPC history remains complete and ordered across fresh reads.
+    // case-contract: test_conversation_loads_newest_messages_before_older_history | A 120-message conversation initially presents its newest 40 messages directly without loading earlier messages. Earlier messages appear only after the user activates Load earlier messages, in batches, without losing the newest messages or changing order. CLI/XPC history remains complete and ordered across fresh reads.
     func test_conversation_loads_newest_messages_before_older_history() throws {
         let fixtureCopy = WorkspaceFixture.root.appendingPathComponent("codex-fixture-long-history-success")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureCopy.path), "The UI runner must prepare the long-history fixture before launch.")
@@ -6445,6 +6445,11 @@ final class StationAIUITests: XCTestCase {
         let latest = app.staticTexts["Long history assistant 60."]
         let oldest = app.staticTexts["Long history user 01."]
         XCTAssertTrue(latest.waitForExistence(timeout: 20), "The conversation should open at its newest message.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "The completed long history should return to the board before reopening.")
+        openTask(named: "Long conversation history")
+        XCTAssertTrue(latest.waitForExistence(timeout: 20), "Reopening a populated conversation should show its newest message.")
+        XCTAssertTrue(latest.isHittable, "The newest message should be visible in the initial transcript viewport.")
         let scrollView = element("conversation-scroll-view")
         XCTAssertEqual(scrollView.value as? String, "Showing latest 40 of 120 messages", "The initial transcript window should contain exactly the newest 40 messages.")
         XCTAssertFalse(oldest.exists, "Older messages should not be rendered in the initial message window.")
@@ -6452,16 +6457,19 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual((history["messages"] as? [[String: Any]])?.count, 120, "The CLI should retain complete history while the UI renders a recent window.")
 
         let intermediate = app.staticTexts["Long history user 21."]
-        for _ in 0..<8 where (scrollView.value as? String) != "Showing latest 80 of 120 messages" {
+        XCTAssertEqual(scrollView.value as? String, "Showing latest 40 of 120 messages", "Opening the conversation must not backfill earlier batches.")
+        XCTAssertFalse(intermediate.exists, "The first message in the excluded prior page should not be rendered before activation.")
+        let loadEarlier = element("conversation-load-older-button")
+        for _ in 0..<8 where !loadEarlier.isHittable {
             scrollView.swipeDown()
         }
+        XCTAssertTrue(loadEarlier.isHittable, "The earlier-message action should be available at the top of the transcript.")
+        loadEarlier.click()
         XCTAssertEqual(scrollView.value as? String, "Showing latest 80 of 120 messages", "Reaching the top should reveal one older batch at a time.")
         XCTAssertTrue(intermediate.exists, "The first older batch should include message 21.")
         XCTAssertFalse(oldest.exists, "The first older batch should not yet include the oldest message.")
 
-        for _ in 0..<8 where !oldest.exists {
-            scrollView.swipeDown()
-        }
+        loadEarlier.click()
         XCTAssertTrue(oldest.waitForExistence(timeout: 10), "Scrolling to the top should reveal the oldest message in an earlier batch.")
         XCTAssertEqual(scrollView.value as? String, "Showing latest 120 of 120 messages")
         let firstAssistant = app.staticTexts["Long history assistant 01."]

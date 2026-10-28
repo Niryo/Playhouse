@@ -225,7 +225,7 @@
   },
   {
     "id": "test_conversation_loads_newest_messages_before_older_history",
-    "expectation": "A 120-message conversation initially presents its newest 40 messages; scrolling to the top reveals older messages in batches without losing the newest messages or changing order. CLI/XPC history remains complete and ordered across fresh reads."
+    "expectation": "A 120-message conversation initially presents its newest 40 messages directly without loading earlier messages. Earlier messages appear only after the user activates Load earlier messages, in batches, without losing the newest messages or changing order. CLI/XPC history remains complete and ordered across fresh reads."
   },
   {
     "id": "test_conversation_shows_subagent_delegation",

@@ -4678,7 +4678,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertLess(user["timelineOrder"], reloaded_rows[0]["timelineOrder"])
         self.assertLess(reloaded_rows[0]["timelineOrder"], assistant["timelineOrder"])
 
-    # case-contract: test_conversation_loads_newest_messages_before_older_history | A 120-message conversation initially presents its newest 40 messages; scrolling to the top reveals older messages in batches without losing the newest messages or changing order. CLI/XPC history remains complete and ordered across fresh reads.
+    # case-contract: test_conversation_loads_newest_messages_before_older_history | A 120-message conversation initially presents its newest 40 messages directly without loading earlier messages. Earlier messages appear only after the user activates Load earlier messages, in batches, without losing the newest messages or changing order. CLI/XPC history remains complete and ordered across fresh reads.
     def test_conversation_loads_newest_messages_before_older_history(self):
         task_id = self.create_task(title="Long conversation history")["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"

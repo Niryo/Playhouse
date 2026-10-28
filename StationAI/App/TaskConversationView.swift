@@ -286,7 +286,6 @@ struct TaskConversationView: View {
     @State private var providerNotice: String?
     @State private var messages: [ConversationMessage] = []
     @State private var visibleConversationMessageCount = 40
-    @State private var hasPresentedLatestConversation = false
     @State private var annotations: [ConversationAnnotation] = []
     @State private var annotationSelection: AnnotationSelection?
     @State private var currentTextSelection: AnnotationSelection?
@@ -1568,13 +1567,17 @@ struct TaskConversationView: View {
                                 providerBoundaryRow(boundary)
                             }
                             if hasOlderConversationMessages {
-                                Color.clear
-                                    .frame(height: 1)
-                                    .onAppear {
-                                        guard hasPresentedLatestConversation else { return }
-                                        revealOlderConversationMessages()
-                                    }
-                                    .accessibilityIdentifier("conversation-load-older-anchor")
+                                Button("Load earlier messages") {
+                                    revealOlderConversationMessages()
+                                }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                                .buttonHoverPointer()
+                                .help("Load 40 earlier messages.")
+                                .accessibilityIdentifier("conversation-load-older-button")
                             }
                             ForEach(renderedConversationMessages) { message in
                                 if shouldShowActivityDisclosure, message.id == activityDisclosureAnchorID {
@@ -4529,7 +4532,6 @@ struct TaskConversationView: View {
         // Defer until the state-driven content update has had a layout pass.
         Task { @MainActor in
             await Task.yield()
-            hasPresentedLatestConversation = true
             withAnimation(.easeOut(duration: 0.2)) {
                 if let latestMessageID {
                     proxy.scrollTo(latestMessageID, anchor: .bottom)
