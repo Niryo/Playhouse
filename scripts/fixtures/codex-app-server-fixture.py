@@ -56,7 +56,7 @@ def answer_text(user_message):
         return "Fixture internal reminder reply."
     if user_message == "Follow up after private recovery.":
         return "Follow-up after private recovery complete."
-    if mode.endswith("-nonblocking-slow"):
+    if mode.endswith("-nonblocking-slow") or mode.endswith("-nonblocking-restart-question"):
         return "Answers received: Custom approach / fixture-secret."
     if is_restart_question_mode(mode) and mode.endswith("-no-secret") and (user_message or "").startswith("Continue this conversation by applying"):
         answer_values = re.findall(r"(?m)^\s*Answer:\s*(.*?)\s*$", user_message)
@@ -467,7 +467,7 @@ def main():
                 turns.append(turn_history)
                 saved_history["turns"] = turns
                 history_path.write_text(json.dumps(saved_history), encoding="utf-8")
-            preserve_no_outcome = any(marker in mode for marker in ("nonblocking-slow", "hold-release"))
+            preserve_no_outcome = any(marker in mode for marker in ("nonblocking-slow", "nonblocking-restart-question", "hold-release"))
             if is_outcome_reminder and not preserve_no_outcome:
                 instructions = turn_history.get("developerInstructions") or serial_history().get("threadStartDeveloperInstructions") or ""
                 outcome_line = next((line.strip() for line in instructions.splitlines() if " task outcome " in line), None)
@@ -1047,6 +1047,12 @@ def main():
                     secret_stage.write_text("A later secret question is pending.\n", encoding="utf-8")
                     question_request(902)
                     return 0
+                if is_outcome_reminder:
+                    question_request(901)
+                    write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                        "threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"},
+                    }})
+                    continue
                 if turn_message and not turn_message.startswith("Continue this conversation by applying"):
                     write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                         "threadId": THREAD_ID, "turnId": TURN_ID,
@@ -1056,8 +1062,11 @@ def main():
                         "threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"},
                     }})
                     continue
-                no_secret_recovery = mode.endswith("-restart-question-no-secret") and not secret_stage.exists()
-                expected_recovery_answers = ("Blue",) if no_secret_recovery else ("Green", "fixture-secret")
+                if "-nonblocking" in mode:
+                    expected_recovery_answers = ("Custom approach", "fixture-secret")
+                else:
+                    no_secret_recovery = mode.endswith("-restart-question-no-secret") and not secret_stage.exists()
+                    expected_recovery_answers = ("Blue",) if no_secret_recovery else ("Green", "fixture-secret")
                 if not turn_message or any(answer not in turn_message for answer in expected_recovery_answers):
                     write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                         "threadId": THREAD_ID,
@@ -1154,7 +1163,9 @@ def main():
                 "color": {"answers": ["Blue"]},
                 "token": {"answers": ["fixture-secret"]},
             }
-            if is_restart_question_mode(mode):
+            if "-nonblocking" in mode:
+                expected_answers = {"color": {"answers": ["Custom approach"]}, "token": {"answers": ["fixture-secret"]}}
+            elif is_restart_question_mode(mode):
                 no_secret_fixture = mode.endswith("-restart-question-no-secret")
                 secret_stage = Path(str(sys.argv[0]) + ".secret-stage").exists()
                 expected_answers = (

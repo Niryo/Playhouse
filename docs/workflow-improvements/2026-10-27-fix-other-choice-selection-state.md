@@ -1,6 +1,6 @@
 # Fix “Other” Choice Selection State
 
-Task: `048F884A-E21E-476E-B063-E040CA7168E3`  
+Task: `048F884A-E21E-476E-B063-E040CA7168E3`
 Client date: 2026-10-27
 
 ## Timeline and measured time
