@@ -287,6 +287,7 @@ struct TaskConversationView: View {
     @State private var messages: [ConversationMessage] = []
     @State private var visibleConversationMessageCount = 40
     @State private var hasPresentedLatestConversation = false
+    @State private var lastScrolledUserMessageID: String?
     @State private var annotations: [ConversationAnnotation] = []
     @State private var annotationSelection: AnnotationSelection?
     @State private var currentTextSelection: AnnotationSelection?
@@ -1653,10 +1654,10 @@ struct TaskConversationView: View {
             .accessibilityIdentifier("conversation-scroll-view")
             .accessibilityValue("Showing latest \(renderedConversationMessages.count) of \(conversationMessages.count) messages")
             .onChange(of: messages.count) { _, _ in
-                scrollToLatest(using: scrollProxy)
+                scrollToLatestUserMessage(using: scrollProxy)
             }
             .onChange(of: messages.map(\.text)) { _, _ in
-                scrollToLatest(using: scrollProxy)
+                if !hasPresentedLatestConversation { scrollToLatest(using: scrollProxy) }
             }
             .onChange(of: hasCompletedAssistantResponse) { _, hasCompletedResponse in
                 if hasCompletedResponse && activities.isEmpty {
@@ -1664,16 +1665,16 @@ struct TaskConversationView: View {
                 }
             }
             .onChange(of: activities) { _, _ in
-                if isResponding { scrollToLatest(using: scrollProxy) }
+                if isResponding && !hasPresentedLatestConversation { scrollToLatest(using: scrollProxy) }
             }
             .onChange(of: isResponding) { _, _ in
-                scrollToLatest(using: scrollProxy)
+                if !hasPresentedLatestConversation { scrollToLatest(using: scrollProxy) }
             }
             .onChange(of: activeGoal?.status) { _, status in
-                if status == "complete" { scrollToLatest(using: scrollProxy) }
+                if status == "complete" && !hasPresentedLatestConversation { scrollToLatest(using: scrollProxy) }
             }
             .onChange(of: goalAchievementTimelineEntries.count) { _, _ in
-                scrollToLatest(using: scrollProxy)
+                if !hasPresentedLatestConversation { scrollToLatest(using: scrollProxy) }
             }
         }
     }
@@ -4530,12 +4531,33 @@ struct TaskConversationView: View {
         Task { @MainActor in
             await Task.yield()
             hasPresentedLatestConversation = true
+            lastScrolledUserMessageID = renderedConversationMessages.last(where: { $0.role == .user })?.id
             withAnimation(.easeOut(duration: 0.2)) {
                 if let latestMessageID {
                     proxy.scrollTo(latestMessageID, anchor: .bottom)
                 } else {
                     proxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
                 }
+            }
+        }
+    }
+
+    /// After the conversation is already settled, a newly sent question should land at the
+    /// top of the viewport and stay there while its answer streams in below — mirroring how
+    /// ChatGPT/Claude.ai keep your question in view instead of auto-scrolling to chase the
+    /// growing answer all the way to the bottom.
+    private func scrollToLatestUserMessage(using proxy: ScrollViewProxy) {
+        guard hasPresentedLatestConversation else {
+            scrollToLatest(using: proxy)
+            return
+        }
+        guard let latestUserMessage = renderedConversationMessages.last(where: { $0.role == .user }),
+              latestUserMessage.id != lastScrolledUserMessageID else { return }
+        lastScrolledUserMessageID = latestUserMessage.id
+        Task { @MainActor in
+            await Task.yield()
+            withAnimation(.easeOut(duration: 0.2)) {
+                proxy.scrollTo(latestUserMessage.id, anchor: .top)
             }
         }
     }
