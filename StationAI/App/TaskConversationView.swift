@@ -2934,10 +2934,8 @@ struct TaskConversationView: View {
                          : (isResponding ? "Press Return to queue this follow-up. Press Command-Return to steer the active turn, or use a queued row's Steer action."
                             : (isLoadingHistory ? "Composer unavailable while conversation history loads." : "")),
                     onSubmit: {
-                        if isResponding, isConversationTurnActive {
+                        if isResponding {
                             queueDraftForAfterTurn()
-                        } else if isResponding {
-                            errorMessage = "The active turn is finishing; try again when follow-ups are available."
                         } else {
                             sendMessage()
                         }
