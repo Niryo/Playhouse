@@ -1189,44 +1189,40 @@ private struct TaskCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
-            HStack(spacing: 6) {
-                Image(systemName: "circle.inset.filled")
-                    .font(.system(size: 9))
-                    .foregroundStyle(task.status.accent)
-                Text(task.status.rawValue)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-                Spacer(minLength: 0)
-            }
-
-            if let progressLabel = task.progressLabel, !progressLabel.isEmpty {
-                HStack(alignment: .top, spacing: 6) {
-                    let progressType = TaskProgressType(rawValue: task.progressTypeRawValue ?? "")
-                    Image(systemName: progressType?.symbol ?? "sparkle")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Color.accentColor)
-                        .accessibilityLabel(progressType?.symbol ?? "sparkle")
-                        .accessibilityIdentifier("task-progress-icon-\(task.id.uuidString)")
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(progressLabel)
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(WorkspaceTheme.conversationText)
-                            .accessibilityIdentifier("task-progress-label-\(task.id.uuidString)")
-                        if let progressDetail = task.progressDetail, !progressDetail.isEmpty {
-                            Text(progressDetail)
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                                .accessibilityIdentifier("task-progress-detail-\(task.id.uuidString)")
-                        }
+            if showPullRequestControls || hasLiveStatus {
+                HStack(alignment: .center, spacing: 6) {
+                    if showPullRequestControls {
+                        pullRequestControls
+                        Spacer(minLength: 8)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    if let progressLabel = task.progressLabel, !progressLabel.isEmpty {
+                        HStack(alignment: .top, spacing: 6) {
+                            let progressType = TaskProgressType(rawValue: task.progressTypeRawValue ?? "")
+                            Image(systemName: progressType?.symbol ?? "sparkle")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Color.accentColor)
+                                .accessibilityLabel(progressType?.symbol ?? "sparkle")
+                                .accessibilityIdentifier("task-progress-icon-\(task.id.uuidString)")
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(progressLabel)
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(WorkspaceTheme.conversationText)
+                                    .accessibilityIdentifier("task-progress-label-\(task.id.uuidString)")
+                                if let progressDetail = task.progressDetail, !progressDetail.isEmpty {
+                                    Text(progressDetail)
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                        .accessibilityIdentifier("task-progress-detail-\(task.id.uuidString)")
+                                }
+                            }
+                        }
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("task-progress-report-\(task.id.uuidString)")
+                        .accessibilityLabel([progressLabel, task.progressDetail].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", "))
+                        .accessibilityValue("Progress icon: \(TaskProgressType(rawValue: task.progressTypeRawValue ?? "")?.symbol ?? "sparkle")")
+                    }
                 }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("task-progress-report-\(task.id.uuidString)")
-                .accessibilityLabel([progressLabel, task.progressDetail].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", "))
-                .accessibilityValue("Progress icon: \(TaskProgressType(rawValue: task.progressTypeRawValue ?? "")?.symbol ?? "sparkle")")
             }
 
             if let statusMessage = task.statusMessage, !statusMessage.isEmpty {
@@ -1277,7 +1273,7 @@ private struct TaskCardView: View {
                 .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
         }
         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay {
+        .background {
             Button(action: {
                 DispatchQueue.main.async(execute: onOpen)
             }) {
@@ -1293,80 +1289,6 @@ private struct TaskCardView: View {
             .accessibilityIdentifier("task-card-\(task.id.uuidString)")
         }
         .accessibilityElement(children: .contain)
-        .overlay(alignment: .topTrailing) {
-            if task.status != .backlog && !task.repositoryWorktrees.isEmpty {
-                HStack(spacing: 5) {
-                    let linked = linkedPullRequests
-                    if linked.isEmpty {
-                        Button(action: onCreatePullRequests) {
-                            if isCreatingPullRequests {
-                                ProgressView().controlSize(.mini)
-                            } else {
-                                Text("PR").font(.system(size: 10, weight: .semibold))
-                                    .frame(minWidth: 30, minHeight: 30)
-                            }
-                        }
-                        .actionButtonHoverEmphasis(padding: 10)
-                        .buttonHoverPointer()
-                        .help("Create a pull request for each repository linked to this task")
-                        .disabled(isCreatingPullRequests)
-                        .frame(width: 30, height: 30)
-                        .contentShape(Rectangle())
-                        .accessibilityLabel("Create a pull request for each repository linked to this task")
-                        .accessibilityIdentifier("task-create-pr-\(task.id.uuidString)")
-                    } else {
-                        if isPullRequestMerged, let onMoveToDone {
-                            Button(action: onMoveToDone) {
-                                Image(systemName: "checkmark")
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundStyle(.green)
-                            }
-                            .actionButtonHoverEmphasis(padding: 10)
-                            .buttonHoverPointer()
-                            .help("Complete task: all linked pull requests have merged")
-                            .frame(width: 30, height: 30)
-                            .contentShape(Rectangle())
-                            .accessibilityLabel("Green checkmark. Complete task, all linked pull requests merged")
-                            .accessibilityIdentifier("task-complete-merged-pr-\(task.id.uuidString)")
-                        } else {
-                            if hasPullRequestConflicts {
-                                Button(action: onResolveConflicts) {
-                                    Image("ConflictIndicator")
-                                        .resizable()
-                                        .scaledToFit()
-                                        .frame(width: 30, height: 12)
-                                        .accessibilityIdentifier("task-resolve-pr-conflicts-icon-\(task.id.uuidString)")
-                                }
-                                .actionButtonHoverEmphasis(padding: 10)
-                                .buttonHoverPointer()
-                                .help("Resolve pull request conflicts with \(task.conversationProvider.displayName)")
-                                .accessibilityLabel("Resolve pull request conflicts")
-                                .accessibilityIdentifier("task-resolve-pr-conflicts-\(task.id.uuidString)")
-                                .frame(minWidth: 30, minHeight: 30)
-                                .contentShape(Rectangle())
-                            }
-                            ForEach(linked, id: \.repositoryPath) { record in
-                                if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
-                                    Link("#\(number)", destination: url)
-                                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                        .frame(minWidth: 30, minHeight: 30)
-                                        .actionButtonHoverEmphasis(padding: 10)
-                                        .buttonHoverPointer()
-                                        .help("Open pull request #\(number) in your browser")
-                                        .frame(width: 30, height: 30)
-                                        .contentShape(Rectangle())
-                                        .accessibilityIdentifier("task-pr-link-\(task.id.uuidString)-\(number)")
-                                }
-                            }
-                        }
-                    }
-                }
-                .buttonStyle(.borderless)
-                .padding(.trailing, 14)
-                .padding(.top, 12)
-                .zIndex(2)
-            }
-        }
         .contextMenu {
             if let onMoveToDone {
                 Button("Move to Done", systemImage: "checkmark.circle", action: onMoveToDone)
@@ -1387,6 +1309,86 @@ private struct TaskCardView: View {
 
     private var linkedPullRequests: [RepositoryWorktreeRecord] {
         task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
+    }
+
+    private var showPullRequestControls: Bool {
+        task.status != .backlog && !task.repositoryWorktrees.isEmpty
+    }
+
+    private var hasLiveStatus: Bool {
+        guard let progressLabel = task.progressLabel else { return false }
+        return !progressLabel.isEmpty
+    }
+
+    @ViewBuilder
+    private var pullRequestControls: some View {
+        HStack(spacing: 5) {
+            let linked = linkedPullRequests
+            if linked.isEmpty {
+                Button(action: onCreatePullRequests) {
+                    if isCreatingPullRequests {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Text("PR").font(.system(size: 10, weight: .semibold))
+                            .frame(minWidth: 30, minHeight: 30)
+                    }
+                }
+                .actionButtonHoverEmphasis(padding: 10)
+                .buttonHoverPointer()
+                .help("Create a pull request for each repository linked to this task")
+                .disabled(isCreatingPullRequests)
+                .frame(width: 30, height: 30)
+                .contentShape(Rectangle())
+                .accessibilityLabel("Create a pull request for each repository linked to this task")
+                .accessibilityIdentifier("task-create-pr-\(task.id.uuidString)")
+            } else {
+                if isPullRequestMerged, let onMoveToDone {
+                    Button(action: onMoveToDone) {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(.green)
+                    }
+                    .actionButtonHoverEmphasis(padding: 10)
+                    .buttonHoverPointer()
+                    .help("Complete task: all linked pull requests have merged")
+                    .frame(width: 30, height: 30)
+                    .contentShape(Rectangle())
+                    .accessibilityLabel("Green checkmark. Complete task, all linked pull requests merged")
+                    .accessibilityIdentifier("task-complete-merged-pr-\(task.id.uuidString)")
+                } else {
+                    if hasPullRequestConflicts {
+                        Button(action: onResolveConflicts) {
+                            Image("ConflictIndicator")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 30, height: 12)
+                                .accessibilityIdentifier("task-resolve-pr-conflicts-icon-\(task.id.uuidString)")
+                        }
+                        .actionButtonHoverEmphasis(padding: 10)
+                        .buttonHoverPointer()
+                        .help("Resolve pull request conflicts with \(task.conversationProvider.displayName)")
+                        .accessibilityLabel("Resolve pull request conflicts")
+                        .accessibilityIdentifier("task-resolve-pr-conflicts-\(task.id.uuidString)")
+                        .frame(minWidth: 30, minHeight: 30)
+                        .contentShape(Rectangle())
+                    }
+                    ForEach(linked, id: \.repositoryPath) { record in
+                        if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
+                            Link("#\(number)", destination: url)
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .frame(minWidth: 30, minHeight: 30)
+                                .actionButtonHoverEmphasis(padding: 10)
+                                .buttonHoverPointer()
+                                .help("Open pull request #\(number) in your browser")
+                                .frame(width: 30, height: 30)
+                                .contentShape(Rectangle())
+                                .accessibilityIdentifier("task-pr-link-\(task.id.uuidString)-\(number)")
+                        }
+                    }
+                }
+            }
+        }
+        .buttonStyle(.borderless)
     }
 
     private func workingDuration(at date: Date) -> String {
