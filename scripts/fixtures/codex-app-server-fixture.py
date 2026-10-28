@@ -56,7 +56,9 @@ def answer_text(user_message):
         return "Fixture internal reminder reply."
     if user_message == "Follow up after private recovery.":
         return "Follow-up after private recovery complete."
-    if mode.endswith("-nonblocking-slow") or mode.endswith("-nonblocking-restart-question"):
+    if mode.endswith("-nonblocking-slow"):
+        return "Answers received: Custom approach / fixture-secret."
+    if mode.endswith("-nonblocking-restart-question") and (user_message or "").startswith("Continue this conversation by applying"):
         return "Answers received: Custom approach / fixture-secret."
     if is_restart_question_mode(mode) and mode.endswith("-no-secret") and (user_message or "").startswith("Continue this conversation by applying"):
         answer_values = re.findall(r"(?m)^\s*Answer:\s*(.*?)\s*$", user_message)
@@ -99,7 +101,14 @@ def is_restart_question_mode(mode):
     return mode.endswith("-restart-question") or mode.endswith("-restart-question-no-secret")
 
 
-def question_request(request_id):
+question_contexts = {}
+question_rounds = {}
+question_sequence = 900
+first_question_thread = None
+
+
+def question_request(request_id, followup=False):
+    global question_sequence, first_question_thread
     mode = os.path.basename(sys.argv[0])
     if mode.endswith("-restart-question-no-secret") and Path(str(sys.argv[0]) + ".secret-stage").exists():
         questions = [
@@ -156,6 +165,15 @@ def question_request(request_id):
             "isSecret": True,
         },
         ]
+    if "-question-isolation-" in mode:
+        question_sequence += 1
+        request_id = question_sequence
+        question_contexts[request_id] = (THREAD_ID, TURN_ID)
+        question_rounds[THREAD_ID] = question_rounds.get(THREAD_ID, 0) + 1
+        if first_question_thread is None:
+            first_question_thread = THREAD_ID
+        if followup:
+            questions[0]["question"] = "Which color should I use next?"
     write({
         "jsonrpc": "2.0",
         "id": request_id,
@@ -264,6 +282,7 @@ def main():
     global THREAD_ID, TURN_ID
     mode = os.path.basename(sys.argv[0])
     answers = None
+    isolation_turns = {}
     saw_question = False
     saw_turn = False
     turn_message = None
@@ -289,6 +308,12 @@ def main():
             message = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if "-question-isolation-" in mode and message.get("method") in ("thread/items/list", "thread/turns/list"):
+            requested = message.get("params", {}).get("threadId")
+            if requested in isolation_turns:
+                THREAD_ID = requested
+                TURN_ID, answers = isolation_turns[requested]
+                saw_turn = True
         if message.get("method") == "initialized":
             continue
         if "method" in message and "id" not in message:
@@ -306,7 +331,7 @@ def main():
                 {"id": "gpt-5.6-luna", "displayName": "GPT-5.6 Luna", "isDefault": False,
                  "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]},
             ]}})
-        elif "-goal" in mode and message.get("method") == "thread/goal/get":
+        elif message.get("method") == "thread/goal/get":
             goal = json.loads(goal_path.read_text(encoding="utf-8")) if goal_path.is_file() else None
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"goal": goal}})
         elif "-goal" in mode and message.get("method") == "thread/goal/set":
@@ -322,6 +347,8 @@ def main():
             goal_path.unlink(missing_ok=True)
             write({"jsonrpc": "2.0", "id": message["id"], "result": {}})
         elif message.get("method") == "thread/start":
+            if "-question-isolation-" in mode:
+                THREAD_ID = str(uuid.uuid4())
             thread_start_instructions = message.get("params", {}).get("developerInstructions")
             if serial_mode:
                 history = serial_history()
@@ -345,6 +372,8 @@ def main():
                 history_path.write_text(json.dumps(history), encoding="utf-8")
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": message.get("params", {}).get("model", "gpt-6-luna")}})
         elif message.get("method") == "thread/resume":
+            if "-question-isolation-" in mode:
+                THREAD_ID = message["params"]["threadId"]
             resume_error = Path(str(sys.argv[0]) + ".resume-error")
             if resume_error.is_file():
                 resume_error.unlink(missing_ok=True)
@@ -377,6 +406,10 @@ def main():
                 history_path.write_text(json.dumps(history), encoding="utf-8")
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"thread": {"id": THREAD_ID}, "model": message.get("params", {}).get("model", "gpt-6-luna")}})
         elif message.get("method") == "turn/start":
+            if "-question-isolation-" in mode:
+                THREAD_ID = message["params"]["threadId"]
+                TURN_ID = f"turn-{uuid.uuid4()}"
+                isolation_turns[THREAD_ID] = (TURN_ID, None)
             saw_turn = True
             saw_question = True
             if is_restart_question_mode(mode):
@@ -430,7 +463,12 @@ def main():
                     resume.unlink(missing_ok=True)
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID,
-                    "item": {"id": "item_stationai_title", "type": "agentMessage", "text": "Generated fixture title"},
+                    "item": {
+                        "id": "item_stationai_title",
+                        "type": "agentMessage",
+                        "phase": "final_answer",
+                        "text": "Generated fixture title",
+                    },
                 }})
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                     "threadId": THREAD_ID,
@@ -467,7 +505,7 @@ def main():
                 turns.append(turn_history)
                 saved_history["turns"] = turns
                 history_path.write_text(json.dumps(saved_history), encoding="utf-8")
-            preserve_no_outcome = any(marker in mode for marker in ("nonblocking-slow", "nonblocking-restart-question", "hold-release"))
+            preserve_no_outcome = any(marker in mode for marker in ("nonblocking-slow", "nonblocking-restart-question", "hold-release", "question-isolation"))
             if is_outcome_reminder and not preserve_no_outcome:
                 instructions = turn_history.get("developerInstructions") or serial_history().get("threadStartDeveloperInstructions") or ""
                 outcome_line = next((line.strip() for line in instructions.splitlines() if " task outcome " in line), None)
@@ -992,6 +1030,7 @@ def main():
                 }})
             elif mode.endswith("-markdown"):
                 plan_item_id = "item_stationai_plan"
+                is_plan_turn = message.get("params", {}).get("collaborationMode", {}).get("mode") == "plan"
                 write({"jsonrpc": "2.0", "method": "item/started", "params": {
                     "threadId": THREAD_ID, "turnId": TURN_ID,
                     "item": {"id": plan_item_id, "type": "plan", "text": ""},
@@ -1001,7 +1040,7 @@ def main():
                         "threadId": THREAD_ID, "turnId": TURN_ID,
                         "itemId": plan_item_id, "delta": delta,
                     }})
-                    if index == 0 and Path(str(sys.argv[0]) + ".plan-delta-hold").exists():
+                    if index == 0 and is_plan_turn and Path(str(sys.argv[0]) + ".plan-delta-hold").exists():
                         ready = Path(str(sys.argv[0]) + ".plan-delta-ready")
                         release = Path(str(sys.argv[0]) + ".plan-delta-release")
                         ready.write_text("The first plan delta is visible before completion.\n", encoding="utf-8")
@@ -1017,7 +1056,7 @@ def main():
                     "item": {"id": plan_item_id, "type": "plan", "text": MARKDOWN_PLAN},
                 }})
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
-                    "threadId": "00000000-0000-0000-0000-000000000001",
+                    "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
             elif mode.endswith("-hold"):
@@ -1148,7 +1187,9 @@ def main():
                 }})
             else:
                 question_request(901)
-        elif message.get("id") in {901, 902}:
+        elif message.get("id") in {901, 902} or message.get("id") in question_contexts:
+            if "-question-isolation-" in mode:
+                THREAD_ID, TURN_ID = question_contexts.pop(message["id"])
             if "error" in message:
                 answers = None
                 rejection_message = message.get("error", {}).get("message", "")
@@ -1179,6 +1220,11 @@ def main():
             if mode.endswith("-user-question"):
                 expected_answers = {"question_action": {"answers": ["Continue"]}}
             failed = mode.endswith("-empty") or mode.endswith("-fail") or answers != expected_answers
+            if not failed and "-question-isolation-" in mode and THREAD_ID == first_question_thread and question_rounds[THREAD_ID] == 1:
+                question_request(901, followup=True)
+                continue
+            if "-question-isolation-" in mode:
+                isolation_turns[THREAD_ID] = (TURN_ID, answers)
             if not failed and Path(str(sys.argv[0]) + ".outcome-hold").exists():
                 active = Path(str(sys.argv[0]) + ".outcome-active")
                 release = Path(str(sys.argv[0]) + ".outcome-release")
@@ -1196,6 +1242,18 @@ def main():
                     "threadId": THREAD_ID, "turnId": TURN_ID,
                     "item": {"id": f"item_recovered_answer_{TURN_ID}", "type": "agentMessage", "phase": "final_answer", "text": answer_text(turn_message)},
                 }})
+            else:
+                echoed = echoed_outcome_answer(turn_message)
+                if not failed and echoed:
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                        "threadId": THREAD_ID, "turnId": TURN_ID,
+                        "item": {
+                            "id": "item_stationai_echoed_outcome",
+                            "type": "agentMessage",
+                            "phase": "final_answer",
+                            "text": echoed,
+                        },
+                    }})
             write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                 "threadId": THREAD_ID,
                 "turn": {"id": TURN_ID, "status": "interrupted" if mode.endswith("-interrupted") else ("failed" if failed else "completed"),
@@ -1293,7 +1351,7 @@ def main():
                     if user_content:
                         contents.extend([
                             {"id": f"item_user_fixture_{index}", "type": "userMessage", "content": user_content},
-                            {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": answer_text(user_message)},
+                            {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "phase": "final_answer", "text": answer_text(user_message)},
                         ])
             elif saved_history.get("turns"):
                 contents = []
@@ -1305,12 +1363,12 @@ def main():
                     ]
                     if user_content:
                         echoed = echoed_outcome_answer(user_message)
-                        assistant = {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": "Answers received: Blue / fixture-secret."}
+                        assistant = {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "phase": "final_answer", "text": "Answers received: Blue / fixture-secret."}
                         if echoed:
                             assistant.update(phase="final_answer", text=echoed)
                         contents.extend([
                             {"id": f"item_user_fixture_{index}", "type": "userMessage", "content": user_content},
-                            assistant if echoed else {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "text": answer_text(user_message)},
+                            assistant if echoed else {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "phase": "final_answer", "text": answer_text(user_message)},
                         ])
                         if mode.endswith("-hold-release") and "stationai internal outcome reminder:" not in (user_message or "").lower():
                             contents.append({
@@ -1363,7 +1421,7 @@ def main():
                 ]
                 contents = ([
                     {"id": "item_user_fixture", "type": "userMessage", "content": user_content},
-                    {"id": "item_assistant_fixture", "type": "agentMessage", "text": answer_text(user_message)},
+                    {"id": "item_assistant_fixture", "type": "agentMessage", "phase": "final_answer", "text": answer_text(user_message)},
                 ] if user_content and not mode.endswith("-empty") else [])
             if mode.endswith("-subagent") or mode.endswith("-subagent-wait"):
                 contents = [

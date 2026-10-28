@@ -63,6 +63,16 @@ struct StationAIApp: App {
         }
         .defaultSize(width: 1280, height: 820)
         .windowResizability(.contentSize)
+        .commands {
+            CommandGroup(after: .textEditing) {
+                Button("Search Tasks") {
+                    NotificationCenter.default.post(name: .stationAIShowBoardSearch, object: nil)
+                }
+                .buttonHoverPointer()
+                .help("Search tasks")
+                .keyboardShortcut("f", modifiers: .command)
+            }
+        }
 
         Settings {
             WorkspaceSettingsView()
@@ -77,6 +87,10 @@ struct StationAIApp: App {
             .environmentObject(claudeClient)
             .defaultAppStorage(appPreferences)
     }
+}
+
+extension Notification.Name {
+    static let stationAIShowBoardSearch = Notification.Name("stationAIShowBoardSearch")
 }
 
 @MainActor

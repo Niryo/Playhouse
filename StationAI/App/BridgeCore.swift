@@ -1993,7 +1993,15 @@ final class BoardTaskManager {
 
     func reviewPullRequests(_ id: UUID) async throws -> [PullRequestReviewState] {
         let task = try requireTask(id)
-        let records = task.repositoryWorktrees.filter { !$0.isPending && $0.pullRequestNumber != nil }
+        return try await reviewPullRequests(task)
+    }
+
+    func reviewPullRequests(_ task: BoardTask) async throws -> [PullRequestReviewState] {
+        let records = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil }
+        return try await reviewPullRequests(records)
+    }
+
+    func reviewPullRequests(_ records: [RepositoryWorktreeRecord]) async throws -> [PullRequestReviewState] {
         guard !records.isEmpty else { return [] }
         let executable = try pullRequestService.resolveExecutable()
         return try await withThrowingTaskGroup(of: PullRequestReviewState.self) { group in
@@ -2324,7 +2332,7 @@ final class BoardTaskManager {
             let message: String
             switch task.status {
             case .inProgress:
-                message = "StationAI restarted before \(providerName) reported that this turn finished. Your conversation is saved; review it and send a follow-up to continue."
+                message = "StationAI closed while this turn was running. Your conversation is saved; review it and send a follow-up to continue."
             case .waitingResponse:
                 message = "StationAI reopened before the pending question was answered. Review the conversation and send a prompt to continue."
             default:
@@ -2637,13 +2645,19 @@ final class BoardTaskManager {
         }
     }
 
-    func prepareRepositoryWorktrees(_ id: UUID, fallbackPrompt: String? = nil) async throws -> BoardTask {
+    func prepareRepositoryWorktrees(
+        _ id: UUID,
+        fallbackPrompt: String? = nil,
+        resolvedTitle: String? = nil
+    ) async throws -> BoardTask {
         let initialTask = try requireTask(id)
         let initialRecords = initialTask.repositoryWorktrees
         let pending = initialRecords.filter(\.isPending)
         guard !pending.isEmpty else { return initialTask }
         let branchTitle: String
-        if ["Generating title…", "Untitled task"].contains(initialTask.title) {
+        if let resolvedTitle, !resolvedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            branchTitle = resolvedTitle
+        } else if ["Generating title…", "Untitled task"].contains(initialTask.title) {
             let prompt = initialTask.savedPrompt ?? fallbackPrompt ?? initialTask.title
             branchTitle = prompt.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
         } else {
@@ -3162,6 +3176,11 @@ final class WorkspaceManager {
             repositoryPaths: repositoryPaths,
             duringActiveConversation: true
         )
+        let taskBeforePreparation = try taskManager.taskModel(taskID)
+        if ["Untitled task", "Generating title…"].contains(taskBeforePreparation.title),
+           taskBeforePreparation.pendingSubmittedPrompt == nil {
+            return BoardTaskRecord(task: taskBeforePreparation)
+        }
         let record = try await taskManager.prepareRepositoryWorktrees(taskID)
         try settingsManager.setLastSelectedRepositories(record.repositoryWorktrees.map(\.repositoryPath))
         StationAIDiagnostics.record("workspace.repositories.add.succeeded", fields: [
@@ -3434,7 +3453,6 @@ final class ConversationManager {
         taskID: UUID,
         request: ConversationUserInputRequest,
         answers: [String: [String]],
-        mode: ConversationMode = .code,
         modelID: String? = nil,
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in }
     ) async throws -> Bool {
@@ -3502,7 +3520,7 @@ final class ConversationManager {
         _ = try await send(
             taskID: taskID,
             text: recoveryPrompt,
-            mode: mode,
+            mode: request.mode,
             modelID: modelID,
             onUpdate: onUpdate,
             sensitiveUserInputAnswerValues: sensitiveValues,
@@ -3533,7 +3551,6 @@ final class ConversationManager {
         taskID: UUID,
         requestID: String,
         answers: [String: [String]],
-        mode: ConversationMode = .code,
         modelID: String? = nil,
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in }
     ) async throws -> Bool {
@@ -3542,11 +3559,35 @@ final class ConversationManager {
             throw BridgeCommandError(code: "not_found", message: "That pending question is no longer available.")
         }
         return try await answerUserInput(
-            taskID: taskID, request: request, answers: answers, mode: mode, modelID: modelID, onUpdate: onUpdate
+            taskID: taskID, request: request, answers: answers, modelID: modelID, onUpdate: onUpdate
         )
     }
 
+    /// Repairs the historical shared-callback bug without answering the question
+    /// or resuming its provider. The native thread identity determines ownership.
+    func repairPendingUserInput(taskID: UUID, sourceTaskID: UUID) async throws -> ConversationUserInputRequest {
+        let task = try tasks.taskModel(taskID)
+        let source = try tasks.taskModel(sourceTaskID)
+        guard taskID != sourceTaskID, task.status != .done,
+              let threadID = task.activeConversationID,
+              source.activeConversationID != threadID else {
+            throw BridgeCommandError(code: "invalid_transition", message: "Choose the question's original conversation and a different source task.")
+        }
+        let request = try transcripts.reassignPendingUserInput(from: sourceTaskID, to: taskID, threadID: threadID)
+        if request.isBlocking, task.status == .inProgress {
+            _ = try await tasks.transitionLifecycleStatus(taskID, from: .inProgress, to: .waitingResponse)
+        }
+        StationAIDiagnostics.record("conversation.user_input.repaired", fields: [
+            "taskID": taskID.uuidString, "sourceTaskID": sourceTaskID.uuidString,
+            "threadID": threadID, "requestID": request.id
+        ])
+        return request
+    }
+
     private func persistPendingUserInputRequest(_ request: ConversationUserInputRequest, taskID: UUID) throws {
+        guard try tasks.taskModel(taskID).activeConversationID == request.threadID else {
+            throw BridgeCommandError(code: "invalid_transition", message: "The question belongs to another conversation.")
+        }
         try transcripts.mutate(taskID) { transcript in
             transcript.pendingUserInputRequest = request
         }
@@ -4596,6 +4637,32 @@ final class ConversationManager {
     private func recordClaudeActivity(taskID: UUID, turnID: String, _ activity: ConversationActivity) {
         do {
             try transcripts.mutate(taskID) { transcript in
+                // A background Agent/Task call can still be running (or get a terminal
+                // notification) after the turn that launched it ends, and after a
+                // restart its new turn has no in-memory record of the launch at all.
+                // Resolve by the provider's durable backgroundTaskID first, wherever in
+                // the transcript that activity actually lives, before falling back to
+                // an id match scoped to this turn.
+                if let backgroundTaskID = activity.backgroundTaskID {
+                    for turnIndex in transcript.turns.indices {
+                        guard let existingIndex = transcript.turns[turnIndex].activities.firstIndex(where: {
+                            $0.backgroundTaskID == backgroundTaskID
+                        }) else { continue }
+                        let existing = transcript.turns[turnIndex].activities[existingIndex]
+                        transcript.turns[turnIndex].activities[existingIndex] = ConversationActivity(
+                            id: existing.id, title: existing.title,
+                            detail: activity.detail.isEmpty ? existing.detail : activity.detail,
+                            status: activity.status,
+                            childThreadID: existing.childThreadID, agentPath: existing.agentPath, model: existing.model,
+                            reasoningEffort: existing.reasoningEffort, toolKind: existing.toolKind,
+                            server: existing.server, tool: existing.tool,
+                            durationMs: activity.durationMs ?? existing.durationMs, startedAt: existing.startedAt,
+                            isContextCompaction: existing.isContextCompaction, turnID: existing.turnID,
+                            timelineOrder: existing.timelineOrder, backgroundTaskID: existing.backgroundTaskID
+                        )
+                        return
+                    }
+                }
                 guard let index = transcript.turns.lastIndex(where: { $0.id == turnID }) else { return }
                 var activity = activity
                 activity.turnID = turnID
@@ -4721,7 +4788,7 @@ final class ConversationManager {
         try tasks.prepareConversationTurnOutcome(taskID)
         defer { tasks.clearConversationTurnOutcome(taskID) }
         var persistedThreadID = task.activeConversationID
-        StationAIDiagnostics.record("conversation.send.started", fields: client.diagnosticFields(forThread: persistedThreadID ?? "", [
+        StationAIDiagnostics.recordAndFlush("conversation.send.started", fields: client.diagnosticFields(forThread: persistedThreadID ?? "", [
             "taskID": taskID.uuidString,
             "threadID": task.activeConversationID ?? "new",
             "taskStatus": task.status.rawValue,
@@ -4732,7 +4799,12 @@ final class ConversationManager {
                 client.clearTurnStarting(threadID: threadID)
             }
         }
-        let repositoryRoot = try settingsManager.requireRepositoryRootFolder()
+        // A task with explicit workspace roots is self-contained and may be
+        // sent through CLI/XPC before the UI has initialized the global
+        // default-parent setting. Rootless tasks still require that setting.
+        let repositoryRoot = try (task.workspaceRootPaths
+            .compactMap { WorkspaceSettings.validDirectoryURL(for: $0) }
+            .first ?? settingsManager.requireRepositoryRootFolder())
         let shouldGenerateTitle = !hideInternalOutcomeReminder
             && !normalizedText.isEmpty
             && ["Untitled task", "Generating title…"].contains(task.title)
@@ -4746,7 +4818,15 @@ final class ConversationManager {
         let resolveTitleBeforeWorktree: Bool
         let workspace: ConversationWorkspaceContext
         let titleGeneration: Task<Void, Never>?
+        var resolvedWorktreeTitle: String? = ["Untitled task", "Generating title…"].contains(task.title)
+            ? nil
+            : task.title
         do {
+            // Resolve the first submitted prompt's title before preparing any
+            // repositories. The app's model context can lag repository changes
+            // made through the bridge, so using this snapshot to detect an auto
+            // branch can otherwise allocate "untitled-task" before the generated
+            // title arrives.
             let titleMustPrecedeAutoWorktree = task.repositoryWorktrees.contains {
                 $0.isPending && $0.branch == "auto"
             }
@@ -4760,7 +4840,7 @@ final class ConversationManager {
                 if reserved != nil {
                     let titleRoots = task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true) }
                     let titleWorkspace = try ConversationWorkspaceContext(roots: titleRoots)
-                    try await generateAndApplyTitle(
+                    resolvedWorktreeTitle = try await generateAndApplyTitle(
                         taskID: taskID,
                         prompt: persistedText,
                         workspace: titleWorkspace,
@@ -4774,10 +4854,12 @@ final class ConversationManager {
                         message: "The task title changed while it was being prepared. Try sending again."
                     )
                 }
+                resolvedWorktreeTitle = task.title
             }
             task = try await tasks.prepareRepositoryWorktrees(
                 taskID,
-                fallbackPrompt: hideInternalOutcomeReminder ? (task.savedPrompt ?? persistedText) : persistedText
+                fallbackPrompt: hideInternalOutcomeReminder ? (task.savedPrompt ?? persistedText) : persistedText,
+                resolvedTitle: resolvedWorktreeTitle ?? persistedText
             )
             if !hideInternalOutcomeReminder, !normalizedText.isEmpty {
                 _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
@@ -4798,7 +4880,7 @@ final class ConversationManager {
                     let titleClients = clients.helperClients(preferring: provider)
                     titleGeneration = Task { @MainActor in
                         do {
-                            try await self.generateAndApplyTitle(
+                            _ = try await self.generateAndApplyTitle(
                                 taskID: taskID,
                                 prompt: persistedText,
                                 workspace: workspace,
@@ -4870,6 +4952,7 @@ final class ConversationManager {
             }
             var finalMessageCount = 0
             var leakedOutcome: String?
+            var pendingQuestionLifecycleRevision: Int?
             if onTurnStarting != nil {
                 client.markTurnStarting(threadID: threadID)
                 onTurnStarting?()
@@ -5081,6 +5164,9 @@ final class ConversationManager {
                     let lifecycle = request.isBlocking
                         ? try? await self.tasks.transitionLifecycleStatus(taskID, from: .inProgress, to: .waitingResponse)
                         : nil
+                    if let revision = lifecycle ?? nil {
+                        pendingQuestionLifecycleRevision = revision
+                    }
                     let status = try? await self.tasks.clearProgressReport(taskID)
                     onUpdate(ConversationUpdate(
                         type: "user_input",
@@ -5163,7 +5249,27 @@ final class ConversationManager {
             phase = "review-status-persistence"
             let reportedOutcome = try await tasks.finishConversationTurnOutcome(taskID) ?? leakedOutcome
             lastReportedTurnOutcomeByTaskID[taskID] = reportedOutcome
-            if reportedOutcome != nil || !deferMissingOutcomeStatus {
+            if reportedOutcome == nil, deferMissingOutcomeStatus, let revision = pendingQuestionLifecycleRevision,
+               let stillPending = try? transcripts.read(taskID).pendingUserInputRequest {
+                // The turn completed without reporting an outcome while a structured
+                // question it raised is still unanswered. Undo the immediate
+                // waiting-response flip so the outcome reminder loop — not a stray
+                // unanswered question — decides this task's fate, and downgrade the
+                // saved request so reopening the conversation doesn't re-force it.
+                _ = try? await tasks.restoreLifecycleStatus(taskID, to: .inProgress, ifRevision: revision)
+                if stillPending.isBlocking {
+                    try? transcripts.mutate(taskID) { transcript in
+                        guard transcript.pendingUserInputRequest?.id == stillPending.id else { return }
+                        transcript.pendingUserInputRequest = ConversationUserInputRequest(
+                            id: stillPending.id,
+                            threadID: stillPending.threadID,
+                            questions: stillPending.questions,
+                            isBlocking: false,
+                            mode: stillPending.mode
+                        )
+                    }
+                }
+            } else if reportedOutcome != nil || !deferMissingOutcomeStatus {
                 let finalStatus: TaskStatus = reportedOutcome == "completed" ? .review : .waitingResponse
                 _ = try await tasks.setLifecycleStatus(taskID, to: finalStatus)
             }
@@ -5238,11 +5344,12 @@ final class ConversationManager {
         prompt: String,
         workspace: ConversationWorkspaceContext,
         clients titleClients: [ConversationProviderClient]
-    ) async throws {
+    ) async throws -> String {
         let result = await ConversationTitleGenerator(clients: titleClients)
             .generateTitle(from: prompt, workspace: workspace, taskID: taskID)
         let generated = result?.title
         let fallback = prompt.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
+        let resolvedTitle = generated.flatMap { $0.isEmpty ? nil : $0 } ?? fallback
         let titleSource = result?.provider.rawValue ?? "prompt-fallback"
         let latest: BoardTask
         do {
@@ -5252,7 +5359,7 @@ final class ConversationManager {
             fields["taskID"] = taskID.uuidString
             fields["titleSource"] = titleSource
             StationAIDiagnostics.record("task.title_apply.skipped", fields: fields.merging(["reason": "task_unavailable"]) { _, new in new })
-            return
+            return fallback
         }
         guard latest.title == "Generating title…" else {
             StationAIDiagnostics.record("task.title_apply.skipped", fields: [
@@ -5261,9 +5368,10 @@ final class ConversationManager {
                 "currentTitleState": StationAITaskTitleDiagnostics.state(of: latest.title),
                 "titleSource": titleSource
             ])
-            return
+            return ["Generating title…", "Untitled task"].contains(latest.title)
+                ? resolvedTitle
+                : latest.title
         }
-        let resolvedTitle = generated.flatMap { $0.isEmpty ? nil : $0 } ?? fallback
         do {
             guard try await tasks.renameIfTitleMatches(
                 taskID,
@@ -5277,13 +5385,14 @@ final class ConversationManager {
                     "currentTitleState": StationAITaskTitleDiagnostics.state(of: currentTitle),
                     "titleSource": titleSource
                 ])
-                return
+                return currentTitle
             }
             StationAIDiagnostics.record("task.title_apply.succeeded", fields: [
                 "taskID": taskID.uuidString,
                 "titleSource": titleSource,
                 "fallbackWordCount": generated == nil ? String(fallback.split(whereSeparator: \.isWhitespace).count) : "0"
             ])
+            return resolvedTitle
         } catch {
             var fields = StationAIDiagnostics.errorFields(error, redacting: [resolvedTitle, prompt])
             fields["taskID"] = taskID.uuidString
@@ -5306,13 +5415,14 @@ final class ConversationManager {
                         "currentTitleState": StationAITaskTitleDiagnostics.state(of: currentTitle),
                         "titleSource": "prompt-fallback"
                     ])
-                    return
+                    return currentTitle
                 }
                 StationAIDiagnostics.record("task.title_apply.succeeded", fields: [
                     "taskID": taskID.uuidString,
                     "titleSource": "prompt-fallback",
                     "fallbackWordCount": String(fallback.split(whereSeparator: \.isWhitespace).count)
                 ])
+                return fallback
             } catch {
                 var recoveryFields = StationAIDiagnostics.errorFields(error, redacting: [fallback, prompt])
                 recoveryFields["taskID"] = taskID.uuidString
@@ -5803,20 +5913,20 @@ final class StationAIBridgeRuntime {
                 }
                 let answer = try await conversations.answerAsyncQuestion(taskID: taskID, question: question, answers: answers)
                 result = .object(["text": .string(answer.text), "queued": .boolean(answer.queued)])
+            case "conversation.repair_user_input":
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = try await Self.value(conversations.repairPendingUserInput(
+                    taskID: request.requiredUUID("taskID"), sourceTaskID: request.requiredUUID("sourceTaskID")
+                ))
             case "conversation.answer_user_input":
                 let taskID = try request.requiredUUID("taskID")
                 let requestID = try request.requiredString("requestID")
                 let answers = try request.optionalStringArrays("answers")
-                let modeValue = request.arguments["mode"]?.string ?? ConversationMode.code.rawValue
-                guard let mode = ConversationMode(rawValue: modeValue) else {
-                    throw BridgeCommandError(code: "invalid_argument", message: "Unknown conversation mode '\(modeValue)'. Valid modes: default, plan.")
-                }
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 let accepted = try await conversations.answerUserInput(
                     taskID: taskID,
                     requestID: requestID,
                     answers: answers,
-                    mode: mode,
                     modelID: request.arguments["model"]?.string,
                     onUpdate: { update in
                         if let payload = try? Self.value(update) {

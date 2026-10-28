@@ -242,6 +242,35 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         run_tool("toolu_checks_first", "Read", {"file_path": os.path.join(os.getcwd(), "README.md")})
         text("msg_checks_last", UNANSWERED_LAST)
         run_tool("toolu_checks_last", "Read", {"file_path": os.path.join(os.getcwd(), "README.md")})
+    elif "background agent" in user_text.lower():
+        # Mirrors the real `claude` CLI's --forward-subagent-text protocol for a
+        # backgrounded Agent/Task call: the launch confirmation tool_result is not
+        # completion, and the real outcome arrives later as system task events.
+        tool_id = "toolu_background_agent"
+        task_id = "bgtask-fixture-1"
+        assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": "Agent", "input": {
+            "subagent_type": "Explore", "description": "Background check", "prompt": "check something",
+            "run_in_background": True,
+        }}])
+        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tool_id, "content": "Async agent launched successfully.", "is_error": False},
+        ]}})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
+            {"task_id": task_id, "run_id": "fixture-run-1", "task_type": "local_agent",
+             "subagent_type": "Explore", "description": "Background check"},
+        ]})
+        write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "description": "Background check", "subagent_type": "Explore",
+               "is_backgrounded": True, "spawn_depth": 1, "task_type": "local_agent"})
+        write({"type": "system", "subtype": "task_progress", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "description": "Running Bash", "subagent_type": "Explore",
+               "last_tool_name": "Bash"})
+        text("msg_background_started", "STARTED")
+        write({"type": "system", "subtype": "task_updated", "task_id": task_id, "run_id": "fixture-run-1",
+               "patch": {"status": "completed", "end_time": 0}})
+        write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "status": "completed", "output_file": "", "summary": "Background check finished."})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
     else:
         text("msg_simple", SIMPLE_ANSWER)
     return commands

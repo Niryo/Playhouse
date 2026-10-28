@@ -45,6 +45,52 @@ shared_sources=(
   "${repository_root}/StationAI/Bridge/BridgeContract.swift"
 )
 
+bridge_stamp="${TARGET_BUILD_DIR}/.stationai-bridge-build-stamp-${PRODUCT_BUNDLE_IDENTIFIER//./_}"
+bridge_inputs=(
+  "${BASH_SOURCE[0]}"
+  "${shared_sources[@]}"
+  "${repository_root}/StationAI/Bridge/XPCServiceMain.swift"
+  "${repository_root}/StationAI/Bridge/BridgeContract.swift"
+  "${repository_root}/StationAI/CLI/BridgeClient.swift"
+  "${repository_root}/StationAI/CLI/StationAICLI.swift"
+  "${architecture}-apple-macosx${deployment_target}"
+  "${sdk}"
+  "$(xcrun --sdk macosx swiftc -version)"
+  "${CONFIGURATION:-Debug}"
+  "${PRODUCT_BUNDLE_IDENTIFIER:-com.stationai.app}"
+  "${MARKETING_VERSION:-1.0}"
+  "${CURRENT_PROJECT_VERSION:-1}"
+  "${STATIONAI_PROFILE_ROOT}"
+)
+bridge_fingerprint="$(
+  {
+    for input in "${bridge_inputs[@]}"; do
+      if [[ -f "${input}" ]]; then
+        shasum -a 256 "${input}"
+      else
+        printf '%s\n' "${input}"
+      fi
+    done
+  } | shasum -a 256 | awk '{print $1}'
+)"
+
+metadata_matches() {
+  local app_info="${app_contents}/Info.plist"
+  local service_info="${service_contents}/Info.plist"
+  [[ -f "${app_info}" && -f "${service_info}" ]] || return 1
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :StationAIStoreCompatibilityVersion' "${app_info}" 2>/dev/null)" == "2" ]] &&
+    [[ "$(/usr/libexec/PlistBuddy -c 'Print :StationAISourceWorktree' "${app_info}" 2>/dev/null)" == "${STATIONAI_PROFILE_ROOT}" ]] &&
+    [[ "$(/usr/libexec/PlistBuddy -c 'Print :StationAIStoreCompatibilityVersion' "${service_info}" 2>/dev/null)" == "2" ]] &&
+    [[ "$(/usr/libexec/PlistBuddy -c 'Print :StationAISourceWorktree' "${service_info}" 2>/dev/null)" == "${STATIONAI_PROFILE_ROOT}" ]]
+}
+
+if [[ -x "${cli_executable}" && -x "${service_macos}/StationAIBridge" &&
+      -f "${bridge_stamp}" && "$(cat "${bridge_stamp}")" == "${bridge_fingerprint}" ]] &&
+      metadata_matches; then
+  printf 'Reusing unchanged embedded bridge tools in %s\n' "${app_contents}"
+  exit 0
+fi
+
 xcrun --sdk macosx swiftc \
   -swift-version 5 \
   -target "${architecture}-apple-macosx${deployment_target}" \
@@ -115,6 +161,8 @@ if [[ "${app_executable}" -ef "${cli_executable}" ]]; then
   printf 'The CLI must not replace the StationAI app executable: %s\n' "${app_executable}" >&2
   exit 1
 fi
+
 codesign --force --sign - --timestamp=none "${cli_executable}"
 codesign --force --sign - --timestamp=none "${service_bundle}"
+printf '%s\n' "${bridge_fingerprint}" > "${bridge_stamp}"
 printf 'Embedded stationai CLI and XPC service in %s\n' "${app_contents}"

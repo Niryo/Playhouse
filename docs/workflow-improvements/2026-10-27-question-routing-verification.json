@@ -1,0 +1,100 @@
+{
+  "task": "752C1184-D363-4C62-B2A6-BF3697C8DDC8",
+  "phase": "complete",
+  "recordedAt": "2026-10-27T20:44:14.533111+00:00",
+  "fingerprint": "16e0b3ce84dac5ade59d55929fa9aedc69182cea249a0ebc8e70ee6163150e3d",
+  "files": [
+    "StationAI/App/BridgeCore.swift",
+    "StationAI/App/CodexAppServerClient.swift",
+    "StationAI/App/ConversationTranscriptStore.swift",
+    "StationAI/App/TaskConversationView.swift",
+    "StationAI/BridgeTests/BridgeTestContracts.json",
+    "StationAI/CLI/StationAICLI.swift",
+    "StationAI/StationAIUITests/StationAIUITests.swift",
+    "scripts/fixtures/codex-app-server-fixture.py",
+    "scripts/test-bridge.py",
+    "scripts/test-codex-question-ownership.swift",
+    "scripts/test-ui.sh"
+  ],
+  "cases": [
+    "test_codex_questions_can_be_answered_over_cli_xpc",
+    "test_pending_question_repair_restores_thread_owner"
+  ],
+  "parity": "91 identical cases passed",
+  "providers": {
+    "codex": "Per-thread question handler/mode/native pending map; UI reads pending by thread; manager rejects foreign thread. Protocol-specific regression extends existing question case.",
+    "claude": "Existing ClaudeCodeClient runners keyed by session; pendingUserInputRequest(forThread:) already isolates questions. Shared manager ownership guard and transcript repair apply to both providers. Repair uses Codex representative because shared persistence/validation path does not dispatch provider."
+  },
+  "staticReviews": {
+    "initial": {
+      "fingerprint": "701f41f6f97ef5352a0f061e7dbcb9f6763b06d4232c1db71f61dca6cb128602",
+      "task": "REJECTED: shared-client headless coverage/validation/backup/secrecy/permission gaps",
+      "ui": "REJECTED: shared fixture marker and parallel answer assertions",
+      "architecture": "CONCERN: singleton remaining callbacks; interrupted repair resurrection"
+    },
+    "revision2": {
+      "fingerprint": "d515bb3ae898fe72bef598f0e335f6c9dd8a32024f46c248503acfff9dad37f6",
+      "task": "APPROVED",
+      "ui": "REJECTED: await A final response before B answer",
+      "architecture": "CONCERN: reentrant cold initialize"
+    },
+    "approved": {
+      "fingerprint": "b9073edb6cb057b0cdf91d83b23627cbacb9ae297e4bc91155e5a99ca67d13f8",
+      "task": "APPROVED",
+      "ui": "APPROVED",
+      "architecture": "APPROVED",
+      "recordedAt": "2026-10-27T20:47:59.543309+00:00"
+    },
+    "runtimeRepair": {
+      "fingerprint": "16e0b3ce84dac5ade59d55929fa9aedc69182cea249a0ebc8e70ee6163150e3d",
+      "task": "APPROVED",
+      "ui": "APPROVED at366801 retained: only helper lifecycle assertions changed",
+      "architecture": "APPROVED at366801 retained: only helper lifecycle assertions changed"
+    }
+  },
+  "runtime": [
+    {
+      "command": "scripts/test-e2e.sh",
+      "start": "2026-10-27T20:47:59.543556+00:00",
+      "result": "91 executed: 90 passed, 1 failed (shared-client harness used separate XPC processes)",
+      "durationSeconds": 350,
+      "log": "/tmp/stationai-question-routing-e2e.log"
+    },
+    {
+      "command": "scripts/test-e2e.sh --case test_codex_questions_can_be_answered_over_cli_xpc --case test_pending_question_repair_restores_thread_owner",
+      "start": "2026-10-27T21:03:50.868155+00:00",
+      "result": "2/2 passed; no skips; shared-client probe plus realCLI/XPC persistence",
+      "durationSeconds": 181,
+      "caseSeconds": 24,
+      "log": "/tmp/stationai-question-routing-focused.log"
+    },
+    {
+      "command": "scripts/test-e2e.sh",
+      "start": "2026-10-27T21:07:04.744960+00:00",
+      "fingerprint": "16e0b3ce84dac5ade59d55929fa9aedc69182cea249a0ebc8e70ee6163150e3d",
+      "result": "91/91 passed, no skipped/incomplete cases; final confirmation",
+      "durationSeconds": 214,
+      "caseSeconds": 210.148,
+      "log": "/tmp/stationai-question-routing-final.log",
+      "artifactDirectory": "/tmp/stationai-bridge.Wr7F9z"
+    }
+  ],
+  "fixturePermission": "User explicitly approved: Allow extending the existing test fixture",
+  "revision": "Removed ineffective per-XPC shared-client cache. Supplemental helper compiles unchanged production core and real SwiftData to exercise GUI shared-client overlap; bundled CLI/XPC creates tasks and verifies persisted results. UI observes task-specific pending requests on view return.",
+  "uiRuntime": "Not run: routine verification is static UI coverage only; screenshots not applicable",
+  "liveRecovery": {
+    "targetTaskID": "1D69A6C9-61B0-4731-A4A5-FE5E20692E08",
+    "sourceTaskID": "789FAB2D-7230-471D-ACB7-076C9B7B5592",
+    "threadID": "01a17e41-e13c-7650-b2e9-ed66fef3cb90",
+    "requestID": "1",
+    "result": "Restored exact question; source pending cleared; all other transcript fields preserved; no answer sent",
+    "backupDirectory": "/Users/niryo/Library/Application Support/StationAI/conversation-transcripts/question-repair-backups/174767EB-3B5D-46CB-80D1-D9CCCEF251D3",
+    "timestamp": "2026-10-27T21:11:48.535750+00:00",
+    "method": "One-off recovery compiled against unchanged reviewed production core, using ConversationTranscriptStore.reassignPendingUserInput; old running bridge lacks new repair command. No app profile safeguards bypassed and no SwiftData opened.",
+    "freshHistoryXPC": "{'code': 'operation_failed', 'message': 'History for a private recovery conversation could not be loaded.'}",
+    "nativeHistoryInvestigation": "Native thread/resume returned -32600: already has an active writer. GUI history for original task succeeded at21:01:49Z; separate CLI cannot acquire the GUI-owned thread. No provider process killed or answer submitted."
+  },
+  "finishedAt": "2026-10-27T21:15:01.301541+00:00",
+  "gitWrites": "None",
+  "delivery": "Source changes in task worktree; main running app not rebuilt/relaunched"
+}

@@ -85,29 +85,58 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     private let deltaLogSummaryLimit = 100
     private var nextRequestID = 1
     private var initialized = false
+    private var initializationTask: Task<Void, Error>?
     private var resumedThreadIDs = Set<String>()
     private var activeTurnID: String?
     private var conversationOperationsInFlight = 0
     private var applicationShutdownInterruptResult: String?
     private(set) var wasLastTurnInterrupted = false
     private(set) var isPreparingForApplicationTermination = false
-    private var activeDeltaHandler: ((String) -> Void)?
-    private var activeFinalMessageHandler: ((String) -> Void)?
-    private var activeProgressMessageHandler: ((ConversationMessage) -> Void)?
-    private var activeSteerMessageHandler: ((String, [String]) -> Void)?
-    private var activeActivityHandler: ((ConversationActivity) -> Void)?
-    private var activeDiffHandler: ((ConversationTurnDiff) -> Void)?
-    private var activeActivities: [String: ConversationActivity] = [:]
+    private final class TurnContext {
+        var turnID: String?
+        let onDelta: (String) -> Void
+        let onFinal: (String) -> Void
+        let onProgress: (ConversationMessage) -> Void
+        let onSteer: (String, [String]) -> Void
+        let onActivity: (ConversationActivity) -> Void
+        let onDiff: (ConversationTurnDiff) -> Void
+        let onAction: () -> Void
+        var activities: [String: ConversationActivity] = [:]
+        var startedAtUptime: [String: UInt64] = [:]
+        var startedAtDate: [String: Date] = [:]
+        var durations: [String: Int] = [:]
+
+        init(onDelta: @escaping (String) -> Void, onFinal: @escaping (String) -> Void,
+             onProgress: @escaping (ConversationMessage) -> Void, onSteer: @escaping (String, [String]) -> Void,
+             onActivity: @escaping (ConversationActivity) -> Void, onDiff: @escaping (ConversationTurnDiff) -> Void,
+             onAction: @escaping () -> Void) {
+            self.onDelta = onDelta; self.onFinal = onFinal; self.onProgress = onProgress
+            self.onSteer = onSteer; self.onActivity = onActivity; self.onDiff = onDiff; self.onAction = onAction
+        }
+    }
+    private var turnContexts: [String: TurnContext] = [:]
+    private var completedActivityDurations: [String: [String: Int]] = [:]
+    private var interruptedThreadIDs = Set<String>()
     private var goalObservationThreadID: String?
     private var goalTurnStartRevision = 0
-    private var activityStartedAtUptime: [String: UInt64] = [:]
-    private var activityStartedAtDate: [String: Date] = [:]
-    private(set) var lastTurnActivityDurations: [String: Int] = [:]
+    var lastTurnActivityDurations: [String: Int] { activeThreadID.map { lastTurnActivityDurations(threadID: $0) } ?? [:] }
+    func lastTurnActivityDurations(threadID: String) -> [String: Int] {
+        turnContexts[threadID]?.durations ?? completedActivityDurations[threadID] ?? [:]
+    }
+    func wasLastTurnInterrupted(threadID: String) -> Bool { interruptedThreadIDs.contains(threadID) }
     private var actionRequestHandler: (() -> Void)?
-    private var userInputHandler: ((ConversationUserInputRequest) async -> Void)?
-    private var pendingUserInputRequestID: Any?
-    private var pendingUserInputThreadID: String?
-    private var pendingUserInputQuestions: [String: ConversationUserQuestion] = [:]
+    // History reads and other sends can change the displayed thread while a
+    // provider turn is waiting. Question ownership follows the requesting thread.
+    private struct UserInputContext {
+        let mode: ConversationMode
+        let handler: (ConversationUserInputRequest) async -> Void
+    }
+    private struct PendingUserInput {
+        let nativeID: Any
+        let request: ConversationUserInputRequest
+    }
+    private var userInputContexts: [String: UserInputContext] = [:]
+    @Published private var pendingUserInputs: [String: PendingUserInput] = [:]
     private let codexExecutableOverride: String?
     private let codexHomeOverride: String?
     private let goalFeatureEnabled: Bool
@@ -132,7 +161,16 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         fields["activeThreadID"] = activeThreadID ?? ""
         fields["activeTurnID"] = activeTurnID ?? ""
         fields["isTurnActive"] = String(isTurnActive)
-        fields["pendingInputThreadID"] = pendingUserInputThreadID ?? ""
+        fields["pendingInputThreadID"] = pendingUserInputRequest?.threadID ?? ""
+        return fields
+    }
+
+    func diagnosticFields(forThread threadID: String, _ additionalFields: [String: String]) -> [String: String] {
+        var fields = diagnosticFields(additionalFields)
+        fields["activeThreadID"] = threadID
+        fields["activeTurnID"] = activeTurnID(for: threadID) ?? ""
+        fields["isTurnActive"] = String(isTurnActive(threadID: threadID))
+        fields["pendingInputThreadID"] = pendingUserInputRequest(forThread: threadID)?.threadID ?? ""
         return fields
     }
 
@@ -145,7 +183,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         onActionRequest: @escaping () -> Void
     ) async throws -> ConversationHistory {
         actionRequestHandler = onActionRequest
-        if goalRuntimeEnabled {
+        if goalRuntimeEnabled, turnContexts.isEmpty {
             if activeThreadID != threadID {
                 activeTurnID = nil
                 isTurnActive = false
@@ -207,22 +245,26 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
 
     func availableModels(workspace: ConversationWorkspaceContext) async throws -> [ConversationModelOption] {
         try await ensureInitialized(workspace: workspace)
-        let response = try await request(method: "model/list", params: ["includeHidden": false])
-        let models = (response["data"] as? [[String: Any]] ?? []).compactMap { item -> ConversationModelOption? in
-            guard let id = item["id"] as? String, !id.isEmpty else { return nil }
-            let supportedEfforts = (item["supportedReasoningEfforts"] as? [Any])?.compactMap { value -> ConversationEffort? in
-                let rawValue = (value as? String) ?? (value as? [String: Any])?["reasoningEffort"] as? String
-                guard let rawValue else { return nil }
-                return ConversationEffort(rawValue: rawValue)
+        for attempt in 0..<3 {
+            let response = try await request(method: "model/list", params: ["includeHidden": false])
+            let models = (response["data"] as? [[String: Any]] ?? []).compactMap { item -> ConversationModelOption? in
+                guard let id = item["id"] as? String, !id.isEmpty else { return nil }
+                let supportedEfforts = (item["supportedReasoningEfforts"] as? [Any])?.compactMap { value -> ConversationEffort? in
+                    let rawValue = (value as? String) ?? (value as? [String: Any])?["reasoningEffort"] as? String
+                    guard let rawValue else { return nil }
+                    return ConversationEffort(rawValue: rawValue)
+                }
+                return ConversationModelOption(
+                    id: id,
+                    name: item["displayName"] as? String ?? item["model"] as? String ?? id,
+                    isDefault: item["isDefault"] as? Bool ?? false,
+                    supportedEfforts: supportedEfforts?.isEmpty == false ? supportedEfforts : nil
+                )
             }
-            return ConversationModelOption(
-                id: id,
-                name: item["displayName"] as? String ?? item["model"] as? String ?? id,
-                isDefault: item["isDefault"] as? Bool ?? false,
-                supportedEfforts: supportedEfforts?.isEmpty == false ? supportedEfforts : nil
-            )
+            if !models.isEmpty { return models }
+            if attempt < 2 { try await Task.sleep(for: .milliseconds(200)) }
         }
-        return models.isEmpty ? [ConversationModelOption(id: Self.modelID, name: "GPT-6 Luna", isDefault: true)] : models
+        return [ConversationModelOption(id: Self.modelID, name: "GPT-6 Luna", isDefault: true)]
     }
 
     func validateEffort(_ effort: ConversationEffort, modelID: String, workspace: ConversationWorkspaceContext) async throws {
@@ -238,19 +280,22 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     }
 
     func interruptActiveTurn(threadID expectedThreadID: String) async throws -> Bool {
-        guard let threadID = activeThreadID,
-              threadID == expectedThreadID,
-              let turnID = activeTurnID else {
-            // Another StationAI process may own the turn.
+        if let owner = Self.activeClientsByThreadID[expectedThreadID], owner !== self {
+            return try await owner.interruptActiveTurn(threadID: expectedThreadID)
+        }
+        guard let turnID = activeTurnID(for: expectedThreadID) else {
             guard Self.activeClientsByThreadID[expectedThreadID] == nil else { return false }
             return try await ConversationSteerMailbox.requestInterrupt(threadID: expectedThreadID)
         }
+        let threadID = expectedThreadID
         wasLastTurnInterrupted = true
+        interruptedThreadIDs.insert(threadID)
         do {
             _ = try await request(method: "turn/interrupt", params: ["threadId": threadID, "turnId": turnID])
             return true
         } catch {
             wasLastTurnInterrupted = false
+            interruptedThreadIDs.remove(threadID)
             throw error
         }
     }
@@ -395,9 +440,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         guard let target = Self.activeClientsByThreadID[expectedThreadID] else {
             return try await ConversationSteerMailbox.requestSteer(threadID: expectedThreadID, text: normalized, imageDataURLs: imageDataURLs)
         }
-        guard let threadID = target.activeThreadID, threadID == expectedThreadID,
-              let turnID = target.activeTurnID, target.isTurnActive else { return false }
-        return try await target.sendSteerRequest(threadID: threadID, turnID: turnID, text: normalized, imageDataURLs: imageDataURLs)
+        guard let turnID = target.activeTurnID(for: expectedThreadID) else { return false }
+        return try await target.sendSteerRequest(threadID: expectedThreadID, turnID: turnID, text: normalized, imageDataURLs: imageDataURLs)
     }
 
     private func sendSteerRequest(threadID: String, turnID: String, text: String, imageDataURLs: [String] = []) async throws -> Bool {
@@ -431,7 +475,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 if case ClientError.staleTurn = error { return false }
                 throw error
             }
-            if accepted { activeSteerMessageHandler?(text, images) }
+            if accepted { turnContexts[threadID]?.onSteer(text, images) }
             return accepted
         } interrupt: {
             try await interruptActiveTurn(threadID: threadID)
@@ -461,8 +505,30 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         sensitiveUserInputAnswerValues: [String] = [],
         hideSensitiveRecoveryPrompt: Bool = false
     ) async throws {
-        actionRequestHandler = onActionRequest
-        userInputHandler = onUserInput
+        guard turnContexts[threadID] == nil else {
+            throw BridgeCommandError(code: "invalid_transition", message: "This conversation already has an active send.")
+        }
+        let context = TurnContext(onDelta: onDelta, onFinal: onFinalMessage, onProgress: onProgressMessage,
+                                  onSteer: onSteerMessage, onActivity: onActivity, onDiff: onDiff, onAction: onActionRequest)
+        turnContexts[threadID] = context
+        interruptedThreadIDs.remove(threadID)
+        userInputContexts[threadID] = UserInputContext(mode: mode, handler: onUserInput)
+        defer {
+            completedActivityDurations[threadID] = context.durations
+            turnContexts.removeValue(forKey: threadID)
+            userInputContexts.removeValue(forKey: threadID)
+            Self.processActiveThreadIDs.remove(threadID)
+            ConversationSteerMailbox.clearActiveTurn(threadID: threadID)
+            if Self.activeClientsByThreadID[threadID] === self {
+                Self.activeClientsByThreadID.removeValue(forKey: threadID)
+            }
+            if activeThreadID == threadID {
+                activeThreadID = turnContexts.first(where: { $0.value.turnID != nil })?.key
+                activeTurnID = activeThreadID.flatMap { turnContexts[$0]?.turnID }
+                activeConversationMode = .code
+            }
+            isTurnActive = turnContexts.values.contains { $0.turnID != nil }
+        }
         try await resumeThreadIfNeeded(
             id: threadID,
             workspace: workspace,
@@ -476,38 +542,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         Self.activeClientsByThreadID[threadID] = self
         activeTurnID = nil
         activeConversationMode = mode
-        isTurnActive = false
+        isTurnActive = turnContexts.values.contains { $0.turnID != nil }
         wasLastTurnInterrupted = false
-        activeDeltaHandler = onDelta
-        activeFinalMessageHandler = onFinalMessage
-        activeProgressMessageHandler = onProgressMessage
-        activeSteerMessageHandler = onSteerMessage
-        activeActivityHandler = onActivity
-        activeDiffHandler = onDiff
-        activeActivities.removeAll()
-        activityStartedAtUptime.removeAll()
-        activityStartedAtDate.removeAll()
-        lastTurnActivityDurations.removeAll()
-        defer {
-            Self.processActiveThreadIDs.remove(threadID)
-            ConversationSteerMailbox.clearActiveTurn(threadID: threadID)
-            if Self.activeClientsByThreadID[threadID] === self {
-                Self.activeClientsByThreadID.removeValue(forKey: threadID)
-            }
-            activeThreadID = nil
-            activeTurnID = nil
-            activeConversationMode = .code
-            isTurnActive = false
-            activeDeltaHandler = nil
-            activeFinalMessageHandler = nil
-            activeProgressMessageHandler = nil
-            activeSteerMessageHandler = nil
-            activeActivityHandler = nil
-            activeDiffHandler = nil
-            activeActivities.removeAll()
-            userInputHandler = nil
-        }
-
         let response = try await request(
             method: "turn/start",
             params: [
@@ -532,19 +568,25 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
               let turnID = turn["id"] as? String else {
             throw ClientError.protocolFailure("Codex did not return a turn ID.")
         }
-        activeTurnID = turnID
+        let turnKey = Self.turnKey(threadID: threadID, turnID: turnID)
+        let returnedStatus = turn["status"] as? String
+        let turnAlreadyTerminal = completedTurns[turnKey] != nil
+            || returnedStatus.map { ["completed", "failed", "interrupted"].contains($0) } == true
+        context.turnID = turnAlreadyTerminal ? nil : turnID
+        activeTurnID = turnAlreadyTerminal ? nil : turnID
         onTurnStarted(turnID)
-        isTurnActive = true
-        ConversationSteerMailbox.publishActiveTurn(threadID: threadID, turnID: turnID)
-        Self.processActiveThreadIDs.insert(threadID)
+        isTurnActive = !turnAlreadyTerminal
+        if !turnAlreadyTerminal {
+            ConversationSteerMailbox.publishActiveTurn(threadID: threadID, turnID: turnID)
+            Self.processActiveThreadIDs.insert(threadID)
+        }
         StationAIDiagnostics.record("codex.turn.started", fields: diagnosticFields([
             "threadID": threadID,
             "turnID": turnID,
-            "turnStatus": turn["status"] as? String ?? "unknown",
+            "turnStatus": returnedStatus ?? "unknown",
             "workspaceRootCount": String(workspace.roots.count),
         ]))
 
-        let turnKey = Self.turnKey(threadID: threadID, turnID: turnID)
         switch turn["status"] as? String {
         case "completed":
             break
@@ -557,7 +599,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             throw ClientError.turnFailed(Self.turnFailureDescription(turn))
         default:
             let mailboxTask = Task { @MainActor [weak self] in
-                while let self, !Task.isCancelled, self.activeThreadID == threadID, self.activeTurnID == turnID {
+                while let self, !Task.isCancelled, self.turnContexts[threadID]?.turnID == turnID {
                     await self.serviceSteerMailbox(threadID: threadID, turnID: turnID)
                     try? await Task.sleep(for: .milliseconds(75))
                 }
@@ -589,9 +631,12 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             "questionCount": String(answers.count),
             "answerCount": String(answers.values.reduce(0) { $0 + $1.count })
         ])
-        guard let requestIDValue = pendingUserInputRequestID,
-              String(describing: requestIDValue) == requestID,
-              pendingUserInputThreadID == threadID else { return false }
+        if let owner = Self.activeClientsByThreadID[threadID], owner !== self {
+            return owner.answerUserInput(requestID: requestID, threadID: threadID, answers: answers)
+        }
+        guard let pending = pendingUserInputs[threadID], pending.request.id == requestID else { return false }
+        let requestIDValue = pending.nativeID
+        let pendingUserInputQuestions = Dictionary(uniqueKeysWithValues: pending.request.questions.map { ($0.id, $0) })
         let answersAreValid = Set(answers.keys) == Set(pendingUserInputQuestions.keys) &&
             answers.allSatisfy { questionID, values in
                 guard !values.isEmpty, let question = pendingUserInputQuestions[questionID] else { return false }
@@ -606,20 +651,14 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 "reason": "invalid_answer_shape",
                 "questionCount": String(answers.count)
             ])
-            self.pendingUserInputRequestID = nil
-            pendingUserInputThreadID = nil
-            pendingUserInputQuestions.removeAll()
-            pendingUserInputRequest = nil
+            clearPendingUserInput(threadID: threadID)
             sendServerError(requestID: requestIDValue, code: -32602, message: "Answers must include a non-empty response for every question.")
             return false
         }
-        self.pendingUserInputRequestID = nil
-        pendingUserInputThreadID = nil
-        pendingUserInputQuestions.removeAll()
         do {
             try sendJSON(["jsonrpc": "2.0", "id": requestIDValue,
                           "result": ["answers": answers.mapValues { ["answers": $0] }]])
-            self.pendingUserInputRequest = nil
+            clearPendingUserInput(threadID: threadID)
             StationAIDiagnostics.record("codex.user_input.answer.succeeded", fields: [
                 "requestID": requestID,
                 "threadID": threadID,
@@ -638,16 +677,16 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     }
 
     func rejectUserInput(requestID: String, threadID: String, message: String) {
-        guard let requestIDValue = pendingUserInputRequestID,
-              String(describing: requestIDValue) == requestID,
-              pendingUserInputThreadID == threadID else { return }
-        pendingUserInputRequestID = nil
-        pendingUserInputThreadID = nil
-        pendingUserInputQuestions.removeAll()
-        pendingUserInputRequest = nil
+        if let owner = Self.activeClientsByThreadID[threadID], owner !== self {
+            owner.rejectUserInput(requestID: requestID, threadID: threadID, message: message)
+            return
+        }
+        guard let pending = pendingUserInputs[threadID], pending.request.id == requestID else { return }
+        let requestIDValue = pending.nativeID
+        clearPendingUserInput(threadID: threadID)
         sendServerError(requestID: requestIDValue, code: -32000, message: message)
 
-        guard activeThreadID == threadID, let turnID = activeTurnID else { return }
+        guard let turnID = activeTurnID(for: threadID) else { return }
         let turnKey = Self.turnKey(threadID: threadID, turnID: turnID)
         rejectedTurnKeys.insert(turnKey)
         let error = ClientError.turnFailed(message)
@@ -659,13 +698,24 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         Task { try? await request(method: "turn/interrupt", params: ["threadId": threadID, "turnId": turnID]) }
     }
 
+    func pendingUserInputRequest(forThread threadID: String) -> ConversationUserInputRequest? {
+        pendingUserInputs[threadID]?.request
+    }
+
+    private func clearPendingUserInput(threadID: String) {
+        pendingUserInputs.removeValue(forKey: threadID)
+        pendingUserInputRequest = pendingUserInputs.values.first?.request
+    }
+
     func isTurnActive(threadID: String) -> Bool {
         startingThreadIDs.contains(threadID)
+            || turnContexts[threadID]?.turnID != nil
             || (activeThreadID == threadID && activeTurnID != nil)
-            || pendingUserInputThreadID == threadID
+            || pendingUserInputs[threadID] != nil
     }
 
     func activeTurnID(for threadID: String) -> String? {
+        if let turnID = turnContexts[threadID]?.turnID { return turnID }
         guard activeThreadID == threadID else { return nil }
         return activeTurnID
     }
@@ -683,7 +733,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     }
 
     func canInterruptActiveTurn(threadID: String) -> Bool {
-        activeThreadID == threadID && activeTurnID != nil
+        activeTurnID(for: threadID) != nil
     }
 
     func markTurnStarting(threadID: String) {
@@ -714,9 +764,15 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     }
 
     private func ensureInitialized(workspace: ConversationWorkspaceContext) async throws {
-        if initialized, process?.isRunning == true {
-            return
-        }
+        if initialized, process?.isRunning == true { return }
+        if let initializationTask { return try await initializationTask.value }
+        let initialization = Task { @MainActor in try await self.initializeProcess(workspace: workspace) }
+        initializationTask = initialization
+        defer { initializationTask = nil }
+        try await initialization.value
+    }
+
+    private func initializeProcess(workspace: ConversationWorkspaceContext) async throws {
 
         if process?.isRunning != true {
             if let stoppedProcess = process {
@@ -1237,6 +1293,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     }
 
     private func handleNotification(method: String, params: [String: Any]) {
+        let context = (params["threadId"] as? String).flatMap { turnContexts[$0] }
         switch method {
         case "thread/goal/updated", "thread/goal/cleared":
             guard let threadID = params["threadId"] as? String else { return }
@@ -1245,10 +1302,11 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         case "turn/started":
             // Server notifications use params {threadId, turn:{id,status,...}}.
             guard let threadID = params["threadId"] as? String,
-                  threadID == activeThreadID,
+                  context != nil || threadID == goalObservationThreadID,
                   let turn = params["turn"] as? [String: Any],
                   let turnID = turn["id"] as? String else { return }
-            activeTurnID = turnID
+            context?.turnID = turnID
+            if activeThreadID == threadID { activeTurnID = turnID }
             isTurnActive = true
             Self.processActiveThreadIDs.insert(threadID)
             if goalObservationThreadID == threadID {
@@ -1257,13 +1315,11 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 goalTurnStartedThreadID = threadID
             }
         case "item/agentMessage/delta", "item/plan/delta":
-            guard params["threadId"] as? String == activeThreadID,
-                  let delta = params["delta"] as? String else { return }
-            activeDeltaHandler?(delta)
+            guard let context, let delta = params["delta"] as? String else { return }
+            context.onDelta(delta)
         case "item/started", "item/completed":
-            guard params["threadId"] as? String == activeThreadID,
-                  let item = params["item"] as? [String: Any] else { return }
-            if goalObservationThreadID == activeThreadID { goalTurnRevision += 1 }
+            if goalObservationThreadID == (params["threadId"] as? String) { goalTurnRevision += 1 }
+            guard let context, let item = params["item"] as? [String: Any] else { return }
             if method == "item/completed",
                let itemType = item["type"] as? String,
                itemType == "agentMessage" || itemType == "plan" {
@@ -1273,7 +1329,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 guard !text.isEmpty || questions != nil else { return }
                 if itemType == "agentMessage", item["delivery"] as? String == "async",
                    let questions {
-                    activeProgressMessageHandler?(ConversationMessage(
+                    context.onProgress(ConversationMessage(
                         id: item["id"] as? String ?? UUID().uuidString,
                         role: .assistant,
                         text: text,
@@ -1282,7 +1338,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                         asyncQuestions: questions
                     ))
                 } else if itemType == "agentMessage", item["phase"] as? String == "commentary" {
-                    activeProgressMessageHandler?(ConversationMessage(
+                    context.onProgress(ConversationMessage(
                         id: item["id"] as? String ?? UUID().uuidString,
                         role: .assistant,
                         text: text,
@@ -1290,7 +1346,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                         turnID: params["turnId"] as? String
                     ))
                 } else {
-                    activeFinalMessageHandler?(text)
+                    context.onFinal(text)
                 }
             }
             let activityID = item["type"] as? String == "subAgentActivity"
@@ -1298,11 +1354,11 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 : item["id"] as? String
             guard let activityID else { return }
             if method == "item/started" {
-                activityStartedAtUptime[activityID] = activityStartedAtUptime[activityID] ?? DispatchTime.now().uptimeNanoseconds
-                activityStartedAtDate[activityID] = activityStartedAtDate[activityID] ?? .now
+                context.startedAtUptime[activityID] = context.startedAtUptime[activityID] ?? DispatchTime.now().uptimeNanoseconds
+                context.startedAtDate[activityID] = context.startedAtDate[activityID] ?? .now
             }
             let measuredDuration: Int?
-            if method == "item/completed", let started = activityStartedAtUptime[activityID] {
+            if method == "item/completed", let started = context.startedAtUptime[activityID] {
                 measuredDuration = max(1, Int((DispatchTime.now().uptimeNanoseconds - started) / 1_000_000))
             } else {
                 measuredDuration = nil
@@ -1311,29 +1367,27 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 item: item,
                 lifecycle: method == "item/completed" ? "completed" : "inProgress",
                 turnID: params["turnId"] as? String,
-                startedAt: activityStartedAtDate[activityID],
+                startedAt: context.startedAtDate[activityID],
                 measuredDurationMs: measuredDuration
             ) else { return }
             if method == "item/completed" {
-                if let durationMs = activity.durationMs { lastTurnActivityDurations[activity.id] = durationMs }
-                activityStartedAtUptime.removeValue(forKey: activityID)
-                activityStartedAtDate.removeValue(forKey: activityID)
+                if let durationMs = activity.durationMs { context.durations[activity.id] = durationMs }
+                context.startedAtUptime.removeValue(forKey: activityID)
+                context.startedAtDate.removeValue(forKey: activityID)
             }
-            activeActivities[activity.id] = activity
-            activeActivityHandler?(activity)
+            context.activities[activity.id] = activity
+            context.onActivity(activity)
         case "item/commandExecution/outputDelta":
-            guard params["threadId"] as? String == activeThreadID,
-                  let itemID = params["itemId"] as? String,
+            guard let context, let itemID = params["itemId"] as? String,
                   let delta = params["delta"] as? String,
-                  var activity = activeActivities[itemID] else { return }
+                  var activity = context.activities[itemID] else { return }
             let output = String((activity.detail + delta).suffix(2_000))
             activity.detail = output
-            activeActivities[itemID] = activity
-            activeActivityHandler?(activity)
+            context.activities[itemID] = activity
+            context.onActivity(activity)
         case "turn/diff/updated":
-            guard params["threadId"] as? String == activeThreadID,
-                  let diff = params["diff"] as? String, !diff.isEmpty else { return }
-            activeDiffHandler?(ConversationTurnDiff(unifiedDiff: diff))
+            guard let context, let diff = params["diff"] as? String, !diff.isEmpty else { return }
+            context.onDiff(ConversationTurnDiff(unifiedDiff: diff))
         case "turn/completed":
             // A terminal notification has the same threadId/turn envelope; only a matching waiter completes.
             guard let threadID = params["threadId"] as? String,
@@ -1348,12 +1402,16 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 "turnStatus": turn["status"] as? String ?? "unknown",
             ]))
 
-            if goalObservationThreadID == threadID, activeTurnID == turnID {
+            let isMatchingActiveTurn = activeThreadID == threadID && activeTurnID == turnID
+            if isMatchingActiveTurn {
                 activeTurnID = nil
                 isTurnActive = false
-                goalTurnCompletedTurnID = turnID
                 Self.processActiveThreadIDs.remove(threadID)
                 ConversationSteerMailbox.clearActiveTurn(threadID: threadID)
+            }
+
+            if goalObservationThreadID == threadID, isMatchingActiveTurn {
+                goalTurnCompletedTurnID = turnID
                 goalTurnRevision += 1
                 goalTurnCompletedRevision += 1
                 return
@@ -1388,7 +1446,9 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         if normalizedMethod.contains("approval") || normalizedMethod.contains("item/tool/") ||
             normalizedMethod.contains("elicitation"),
            method != "item/tool/requestUserInput", method != "tool/requestUserInput" {
-            actionRequestHandler?()
+            if let threadID = params["threadId"] as? String, let context = turnContexts[threadID] {
+                context.onAction()
+            }
         }
 
         let result: [String: Any]
@@ -1418,17 +1478,20 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 sendServerError(requestID: requestID, code: -32602, message: "Question IDs must be unique.")
                 return
             }
-            pendingUserInputRequestID = requestID
-            pendingUserInputThreadID = threadID
-            pendingUserInputQuestions = Dictionary(uniqueKeysWithValues: questions.map { ($0.id, $0) })
+            guard let context = userInputContexts[threadID] else {
+                sendServerError(requestID: requestID, code: -32000, message: "No conversation owns this question request.")
+                return
+            }
             let request = ConversationUserInputRequest(
                 id: requestIDString,
                 threadID: threadID,
                 questions: questions,
-                isBlocking: activeConversationMode == .plan || (params["isBlocking"] as? Bool ?? true)
+                isBlocking: context.mode == .plan || (params["isBlocking"] as? Bool ?? true),
+                mode: context.mode
             )
+            pendingUserInputs[threadID] = PendingUserInput(nativeID: requestID, request: request)
             pendingUserInputRequest = request
-            await userInputHandler?(request)
+            await context.handler(request)
             return
         case "item/commandExecution/requestApproval", "item/fileChange/requestApproval":
             result = ["decision": "decline"]
@@ -1494,6 +1557,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         for key in Array(deltaLogSummaries.keys) { flushDeltaLogSummary(for: key, reason: "app_server_exit") }
 
         let exitDetail = "Codex CLI exited with status \(terminatedProcess.terminationStatus)."
+        pendingUserInputs.removeAll()
+        pendingUserInputRequest = nil
         StationAIDiagnostics.record("codex.app_server.exited", fields: diagnosticFields([
             "codexPID": String(terminatedProcess.processIdentifier),
             "exitStatus": String(terminatedProcess.terminationStatus),
@@ -1510,7 +1575,6 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         initialized = false
         resumedThreadIDs.removeAll()
         activeThreadID = nil
-        activeDeltaHandler = nil
 
         for continuation in pendingRequests.values {
             continuation.resume(throwing: error)

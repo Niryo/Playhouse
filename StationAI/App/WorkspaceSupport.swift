@@ -152,10 +152,16 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
     var isContextCompaction: Bool = false
     var turnID: String? = nil
     var timelineOrder: Int? = nil
+    /// The provider's own background-task identifier for a backgrounded Claude
+    /// Agent/Task call. Durable across process restarts, so a bare task
+    /// notification with no matching in-memory tool-use id can still be
+    /// resolved against the persisted activity that originally started it.
+    var backgroundTaskID: String? = nil
 
     private enum CodingKeys: String, CodingKey {
         case id, title, detail, status, childThreadID, agentPath, model, reasoningEffort
         case toolKind, server, tool, durationMs, startedAt, isContextCompaction, turnID, timelineOrder
+        case backgroundTaskID
     }
 
     init(
@@ -174,7 +180,8 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
         startedAt: Date? = nil,
         isContextCompaction: Bool = false,
         turnID: String? = nil,
-        timelineOrder: Int? = nil
+        timelineOrder: Int? = nil,
+        backgroundTaskID: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -192,6 +199,7 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
         self.isContextCompaction = isContextCompaction
         self.turnID = turnID
         self.timelineOrder = timelineOrder
+        self.backgroundTaskID = backgroundTaskID
     }
 
     init(from decoder: Decoder) throws {
@@ -212,6 +220,7 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
         isContextCompaction = try values.decodeIfPresent(Bool.self, forKey: .isContextCompaction) ?? false
         turnID = try values.decodeIfPresent(String.self, forKey: .turnID)
         timelineOrder = try values.decodeIfPresent(Int.self, forKey: .timelineOrder)
+        backgroundTaskID = try values.decodeIfPresent(String.self, forKey: .backgroundTaskID)
     }
 
     var isSubagent: Bool { childThreadID != nil }
@@ -232,6 +241,7 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
         case "completed": "Completed"
         case "failed": "Failed"
         case "interrupted": "Interrupted"
+        case "stopped": "Stopped"
         case "inprogress", "running": "In progress"
         default: status
         }
@@ -242,6 +252,7 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
         case "inprogress", "running": "started working"
         case "completed": "finished working"
         case "interrupted": "was interrupted"
+        case "stopped": "was stopped"
         case "failed": "failed"
         default: "working · \(statusLabel.lowercased())"
         }
@@ -1319,7 +1330,7 @@ struct FlowLayout: Layout {
 
 struct WorkspaceSettingsView: View {
     @AppStorage(WorkspaceSettings.defaultParentFolderKey, store: WorkspaceSettings.preferencesStore) private var defaultParentFolderPath = ""
-    @AppStorage(WorkspaceSettings.appearanceKey, store: WorkspaceSettings.preferencesStore) private var appearance = "dark"
+    @State private var appearance = WorkspaceSettings.preferencesStore.string(forKey: WorkspaceSettings.appearanceKey) ?? "dark"
     @State private var pickerError: String?
 
     private var parentFolderURL: URL? {
@@ -1334,6 +1345,7 @@ struct WorkspaceSettingsView: View {
                     set: { value in
                         do {
                             try WorkspaceSettingsManager().setAppearance(value)
+                            appearance = value
                         } catch {
                             pickerError = error.localizedDescription
                         }
@@ -1384,6 +1396,17 @@ struct WorkspaceSettingsView: View {
                     Text("Changing this setting affects suggestions for new tasks. It does not change the working folders saved on existing tasks.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
+            }
+        }
+        .task {
+            while !Task.isCancelled {
+                let preferences = WorkspaceSettings.preferencesStore
+                preferences.synchronize()
+                if let updatedAppearance = preferences.string(forKey: WorkspaceSettings.appearanceKey),
+                   updatedAppearance != appearance {
+                    appearance = updatedAppearance
+                }
+                try? await Task.sleep(for: .milliseconds(250))
             }
         }
         .formStyle(.grouped)

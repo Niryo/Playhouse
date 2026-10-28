@@ -74,10 +74,11 @@ if [[ "$(cat "${fixture_root}/.stationai-bridge-fixture" 2>/dev/null || true)" !
   exit 1
 fi
 codex_fixtures=(
-  ui empty nonblocking slow plan-slow interrupted abort success unique-turns-success goal-success
-  title-success title-failure title-success-wait hold hold-interrupt hold-reject-interrupt
+  ui empty nonblocking slow plan-slow question-isolation-plan-slow interrupted abort success unique-turns-success goal-success
+  title-success title-failure title-success-wait title-archive-ui hold
+  hold-interrupt hold-reject-interrupt
   progress-hold-release progress-hold-release-failed progress-hold-release-interrupted
-  progress-question success-wait store-write-success-wait concurrent-serial-success-wait restart-question restart-question-no-secret unassociated-restart-question
+  progress-question progress-user-question success-wait store-write-success-wait concurrent-serial-success-wait restart-question restart-question-no-secret unassociated-restart-question
   status-transition-ui nonblocking-slow nonblocking-restart-question async-question async-question-queued subagent context-compaction tool-activity long-history-success markdown steer-queue-serial-success-wait
 )
 for fixture in "${codex_fixtures[@]}"; do
@@ -148,14 +149,13 @@ python3 "${dashboard_script}" "${dashboard_arguments[@]}" >/dev/null
 architecture="$(uname -m)"
 xcode_version="$(xcodebuild -version | awk '/^Xcode / {print $2}')"
 if [[ "${STATIONAI_UI_TART_GUEST:-0}" == "1" ]]; then
-  repository_cache_key="tart-vm-v5"
+  repository_cache_key="tart-vm-$(printf '%s' "${repository_root}" | shasum -a 256 | cut -c 1-12)"
   derived_data_root="${HOME}/StationAIUITestRuns/DerivedData"
 else
   repository_cache_key="$(printf '%s' "${repository_root}" | shasum -a 256 | cut -c 1-12)"
   derived_data_root="${TMPDIR:-/tmp}"
 fi
 derived_data_dir="${derived_data_root}/stationai-ui-derived-data-${xcode_version}-${architecture}-${repository_cache_key}"
-test_run_identifier="$(basename "${test_output_dir}" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')"
 source_bundle_identifier="$("${repository_root}/scripts/app-profile.sh" "${repository_root}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["bundleID"])')"
 task_pr_seeder="${fixture_root}/seed-task-pr-link"
 xcrun swiftc -module-name StationAI \
@@ -211,7 +211,6 @@ else
 fi
 
 base_test_arguments=(
-  test
   -project "${repository_root}/StationAI.xcodeproj"
   -scheme StationAI
   -destination "platform=macOS,arch=${architecture}"
@@ -224,12 +223,149 @@ base_test_arguments+=(
   ARCHS="${architecture}"
   ONLY_ACTIVE_ARCH=YES
 )
+app_bundle_identifier="${source_bundle_identifier}.e2e.ui"
+ui_build_timeout_seconds="${STATIONAI_UI_BUILD_TIMEOUT_SECONDS:-600}"
+watchdog_command=(
+  perl -e '
+    use POSIX ":sys_wait_h";
+    $timeout = shift @ARGV;
+    $screenshot = shift @ARGV;
+    $pid = fork // die "fork failed: $!\n";
+    if (!$pid) {
+      setpgrp(0, 0);
+      exec @ARGV or die "exec failed: $!\n";
+    }
+    $started = time;
+    $next_update = 20;
+    while (1) {
+      $waited = waitpid($pid, WNOHANG);
+      last if $waited == $pid;
+      $elapsed = time - $started;
+      if ($elapsed >= $next_update) {
+        print STDERR "Watchdog: process is still active after ${elapsed}s (limit ${timeout}s).\n";
+        $next_update += 20;
+      }
+      if ($elapsed >= $timeout) {
+        system("/usr/sbin/screencapture", "-x", $screenshot);
+        kill "TERM", -$pid;
+        sleep 1;
+        kill "KILL", -$pid;
+        waitpid($pid, 0);
+        exit 124;
+      }
+      select undef, undef, undef, 0.25;
+    }
+    $status = $?;
+    exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
+  '
+)
 
-# A new xcodebuild test session every eight cases bounds sequence-dependent
-# XCTest/macOS state while keeping each case single-shot and serial.
-batch_size=8
+# Compile the VM snapshot once before starting the per-case watchdogs. A
+# separate xcodebuild session per case is useful for isolation, but charging
+# compilation to every case makes the one-minute case limit measure build
+# setup instead of UI execution.
+build_log="${test_output_dir}/xcodebuild-build-for-testing.log"
+build_input_fingerprint="$(python3 - "${repository_root}" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+inputs = [
+    root / "StationAI",
+    root / "StationAI.xcodeproj" / "project.pbxproj",
+    root / "scripts" / "app-profile.sh",
+    root / "scripts" / "build-bridge.sh",
+]
+files = []
+for item in inputs:
+    if item.is_dir():
+        files.extend(path for path in item.rglob("*") if path.is_file())
+    elif item.is_file():
+        files.append(item)
+digest = hashlib.sha256()
+for path in sorted(files):
+    digest.update(str(path.relative_to(root)).encode())
+    digest.update(b"\0")
+    digest.update(path.read_bytes())
+print(digest.hexdigest())
+PY
+)"
+build_stamp="${derived_data_dir}/stationai-ui-build-input.sha256"
+test_runner_product="${derived_data_dir}/Build/Products/Debug/StationAIUITests-Runner.app"
+compiled_app="${derived_data_dir}/Build/Products/Debug/StationAI.app"
+compiled_bundle_is_compatible=0
+if [[ -f "${compiled_app}/Contents/Info.plist" &&
+  -f "${compiled_app}/Contents/XPCServices/StationAIBridge.xpc/Contents/Info.plist" ]]; then
+  if python3 - "${compiled_app}" <<'PY'
+import plistlib
+import sys
+from pathlib import Path
+
+app = Path(sys.argv[1])
+try:
+    app_info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+    bridge_info = plistlib.loads(
+        (app / "Contents/XPCServices/StationAIBridge.xpc/Contents/Info.plist").read_bytes()
+    )
+except (OSError, plistlib.InvalidFileException):
+    raise SystemExit(0)
+if (
+    app_info.get("StationAIStoreCompatibilityVersion") == "2"
+    and bridge_info.get("StationAIStoreCompatibilityVersion") == "2"
+):
+    raise SystemExit(1)
+raise SystemExit(0)
+PY
+  then
+    compiled_bundle_is_compatible=0
+  else
+    compiled_bundle_is_compatible=1
+  fi
+fi
+if [[ -d "${test_runner_product}" ]] &&
+  [[ "${compiled_bundle_is_compatible}" == "1" ]] &&
+  [[ "$(cat "${build_stamp}" 2>/dev/null || true)" == "${build_input_fingerprint}" ]]; then
+  printf 'Reusing compiled UI test products; build inputs are unchanged.\n'
+else
+  printf 'Building UI tests once before per-case execution...\n'
+  if [[ -d "${derived_data_dir}" ]] &&
+    [[ "${compiled_bundle_is_compatible}" != "1" ]]; then
+    printf 'Discarding stale compiled products with incompatible app metadata.\n'
+    rm -rf -- "${derived_data_dir}"
+  fi
+  set +e
+  caffeinate -d "${watchdog_command[@]}" "${ui_build_timeout_seconds}" \
+    "${test_output_dir}/build-timeout.png" \
+    xcodebuild build-for-testing "${base_test_arguments[@]}" \
+    "STATIONAI_APP_BUNDLE_IDENTIFIER=${app_bundle_identifier}" 2>&1 | tee "${build_log}"
+  build_status="${PIPESTATUS[0]}"
+  set -e
+  if (( build_status != 0 )); then
+    if (( build_status == 124 )); then
+      printf 'UI build watchdog expired; the watchdog-owned build process group was terminated.\n' >&2
+    fi
+    printf 'UI test build-for-testing failed with exit %s; no cases were executed.\n' "${build_status}" >&2
+    for ui_case in "${selected_cases[@]}"; do
+      python3 "${dashboard_script}" finish --state-file "${dashboard_state}" \
+        --exit-status "${build_status}" \
+        --case "${ui_case}" >/dev/null 2>&1 || true
+    done
+    python3 "${dashboard_script}" finish --state-file "${dashboard_state}" \
+      --exit-status "${build_status}" >/dev/null 2>&1 || true
+    exit "${build_status}"
+  fi
+  mkdir -p "${derived_data_dir}"
+  printf '%s\n' "${build_input_fingerprint}" > "${build_stamp}.tmp"
+  mv -f "${build_stamp}.tmp" "${build_stamp}"
+fi
+
+# Each case gets its own xcodebuild session so the one-minute watchdog applies
+# to one UI test at a time and a stalled case cannot delay later cases.
+batch_size=1
 batch_count=$(( (${#selected_cases[@]} + batch_size - 1) / batch_size ))
 overall_failed=0
+ui_test_timeout_seconds="${STATIONAI_UI_TEST_TIMEOUT_SECONDS:-120}"
 for (( batch_index=0; batch_index<batch_count; batch_index++ )); do
   first_case=$(( batch_index * batch_size ))
   batch_cases=("${selected_cases[@]:first_case:batch_size}")
@@ -238,8 +374,7 @@ for (( batch_index=0; batch_index<batch_count; batch_index++ )); do
   result_bundle="${test_output_dir}/StationAI-UI-batch-${batch_tag}.xcresult"
   summary_path="${test_output_dir}/test-summary-batch-${batch_tag}.json"
   dashboard_log="${test_output_dir}/xcodebuild-batch-${batch_tag}.log"
-  app_bundle_identifier="${source_bundle_identifier}.e2e.${test_run_identifier}.b${batch_tag}"
-  test_arguments=("${base_test_arguments[@]}" -resultBundlePath "${result_bundle}")
+  test_arguments=(test-without-building "${base_test_arguments[@]}" -resultBundlePath "${result_bundle}")
   for ui_case in "${batch_cases[@]}"; do
     test_arguments+=("-only-testing:StationAIUITests/StationAIUITests/${ui_case}")
   done
@@ -252,12 +387,49 @@ for (( batch_index=0; batch_index<batch_count; batch_index++ )); do
   if (( dashboard_inline == 1 )); then
     tracker_arguments+=(--announce)
   fi
-  caffeinate -d xcodebuild "${test_arguments[@]}" 2>&1 \
+  caffeinate -d "${watchdog_command[@]}" "${ui_test_timeout_seconds}" \
+    "${test_output_dir}/timeout-${batch_tag}.png" \
+    xcodebuild "${test_arguments[@]}" 2>&1 \
     | python3 "${dashboard_script}" "${tracker_arguments[@]}"
   pipeline_status=("${PIPESTATUS[@]}")
   xcodebuild_status="${pipeline_status[0]}"
   dashboard_tracker_status="${pipeline_status[1]}"
   set -e
+
+  if (( xcodebuild_status == 124 )); then
+    printf 'UI case watchdog expired; the watchdog-owned XCTest process group was terminated.\n' >&2
+  fi
+  # XCTest teardown is skipped when the watchdog terminates xcodebuild. The
+  # VM is dedicated to this run, so clean up the app and runner after every
+  # case to prevent a timed-out case from contaminating the next one.
+  pkill -x StationAI >/dev/null 2>&1 || true
+  pkill -x StationAIUITests-Runner >/dev/null 2>&1 || true
+  pkill -x "Diagnostics Reporter" >/dev/null 2>&1 || true
+  for _ in $(seq 1 20); do
+    if ! pgrep -x StationAI >/dev/null 2>&1 &&
+      ! pgrep -x StationAIUITests-Runner >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.25
+  done
+  if pgrep -x StationAI >/dev/null 2>&1; then
+    pkill -KILL -x StationAI >/dev/null 2>&1 || true
+  fi
+  if pgrep -x StationAIUITests-Runner >/dev/null 2>&1; then
+    pkill -KILL -x StationAIUITests-Runner >/dev/null 2>&1 || true
+  fi
+  for _ in $(seq 1 8); do
+    if ! pgrep -x StationAI >/dev/null 2>&1 &&
+      ! pgrep -x StationAIUITests-Runner >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.25
+  done
+  if pgrep -x StationAI >/dev/null 2>&1 ||
+    pgrep -x StationAIUITests-Runner >/dev/null 2>&1; then
+    printf 'Could not clean up the prior UI case processes before continuing.\n' >&2
+    overall_failed=1
+  fi
 
   summary_read_status=0
   if xcrun xcresulttool get test-results summary --path "${result_bundle}" > "${summary_path}"; then

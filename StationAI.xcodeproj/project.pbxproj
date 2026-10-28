@@ -320,7 +320,8 @@
 			);
 			inputPaths = (
 				"$(SRCROOT)/scripts/build-bridge.sh",
-				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Info.plist",
+				"$(SRCROOT)/scripts/app-profile.sh",
+				"$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
 				"$(SRCROOT)/StationAI/Bridge/BridgeContract.swift",
 				"$(SRCROOT)/StationAI/Bridge/XPCServiceMain.swift",
 				"$(SRCROOT)/StationAI/CLI/BridgeClient.swift",
@@ -328,6 +329,7 @@
 				"$(SRCROOT)/StationAI/App/BridgeCore.swift",
 				"$(SRCROOT)/StationAI/App/BoardTask.swift",
 				"$(SRCROOT)/StationAI/App/WorkspaceSupport.swift",
+				"$(SRCROOT)/StationAI/App/WorkspaceChanges.swift",
 				"$(SRCROOT)/StationAI/App/CodexAppServerClient.swift",
 				"$(SRCROOT)/StationAI/App/ConversationModel.swift",
 				"$(SRCROOT)/StationAI/App/ClaudeCodeClient.swift",

@@ -398,6 +398,12 @@ enum StationAICLI {
                     return .string("data:\(mime);base64,\(data.base64EncodedString())")
                 }
                 return BridgeRequest(command: "conversation.steer", arguments: ["taskID": .string(id), "message": .string(flags["--message"]?.first ?? ""), "images": .array(images)])
+            case "repair-user-input":
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--from-task"])
+                guard let sourceTaskID = flags["--from-task"]?.first else {
+                    throw CLIError.usage("Use: stationai conversation repair-user-input <task-id> --from-task <source-task-id>")
+                }
+                return BridgeRequest(command: "conversation.repair_user_input", arguments: ["taskID": .string(id), "sourceTaskID": .string(sourceTaskID)])
             case "answer-async":
                 guard tail.count >= 2 else { throw CLIError.usage("Use: stationai conversation answer-async <task-id> <item-id> --answer <text> [--answer <text>]...") }
                 let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--answer"])
@@ -564,6 +570,7 @@ enum StationAICLI {
       stationai conversation queue-steer <task-id> <message-id>
       stationai conversation steer <task-id> --message <text> [--image <path>]...
       stationai conversation answer-async <task-id> <item-id> --answer <text> [--answer <text>]...
+      stationai conversation repair-user-input <task-id> --from-task <source-task-id>
       stationai conversation answer-user-input <task-id> <request-id> --answer <question-id>=<answer> [--answer <question-id>=<answer>]...
       stationai conversation models <task-id>
       stationai conversation effort <task-id> [set <low|medium|high|xhigh>]

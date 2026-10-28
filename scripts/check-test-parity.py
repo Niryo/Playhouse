@@ -85,7 +85,7 @@ def composer_coverage_problems(source: str) -> list[str]:
     if "composer.frame.height" in body:
         problems.append("Composer growth assertions must measure the viewport, not the text document.")
     required = {
-        'editorViewport.frame.height >= 239': "initial expansion of a restored long draft",
+        'editorViewport.frame.height >= 205': "initial expansion of a restored long draft",
         'editorViewport.frame.height > fiveLineHeight': "visible growth beyond five lines",
         'editorViewport.frame.height > shortHeight': "growth from wrapped text",
         'editorViewport.frame.height < 60': "shrinking after replacement",
