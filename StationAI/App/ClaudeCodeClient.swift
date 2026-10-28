@@ -76,6 +76,10 @@ final class ClaudeSessionRunner {
     /// any of these are still running, or their results and the activity rows
     /// tracking them would be lost when the process is torn down.
     private var outstandingBackgroundTaskIDs: Set<String> = []
+    /// A task_updated terminal status is not the final report. Wait for the
+    /// distinct task_notification event even if background_tasks_changed has
+    /// already removed the task from its outstanding list.
+    private var pendingBackgroundTaskNotificationIDs: Set<String> = []
     /// Maps the provider's own background task id to the tool-use id (the
     /// activity's `childThreadID`) that launched it, learned from `task_started`.
     private var backgroundTaskToolUseIDs: [String: String] = [:]
@@ -481,7 +485,8 @@ final class ClaudeSessionRunner {
 
     private func waitForTurnCompletion() async throws {
         if turnCompletion.resultReceived, pendingCommandUUIDs.isEmpty || !sawCommandLifecycle,
-           outstandingBackgroundTaskIDs.isEmpty {
+           outstandingBackgroundTaskIDs.isEmpty,
+           pendingBackgroundTaskNotificationIDs.isEmpty {
             if let error = turnCompletion.resultError { throw error }
             return
         }
@@ -780,6 +785,7 @@ final class ClaudeSessionRunner {
                 nestedBackgroundTaskIDs.insert(taskID)
                 return
             }
+            pendingBackgroundTaskNotificationIDs.insert(taskID)
             backgroundTaskToolUseIDs[taskID] = toolUseID
             guard var activity = toolActivities[toolUseID] else { return }
             activity.backgroundTaskID = taskID
@@ -796,7 +802,11 @@ final class ClaudeSessionRunner {
             activityHandler?(activity)
         case "task_updated", "task_notification":
             guard let taskID = message["task_id"] as? String else { return }
-            outstandingBackgroundTaskIDs.remove(taskID)
+            let isTaskNotification = subtype == "task_notification"
+            if isTaskNotification {
+                outstandingBackgroundTaskIDs.remove(taskID)
+                pendingBackgroundTaskNotificationIDs.remove(taskID)
+            }
             guard !nestedBackgroundTaskIDs.contains(taskID) else { return }
             let patch = message["patch"] as? [String: Any]
             guard let rawStatus = (message["status"] as? String) ?? (patch?["status"] as? String) else {
@@ -805,6 +815,14 @@ final class ClaudeSessionRunner {
             }
             let status = Self.resolvedBackgroundTaskStatus(rawStatus)
             let summary = message["summary"] as? String
+            // A task_updated event can report a terminal status before Claude
+            // sends the task_notification containing the actual agent result.
+            // Keep the activity and parent turn open until that result arrives.
+            if !isTaskNotification, status != "inProgress" {
+                pendingBackgroundTaskNotificationIDs.insert(taskID)
+                completeTurnIfSettled()
+                return
+            }
             if let toolUseID = (message["tool_use_id"] as? String) ?? backgroundTaskToolUseIDs[taskID],
                let existing = toolActivities[toolUseID] {
                 let duration = activityStartedAtUptime.removeValue(forKey: toolUseID).map {
@@ -814,7 +832,8 @@ final class ClaudeSessionRunner {
                     id: existing.id, title: existing.title, detail: summary ?? existing.detail, status: status,
                     childThreadID: existing.childThreadID, agentPath: existing.agentPath, model: existing.model,
                     toolKind: existing.toolKind, server: existing.server, tool: existing.tool,
-                    durationMs: duration ?? existing.durationMs, turnID: existing.turnID, backgroundTaskID: taskID
+                    durationMs: duration ?? existing.durationMs, turnID: existing.turnID, backgroundTaskID: taskID,
+                    backgroundTaskSummary: summary ?? existing.backgroundTaskSummary
                 )
                 if let duration { activityDurations[activity.id] = duration }
                 toolActivities[toolUseID] = activity
@@ -825,7 +844,8 @@ final class ClaudeSessionRunner {
                 // only by backgroundTaskID so the owner can resolve it against the
                 // persisted activity from whichever earlier turn launched it.
                 activityHandler?(ConversationActivity(
-                    id: taskID, title: "Background agent", detail: summary ?? "", status: status, backgroundTaskID: taskID
+                    id: taskID, title: "Background agent", detail: summary ?? "", status: status,
+                    backgroundTaskID: taskID, backgroundTaskSummary: summary
                 ))
             }
             completeTurnIfSettled()
@@ -866,7 +886,8 @@ final class ClaudeSessionRunner {
 
     private func completeTurnIfSettled() {
         guard turnCompletion.resultReceived, pendingCommandUUIDs.isEmpty || !sawCommandLifecycle,
-              outstandingBackgroundTaskIDs.isEmpty else { return }
+              outstandingBackgroundTaskIDs.isEmpty,
+              pendingBackgroundTaskNotificationIDs.isEmpty else { return }
         if let error = turnCompletion.resultError {
             finishTurn(.failure(error))
             return

@@ -5348,7 +5348,7 @@ class StationAIBridgeTests(unittest.TestCase):
         resumed, _ = self.call_cli("conversation", "history", task_id)
         self.assertIsNone(self.assert_success(resumed).get("pendingUserInputRequest"))
 
-    # case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early.
+    # case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early. A status-only completion update is not shown as an agent result; the summary-bearing notification is persisted as one normal assistant message in the parent conversation, appears in the visible transcript, and survives fresh CLI/XPC history reads and app reopening without duplication. A failed background agent remains inspectable as a failed activity, and its error summary is not added as an assistant result.
     def test_claude_background_agent_keeps_turn_open_until_resolved(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-background-agent"
@@ -5361,10 +5361,48 @@ class StationAIBridgeTests(unittest.TestCase):
             "task", "create", "--title", "Claude background agent", "--root", self.primary, "--provider", "claude"
         )
         task_id = self.assert_success(task)["id"]
-        response, events = self.call_cli(
-            "conversation", "send", task_id, "--message", "Launch a background agent for this turn.",
-            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
-        )
+        env = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        command = ("conversation", "send", task_id, "--message", "Launch a background agent for this turn.")
+        pause = Path(str(executable) + ".background-summary-pause")
+        ready = Path(str(executable) + ".background-summary-ready")
+        release = Path(str(executable) + ".background-summary-release")
+        pause.write_text("Pause after status-only completion.\n", encoding="utf-8")
+        process = self.start_cli(*command, extra_environment=env, binary_output=True)
+        try:
+            deadline = time.monotonic() + 20
+            while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "The fixture should pause after the status-only completion update.")
+            self.assertIsNone(
+                process.poll(),
+                "The CLI send must remain active after Claude returns its parent result but before the background summary notification.",
+            )
+            interim_history = None
+            interim_activity = None
+            for _ in range(20):
+                interim_response, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+                interim_history = self.assert_success(interim_response)
+                interim_activity = next(a for a in interim_history["activities"] if a["childThreadID"] == "toolu_background_agent")
+                if interim_activity["status"] == "inProgress":
+                    break
+                time.sleep(0.05)
+            self.assertEqual(interim_activity["status"], "inProgress", "A status-only update must leave the agent active.")
+            self.assertIsNone(interim_activity.get("backgroundTaskSummary"))
+            self.assertFalse(
+                any(message.get("phase") == "subagent_report" for message in interim_history["messages"]),
+                "Progress detail must not appear as a completed assistant result before Claude sends its summary.",
+            )
+            release.write_text("Release summary notification.\n", encoding="utf-8")
+            stdout, stderr = process.communicate(timeout=60)
+            self.assertEqual(process.returncode, 0, f"CLI exit mismatch for {command}: {stderr!r}")
+            output_lines = [line for line in stdout.decode("utf-8").splitlines() if line.strip()]
+            self.assertTrue(output_lines, "The CLI should return a final result.")
+            response = json.loads(output_lines[-1])
+            events = [json.loads(line) for line in output_lines[:-1]]
+        finally:
+            release.write_text("Release summary after assertion failure.\n", encoding="utf-8")
+            if process.poll() is None:
+                process.communicate(timeout=30)
         result = self.assert_success(response)
         activity_updates = [
             event["payload"]["activity"] for event in events
@@ -5386,11 +5424,40 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assertEqual(activity_updates[-1]["backgroundTaskID"], "bgtask-fixture-1")
         self.assertEqual(activity_updates[-1]["detail"], "Background check finished.")
+        terminal_updates = [update for update in activity_updates if update["status"] == "completed"]
+        self.assertTrue(terminal_updates, "The summary-bearing notification should resolve the agent.")
+        self.assertEqual(terminal_updates[-1].get("backgroundTaskSummary"), "Background check finished.")
         self.assertTrue(any(message["text"] == "STARTED" for message in result["messages"]))
         history = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
         activity = next(a for a in history["activities"] if a["childThreadID"] == "toolu_background_agent")
         self.assertEqual(activity["status"], "completed")
         self.assertEqual(activity["backgroundTaskID"], "bgtask-fixture-1")
+        reports = [message for message in history["messages"] if message.get("phase") == "subagent_report"]
+        self.assertEqual(len(reports), 1, "The completed background-agent result should be a single parent conversation message.")
+        self.assertEqual(reports[0]["role"], "assistant")
+        self.assertEqual(reports[0]["provider"], "claude")
+        self.assertEqual(reports[0]["text"], "Background check finished.")
+        fresh_history = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+        fresh_reports = [message for message in fresh_history["messages"] if message.get("phase") == "subagent_report"]
+        self.assertEqual(fresh_reports, reports, "Fresh XPC reads should preserve one stable result message without duplication.")
+
+        failed_task_response, _ = self.call_cli(
+            "task", "create", "--title", "Claude failed background agent", "--root", self.primary, "--provider", "claude"
+        )
+        failed_task_id = self.assert_success(failed_task_response)["id"]
+        failed_send, _ = self.call_cli(
+            "conversation", "send", failed_task_id, "--message", "Launch a background agent failure case.",
+            extra_environment=env,
+        )
+        self.assert_success(failed_send)
+        failed_history = self.assert_success(self.call_cli("conversation", "history", failed_task_id, extra_environment=env)[0])
+        failed_activity = next(a for a in failed_history["activities"] if a["childThreadID"] == "toolu_background_agent")
+        self.assertEqual(failed_activity["status"], "failed")
+        self.assertEqual(failed_activity["backgroundTaskSummary"], "Background check failed.")
+        self.assertFalse(
+            any(message.get("phase") == "subagent_report" for message in failed_history["messages"]),
+            "A failed agent summary must not be presented as a successful assistant result.",
+        )
 
     # case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, StationAI returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics.
     def test_claude_private_recovery_failure_fails_closed(self):
