@@ -71,7 +71,11 @@ def run_tool(tool_id, name, tool_input, command=None):
     return output
 
 
+background_result_sent = False
+
+
 def respond(user_text, instructions, preserve_no_outcome=False):
+    global background_result_sent
     commands = []
     if PENDING_QUESTION_SUCCESS_MARKER in user_text.lower():
         question_input = {
@@ -248,6 +252,9 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         # completion, and the real outcome arrives later as system task events.
         tool_id = "toolu_background_agent"
         task_id = "bgtask-fixture-1"
+        did_fail = "background agent failure" in user_text.lower()
+        terminal_status = "failed" if did_fail else "completed"
+        result_summary = "Background check failed." if did_fail else "Background check finished."
         assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": "Agent", "input": {
             "subagent_type": "Explore", "description": "Background check", "prompt": "check something",
             "run_in_background": True,
@@ -266,10 +273,30 @@ def respond(user_text, instructions, preserve_no_outcome=False):
                "tool_use_id": tool_id, "description": "Running Bash", "subagent_type": "Explore",
                "last_tool_name": "Bash"})
         text("msg_background_started", "STARTED")
+        if not did_fail:
+            # Model the provider finishing its parent response before it sends
+            # the background agent's terminal notification. The bridge must
+            # keep the send open while that result is still outstanding.
+            write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+            background_result_sent = True
         write({"type": "system", "subtype": "task_updated", "task_id": task_id, "run_id": "fixture-run-1",
-               "patch": {"status": "completed", "end_time": 0}})
+               "patch": {"status": terminal_status, "end_time": 0}})
+        if not did_fail:
+            # This empty snapshot can clear the client's outstanding task set
+            # before task_notification carries the actual result.
+            write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+        summary_pause = Path(str(sys.argv[0]) + ".background-summary-pause")
+        if summary_pause.exists() and not did_fail:
+            summary_ready = Path(str(sys.argv[0]) + ".background-summary-ready")
+            summary_release = Path(str(sys.argv[0]) + ".background-summary-release")
+            summary_ready.write_text("Status-only completion sent.\n", encoding="utf-8")
+            summary_deadline = time.monotonic() + 30
+            while not summary_release.exists() and time.monotonic() < summary_deadline:
+                time.sleep(0.02)
+            if not summary_release.exists():
+                raise TimeoutError("The test did not release the background-agent summary event.")
         write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
-               "tool_use_id": tool_id, "status": "completed", "output_file": "", "summary": "Background check finished."})
+               "tool_use_id": tool_id, "status": terminal_status, "output_file": "", "summary": result_summary})
         write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
     else:
         text("msg_simple", SIMPLE_ANSWER)
@@ -277,6 +304,7 @@ def respond(user_text, instructions, preserve_no_outcome=False):
 
 
 def main():
+    global background_result_sent
     history_path = Path(str(sys.argv[0]) + ".history")
     instructions = argument("--append-system-prompt") or ""
     turn = {
@@ -352,6 +380,7 @@ def main():
                 history["turns"][-1]["questionAnswers"] = answers
             history_path.write_text(json.dumps(history), encoding="utf-8")
         elif message.get("type") == "user":
+            background_result_sent = False
             content = message.get("message", {}).get("content", [])
             user_text = "".join(block.get("text", "") for block in content if block.get("type") == "text")
             turn["userText"] = user_text
@@ -389,7 +418,8 @@ def main():
                 # the control request; otherwise a pending question races with
                 # an already successful result.
                 continue
-            write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+            if not background_result_sent:
+                write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
     return 0
 
 

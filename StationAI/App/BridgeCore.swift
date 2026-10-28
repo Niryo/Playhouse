@@ -4649,7 +4649,7 @@ final class ConversationManager {
                             $0.backgroundTaskID == backgroundTaskID
                         }) else { continue }
                         let existing = transcript.turns[turnIndex].activities[existingIndex]
-                        transcript.turns[turnIndex].activities[existingIndex] = ConversationActivity(
+                        let updatedActivity = ConversationActivity(
                             id: existing.id, title: existing.title,
                             detail: activity.detail.isEmpty ? existing.detail : activity.detail,
                             status: activity.status,
@@ -4658,7 +4658,16 @@ final class ConversationManager {
                             server: existing.server, tool: existing.tool,
                             durationMs: activity.durationMs ?? existing.durationMs, startedAt: existing.startedAt,
                             isContextCompaction: existing.isContextCompaction, turnID: existing.turnID,
-                            timelineOrder: existing.timelineOrder, backgroundTaskID: existing.backgroundTaskID
+                            timelineOrder: existing.timelineOrder, backgroundTaskID: existing.backgroundTaskID,
+                            backgroundTaskSummary: activity.backgroundTaskSummary ?? existing.backgroundTaskSummary
+                        )
+                        transcript.turns[turnIndex].activities[existingIndex] = updatedActivity
+                        let reportTurnIndex = transcript.turns.lastIndex(where: { $0.id == turnID }) ?? turnIndex
+                        let reportTurnID = transcript.turns[reportTurnIndex].id
+                        Self.upsertClaudeBackgroundAgentReport(
+                            activity: updatedActivity,
+                            transcript: &transcript,
+                            turnID: reportTurnID
                         )
                         return
                     }
@@ -4671,12 +4680,43 @@ final class ConversationManager {
                 } else {
                     transcript.turns[index].activities.append(activity)
                 }
+                let targetTurnID = transcript.turns[index].id
+                Self.upsertClaudeBackgroundAgentReport(activity: activity, transcript: &transcript, turnID: targetTurnID)
             }
         } catch {
             var fields = StationAIDiagnostics.errorFields(error)
             fields["taskID"] = taskID.uuidString
             StationAIDiagnostics.record("conversation.transcript.write_failed", fields: fields)
         }
+    }
+
+    /// Claude reports a background agent's result on its task notification,
+    /// outside the parent assistant response. Persist that report as a normal
+    /// assistant message so it is visible in the conversation and available to
+    /// later turns, matching Codex's parent-thread agent message behavior.
+    private static func upsertClaudeBackgroundAgentReport(
+        activity: ConversationActivity,
+        transcript: inout ConversationTranscript,
+        turnID: String
+    ) {
+        guard activity.backgroundTaskID != nil,
+              activity.status == "completed",
+              let summary = activity.backgroundTaskSummary,
+              !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let messageID = "claude-background-agent-result-\(activity.id)"
+        guard let targetTurnIndex = transcript.turns.firstIndex(where: { $0.id == turnID }) else { return }
+        let report = ConversationMessage(
+            id: messageID,
+            role: .assistant,
+            text: summary,
+            phase: "subagent_report",
+            turnID: turnID,
+            provider: .claude
+        )
+        for index in transcript.turns.indices {
+            transcript.turns[index].messages.removeAll { $0.id == messageID }
+        }
+        transcript.turns[targetTurnIndex].messages.append(report)
     }
 
     /// Records the accepted turn before its first events can be queried by another XPC call.

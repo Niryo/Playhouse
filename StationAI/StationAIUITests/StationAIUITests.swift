@@ -7752,7 +7752,7 @@ final class StationAIUITests: XCTestCase {
         )
     }
 
-    // case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early.
+    // case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early. A status-only completion update is not shown as an agent result; the summary-bearing notification is persisted as one normal assistant message in the parent conversation, appears in the visible transcript, and survives fresh CLI/XPC history reads and app reopening without duplication. A failed background agent remains inspectable as a failed activity, and its error summary is not added as an assistant result.
     func test_claude_background_agent_keeps_turn_open_until_resolved() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-background-agent")
         try FileManager.default.copyItem(
@@ -7766,6 +7766,11 @@ final class StationAIUITests: XCTestCase {
             encoding: .utf8
         )
         claudeFixtureExecutable = executable.path
+        let summaryPause = URL(fileURLWithPath: executable.path + ".background-summary-pause")
+        let summaryReady = URL(fileURLWithPath: executable.path + ".background-summary-ready")
+        let summaryRelease = URL(fileURLWithPath: executable.path + ".background-summary-release")
+        try "Pause after status-only completion.\n".write(to: summaryPause, atomically: true, encoding: .utf8)
+        defer { try? "Release summary notification.\n".write(to: summaryRelease, atomically: true, encoding: .utf8) }
         let created = try XCTUnwrap(try runCLI([
             "task", "create", "--title", "Claude background agent", "--root", fixture.primary.path, "--provider", "claude"
         ]) ["result"] as? [String: Any])
@@ -7775,18 +7780,31 @@ final class StationAIUITests: XCTestCase {
         element("message-composer").click()
         element("message-composer").typeText("Launch a background agent for this turn.")
         element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: summaryReady.path) }, timeout: 15),
+                      "The fixture should pause after its status-only completion update.")
 
         let subagentRow = element("codex-subagent-row-toolu_background_agent")
         XCTAssertTrue(subagentRow.waitForExistence(timeout: 10), "A background Agent/Task call should render a live subagent row.")
         XCTAssertTrue(subagentRow.label.contains("started working"), subagentRow.label)
         XCTAssertTrue(
-            app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "STARTED")).firstMatch.waitForExistence(timeout: 15),
-            "The visible answer should still render while the background agent keeps the turn open."
+            app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "STARTED")).firstMatch.waitForExistence(timeout: 10),
+            "The parent response should be visible while the background summary notification is still pending."
         )
+        XCTAssertEqual(
+            try taskRecord(id: taskID)?["status"] as? String,
+            "In Progress",
+            "The parent task must remain active after Claude returns its result but before the background summary notification."
+        )
+        let reportIdentifier = "assistant-message-claude-background-agent-result-toolu_background_agent"
+        XCTAssertFalse(element(reportIdentifier).exists, "A status-only completion must not render progress text as the agent result.")
+        try "Release summary notification.\n".write(to: summaryRelease, atomically: true, encoding: .utf8)
         XCTAssertTrue(
             waitUntil({ subagentRow.label.contains("finished working") }, timeout: 15),
             "The row must resolve to completed only once the real notification arrives, not the launch confirmation."
         )
+        let report = app.descendants(matching: .any).matching(identifier: reportIdentifier)
+        XCTAssertTrue(report.firstMatch.waitForExistence(timeout: 10), "The completed background-agent result should appear in the parent conversation transcript.")
+        XCTAssertEqual(report.count, 1, "The result should appear exactly once in the parent conversation.")
 
         let history = try XCTUnwrap(try runCLI(
             ["conversation", "history", taskID],
@@ -7796,6 +7814,41 @@ final class StationAIUITests: XCTestCase {
         let activity = try XCTUnwrap(activities.first { $0["childThreadID"] as? String == "toolu_background_agent" })
         XCTAssertEqual(activity["status"] as? String, "completed")
         XCTAssertEqual(activity["backgroundTaskID"] as? String, "bgtask-fixture-1")
+
+        app.terminate()
+        XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
+        relaunchApp()
+        openTask(named: "Claude background agent")
+        let restoredReport = app.descendants(matching: .any).matching(identifier: reportIdentifier)
+        XCTAssertTrue(restoredReport.firstMatch.waitForExistence(timeout: 10), "The result should remain visible after reopening the conversation.")
+        XCTAssertEqual(restoredReport.count, 1, "Reopening should not duplicate the result message.")
+
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        let failedTask = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude failed background agent", "--root", fixture.primary.path, "--provider", "claude"
+        ]) ["result"] as? [String: Any])
+        let failedTaskID = try XCTUnwrap(failedTask["id"] as? String)
+        openTask(named: "Claude failed background agent")
+        element("message-composer").click()
+        element("message-composer").typeText("Launch a background agent failure case.")
+        element("send-message-button").click()
+        XCTAssertTrue(
+            waitUntil({ self.app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "STARTED")).firstMatch.exists }, timeout: 15),
+            "The parent response should remain visible for a failed agent turn."
+        )
+        element("codex-activity-disclosure").click()
+        let failedAgentRow = element("codex-subagent-row-toolu_background_agent")
+        XCTAssertTrue(waitUntil({ failedAgentRow.label.contains("failed") }, timeout: 15), failedAgentRow.label)
+        XCTAssertFalse(element(reportIdentifier).exists, "A failed agent summary must not appear as a successful assistant result.")
+        let failedHistory = try XCTUnwrap(try runCLI(
+            ["conversation", "history", failedTaskID],
+            extraEnvironment: ["STATIONAI_E2E_CLAUDE_EXECUTABLE": executable.path]
+        )["result"] as? [String: Any])
+        let failedActivities = try XCTUnwrap(failedHistory["activities"] as? [[String: Any]])
+        let failedActivity = try XCTUnwrap(failedActivities.first { $0["childThreadID"] as? String == "toolu_background_agent" })
+        XCTAssertEqual(failedActivity["status"] as? String, "failed")
+        XCTAssertFalse((failedHistory["messages"] as? [[String: Any]] ?? []).contains { $0["phase"] as? String == "subagent_report" })
     }
 
     // case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, StationAI returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics.

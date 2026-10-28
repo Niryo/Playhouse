@@ -157,11 +157,14 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
     /// notification with no matching in-memory tool-use id can still be
     /// resolved against the persisted activity that originally started it.
     var backgroundTaskID: String? = nil
+    /// The explicit result summary from Claude's terminal task notification.
+    /// Activity detail may contain progress text before that notification.
+    var backgroundTaskSummary: String? = nil
 
     private enum CodingKeys: String, CodingKey {
         case id, title, detail, status, childThreadID, agentPath, model, reasoningEffort
         case toolKind, server, tool, durationMs, startedAt, isContextCompaction, turnID, timelineOrder
-        case backgroundTaskID
+        case backgroundTaskID, backgroundTaskSummary
     }
 
     init(
@@ -181,7 +184,8 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
         isContextCompaction: Bool = false,
         turnID: String? = nil,
         timelineOrder: Int? = nil,
-        backgroundTaskID: String? = nil
+        backgroundTaskID: String? = nil,
+        backgroundTaskSummary: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -200,6 +204,7 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
         self.turnID = turnID
         self.timelineOrder = timelineOrder
         self.backgroundTaskID = backgroundTaskID
+        self.backgroundTaskSummary = backgroundTaskSummary
     }
 
     init(from decoder: Decoder) throws {
@@ -221,6 +226,7 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
         turnID = try values.decodeIfPresent(String.self, forKey: .turnID)
         timelineOrder = try values.decodeIfPresent(Int.self, forKey: .timelineOrder)
         backgroundTaskID = try values.decodeIfPresent(String.self, forKey: .backgroundTaskID)
+        backgroundTaskSummary = try values.decodeIfPresent(String.self, forKey: .backgroundTaskSummary)
     }
 
     var isSubagent: Bool { childThreadID != nil }
