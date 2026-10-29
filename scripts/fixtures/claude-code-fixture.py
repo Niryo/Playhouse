@@ -72,7 +72,46 @@ def run_tool(tool_id, name, tool_input, command=None):
 
 def respond(user_text, instructions):
     commands = []
-    if "answer to the pending question from the prior stationai session" in user_text.lower():
+    if user_text.startswith("Classify the latest user message for StationAI's continuous chat page index."):
+        hold = Path(str(sys.argv[0]) + ".hold-classifier")
+        if hold.exists():
+            hold.unlink(missing_ok=True)
+            active = Path(str(sys.argv[0]) + ".classifier-active")
+            release = Path(str(sys.argv[0]) + ".classifier-release")
+            active.write_text("The fallback classifier is held in the background.\n", encoding="utf-8")
+            deadline = time.monotonic() + 30
+            while not release.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            released = release.exists()
+            active.unlink(missing_ok=True)
+            release.unlink(missing_ok=True)
+            if not released:
+                return commands
+        if Path(str(sys.argv[0]) + ".fail-classifier").exists():
+            text("msg_page_classification", '{"continues":"sometimes","title":null}')
+            return commands
+        history_path = Path(str(sys.argv[0]) + ".history")
+        history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {"turns": []}
+        classifier_attempts = sum(
+            1 for turn in history.get("turns", [])
+            if (turn.get("userText") or "").startswith("Classify the latest user message for StationAI's continuous chat page index.")
+        )
+        if classifier_attempts == 0:
+            text("msg_page_classification", '{"continues":false,"title":"Ignored extra field","unexpected":true}')
+            return commands
+        if "One more thought about Saturn" in user_text:
+            text("msg_page_classification", '{"continues":true,"title":null}')
+        elif "Neptune" in user_text:
+            text("msg_page_classification", '{"continues":false,"title":"Neptune"}')
+        elif "Another thought about Mars" in user_text:
+            text("msg_page_classification", '{"continues":true,"title":null}')
+        elif "Mars" in user_text:
+            text("msg_page_classification", '{"continues":false,"title":"Mars"}')
+        elif "Saturn's rings" in user_text:
+            text("msg_page_classification", '{"continues":false,"title":"Saturn Rings"}')
+        else:
+            text("msg_page_classification", '{"continues":false,"title":"Volcanoes"}')
+    elif "answer to the pending question from the prior stationai session" in user_text.lower():
         answer = user_text.split("Answer: ", 1)[-1].splitlines()[0].strip()
         text("msg_recovered_question_answer", f"Recovered answer: {answer}.")
     elif "ask a restart-safe structured question" in user_text.lower():

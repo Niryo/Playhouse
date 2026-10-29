@@ -6,7 +6,10 @@ struct KanbanBoardView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var codexClient: CodexAppServerClient
     @EnvironmentObject private var claudeClient: ClaudeCodeClient
-    @Query(filter: #Predicate<BoardTask> { $0.statusRawValue != "Done" }, sort: \BoardTask.createdAt, order: .reverse) private var tasks: [BoardTask]
+    @Query(
+        filter: #Predicate<BoardTask> { $0.statusRawValue != "Done" && !$0.isStandaloneChat },
+        sort: \BoardTask.createdAt, order: .reverse
+    ) private var tasks: [BoardTask]
     @State private var isCreatingNewTask = false
     @State private var saveError: String?
     @State private var lifecycleResetNotice: String?
@@ -49,9 +52,7 @@ struct KanbanBoardView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            mainContent
             if isShowingChatSidebar, let chatTask {
-                Divider()
                 TaskConversationView(
                     task: chatTask, isNewTask: false, isReadOnly: false,
                     conflictResolutionRequested: false,
@@ -59,11 +60,13 @@ struct KanbanBoardView: View {
                 ) {
                     withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = false }
                 }
-                .frame(width: 420)
-                .transition(.move(edge: .trailing).combined(with: .opacity))
+                .frame(width: 460)
+                .transition(.move(edge: .leading).combined(with: .opacity))
                 .id(chatTask.id)
                 .accessibilityIdentifier("chat-sidebar")
+                Divider()
             }
+            mainContent
         }
         .animation(.easeInOut(duration: 0.22), value: isShowingChatSidebar)
     }
@@ -641,7 +644,7 @@ struct KanbanBoardView: View {
         guard isShowingDoneArchive, archiveHasMore, !isLoadingArchivePage else { return }
         isLoadingArchivePage = true
         var descriptor = FetchDescriptor<BoardTask>(
-            predicate: #Predicate { $0.statusRawValue == "Done" },
+            predicate: #Predicate { $0.statusRawValue == "Done" && !$0.isStandaloneChat },
             sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
         )
         descriptor.fetchOffset = archiveOffset

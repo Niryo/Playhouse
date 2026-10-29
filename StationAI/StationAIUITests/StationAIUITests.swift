@@ -3469,8 +3469,14 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(try tasksFromBoardList().isEmpty, "A failed create must not leave a persisted task.")
     }
 
-    // case-contract: test_standalone_chat_hidden_task_and_pages_round_trip | The Chat button opens a hidden, repo/worktree-free task in a sliding sidebar that never appears on the board. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search.
+    // case-contract: test_standalone_chat_hidden_task_and_pages_round_trip | The Chat button opens a hidden, repo/worktree-free task in a sliding sidebar that never appears on the board, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, and the Changes sidebar. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. The hidden task's real lifecycle status changes (In Progress, then Waiting Response) during a send, and it still never renders as a card on the visible Kanban board in any status.
     func test_standalone_chat_hidden_task_and_pages_round_trip() throws {
+        let fixtureSource = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureSource.path), "The prepared Codex fixture is missing or not executable.")
+        let chatFixtureExecutable = dataDirectory.appendingPathComponent("codex-fixture-chat-unique-turns-hold-release")
+        try FileManager.default.copyItem(at: fixtureSource, to: chatFixtureExecutable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: chatFixtureExecutable.path)
+        codexFixtureExecutable = chatFixtureExecutable.path
         launchApp(defaultParent: fixture.parent.path)
         XCTAssertTrue(element("chat-sidebar-button").exists, "The board header should offer a Chat button next to New Task.")
         XCTAssertFalse(element("chat-sidebar").exists, "The chat sidebar should be closed by default.")
@@ -3478,6 +3484,13 @@ final class StationAIUITests: XCTestCase {
         element("chat-sidebar-button").click()
         XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10), "Clicking Chat should slide in the sidebar.")
         XCTAssertTrue(element("message-composer").waitForExistence(timeout: 10), "The sidebar should reuse the standard chat composer.")
+        XCTAssertFalse(element("task-status-message").exists, "Standalone chat must not show task status.")
+        XCTAssertFalse(app.staticTexts["Backlog"].exists, "Standalone chat must not show the hidden task's status label.")
+        XCTAssertFalse(element("conversation-repository-search").exists, "Standalone chat must not show repository controls.")
+        XCTAssertFalse(element("add-conversation-repository-button").exists, "Standalone chat must not expose Add repository.")
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "conversation-repository-badge-")).count, 0, "Standalone chat must not show repository badges.")
+        XCTAssertFalse(element("workspace-changes-list").exists, "Standalone chat must not mount the task Changes sidebar.")
+        XCTAssertFalse(element("workspace-changes-empty").exists, "Standalone chat must not show task workspace changes.")
         attachScreenshot(named: "Standalone chat sidebar opened")
 
         XCTAssertTrue(try tasksFromBoardList().isEmpty, "The hidden standalone chat task must never appear on the board.")
@@ -3502,6 +3515,25 @@ final class StationAIUITests: XCTestCase {
 
         _ = try runCLI(["chat", "page", "close-turn", chatTaskID, "--continues", "false"], expectedStatus: 2)
 
+        let pageListing = try XCTUnwrap(try runCLI(["chat", "page", "list"])["result"] as? [String: Any])
+        let archiveDirectory = URL(fileURLWithPath: try XCTUnwrap(pageListing["archiveDirectory"] as? String))
+        XCTAssertEqual(archiveDirectory.standardizedFileURL, dataDirectory.appendingPathComponent("StandaloneChat-Pages", isDirectory: true).standardizedFileURL)
+        let kyotoFile = archiveDirectory.appendingPathComponent("\(try XCTUnwrap(kyoto["id"] as? String)).json")
+        let recipesFile = archiveDirectory.appendingPathComponent("\(try XCTUnwrap(recipes["id"] as? String)).json")
+        XCTAssertNotEqual(kyotoFile, recipesFile, "Each page must have its own filesystem file.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: kyotoFile.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recipesFile.path))
+        // Recreate the pre-archive database state so opening the manager proves
+        // it backfills pages that existed before the one-time file migration.
+        var archiveDatabase: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(dataDirectory.appendingPathComponent("StandaloneChat-v1.sqlite").path, &archiveDatabase), SQLITE_OK)
+        guard let archiveDatabase else { XCTFail("Could not open the standalone chat database for migration setup."); return }
+        let markerStatus = sqlite3_exec(archiveDatabase, "DELETE FROM chat_archive_migrations WHERE version = 1;", nil, nil, nil)
+        sqlite3_close(archiveDatabase)
+        XCTAssertEqual(markerStatus, SQLITE_OK, "Could not reset the page archive migration marker.")
+        try FileManager.default.removeItem(at: kyotoFile)
+        _ = try runCLI(["chat", "page", "list"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: kyotoFile.path), "Opening a pre-archive database should backfill missing page files once.")
         let matches = try XCTUnwrap(
             (try runCLI(["chat", "page", "search", "Kyoto"])["result"] as? [String: Any])?["matches"] as? [[String: Any]]
         )
@@ -3512,12 +3544,8 @@ final class StationAIUITests: XCTestCase {
 
         // Drive one real provider turn and verify the user/assistant text actually lands on
         // the active page via chat page read, and does not leak onto an unrelated page.
-        let fixtureSource = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success")
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureSource.path), "The prepared Codex fixture is missing or not executable.")
-        let chatFixtureExecutable = dataDirectory.appendingPathComponent("codex-fixture-chat-hold-release")
-        try FileManager.default.copyItem(at: fixtureSource, to: chatFixtureExecutable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: chatFixtureExecutable.path)
         try Data().write(to: URL(fileURLWithPath: chatFixtureExecutable.path + ".hold-release"))
+        let holdMarker = URL(fileURLWithPath: chatFixtureExecutable.path + ".hold-release")
         let activeMarker = URL(fileURLWithPath: chatFixtureExecutable.path + ".turn-active")
         let releaseMarker = URL(fileURLWithPath: chatFixtureExecutable.path + ".turn-release")
         try? FileManager.default.removeItem(at: activeMarker)
@@ -3553,7 +3581,28 @@ final class StationAIUITests: XCTestCase {
         try "Release the completed fixture turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
         sendProcess.waitUntilExit()
         XCTAssertEqual(sendProcess.terminationStatus, 0, "The standalone chat turn should complete successfully.")
+        try? FileManager.default.removeItem(at: holdMarker)
 
+        // A real send moves the hidden task's lifecycle status away from Backlog (In Progress,
+        // then Waiting Response), which is exactly what let it leak into the visible Kanban
+        // board: the board renders from SwiftUI's own @Query over BoardTask, not from the
+        // board.list CLI path that tasksFromBoardList() above already checked and which was
+        // already correctly filtered. Confirm the actual rendered board has no card for it.
+        XCTAssertFalse(
+            element("task-card-\(chatTaskID)").exists,
+            "The hidden standalone chat task must never render as a card on the visible Kanban board."
+        )
+
+        let recipesArchive = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: recipesFile)) as? [String: Any]
+        )
+        XCTAssertEqual((recipesArchive["page"] as? [String: Any])?["title"] as? String, "Dinner recipes")
+        XCTAssertTrue(
+            (recipesArchive["messages"] as? [[String: Any]])?.contains {
+                ($0["role"] as? String) == "user" && ($0["text"] as? String) == "What's a good side dish?"
+            } == true,
+            "The completed user turn should be written to its page file before any later page read."
+        )
         let recipesMessages = try XCTUnwrap(
             (try runCLI(["chat", "page", "read", try XCTUnwrap(recipes["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
         )
@@ -3565,13 +3614,523 @@ final class StationAIUITests: XCTestCase {
             recipesMessages.contains { ($0["role"] as? String) == "assistant" && !(($0["text"] as? String) ?? "").isEmpty },
             "The assistant's reply should also be persisted on that page."
         )
+        let recipesRead = try XCTUnwrap(try runCLI(["chat", "page", "read", try XCTUnwrap(recipes["id"] as? String)])["result"] as? [String: Any])
+        XCTAssertEqual(recipesRead["filePath"] as? String, recipesFile.path)
+        XCTAssertEqual(
+            (recipesArchive["messages"] as? [[String: Any]])?.compactMap { $0["text"] as? String },
+            recipesMessages.compactMap { $0["text"] as? String },
+            "The page file should stay synchronized with its persisted transcript."
+        )
         let kyotoMessages = try XCTUnwrap(
             (try runCLI(["chat", "page", "read", try XCTUnwrap(kyoto["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
         )
         XCTAssertTrue(kyotoMessages.isEmpty, "Messages from the recipes turn must not leak onto an unrelated page.")
 
+        let compliantStatus = try XCTUnwrap(try runCLI(["chat", "status"])["result"] as? [String: Any])
+        XCTAssertEqual(compliantStatus["missedPreviousPageSignal"] as? Bool, false, "A turn that called close-turn must not be flagged as missed.")
+
+        assertCLIError(
+            try runCLI(["task", "repository", "add", chatTaskID, "--repo", fixture.primary.path], expectedStatus: 2),
+            code: "invalid_argument"
+        )
+        _ = try runCLI(["settings", "clear-parent"])
+        XCTAssertNil((try runCLI(["settings", "get"])["result"] as? [String: Any])?["defaultParentFolder"])
+
+        // Exercise the actual sidebar composer without a default repository root. The
+        // background fallback must update the visible page title after the GUI send returns.
+        try? FileManager.default.removeItem(at: activeMarker)
+        try? FileManager.default.removeItem(at: releaseMarker)
+        let classifierHold = URL(fileURLWithPath: chatFixtureExecutable.path + ".hold-classifier")
+        let classifierActive = URL(fileURLWithPath: chatFixtureExecutable.path + ".classifier-active")
+        let classifierRelease = URL(fileURLWithPath: chatFixtureExecutable.path + ".classifier-release")
+        try Data().write(to: classifierHold)
+        XCTAssertTrue(element("send-message-button").isEnabled, "Standalone chat should send without a configured repository root.")
+        element("message-composer").click()
+        element("message-composer").typeText("Tell me about Saturn's rings")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: classifierActive.path) }, timeout: 15), "The fallback classifier should run after the primary answer and be held independently.")
+        XCTAssertFalse(element("chat-active-page-title").exists, "Page titles should appear in transcript separators, not the header.")
+        XCTAssertFalse(element("chat-missed-page-signal-notice").exists, "Page evaluation should stay visually quiet while pending.")
+        XCTAssertEqual(element("chat-sidebar").descendants(matching: .progressIndicator).count, 0, "Page evaluation should not show a loader in the chat sidebar.")
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10), "The primary answer should render before the background classifier is released.")
+        XCTAssertTrue(element("send-message-button").isEnabled, "The background classifier must not keep the composer turn active.")
+        XCTAssertTrue(chatPageSeparatorIsVisible("Dinner recipes"), "The current title should remain in its transcript separator until classification completes.")
+        element("message-composer").click()
+        element("message-composer").typeText("One more thought about Saturn")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ !element("send-message-button").isEnabled }, timeout: 10), "A new send should queue behind the held fallback decision.")
+        try Data("Release classifier.\n".utf8).write(to: classifierRelease)
+        let fallbackReady = waitUntil({
+            guard let status = try? self.runCLI(["chat", "status"])["result"] as? [String: Any],
+                  status["missedPreviousPageSignal"] as? Bool == false,
+                  let page = status["activePage"] as? [String: Any],
+                  page["title"] as? String == "Saturn Rings",
+                  let pageID = page["id"] as? String,
+                  let messages = (try? self.runCLI(["chat", "page", "read", pageID])["result"] as? [String: Any])?["messages"] as? [[String: Any]] else { return false }
+            return self.chatPageSeparatorIsVisible("Saturn Rings")
+                && messages.compactMap { $0["text"] as? String } == [
+                    "Tell me about Saturn's rings", "Answers received: Blue / fixture-secret.",
+                    "One more thought about Saturn", "Answers received: Blue / fixture-secret.",
+                ]
+        }, timeout: 30)
+        XCTAssertTrue(fallbackReady, "The background fallback should update the active page title and clear the missed-signal warning.")
+        XCTAssertFalse(element("chat-active-page-title").exists, "The page title should remain in the transcript, not the header.")
+        XCTAssertFalse(element("chat-missed-page-signal-notice").exists, "The warning should disappear after the fallback persists its result.")
+        let fallbackStatus = try XCTUnwrap(try runCLI(["chat", "status"])["result"] as? [String: Any])
+        let fallbackPage = try XCTUnwrap(fallbackStatus["activePage"] as? [String: Any])
+        let fallbackMessages = try XCTUnwrap(
+            (try runCLI(["chat", "page", "read", try XCTUnwrap(fallbackPage["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
+        )
+        XCTAssertTrue(
+            fallbackMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == "Tell me about Saturn's rings" },
+            "The fallback-classified turn's messages should be moved onto its new page."
+        )
+        XCTAssertTrue(
+            fallbackMessages.contains { ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "Answers received: Blue / fixture-secret." },
+            "The assistant reply must move with its user message onto the new page."
+        )
+        let priorPageMessages = try XCTUnwrap(
+            (try runCLI(["chat", "page", "read", try XCTUnwrap(recipes["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
+        )
+        XCTAssertFalse(
+            priorPageMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == "Tell me about Saturn's rings" },
+            "The fallback-classified turn must not remain duplicated on the prior page."
+        )
+        XCTAssertFalse(priorPageMessages.contains { ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "Answers received: Blue / fixture-secret." })
+
+        // A later turn was queued while the first fallback was held; both turns must
+        // now appear in order on the fallback-selected page.
+        let orderedMessages = try XCTUnwrap(
+            (try runCLI(["chat", "page", "read", try XCTUnwrap(fallbackPage["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
+        )
+        XCTAssertEqual(orderedMessages.map { $0["text"] as? String }, [
+            "Tell me about Saturn's rings", "Answers received: Blue / fixture-secret.",
+            "One more thought about Saturn", "Answers received: Blue / fixture-secret.",
+        ], "A later appended turn must follow the moved messages in chronological order.")
+        let fixtureHistory = try Data(contentsOf: URL(fileURLWithPath: chatFixtureExecutable.path + ".history"))
+        let fixtureTurns = try XCTUnwrap((try JSONSerialization.jsonObject(with: fixtureHistory) as? [String: Any])?["turns"] as? [[String: Any]])
+        let classifierTurns = fixtureTurns.filter { ($0["userMessage"] as? String)?.hasPrefix("Classify the latest user message for StationAI's continuous chat page index.") == true }
+        XCTAssertEqual(classifierTurns.count, 3, "The fallback should reject one malformed result, retry once, then classify the later turn.")
+        let classifierTurn = try XCTUnwrap(classifierTurns.last)
+        XCTAssertEqual(classifierTurn["modelID"] as? String, "gpt-6-luna", "The Codex fallback should use Luna.")
+        XCTAssertEqual(classifierTurn["reasoningEffort"] as? String, "low", "The background classifier should use low effort.")
+
+        // An explicit page start supersedes a held classifier. Reopen the sidebar
+        // to refresh its persisted status, then ensure the late result stays stale.
+        let priorPageID = try XCTUnwrap(fallbackPage["id"] as? String)
+        try? FileManager.default.removeItem(at: classifierActive)
+        try? FileManager.default.removeItem(at: classifierRelease)
+        try Data().write(to: classifierHold)
+        element("message-composer").click()
+        element("message-composer").typeText("Tell me about Neptune")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: classifierActive.path) }, timeout: 15))
+        let explicitPage = try XCTUnwrap((try runCLI(["chat", "page", "new", "--title", "Explicit topic"])["result"] as? [String: Any])?["page"] as? [String: Any])
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(waitUntil({ !element("chat-sidebar").exists }, timeout: 5))
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Explicit topic") }, timeout: 10))
+        XCTAssertFalse(element("chat-missed-page-signal-notice").exists)
+        try Data("Release classifier.\n".utf8).write(to: classifierRelease)
+        XCTAssertTrue(waitUntil({
+            guard let status = try? self.runCLI(["chat", "status"])["result"] as? [String: Any],
+                  let page = status["activePage"] as? [String: Any] else { return false }
+            return (page["id"] as? String) == (explicitPage["id"] as? String)
+        }, timeout: 30), "The late classifier must not replace the explicit page.")
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Explicit topic") }, timeout: 10))
+        let explicitMessages = try XCTUnwrap((try runCLI(["chat", "page", "read", try XCTUnwrap(explicitPage["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+        XCTAssertTrue(explicitMessages.isEmpty)
+        let oldPageMessages = try XCTUnwrap((try runCLI(["chat", "page", "read", priorPageID])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+        XCTAssertTrue(oldPageMessages.contains { ($0["text"] as? String) == "Tell me about Neptune" })
+        XCTAssertTrue(oldPageMessages.contains { ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "Answers received: Blue / fixture-secret." })
+
+        let classifierFailure = URL(fileURLWithPath: chatFixtureExecutable.path + ".fail-classifier")
+        try Data().write(to: classifierFailure)
+        element("message-composer").click()
+        element("message-composer").typeText("Tell me about Mars")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            (try? self.runCLI(["chat", "status"])["result"] as? [String: Any])?["missedPreviousPageSignal"] as? Bool == true
+        }, timeout: 30), "Malformed helper results should keep the pending decision visible and durable.")
+        XCTAssertFalse(element("chat-active-page-title").exists, "Unresolved classification should not add a page title to the header.")
+        XCTAssertFalse(element("chat-missed-page-signal-notice").exists, "Unresolved classification should remain visually quiet.")
+        XCTAssertEqual(element("chat-sidebar").descendants(matching: .progressIndicator).count, 0, "Unresolved classification should not show a loader.")
+        XCTAssertTrue(waitUntil({ self.element("send-message-button").isEnabled }, timeout: 10))
+        element("message-composer").click()
+        element("message-composer").typeText("Do not overtake Mars")
+        element("send-message-button").click()
+        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 15), "A later send should explain that the prior page decision is still pending.")
+        let failedHistory = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: chatFixtureExecutable.path + ".history"))) as? [String: Any]
+        let failedTurns = try XCTUnwrap(failedHistory?["turns"] as? [[String: Any]])
+        XCTAssertFalse(failedTurns.contains { ($0["userMessage"] as? String) == "Do not overtake Mars" }, "The blocked follow-up must not reach the provider.")
+        try FileManager.default.removeItem(at: classifierFailure)
+        _ = try runCLI(["chat", "status"])
+        let retryStatus = try XCTUnwrap(try runCLI(["chat", "status"])["result"] as? [String: Any])
+        XCTAssertFalse(retryStatus["missedPreviousPageSignal"] as? Bool ?? true)
+        XCTAssertEqual((retryStatus["activePage"] as? [String: Any])?["title"] as? String, "Mars")
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(waitUntil({ !element("chat-sidebar").exists }, timeout: 5))
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Mars") }, timeout: 10))
+        XCTAssertFalse(element("chat-active-page-title").exists, "The resolved title should remain in the transcript, not the header.")
+        XCTAssertFalse(element("chat-missed-page-signal-notice").exists)
+        element("message-composer").click()
+        element("message-composer").typeKey("a", modifierFlags: .command)
+        element("message-composer").typeText("Another thought about Mars")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            guard let status = try? self.runCLI(["chat", "status"])["result"] as? [String: Any],
+                  status["missedPreviousPageSignal"] as? Bool == false,
+                  let page = status["activePage"] as? [String: Any],
+                  page["title"] as? String == "Mars",
+                  let pageID = page["id"] as? String,
+                  let messages = (try? self.runCLI(["chat", "page", "read", pageID])["result"] as? [String: Any])?["messages"] as? [[String: Any]] else { return false }
+            return messages.contains { ($0["text"] as? String) == "Another thought about Mars" }
+        }, timeout: 30), "A new send should work once the pending page decision has recovered.")
+
+        // Page sessions rotate, so earlier pages must stay visible rather than disappearing.
+        XCTAssertTrue(chatPageSeparatorIsVisible("Dinner recipes"), "An earlier page stays visible after its session rotated.")
+        XCTAssertTrue(
+            element("chat-sidebar").staticTexts["What's a good side dish?"].exists,
+            "An earlier page keeps its messages in the chat transcript."
+        )
+        let boardTask = try XCTUnwrap(
+            (try runCLI(["task", "create", "--title", "Context page rejection"])["result"] as? [String: Any])?["id"] as? String
+        )
+        let activePageID = try XCTUnwrap(
+            ((try runCLI(["chat", "status"])["result"] as? [String: Any])?["activePage"] as? [String: Any])?["id"] as? String
+        )
+        assertCLIError(
+            try runCLI(["conversation", "send", boardTask, "--message", "Hello", "--context-page", activePageID], expectedStatus: 2),
+            code: "invalid_argument"
+        )
+
         element("chat-sidebar-button").click()
         XCTAssertTrue(waitUntil({ !element("chat-sidebar").exists }, timeout: 5), "Clicking Chat again should slide the sidebar back out.")
+    }
+
+    // case-contract: test_standalone_chat_page_sessions_isolate_context | Each standalone chat page is its own provider session: the first turn of a page starts a fresh session carrying the system prompt plus only that page's own turns, later turns on that page resume it without repeating the page context, and a different page never shares it, so an earlier page's turns never reach a later page. An annotation that quotes an earlier page carries just that page into the current turn, and rotating sessions still leaves every page's messages visible in the transcript.
+    func test_standalone_chat_page_sessions_isolate_context() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-sessions")
+        try FileManager.default.copyItem(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-code-fixture.py"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("StationAI test owns this Claude Code protocol fixture (v1).\n".utf8).write(
+            to: dataDirectory.appendingPathComponent(".stationai-claude-fixture-owner")
+        )
+        claudeFixtureExecutable = executable.path
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        _ = try runCLI(["settings", "clear-parent"])
+        launchApp(defaultParent: nil)
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        let chatID = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["id"] as? String)
+
+        func waitForPage(_ title: String) throws -> [String: Any] {
+            var active: [String: Any] = [:]
+            let settled = waitUntil({
+                guard let response = try? self.runCLI(["chat", "status"]),
+                      let status = response["result"] as? [String: Any],
+                      let page = status["activePage"] as? [String: Any],
+                      (status["missedPreviousPageSignal"] as? Bool) == false,
+                      page["title"] as? String == title else { return false }
+                active = page
+                return true
+            }, timeout: 30)
+            XCTAssertTrue(settled, "The chat never settled on page \(title).")
+            return active
+        }
+
+        func sendFromSidebar(_ prompt: String) {
+            let composer = element("message-composer")
+            XCTAssertTrue(composer.waitForExistence(timeout: 10))
+            composer.click()
+            composer.typeText(prompt)
+            element("send-message-button").click()
+            XCTAssertTrue(waitUntil({ element("send-message-button").isEnabled }, timeout: 30), "The turn should finish.")
+        }
+
+        func answerTurns() throws -> [[String: Any]] {
+            let data = try Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
+            let history = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let turns = try XCTUnwrap(history["turns"] as? [[String: Any]])
+            return turns.filter { !(($0["userText"] as? String) ?? "").hasPrefix("Classify the latest user message") }
+        }
+
+        func turn(endingWith message: String) throws -> [String: Any] {
+            let match = try answerTurns().last { (($0["userText"] as? String) ?? "").hasSuffix(message) }
+            return try XCTUnwrap(match, "The fixture never received a turn ending with \(message).")
+        }
+
+        sendFromSidebar("Tell me about volcanoes")
+        let volcanoes = try waitForPage("Volcanoes")
+        sendFromSidebar("Tell me about Saturn's rings")
+        _ = try waitForPage("Saturn Rings")
+        sendFromSidebar("One more thought about Saturn")
+        _ = try waitForPage("Saturn Rings")
+
+        let first = try turn(endingWith: "Tell me about volcanoes")
+        let second = try turn(endingWith: "Tell me about Saturn's rings")
+        let third = try turn(endingWith: "One more thought about Saturn")
+        // The turn that opens a page still answers in the page it was sent into; only once the
+        // classifier moves it does the next turn get that new page's own session.
+        XCTAssertEqual(first["sessionID"] as? String, second["sessionID"] as? String, "One page answers in one session.")
+        XCTAssertNotEqual(
+            third["sessionID"] as? String, first["sessionID"] as? String,
+            "A different page must never share another page's provider session."
+        )
+        for pageTurn in [first, third] {
+            XCTAssertEqual(pageTurn["resumed"] as? Bool, false, "A page's first turn starts that page's own session.")
+            let arguments = try XCTUnwrap(pageTurn["arguments"] as? [String])
+            let promptIndex = try XCTUnwrap(arguments.firstIndex(of: "--append-system-prompt"))
+            XCTAssertTrue(
+                arguments[promptIndex + 1].contains("chat page close-turn"),
+                "Every page session must carry the standalone chat system prompt."
+            )
+        }
+        XCTAssertEqual(second["resumed"] as? Bool, true, "A turn sent into an existing page resumes its session.")
+        let thirdText = try XCTUnwrap(third["userText"] as? String)
+        XCTAssertTrue(thirdText.contains("Tell me about Saturn's rings"), "A fresh page session is seeded with its own page's turns.")
+        XCTAssertFalse(thirdText.contains("Tell me about volcanoes"), "An earlier page must never be sent as context for a later page.")
+
+        sendFromSidebar("Another thought about Mars")
+        _ = try waitForPage("Saturn Rings")
+        let fourth = try turn(endingWith: "Another thought about Mars")
+        XCTAssertEqual(fourth["sessionID"] as? String, third["sessionID"] as? String, "The same page keeps one session.")
+        XCTAssertEqual(fourth["resumed"] as? Bool, true, "A continuing turn resumes the page's session.")
+        XCTAssertFalse(
+            try XCTUnwrap(fourth["userText"] as? String).contains("<stationai-handoff-context>"),
+            "A resumed page session must not repeat its page context."
+        )
+
+        // Commenting on a message from an earlier page must carry that page into this turn.
+        // Driven through the visible select -> Add comment -> send flow, not the CLI flag, so
+        // the composer's own annotation-to-page mapping is what is exercised.
+        let volcanoesID = try XCTUnwrap(volcanoes["id"] as? String)
+        let archived = try XCTUnwrap(
+            (try runCLI(["chat", "page", "read", volcanoesID])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
+        )
+        XCTAssertFalse(archived.isEmpty, "The earlier page should still hold its own turns.")
+        let historyMessages = try XCTUnwrap(
+            (try runCLI(["conversation", "history", chatID])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
+        )
+        let volcanoMessage = try XCTUnwrap(
+            historyMessages.first { ($0["text"] as? String) == "Tell me about volcanoes" },
+            "The earlier page's message should still be in the visible transcript."
+        )
+        let volcanoMessageID = try XCTUnwrap(volcanoMessage["id"] as? String)
+        let volcanoView = element("user-message-\(volcanoMessageID)")
+        XCTAssertTrue(volcanoView.waitForExistence(timeout: 10), "An earlier page's message stays visible after rotation.")
+        volcanoView.click()
+        volcanoView.typeKey("a", modifierFlags: .command)
+        let addComment = app.buttons.matching(NSPredicate(format: "label == %@", "Add comment")).firstMatch
+        XCTAssertTrue(addComment.waitForExistence(timeout: 5), "Selecting transcript text should expose Add comment.")
+        addComment.click()
+        let commentField = element("comment-input-field")
+        XCTAssertTrue(commentField.waitForExistence(timeout: 5))
+        commentField.typeText("What did we say before?")
+        element("add-comment-button").click()
+        XCTAssertTrue(element("send-message-button").isEnabled, "A comment alone should be sendable.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ element("send-message-button").isEnabled }, timeout: 30), "The annotated turn should finish.")
+        _ = try waitForPage("Saturn Rings")
+        let annotated = try XCTUnwrap(
+            try answerTurns().last { (($0["userText"] as? String) ?? "").contains("What did we say before?") },
+            "The annotated turn never reached the provider."
+        )
+        XCTAssertTrue(
+            try XCTUnwrap(annotated["userText"] as? String).contains("Tell me about volcanoes"),
+            "A page quoted by a comment travels with the turn that quotes it."
+        )
+
+        XCTAssertTrue(chatPageSeparatorIsVisible("Volcanoes"), "Rotating sessions must not hide earlier pages.")
+        XCTAssertTrue(chatPageSeparatorIsVisible("Saturn Rings"))
+        XCTAssertTrue(
+            element("chat-sidebar").staticTexts["Tell me about volcanoes"].exists,
+            "Earlier pages stay visible in the chat transcript."
+        )
+        attachScreenshot(named: "Standalone chat pages keep separate sessions")
+    }
+
+    // case-contract: test_standalone_chat_claude_fallback_classifier | When a standalone chat uses Claude, a missed page signal invokes the Haiku helper at low effort; a malformed result is rejected and retried, an unrelated later question and its assistant reply move to a new titled page, the UI keeps page evaluation visually quiet without blocking the primary answer, updates the transcript separator when classification completes, and holds a following send until the decision resolves, and appends the related follow-up in chronological order. The Claude-specific model and effort arguments are verified through the real CLI/XPC path. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes.
+    func test_standalone_chat_claude_fallback_classifier() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-fallback")
+        try FileManager.default.copyItem(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-code-fixture.py"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("StationAI test owns this Claude Code protocol fixture (v1).\n".utf8).write(
+            to: dataDirectory.appendingPathComponent(".stationai-claude-fixture-owner")
+        )
+        claudeFixtureExecutable = executable.path
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        _ = try runCLI(["settings", "clear-parent"])
+        launchApp(defaultParent: nil)
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        let opened = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any]))
+        XCTAssertNotNil(opened["id"] as? String)
+        XCTAssertEqual(opened["conversationProvider"] as? String, "claude")
+        let firstPage = try XCTUnwrap(
+            (try runCLI(["chat", "page", "new", "--title", "General chat"])["result"] as? [String: Any])?["page"] as? [String: Any]
+        )
+
+        func sendFromSidebar(_ prompt: String, expectedTitle: String) throws {
+            let composer = element("message-composer")
+            XCTAssertTrue(composer.waitForExistence(timeout: 10))
+            XCTAssertTrue(element("send-message-button").isEnabled, "Standalone chat should remain sendable without a repository parent.")
+            let hold = URL(fileURLWithPath: executable.path + ".hold-classifier")
+            let active = URL(fileURLWithPath: executable.path + ".classifier-active")
+            let release = URL(fileURLWithPath: executable.path + ".classifier-release")
+            if prompt == "Tell me about volcanoes" { try Data().write(to: hold) }
+            composer.click()
+            composer.typeText(prompt)
+            element("send-message-button").click()
+            if prompt == "Tell me about volcanoes" {
+                XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: active.path) }, timeout: 15), "The Haiku fallback should remain held after the primary Claude turn finishes.")
+                XCTAssertFalse(element("chat-active-page-title").exists, "Page titles should appear in transcript separators, not the header.")
+                XCTAssertFalse(element("chat-missed-page-signal-notice").exists, "Page evaluation should stay visually quiet while pending.")
+                XCTAssertEqual(element("chat-sidebar").descendants(matching: .progressIndicator).count, 0, "Page evaluation should not show a loader in the chat sidebar.")
+                XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 10), "The primary Claude answer should be visible while fallback classification is pending.")
+                XCTAssertTrue(element("send-message-button").isEnabled, "A background classifier must not block another chat send.")
+                XCTAssertTrue(chatPageSeparatorIsVisible("General chat"))
+                return
+            }
+            if prompt == "Tell me about Saturn's rings" {
+                XCTAssertTrue(waitUntil({ !element("send-message-button").isEnabled }, timeout: 10), "The queued Claude turn should wait for the prior page decision.")
+                try Data("Release classifier.\n".utf8).write(to: release)
+            }
+            XCTAssertTrue(waitUntil({
+                guard self.chatPageSeparatorIsVisible(expectedTitle),
+                      let status = try? self.runCLI(["chat", "status"])["result"] as? [String: Any] else { return false }
+                return status["missedPreviousPageSignal"] as? Bool == false
+            }, timeout: 30), "The Haiku fallback should persist and visibly show the title \(expectedTitle).")
+            XCTAssertFalse(element("chat-missed-page-signal-notice").exists)
+        }
+
+        try sendFromSidebar("Tell me about volcanoes", expectedTitle: "Volcanoes")
+        try sendFromSidebar("Tell me about Saturn's rings", expectedTitle: "Saturn Rings")
+        try sendFromSidebar("One more thought about Saturn", expectedTitle: "Saturn Rings")
+
+        XCTAssertTrue(waitUntil({
+            guard let status = try? self.runCLI(["chat", "status"])["result"] as? [String: Any],
+                  status["missedPreviousPageSignal"] as? Bool == false,
+                  let page = status["activePage"] as? [String: Any],
+                  page["title"] as? String == "Saturn Rings",
+                  let pageID = page["id"] as? String,
+                  let messages = (try? self.runCLI(["chat", "page", "read", pageID])["result"] as? [String: Any])?["messages"] as? [[String: Any]] else { return false }
+            return messages.compactMap { $0["text"] as? String } == [
+                "Tell me about Saturn's rings", "OK.", "One more thought about Saturn", "OK.",
+            ]
+        }, timeout: 30), "The related follow-up must finish on the selected page in transcript order.")
+
+        let status = try XCTUnwrap(try runCLI(["chat", "status"])["result"] as? [String: Any])
+        let activePage = try XCTUnwrap(status["activePage"] as? [String: Any])
+        XCTAssertNotEqual(activePage["id"] as? String, firstPage["id"] as? String)
+        let firstMessages = try XCTUnwrap(
+            (try runCLI(["chat", "page", "read", try XCTUnwrap(firstPage["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
+        )
+        let activeMessages = try XCTUnwrap(
+            (try runCLI(["chat", "page", "read", try XCTUnwrap(activePage["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
+        )
+        XCTAssertTrue(firstMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == "Tell me about volcanoes" })
+        XCTAssertTrue(firstMessages.contains { ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "OK." })
+        XCTAssertEqual(firstMessages.filter { ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "OK." }.count, 1, "The Saturn assistant reply must not remain duplicated on the Volcanoes page.")
+        XCTAssertEqual(activeMessages.map { $0["text"] as? String }, [
+            "Tell me about Saturn's rings", "OK.", "One more thought about Saturn", "OK.",
+        ], "A related turn after fallback must append in chronological order.")
+        XCTAssertFalse(firstMessages.contains { ($0["text"] as? String) == "Tell me about Saturn's rings" })
+        let pages = try XCTUnwrap((try runCLI(["chat", "page", "list"])["result"] as? [String: Any])?["pages"] as? [[String: Any]])
+        XCTAssertEqual(pages.count, 2)
+        XCTAssertEqual(Set(pages.compactMap { $0["title"] as? String }), Set(["Volcanoes", "Saturn Rings"]))
+        let history = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
+        let turns = try XCTUnwrap(history?["turns"] as? [[String: Any]])
+        let classifications = turns.filter { ($0["userText"] as? String)?.hasPrefix("Classify the latest user message for StationAI's continuous chat page index.") == true }
+        XCTAssertEqual(classifications.count, 4, "The fallback should retry one malformed result and classify a later follow-up.")
+        for turn in classifications {
+            XCTAssertEqual(turn["effort"] as? String, "low")
+            let arguments = try XCTUnwrap(turn["arguments"] as? [String])
+            let modelArgumentIndex = try XCTUnwrap(arguments.firstIndex(of: "--model"))
+            XCTAssertEqual(arguments[modelArgumentIndex + 1], "haiku")
+        }
+
+        let priorPageID = try XCTUnwrap(activePage["id"] as? String)
+        let hold = URL(fileURLWithPath: executable.path + ".hold-classifier")
+        let active = URL(fileURLWithPath: executable.path + ".classifier-active")
+        let release = URL(fileURLWithPath: executable.path + ".classifier-release")
+        try? FileManager.default.removeItem(at: active)
+        try? FileManager.default.removeItem(at: release)
+        try Data().write(to: hold)
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText("Tell me about Neptune")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: active.path) }, timeout: 15))
+        let explicitPage = try XCTUnwrap((try runCLI(["chat", "page", "new", "--title", "Explicit topic"])["result"] as? [String: Any])?["page"] as? [String: Any])
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(waitUntil({ !element("chat-sidebar").exists }, timeout: 5))
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Explicit topic") }, timeout: 10))
+        XCTAssertFalse(element("chat-missed-page-signal-notice").exists)
+        try Data("Release classifier.\n".utf8).write(to: release)
+        XCTAssertTrue(waitUntil({
+            guard let status = try? self.runCLI(["chat", "status"])["result"] as? [String: Any],
+                  let page = status["activePage"] as? [String: Any] else { return false }
+            return (page["id"] as? String) == (explicitPage["id"] as? String)
+        }, timeout: 30))
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Explicit topic") }, timeout: 10))
+        let explicitMessages = try XCTUnwrap((try runCLI(["chat", "page", "read", try XCTUnwrap(explicitPage["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+        XCTAssertTrue(explicitMessages.isEmpty)
+        let oldPageMessages = try XCTUnwrap((try runCLI(["chat", "page", "read", priorPageID])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+        XCTAssertTrue(oldPageMessages.contains { ($0["text"] as? String) == "Tell me about Neptune" })
+        XCTAssertTrue(oldPageMessages.contains { ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "OK." })
+
+        let classifierFailure = URL(fileURLWithPath: executable.path + ".fail-classifier")
+        try Data().write(to: classifierFailure)
+        composer.click()
+        composer.typeText("Tell me about Mars")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            (try? self.runCLI(["chat", "status"])["result"] as? [String: Any])?["missedPreviousPageSignal"] as? Bool == true
+        }, timeout: 30))
+        XCTAssertTrue(waitUntil({ self.element("send-message-button").isEnabled }, timeout: 10))
+        composer.click()
+        composer.typeText("Do not overtake Mars")
+        element("send-message-button").click()
+        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 15), "Claude chat should explain when a prior page decision is still unresolved.")
+        let failedHistory = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
+        let failedTurns = try XCTUnwrap(failedHistory?["turns"] as? [[String: Any]])
+        XCTAssertFalse(failedTurns.contains { ($0["userText"] as? String) == "Do not overtake Mars" })
+        try FileManager.default.removeItem(at: classifierFailure)
+        _ = try runCLI(["chat", "status"])
+        let retryStatus = try XCTUnwrap(try runCLI(["chat", "status"])["result"] as? [String: Any])
+        XCTAssertFalse(retryStatus["missedPreviousPageSignal"] as? Bool ?? true)
+        XCTAssertEqual((retryStatus["activePage"] as? [String: Any])?["title"] as? String, "Mars")
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(waitUntil({ !element("chat-sidebar").exists }, timeout: 5))
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Mars") }, timeout: 10))
+        XCTAssertFalse(element("chat-missed-page-signal-notice").exists)
+        composer.click()
+        composer.typeKey("a", modifierFlags: .command)
+        composer.typeText("Another thought about Mars")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            guard let status = try? self.runCLI(["chat", "status"])["result"] as? [String: Any],
+                  status["missedPreviousPageSignal"] as? Bool == false,
+                  let page = status["activePage"] as? [String: Any],
+                  page["title"] as? String == "Mars",
+                  let pageID = page["id"] as? String,
+                  let messages = (try? self.runCLI(["chat", "page", "read", pageID])["result"] as? [String: Any])?["messages"] as? [[String: Any]] else { return false }
+            return messages.contains { ($0["text"] as? String) == "Another thought about Mars" }
+        }, timeout: 30))
     }
 
     // case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while the composer automatically saves an unsent prompt as it is typed; clearing the composer clears the stored draft, backing out needs no Save button, and reopening restores the draft without creating a branch or worktree. Blank drafts cannot be stored, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
@@ -9166,6 +9725,17 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(response["ok"] as? Bool, false, file: file, line: line)
         let error = response["error"] as? [String: Any]
         XCTAssertEqual(error?["code"] as? String, code, file: file, line: line)
+    }
+
+    private func chatPageSeparatorIsVisible(_ title: String) -> Bool {
+        element("chat-sidebar")
+            .descendants(matching: .scrollView)
+            .matching(identifier: "conversation-scroll-view")
+            .firstMatch
+            .staticTexts
+            .matching(identifier: "chat-page-separator")
+            .allElementsBoundByIndex
+            .contains { $0.label == title }
     }
 
     private func element(_ identifier: String) -> XCUIElement {

@@ -283,6 +283,9 @@ enum StationAICLI {
             if rest == ["open"] {
                 return BridgeRequest(command: "chat.open")
             }
+            if rest == ["status"] {
+                return BridgeRequest(command: "chat.status")
+            }
             guard rest.first == "page", rest.count >= 2 else {
                 throw CLIError.usage("Use: stationai chat open or stationai chat page list|search|read|new|close-turn ...")
             }
@@ -468,7 +471,7 @@ enum StationAICLI {
                     "answers": .object(answers.mapValues { .array($0.map(BridgeValue.string)) })
                 ])
             case "send":
-                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode", "--model", "--answer", "--image"])
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode", "--model", "--answer", "--image", "--context-page"])
                 var answers: [String: [String]] = [:]
                 for pair in flags["--answer"] ?? [] {
                     guard let separator = pair.firstIndex(of: "="), separator != pair.startIndex else {
@@ -497,6 +500,10 @@ enum StationAICLI {
                 ]
                 // Without --model, the task's provider chooses its default model.
                 if let model = flags["--model"]?.first { sendArguments["model"] = .string(model) }
+                // Standalone chat only: pages an annotation points at, carried for this turn.
+                if let contextPages = flags["--context-page"] {
+                    sendArguments["contextPages"] = .array(contextPages.map(BridgeValue.string))
+                }
                 return BridgeRequest(command: "conversation.send", arguments: sendArguments)
             default: throw CLIError.usage("Unknown conversation operation '\(operation)'.")
             }
@@ -596,6 +603,7 @@ enum StationAICLI {
       stationai task delete <task-id>
       stationai task delete-check <task-id>
       stationai chat open
+      stationai chat status
       stationai chat page list [--limit <n>]
       stationai chat page search <query>
       stationai chat page read <page-id>
@@ -621,7 +629,7 @@ enum StationAICLI {
       stationai conversation stop <task-id>
       stationai conversation provider <task-id> [set <codex|claude>|capabilities]
       stationai conversation goal <task-id> <get|set|pause|resume|clear> [--text <objective>]
-      stationai conversation send <task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...]
+      stationai conversation send <task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...] [--context-page <page-id>]...
 
     Results are JSON. Conversation send emits JSON event lines followed by a final response.
     Conversation commands use the task's provider; tasks without one use Codex.

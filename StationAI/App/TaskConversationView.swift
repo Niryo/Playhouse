@@ -161,6 +161,7 @@ struct TaskConversationView: View {
     @State private var isShowingImagePicker = false
     @State private var selectedChatImage: NSImage?
     @State private var isGeneratingTitle = false
+    @State private var chatPagesByTurnID: [String: StandaloneChatPage] = [:]
     @State private var conversationMode: ConversationMode = .code
     @State private var isEnteringGoal = false
     @State private var activeGoal: CodexThreadGoal?
@@ -246,7 +247,9 @@ struct TaskConversationView: View {
     }
 
     private var isRepositoryRootConfigured: Bool {
-        WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) != nil
+        // Standalone chat has no repository/worktree of its own, so it must never require the
+        // app's global repository-root setting to be configured before sending.
+        task.isStandaloneChat || WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) != nil
     }
 
     private var canPauseResponse: Bool {
@@ -406,15 +409,24 @@ struct TaskConversationView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            taskSidebar
+        Group {
+            if task.isStandaloneChat {
+                // The standalone chat sidebar reuses only the conversation transcript/composer,
+                // not the repo-specific "Changes" sidebar a real task's worktree needs.
+                conversationPanel
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                HStack(spacing: 0) {
+                    taskSidebar
 
-            Rectangle()
-                .fill(Color.primary.opacity(0.08))
-                .frame(width: 1)
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.08))
+                        .frame(width: 1)
 
-            conversationPanel
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    conversationPanel
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
         }
         .background(WorkspaceTheme.windowBackground)
         .onAppear {
@@ -479,12 +491,14 @@ struct TaskConversationView: View {
             await loadConversation()
             if !isReadOnly { refreshQueuedMessages() }
             if !isReadOnly { await loadModels() }
+            if task.isStandaloneChat { refreshChatPageStatus() }
             if conflictResolutionRequested && !isReadOnly && !isResponding {
                 conflictResolutionAttempt = 1
                 sendMessage(overrideText: "The PR has conflicts. Fix them, commit, and push.")
             }
         }
         .onChange(of: providerTurnIsActive) { _, isTurnActive in
+            if !isTurnActive, task.isStandaloneChat { refreshChatPageStatus() }
             if !isTurnActive, !isReadOnly {
                 refreshQueuedMessages()
             }
@@ -1064,24 +1078,29 @@ struct TaskConversationView: View {
 
                     Spacer(minLength: 8)
 
-                    repositoryBadges
+                    if !task.isStandaloneChat {
+                        repositoryBadges
+                    }
                 }
 
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(task.status.accent)
-                        .frame(width: 6, height: 6)
-                    Text(task.status.rawValue)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
+                if !task.isStandaloneChat {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(task.status.accent)
+                            .frame(width: 6, height: 6)
+                        Text(task.status.rawValue)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    if let statusMessage = task.statusMessage, !statusMessage.isEmpty {
+                        Text(statusMessage)
+                            .font(.system(size: 10))
+                            .foregroundStyle(task.status == .blocked ? Color.red : Color.secondary)
+                            .lineLimit(3)
+                            .accessibilityIdentifier("task-status-message")
+                    }
                 }
-                if let statusMessage = task.statusMessage, !statusMessage.isEmpty {
-                    Text(statusMessage)
-                        .font(.system(size: 10))
-                        .foregroundStyle(task.status == .blocked ? Color.red : Color.secondary)
-                        .lineLimit(3)
-                        .accessibilityIdentifier("task-status-message")
-                }
+
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -1443,6 +1462,10 @@ struct TaskConversationView: View {
                                     .accessibilityIdentifier("conversation-load-older-anchor")
                             }
                             ForEach(renderedConversationMessages) { message in
+                                if let page = standaloneChatPageSeparator(before: message) {
+                                    standaloneChatPageSeparator(page)
+                                        .id("chat-page-separator-\(page.id)-\(message.id)")
+                                }
                                 if shouldShowActivityDisclosure, message.id == activityDisclosureAnchorID {
                                     activityList
                                 }
@@ -3005,9 +3028,13 @@ struct TaskConversationView: View {
         defer { isLoadingHistory = false }
 
         do {
-            let history = try await conversationManager.history(taskID: task.id) {
-                actionNotice = approvalNotice
-            }
+            // Standalone chat rotates one session per page, so the transcript asks for the
+            // earlier pages to be restored from the local archive alongside the live session.
+            let history = try await conversationManager.history(
+                taskID: task.id,
+                onActionRequest: { actionNotice = approvalNotice },
+                restoringEarlierChatPages: task.isStandaloneChat
+            )
             messages = history.messages
             userInputRequest = history.pendingUserInputRequest?.threadID == task.activeConversationID
                 ? history.pendingUserInputRequest
@@ -3223,6 +3250,9 @@ struct TaskConversationView: View {
                 .filter { !$0.isEmpty }.joined(separator: "\n\n")
         }
         let text = annotationPrompt
+        // An annotation can point at text from an earlier page; that page travels with this
+        // turn so the agent sees the quoted context without reloading the whole chat.
+        let annotationPageIDs = standaloneChatPageIDs(for: pendingAnnotations)
         let resolutionAttempt = conflictResolutionAttempt
         if usesComposerDraft && pendingAnnotations.isEmpty && text == "/plan" {
             activatePlanMode()
@@ -3303,7 +3333,7 @@ struct TaskConversationView: View {
             }
             do {
                 _ = try await conversationManager.setEffort(taskID: task.id, effort: selectedEffort)
-                _ = try await conversationManager.send(taskID: task.id, text: text, imageDataURLs: imageDataURLs, mode: conversationMode, modelID: selectedModelID.isEmpty ? nil : selectedModelID, statusBeforeSubmission: statusBeforeSubmission, onTurnStarting: {
+                _ = try await conversationManager.send(taskID: task.id, text: text, imageDataURLs: imageDataURLs, mode: conversationMode, modelID: selectedModelID.isEmpty ? nil : selectedModelID, statusBeforeSubmission: statusBeforeSubmission, contextPageIDs: annotationPageIDs, onTurnStarting: {
                     isResponding = true
                 }, onUpdate: { update in
                     switch update.type {
@@ -3349,6 +3379,8 @@ struct TaskConversationView: View {
                         } else {
                             activities.append(activity)
                         }
+                    case "chat_page_updated":
+                        refreshChatPageStatus()
                     case "diff":
                         break
                     case "history", "completed":
@@ -3520,9 +3552,11 @@ struct TaskConversationView: View {
 
     private func refreshGoalConversation() async {
         do {
-            let history = try await conversationManager.history(taskID: task.id) {
-                actionNotice = approvalNotice
-            }
+            let history = try await conversationManager.history(
+                taskID: task.id,
+                onActionRequest: { actionNotice = approvalNotice },
+                restoringEarlierChatPages: task.isStandaloneChat
+            )
             messages = history.messages
             activities = history.activities
             providerBoundaries = history.providerBoundaries
@@ -3556,6 +3590,54 @@ struct TaskConversationView: View {
         answeredAsyncQuestionIDs = Set((try? conversationManager.answeredAsyncQuestionIDs(taskID: task.id)) ?? [])
     }
 
+    private func refreshChatPageStatus() {
+        guard let chatManager = try? StandaloneChatManager(dataDirectory: ProcessInfo.processInfo.environment["STATIONAI_DATA_DIRECTORY"]) else {
+            chatPagesByTurnID = [:]
+            return
+        }
+        chatPagesByTurnID = (try? chatManager.pageAssignmentsByTurnID()) ?? [:]
+    }
+
+    private func standaloneChatPageSeparator(before message: ConversationMessage) -> StandaloneChatPage? {
+        guard task.isStandaloneChat,
+              let turnID = message.turnID,
+              let page = chatPagesByTurnID[turnID],
+              let messageIndex = messages.firstIndex(where: { $0.id == message.id }) else { return nil }
+        let previousTurnID = messages[..<messageIndex].last(where: { $0.turnID != nil })?.turnID
+        guard previousTurnID.flatMap({ chatPagesByTurnID[$0]?.id }) != page.id else { return nil }
+        return page
+    }
+
+    /// Pages that the pending annotations quote from, excluding the page this turn already runs
+    /// in. Only standalone chat has pages, so task conversations always send an empty list.
+    private func standaloneChatPageIDs(for pendingAnnotations: [ConversationAnnotation]) -> [String] {
+        guard task.isStandaloneChat, !pendingAnnotations.isEmpty else { return [] }
+        let activePageID = messages.last(where: { $0.turnID != nil })?.turnID.flatMap { chatPagesByTurnID[$0]?.id }
+        var pageIDs: [String] = []
+        for annotation in pendingAnnotations {
+            guard let turnID = messages.first(where: { $0.id == annotation.messageID })?.turnID,
+                  let pageID = chatPagesByTurnID[turnID]?.id,
+                  pageID != activePageID, !pageIDs.contains(pageID) else { continue }
+            pageIDs.append(pageID)
+        }
+        return pageIDs
+    }
+
+    private func standaloneChatPageSeparator(_ page: StandaloneChatPage) -> some View {
+        HStack(spacing: 12) {
+            Rectangle().fill(Color.primary.opacity(0.13)).frame(height: 1)
+            Text(page.title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .accessibilityIdentifier("chat-page-separator")
+            Rectangle().fill(Color.primary.opacity(0.13)).frame(height: 1)
+        }
+        .padding(.vertical, 5)
+        .accessibilityElement(children: .contain)
+    }
+
     private func queueDraftForAfterTurn() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
@@ -3582,7 +3664,9 @@ struct TaskConversationView: View {
                 let outcome = try await conversationManager.steerQueuedMessage(taskID: task.id, messageID: message.id)
                 refreshQueuedMessages()
                 guard outcome.accepted else {
-                    if let history = try? await conversationManager.history(taskID: task.id) {
+                    if let history = try? await conversationManager.history(
+                        taskID: task.id, restoringEarlierChatPages: task.isStandaloneChat
+                    ) {
                         messages = history.messages
                         activities = history.activities
                         answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
@@ -3614,7 +3698,9 @@ struct TaskConversationView: View {
                     draft = ""
                     pendingImages.removeAll()
                     refreshQueuedMessages()
-                    if let history = try? await conversationManager.history(taskID: task.id) {
+                    if let history = try? await conversationManager.history(
+                        taskID: task.id, restoringEarlierChatPages: task.isStandaloneChat
+                    ) {
                         messages = history.messages
                         activities = history.activities
                     }
@@ -3643,7 +3729,9 @@ struct TaskConversationView: View {
                 guard retried else {
                     throw BridgeCommandError(code: "operation_failed", message: "The queued follow-up still needs your attention.")
                 }
-                let history = try await conversationManager.history(taskID: task.id)
+                let history = try await conversationManager.history(
+                    taskID: task.id, restoringEarlierChatPages: task.isStandaloneChat
+                )
                 messages = history.messages
                 activities = history.activities
                 answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)

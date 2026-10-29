@@ -1667,20 +1667,25 @@ enum TaskThreadDeveloperInstructions {
         repositories: [RepositoryWorktreeRecord] = [],
         contextFolders: [String] = [],
         repositoryRootPath: String? = nil,
-        isStandaloneChat: Bool = false
+        isStandaloneChat: Bool = false,
+        missedPreviousPageSignal: Bool = false
     ) -> String {
         let executable = cliExecutableURL().path
         let quotedExecutable = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
         let id = taskID.uuidString
         if isStandaloneChat {
-            return """
-            This is a standalone, repo/worktree-free chat (not a task on the board) — do not call task progress, task outcome, or repository commands here. The conversation is split behind the scenes into titled "pages" so your live context stays small while the full history stays searchable. Decide this yourself as part of each normal reply; there is no separate classification step:
-            - If the user's message clearly starts a new, unrelated topic from what you were just discussing, call \(quotedExecutable) chat page new --title "<short title>" before replying, so this turn is filed under a fresh page.
+            let escalation = missedPreviousPageSignal ? """
+            CRITICAL, READ FIRST: your previous reply did not run the required chat page close-turn command below. Before writing anything else this turn, run it now for your previous reply (use --continues true unless that reply clearly started a new topic), then continue normally and run it again at the end of THIS turn too.
+
+            """ : ""
+            return escalation + """
+            This is a standalone, repo/worktree-free chat (not a task on the board) — do not call task progress, task outcome, or repository commands here. The conversation is split behind the scenes into titled "pages" so your live context stays small while the full history stays searchable.
             - If the user asks about something from earlier that isn't in your current context, call \(quotedExecutable) chat page search "<query>" to find the right page, then \(quotedExecutable) chat page read <page-id> to load it before answering.
-            - At the end of every turn, record whether this message continued the active page or started a new one by running exactly one of:
+            - At the end of every single turn, with no exceptions, decide whether the user's message continued the current topic or started a new, unrelated one, and run exactly one of these as a real command (never just write it as text in your reply):
               \(quotedExecutable) chat page close-turn \(id) --continues true
-              \(quotedExecutable) chat page close-turn \(id) --continues false --new-title "<short title>"
-              Run this as a real command, not as text in your reply. If you already called chat page new above, use --continues false with the same title here.
+              \(quotedExecutable) chat page close-turn \(id) --continues false --new-title "<short title for the new topic>"
+              This single command both records your classification and files this turn under the right page — do not call "chat page new" separately for this; close-turn creates the new page itself when needed.
+            - Also end your user-facing answer with one short, visible line: "Page: <current page title> (continued)" or "Page: <new page title> (new topic)". For a continuing page, get its title from `chat status`; for a new page, use the title from your close-turn command. This lets the user see which page received the turn.
             """
         }
         return """
