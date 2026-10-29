@@ -27,43 +27,35 @@ shutil.copytree(bundle, copy, symlinks=True)
 try:
     info_path = copy / 'Contents/Info.plist'
     original = plistlib.loads(info_path.read_bytes())
-    bridge_path = copy / 'Contents/XPCServices/StationAIBridge.xpc/Contents/Info.plist'
-    bridge_original = plistlib.loads(bridge_path.read_bytes())
     foreign_test_id = (
         'com.stationai.app.e2e.foreign'
         if profile['kind'] == 'linked'
         else 'com.stationai.app.worktree.w0000000000000000.e2e.foreign'
     )
+    # The daemon and CLI ship flat in Contents/MacOS and resolve their identity
+    # from this same Info.plist via `Bundle.main` (no separate XPC bundle to
+    # tamper with independently anymore), so every identity/compatibility
+    # check collapses onto this one file.
     cases = [
-        ('app', 'StationAIStoreCompatibilityVersion', None, None, 'predates store isolation'),
-        ('app', 'StationAISourceWorktree', '/another-worktree', None, 'another source worktree'),
-        ('app', 'CFBundleIdentifier', 'com.stationai.foreign', None, 'different identities'),
-        ('app', 'CFBundleIdentifier', foreign_test_id, foreign_test_id, 'Unexpected test app identity'),
-        ('bridge', 'StationAIStoreCompatibilityVersion', None, None, 'predates store isolation'),
-        ('bridge', 'StationAISourceWorktree', '/another-worktree', None, 'another source worktree'),
+        ('StationAIStoreCompatibilityVersion', None, 'predates store isolation'),
+        ('StationAISourceWorktree', '/another-worktree', 'another source worktree'),
+        ('CFBundleIdentifier', 'com.stationai.foreign', 'does not match this worktree profile'),
+        ('CFBundleIdentifier', foreign_test_id, 'Unexpected test app identity'),
     ]
     diagnostics = data / 'Diagnostics.jsonl'
     diagnostics_before = diagnostics.read_bytes() if diagnostics.exists() else None
     snapshots = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in data.glob('*.store*') if p.is_file()}
-    for target, key, value, bridge_identity, reason in cases:
+    for key, value, reason in cases:
         info = dict(original)
-        bridge_info = dict(bridge_original)
-        destination = info if target == 'app' else bridge_info
         if value is None:
-            destination.pop(key, None)
+            info.pop(key, None)
         else:
-            destination[key] = value
-        if bridge_identity is not None:
-            info['CFBundleIdentifier'] = bridge_identity
-            bridge_info['CFBundleIdentifier'] = bridge_identity + '.bridge'
-            bridge_info['StationAIApplicationBundleIdentifier'] = bridge_identity
+            info[key] = value
         info_path.write_bytes(plistlib.dumps(info))
-        bridge_path.write_bytes(plistlib.dumps(bridge_info))
         env['STATIONAI_APP_PATH'] = str(copy)
         result = subprocess.run(['bash', str(root / 'scripts/stationai.sh'), 'task', 'list'], env=env, capture_output=True, text=True, timeout=15)
         assert result.returncode == 2 and not result.stdout and reason in result.stderr, result.stderr
     info_path.write_bytes(plistlib.dumps(original))
-    bridge_path.write_bytes(plistlib.dumps(bridge_original))
     env['STATIONAI_DATA_DIRECTORY'] = str(Path.home() / 'Library/Application Support/StationAI')
     result = subprocess.run(['bash', str(root / 'scripts/stationai.sh'), 'task', 'list'], env=env, capture_output=True, text=True, timeout=15)
     assert result.returncode == 2 and not result.stdout and 'isolated temporary' in result.stderr, result.stderr

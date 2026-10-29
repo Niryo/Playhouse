@@ -752,7 +752,7 @@ enum GitHubPullRequestManager {
     }
 
     static func resolveExecutable() throws -> String {
-        let paths = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map {
+        let paths = (StationAIProcessEnvironment.current["PATH"] ?? "").split(separator: ":").map {
             URL(fileURLWithPath: String($0)).appendingPathComponent("gh").path
         } + ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
         guard let path = paths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
@@ -1732,51 +1732,56 @@ final class BoardTaskManager {
                             "repositoryPath": record.repositoryPath,
                             "worktreePath": record.worktreePath
                         ])
+                        // Runs after this request returns, once the task's turn ends; keep
+                        // this request's environment and diagnostics routing for it.
+                        let requestContext = StationAIRequestContext.capture()
                         Task.detached { @MainActor in
-                            do {
-                                StationAIDiagnostics.record("workspace.repository.deferred_removal_waiting", fields: [
-                                    "taskID": id.uuidString,
-                                    "repositoryPath": record.repositoryPath,
-                                    "worktreePath": record.worktreePath
-                                ])
-                                try await self.withConversationTurnReservation(id) {
-                                    try await self.withTaskOperationLock(id) {
-                                        guard let deferredIntentURL,
-                                              FileManager.default.fileExists(atPath: deferredIntentURL.path) else { return }
-                                        if try self.isRepositoryAttached(record, to: id) {
-                                            try self.clearDeferredRepositoryRemoval(at: deferredIntentURL)
-                                            return
-                                        }
-                                        StationAIDiagnostics.record("workspace.repository.deferred_removal_reservation_acquired", fields: [
-                                            "taskID": id.uuidString,
-                                            "repositoryPath": record.repositoryPath,
-                                            "worktreePath": record.worktreePath
-                                        ])
-                                        if try await self.worktreeService.hasChanges(record) {
-                                            StationAIDiagnostics.record("workspace.repository.deferred_removal_kept_dirty", fields: [
+                            await requestContext.run {
+                                do {
+                                    StationAIDiagnostics.record("workspace.repository.deferred_removal_waiting", fields: [
+                                        "taskID": id.uuidString,
+                                        "repositoryPath": record.repositoryPath,
+                                        "worktreePath": record.worktreePath
+                                    ])
+                                    try await self.withConversationTurnReservation(id) {
+                                        try await self.withTaskOperationLock(id) {
+                                            guard let deferredIntentURL,
+                                                  FileManager.default.fileExists(atPath: deferredIntentURL.path) else { return }
+                                            if try self.isRepositoryAttached(record, to: id) {
+                                                try self.clearDeferredRepositoryRemoval(at: deferredIntentURL)
+                                                return
+                                            }
+                                            StationAIDiagnostics.record("workspace.repository.deferred_removal_reservation_acquired", fields: [
+                                                "taskID": id.uuidString,
+                                                "repositoryPath": record.repositoryPath,
+                                                "worktreePath": record.worktreePath
+                                            ])
+                                            if try await self.worktreeService.hasChanges(record) {
+                                                StationAIDiagnostics.record("workspace.repository.deferred_removal_kept_dirty", fields: [
+                                                    "taskID": id.uuidString,
+                                                    "repositoryPath": record.repositoryPath,
+                                                    "worktreePath": record.worktreePath
+                                                ])
+                                                try self.clearDeferredRepositoryRemoval(at: deferredIntentURL)
+                                                return
+                                            }
+                                            try await self.worktreeService.remove(record)
+                                            StationAIDiagnostics.record("workspace.repository.deferred_removal_succeeded", fields: [
                                                 "taskID": id.uuidString,
                                                 "repositoryPath": record.repositoryPath,
                                                 "worktreePath": record.worktreePath
                                             ])
                                             try self.clearDeferredRepositoryRemoval(at: deferredIntentURL)
-                                            return
                                         }
-                                        try await self.worktreeService.remove(record)
-                                        StationAIDiagnostics.record("workspace.repository.deferred_removal_succeeded", fields: [
-                                            "taskID": id.uuidString,
-                                            "repositoryPath": record.repositoryPath,
-                                            "worktreePath": record.worktreePath
-                                        ])
-                                        try self.clearDeferredRepositoryRemoval(at: deferredIntentURL)
                                     }
+                                } catch {
+                                    StationAIDiagnostics.record("workspace.repository.deferred_removal_failed", fields: [
+                                        "taskID": id.uuidString,
+                                        "repositoryPath": record.repositoryPath,
+                                        "worktreePath": record.worktreePath,
+                                        "error": error.localizedDescription
+                                    ])
                                 }
-                            } catch {
-                                StationAIDiagnostics.record("workspace.repository.deferred_removal_failed", fields: [
-                                    "taskID": id.uuidString,
-                                    "repositoryPath": record.repositoryPath,
-                                    "worktreePath": record.worktreePath,
-                                    "error": error.localizedDescription
-                                ])
                             }
                         }
                     } else {
@@ -2328,6 +2333,10 @@ final class BoardTaskManager {
                     clearProgressReport(task)
                     try await saveTaskContext(taskID: id)
                 }
+                return BoardTaskRecord(task: task)
+            }
+            // A turn the user paused is waiting on purpose; it needs no restart notice.
+            if task.status == .waitingResponse, client.wasLastTurnInterrupted(threadID: threadID) {
                 return BoardTaskRecord(task: task)
             }
             let message: String
@@ -3956,7 +3965,7 @@ final class ConversationManager {
         let root: URL
         if let codexHomePath, !codexHomePath.isEmpty {
             root = URL(fileURLWithPath: codexHomePath, isDirectory: true)
-        } else if let environmentRoot = ProcessInfo.processInfo.environment["CODEX_HOME"], !environmentRoot.isEmpty {
+        } else if let environmentRoot = StationAIProcessEnvironment.current["CODEX_HOME"], !environmentRoot.isEmpty {
             root = URL(fileURLWithPath: environmentRoot, isDirectory: true)
         } else {
             root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
@@ -5378,10 +5387,13 @@ final class ConversationManager {
                 : Self.redactingSensitiveText(error.localizedDescription, values: sensitiveUserInputAnswerValues)
             let pendingQuestion = try? transcripts.read(taskID).pendingUserInputRequest
             let hasPendingBlockingQuestion = pendingQuestion?.isBlocking == true
+            // A saved non-blocking question stays answerable after the provider
+            // exits, exactly as when the task is reconciled on open.
+            let hasPendingNonBlockingQuestion = pendingQuestion != nil && !hasPendingBlockingQuestion
             let failureStatus: TaskStatus
             if hasPendingBlockingQuestion || shouldKeepWaiting {
                 failureStatus = .waitingResponse
-            } else if hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder {
+            } else if hasPendingNonBlockingQuestion || hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder {
                 failureStatus = .inProgress
             } else {
                 failureStatus = .blocked
@@ -5391,7 +5403,7 @@ final class ConversationManager {
                 to: failureStatus,
                 message: shouldKeepResumable
                     ? shutdownMessage
-                    : (wasUserInterrupted ? nil : (hasPendingBlockingQuestion ? "Waiting for your saved question to be answered." : safeFailureMessage))
+                    : (wasUserInterrupted ? nil : (hasPendingBlockingQuestion ? "Waiting for your saved question to be answered." : (hasPendingNonBlockingQuestion ? "A saved question is available for your response." : safeFailureMessage)))
             )
             StationAIDiagnostics.record("conversation.send.failed", fields: fields)
             if hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder || !sensitiveUserInputAnswerValues.isEmpty {
@@ -5667,6 +5679,28 @@ final class StationAIBridgeRuntime {
             return response
         }
 
+        // Turn state lives in this process's memory, so reading it needs no store.
+        if request.command == "conversation.runtime" || request.command == "conversation.runtime.subscribe" {
+            do {
+                let result: BridgeValue
+                if request.command == "conversation.runtime" {
+                    result = try Self.value(ConversationRuntimeSnapshot.current())
+                } else {
+                    // Streams the daemon's turn state to a window until it disconnects.
+                    for await snapshot in ConversationRuntimeSnapshot.changes() {
+                        if Task.isCancelled { break }
+                        eventHandler(BridgeEvent(requestID: request.id, type: "runtime_state", payload: try Self.value(snapshot)))
+                    }
+                    result = .object(["subscribed": .boolean(false)])
+                }
+                await StationAIDiagnostics.endBatch()
+                return .success(request, result: result)
+            } catch {
+                await StationAIDiagnostics.endBatch()
+                return .failure(request, code: "operation_failed", message: error.localizedDescription)
+            }
+        }
+
         do {
             let dataDirectory: String?
             #if DEBUG
@@ -5704,17 +5738,24 @@ final class StationAIBridgeRuntime {
 
             let codexExecutable = request.arguments["__codexExecutable"]?.string
             let claudeExecutable = request.arguments["__claudeExecutable"]?.string
+            // A window's requests run goals against one long-lived Codex client
+            // that observes goal turns, as the window's own client used to.
+            let guiRuntime = request.arguments["__guiRuntime"]?.bool == true
             func conversationClients(codexHome: String? = nil, goalFeatureEnabled: Bool = false) -> ConversationClients {
                 ConversationClients(
-                    codex: CodexAppServerClient(codexExecutableOverride: codexExecutable, codexHomeOverride: codexHome, goalFeatureEnabled: goalFeatureEnabled),
-                    claude: ClaudeCodeClient.sharedPrimaryClient(executableOverride: claudeExecutable)
+                    codex: CodexAppServerClient.sharedClient(executableOverride: codexExecutable, codexHomeOverride: codexHome, goalFeatureEnabled: goalFeatureEnabled, goalRuntimeEnabled: guiRuntime, dataDirectory: dataDirectory),
+                    claude: ClaudeCodeClient.sharedPrimaryClient(executableOverride: claudeExecutable, dataDirectory: dataDirectory)
                 )
             }
 
             let result: BridgeValue
             switch request.command {
             case "status":
-                result = .object(["service": .string("StationAI"), "bridgeVersion": .integer(BridgeContract.currentVersion)])
+                result = .object([
+                    "service": .string("StationAI"),
+                    "bridgeVersion": .integer(BridgeContract.currentVersion),
+                    "processID": .integer(Int(ProcessInfo.processInfo.processIdentifier))
+                ])
             case "board.list", "task.list":
                 result = try Self.value(["tasks": taskManager.list()])
             case "archive.search":
@@ -5831,7 +5872,7 @@ final class StationAIBridgeRuntime {
                     imageDataURLs: request.arguments["images"]?.strings
                 ))
             case "task.delete":
-                try await taskManager.delete(request.requiredUUID("taskID"))
+                try await taskManager.delete(request.requiredUUID("taskID"), diagnostics: conversationClients().codex.diagnosticFields())
                 result = .object(["deleted": .boolean(true)])
             case "task.delete.requires-confirmation":
                 let requiresConfirmation = try await taskManager.deleteRequiresConfirmation(request.requiredUUID("taskID"))
@@ -5896,7 +5937,9 @@ final class StationAIBridgeRuntime {
                 let clients = conversationClients()
                 _ = try await taskManager.reconcileLifecycleStatusOnOpen(taskID, clients: clients)
                 let conversations = ConversationManager(tasks: taskManager, clients: clients, settingsManager: settings)
-                result = try Self.value(await conversations.history(taskID: taskID))
+                result = try Self.value(await conversations.history(taskID: taskID, onActionRequest: {
+                    eventHandler(BridgeEvent(requestID: request.id, type: "action_request", payload: .object([:])))
+                }))
             case "conversation.present-image":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = try Self.value(await conversations.publishImage(
@@ -5952,10 +5995,15 @@ final class StationAIBridgeRuntime {
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = .array(try await conversations.providerCapabilities(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })
             case "conversation.goal":
-                let clients = conversationClients(codexHome: request.arguments["__codexHome"]?.string, goalFeatureEnabled: true)
-                defer { clients.codex.shutdown() }
+                let clients = conversationClients(codexHome: request.arguments["__codexHome"]?.string, goalFeatureEnabled: !guiRuntime)
+                defer { if !guiRuntime { clients.codex.shutdown() } }
                 let conversations = ConversationManager(tasks: taskManager, clients: clients, settingsManager: settings, preferences: preferences)
-                let goal = try await conversations.goal(taskID: request.requiredUUID("taskID"), objective: request.arguments["objective"]?.string, action: request.arguments["action"]?.string ?? "get")
+                let goal = try await conversations.goal(
+                    taskID: request.requiredUUID("taskID"),
+                    objective: request.arguments["objective"]?.string,
+                    action: request.arguments["action"]?.string ?? "get",
+                    observeRuntime: guiRuntime && request.arguments["observe"]?.bool == true
+                )
                 if let goal { result = try Self.value(goal) } else { result = .null }
             case "conversation.queue", "conversation.queue.list", "conversation.queue.retry", "conversation.queue.remove", "conversation.queue.steer", "conversation.steer":
                 let taskID = try request.requiredUUID("taskID")
@@ -5964,7 +6012,11 @@ final class StationAIBridgeRuntime {
                 case "conversation.queue": result = try Self.value(conversations.queueMessage(taskID: taskID, text: request.requiredString("message")))
                 case "conversation.queue.list": result = .array(try conversations.queuedMessages(taskID: taskID).map { try Self.value($0) })
                 case "conversation.queue.retry":
-                    let retried = try await conversations.retryQueuedMessage(taskID: taskID, messageID: request.requiredUUID("messageID"))
+                    let retried = try await conversations.retryQueuedMessage(taskID: taskID, messageID: request.requiredUUID("messageID"), onUpdate: { update in
+                        if let payload = try? Self.value(update) {
+                            eventHandler(BridgeEvent(requestID: request.id, type: update.type, payload: payload))
+                        }
+                    })
                     result = .object(["retried": .boolean(retried)])
                 case "conversation.queue.remove":
                     try conversations.removeQueuedMessage(taskID: taskID, messageID: request.requiredUUID("messageID"))
@@ -5974,7 +6026,9 @@ final class StationAIBridgeRuntime {
                     result = .object(["text": .string(steered.message), "accepted": .boolean(true), "queued": .boolean(!steered.accepted)])
                 default:
                     let accepted = try await conversations.steer(taskID: taskID, text: request.arguments["message"]?.string ?? "", imageDataURLs: request.arguments["images"]?.strings ?? [])
-                    if accepted {
+                    if request.arguments["queueIfMissed"]?.bool == false {
+                        result = .object(["accepted": .boolean(accepted), "queued": .boolean(false)])
+                    } else if accepted {
                         result = .object(["accepted": .boolean(true), "queued": .boolean(false)])
                     } else {
                         _ = try await conversations.queueMissedSteer(taskID: taskID, text: request.arguments["message"]?.string ?? "", imageDataURLs: request.arguments["images"]?.strings ?? [])
@@ -5991,7 +6045,9 @@ final class StationAIBridgeRuntime {
                     throw BridgeCommandError(code: "not_found", message: "That question is not in this conversation.")
                 }
                 let answer = try await conversations.answerAsyncQuestion(taskID: taskID, question: question, answers: answers)
-                result = .object(["text": .string(answer.text), "queued": .boolean(answer.queued)])
+                var answered: [String: BridgeValue] = ["text": .string(answer.text), "queued": .boolean(answer.queued)]
+                if let history = answer.history { answered["history"] = try Self.value(history) }
+                result = .object(answered)
             case "conversation.repair_user_input":
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = try await Self.value(conversations.repairPendingUserInput(
@@ -6014,6 +6070,44 @@ final class StationAIBridgeRuntime {
                     }
                 )
                 result = .object(["accepted": .boolean(accepted)])
+            case "conversation.subagent_history":
+                let activity: ConversationActivity = try Self.decode(request.arguments["activity"])
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = try Self.value(await conversations.subagentHistory(taskID: request.requiredUUID("taskID"), activity: activity))
+            case "conversation.answered_async":
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = .object(["itemIDs": .array(try conversations.answeredAsyncQuestionIDs(taskID: request.requiredUUID("taskID")).map(BridgeValue.string))])
+            case "conversation.queue.missed_steer":
+                let taskID = try request.requiredUUID("taskID")
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = try Self.value(try await conversations.queueMissedSteer(
+                    taskID: taskID,
+                    text: request.arguments["message"]?.string ?? "",
+                    imageDataURLs: request.arguments["images"]?.strings ?? [],
+                    onUpdate: { update in
+                        if let payload = try? Self.value(update) {
+                            eventHandler(BridgeEvent(requestID: request.id, type: update.type, payload: payload))
+                        }
+                    }
+                ))
+            case "task.reconcile":
+                result = try Self.value(await taskManager.reconcileLifecycleStatusOnOpen(request.requiredUUID("taskID"), clients: conversationClients()))
+            case "task.title.generate":
+                let taskID = try request.requiredUUID("taskID")
+                let prompt = try request.requiredString("prompt")
+                let task = try taskManager.taskModel(taskID)
+                guard let workspace = try? ConversationWorkspaceContext(roots: task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL }) else {
+                    StationAIDiagnostics.record("task.title_generation.failed", fields: [
+                        "taskID": taskID.uuidString,
+                        "phase": "workspace-resolution",
+                        "reason": "workspace_unavailable"
+                    ])
+                    result = .null
+                    break
+                }
+                let generated = await ConversationTitleGenerator(clients: conversationClients().helperClients(preferring: task.conversationProvider))
+                    .generateTitle(from: prompt, workspace: workspace, taskID: taskID)
+                result = generated.map { .object(["title": .string($0.title), "provider": .string($0.provider.rawValue)]) } ?? .null
             case "conversation.send":
                 let taskID = try request.requiredUUID("taskID")
                 let message = request.arguments["message"]?.string ?? ""
@@ -6028,7 +6122,11 @@ final class StationAIBridgeRuntime {
                 let answers = try request.optionalStringArrays("answers")
                 let imageDataURLs = request.arguments["images"]?.strings ?? []
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
-                let history = try await conversations.send(taskID: taskID, text: message, imageDataURLs: imageDataURLs, mode: mode, modelID: modelID, userInputAnswers: answers, onUpdate: { update in
+                let statusBeforeSubmission = request.arguments["statusBeforeSubmission"]?.string.flatMap(TaskStatus.init(rawValue:))
+                let reportsTurnStarting = request.arguments["reportTurnStarting"]?.bool == true
+                let history = try await conversations.send(taskID: taskID, text: message, imageDataURLs: imageDataURLs, mode: mode, modelID: modelID, userInputAnswers: answers, statusBeforeSubmission: statusBeforeSubmission, onTurnStarting: reportsTurnStarting ? {
+                    eventHandler(BridgeEvent(requestID: request.id, type: "turn_starting", payload: .object([:])))
+                } : nil, onUpdate: { update in
                     if let payload = try? Self.value(update) {
                         eventHandler(BridgeEvent(requestID: request.id, type: update.type, payload: payload))
                     }
@@ -6188,6 +6286,13 @@ final class StationAIBridgeRuntime {
 
     private static func elapsedMilliseconds(since start: UInt64) -> String {
         String((DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
+    }
+
+    private static func decode<T: Decodable>(_ value: BridgeValue?) throws -> T {
+        guard let value else {
+            throw BridgeCommandError(code: "invalid_argument", message: "A required argument is missing.")
+        }
+        return try value.decoded(T.self)
     }
 
     private static func value<T: Encodable>(_ value: T) throws -> BridgeValue {

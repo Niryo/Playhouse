@@ -299,12 +299,15 @@ final class StationAIUITests: XCTestCase {
         clearSavedWindowFrames()
         cliURL = appBundle.appendingPathComponent("Contents/MacOS/stationai-cli")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: cliURL.path), "The app-bundled CLI is missing.")
-        let serviceInfo = appBundle.appendingPathComponent("Contents/XPCServices/StationAIBridge.xpc/Contents/Info.plist")
+        // The bridge daemon and CLI ship flat in Contents/MacOS and resolve
+        // their identity from the app's own Info.plist via `Bundle.main` (no
+        // separate XPC bundle/Info.plist anymore).
+        let serviceInfo = appBundle.appendingPathComponent("Contents/Info.plist")
         let plistData = try Data(contentsOf: serviceInfo)
         let plist = try XCTUnwrap(
             PropertyListSerialization.propertyList(from: plistData, format: nil) as? [String: Any]
         )
-        serviceName = try XCTUnwrap(plist["CFBundleIdentifier"] as? String)
+        serviceName = try XCTUnwrap(plist["CFBundleIdentifier"] as? String) + ".bridge"
         addUIInterruptionMonitor(withDescription: "Dismiss macOS crash reports") { alert in
             let ignore = alert.buttons["Ignore"]
             guard ignore.exists else { return false }
@@ -380,6 +383,9 @@ final class StationAIUITests: XCTestCase {
         let result = try XCTUnwrap(response["result"] as? [String: Any])
         XCTAssertEqual(result["service"] as? String, "StationAI")
         XCTAssertEqual(result["bridgeVersion"] as? Int, 1)
+        let daemonPID = try XCTUnwrap(result["processID"] as? Int, "The bridge should report the daemon process that answered.")
+        XCTAssertGreaterThan(daemonPID, 0)
+        XCTAssertEqual(kill(pid_t(daemonPID), 0), 0, "The reported daemon process should be running.")
         attachScreenshot(named: "StationAI board opened with a healthy bridge")
     }
 
@@ -4210,6 +4216,11 @@ final class StationAIUITests: XCTestCase {
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15), "\(provider) should be actively thinking before Stop is clicked.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+        let threadKey = provider == "codex" ? "codexThreadID" : "claudeSessionID"
+        let threadID = try XCTUnwrap(try taskRecord(id: taskID)?[threadKey] as? String, "The thinking \(provider) turn should have a native conversation ID.")
+        let thinking = try XCTUnwrap(try runCLI(["conversation", "runtime"])["result"] as? [String: Any])
+        XCTAssertTrue((thinking["activeThreadIDs"] as? [String] ?? []).contains(threadID), "The daemon should report the window's thinking turn as active.")
+        XCTAssertTrue((thinking["interruptibleThreadIDs"] as? [String] ?? []).contains(threadID), "The daemon should report the window's thinking turn as interruptible.")
 
         let stop = element("pause-response-button")
         XCTAssertTrue(waitUntil({ stop.isEnabled }, timeout: 10), "Stop should be enabled while the provider turn is active, before any text is written.")
@@ -4227,16 +4238,151 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("continue-response-button").waitForExistence(timeout: 15), "The stopped turn should reset the composer to its resumable state.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         XCTAssertNil(try taskRecord(id: taskID)?["statusMessage"] as? String, "A user-requested stop should not leave a failure reason.")
+        let settled = try XCTUnwrap(try runCLI(["conversation", "runtime"])["result"] as? [String: Any])
+        XCTAssertFalse((settled["activeThreadIDs"] as? [String] ?? []).contains(threadID), "A stopped turn is no longer active in the daemon.")
+        XCTAssertTrue((settled["interruptedThreadIDs"] as? [String] ?? []).contains(threadID), "The daemon should remember that the window paused the turn.")
     }
 
-    // case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted.
+    // case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles.
     func test_codex_stop_interrupts_thinking_turn_and_waits_for_response() throws {
         try exerciseStopDuringThinking(provider: "codex", title: "Codex stop while thinking")
     }
 
-    // case-contract: test_claude_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Claude reasoning immediately moves the task to Waiting Response and sends Claude's session-scoped control interrupt. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted.
+    // case-contract: test_claude_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Claude reasoning immediately moves the task to Waiting Response and sends Claude's session-scoped control interrupt. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles.
     func test_claude_stop_interrupts_thinking_turn_and_waits_for_response() throws {
         try exerciseStopDuringThinking(provider: "claude", title: "Claude stop while thinking")
+    }
+
+    // case-contract: test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle | The bridge daemon starts on the first request, serves later requests from the same process, and stays alive while any connection (such as a window's runtime watcher) is open. A watcher receives the daemon's runtime snapshots as a turn starts and stops, and the daemon exits by itself once the last connection closes and no request is running; the next request starts a fresh daemon on demand without any manual step.
+    func test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle() throws {
+        // Its own daemon, separate from the one the UI runner keeps alive for every
+        // case. The app starts it: the sandboxed test runner can only connect.
+        let graceEnvironment = [
+            "STATIONAI_BRIDGE_SERVICE_NAME": "\(serviceName!).lifecycle-\(UUID().uuidString.prefix(8))",
+            "STATIONAI_BRIDGE_IDLE_GRACE_SECONDS": "3",
+        ]
+        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-hold-interrupt").path
+        codexFixtureExecutable = executable
+        let ready = URL(fileURLWithPath: executable + ".interrupt-ready")
+        let received = URL(fileURLWithPath: executable + ".interrupt-received")
+        let release = URL(fileURLWithPath: executable + ".interrupt-release")
+        for marker in [ready, received, release] { try? FileManager.default.removeItem(at: marker) }
+        func daemonPID() throws -> Int {
+            let status = try XCTUnwrap(try runCLI(["status"], extraEnvironment: graceEnvironment)["result"] as? [String: Any])
+            return try XCTUnwrap(status["processID"] as? Int)
+        }
+        func isRunning(_ pid: Int) -> Bool { kill(pid_t(pid), 0) == 0 }
+
+        // The open window is a watcher: it starts the daemon and keeps it alive.
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: graceEnvironment)
+        let task = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Daemon watcher", "--root", fixture.primary.path, "--provider", "codex",
+        ], extraEnvironment: graceEnvironment)["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        let firstPID = try daemonPID()
+        XCTAssertTrue(isRunning(firstPID), "The window's first request should have started a daemon.")
+        XCTAssertEqual(try daemonPID(), firstPID, "Later requests should reuse the running daemon.")
+        RunLoop.current.run(until: Date().addingTimeInterval(4.5))
+        XCTAssertTrue(isRunning(firstPID), "An open window keeps the daemon alive past its idle grace.")
+        XCTAssertEqual(try daemonPID(), firstPID)
+        let idle = try XCTUnwrap(try runCLI(["conversation", "runtime"], extraEnvironment: graceEnvironment)["result"] as? [String: Any])
+        XCTAssertEqual(idle["activeThreadIDs"] as? [String], [], "A daemon with no turns reports nothing active.")
+
+        // The window sees the daemon's turn start and stop.
+        openTask(named: "Daemon watcher")
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        composer.click()
+        composer.typeText("Hold until stopped.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15), "The held turn should be thinking.")
+        let threadID = try XCTUnwrap(try taskRecord(id: taskID)?["codexThreadID"] as? String)
+        let running = try XCTUnwrap(try runCLI(["conversation", "runtime"], extraEnvironment: graceEnvironment)["result"] as? [String: Any])
+        XCTAssertTrue((running["activeThreadIDs"] as? [String] ?? []).contains(threadID))
+        XCTAssertTrue((running["interruptibleThreadIDs"] as? [String] ?? []).contains(threadID))
+        let stop = element("pause-response-button")
+        XCTAssertTrue(waitUntil({ stop.exists && stop.isEnabled }, timeout: 15), "The window should show Stop for the daemon's running turn.")
+        _ = try runCLI(["conversation", "stop", taskID], extraEnvironment: graceEnvironment)
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: received.path) }, timeout: 10))
+        try Data("acknowledge interrupt\n".utf8).write(to: release)
+        XCTAssertTrue(element("continue-response-button").waitForExistence(timeout: 15), "The window should show the turn as paused once the daemon settles it.")
+        let stopped = try XCTUnwrap(try runCLI(["conversation", "runtime"], extraEnvironment: graceEnvironment)["result"] as? [String: Any])
+        XCTAssertFalse((stopped["activeThreadIDs"] as? [String] ?? []).contains(threadID))
+        XCTAssertTrue((stopped["interruptedThreadIDs"] as? [String] ?? []).contains(threadID))
+
+        // Closing the last connection lets the daemon go; the next request starts a new one.
+        XCTAssertTrue(terminateAppAndWait(app), "StationAI must quit before the daemon can go idle.")
+        XCTAssertTrue(waitUntil({ !isRunning(firstPID) }, timeout: 20), "The daemon should exit by itself once its last connection closes and no request is running.")
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: graceEnvironment)
+        let secondPID = try daemonPID()
+        XCTAssertNotEqual(secondPID, firstPID, "The next request should start a fresh daemon on demand.")
+        XCTAssertTrue(isRunning(secondPID))
+    }
+
+    // case-contract: test_bridge_daemon_death_fails_the_turn_and_recovers_on_next_request | When the bridge daemon dies in the middle of a turn, that turn's send fails with a connection error instead of hanging. The next request starts a fresh daemon on demand, which reconciles the task out of In Progress into a resumable Waiting Response, and that daemon can run and stop a new turn.
+    func test_bridge_daemon_death_fails_the_turn_and_recovers_on_next_request() throws {
+        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-hold-interrupt").path
+        codexFixtureExecutable = executable
+        let ready = URL(fileURLWithPath: executable + ".interrupt-ready")
+        let received = URL(fileURLWithPath: executable + ".interrupt-received")
+        let release = URL(fileURLWithPath: executable + ".interrupt-release")
+        for marker in [ready, received, release] { try? FileManager.default.removeItem(at: marker) }
+        // Its own daemon, so killing it leaves the UI runner's shared one alone.
+        let daemonEnvironment = ["STATIONAI_BRIDGE_SERVICE_NAME": "\(serviceName!).death-\(UUID().uuidString.prefix(8))"]
+        let task = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Daemon death", "--root", fixture.primary.path, "--provider", "codex",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(task["id"] as? String)
+        func daemonPID() throws -> Int {
+            let status = try XCTUnwrap(try runCLI(["status"], extraEnvironment: daemonEnvironment)["result"] as? [String: Any])
+            return try XCTUnwrap(status["processID"] as? Int)
+        }
+
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: daemonEnvironment)
+        openTask(named: "Daemon death")
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        composer.click()
+        composer.typeText("Hold until the daemon dies.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 15), "The turn should be running before the daemon dies.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+        let firstPID = try daemonPID()
+
+        kill(pid_t(firstPID), SIGKILL)
+        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 20), "The window should surface the failed turn instead of hanging.")
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response"
+        }, timeout: 30), "A fresh daemon should settle the orphaned turn into a resumable Waiting Response.")
+        let recovered = try XCTUnwrap(taskRecord(id: taskID))
+        XCTAssertTrue((recovered["statusMessage"] as? String ?? "").contains("closed while this turn was running"))
+        // The window starts the fresh daemon itself while it reconnects.
+        var secondPID = firstPID
+        XCTAssertTrue(waitUntil({
+            secondPID = (try? self.daemonProcessID(environment: daemonEnvironment)) ?? firstPID
+            return secondPID != firstPID
+        }, timeout: 20), "The window should start a fresh daemon while it reconnects.")
+        XCTAssertEqual(kill(pid_t(secondPID), 0), 0)
+
+        // The window follows the fresh daemon: a new turn shows Stop and stops.
+        let staleFixture = Process()
+        staleFixture.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        staleFixture.arguments = ["-f", executable]
+        try staleFixture.run()
+        staleFixture.waitUntilExit()
+        for marker in [ready, received, release] { try? FileManager.default.removeItem(at: marker) }
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15))
+        composer.click()
+        composer.typeText("Hold again on the fresh daemon.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 20), "The fresh daemon should run a new turn.")
+        let stop = element("pause-response-button")
+        XCTAssertTrue(waitUntil({ stop.exists && stop.isEnabled }, timeout: 20), "The window should follow the fresh daemon and offer Stop.")
+        stop.click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: received.path) }, timeout: 10))
+        try Data("acknowledge interrupt\n".utf8).write(to: release)
+        XCTAssertTrue(element("continue-response-button").waitForExistence(timeout: 15))
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
     }
 
     private func exerciseRejectedStop(provider: String, title: String) throws {
@@ -5168,7 +5314,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(commentOnlyPayload.contains("Explain this reply"))
     }
 
-    // case-contract: test_claude_auto_branch_uses_generated_title_and_fallback | An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree.
+    // case-contract: test_claude_auto_branch_uses_generated_title_and_fallback | An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree. A fresh `task title` request reproduces the generated title and provider (null when generation yields nothing), and `task reconcile` returns the settled task unchanged.
     func test_claude_auto_branch_uses_generated_title_and_fallback() throws {
         let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
@@ -5210,6 +5356,18 @@ final class StationAIUITests: XCTestCase {
             let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
             let messages = try XCTUnwrap(history["messages"] as? [[String: Any]])
             XCTAssertTrue(messages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == prompt })
+            let generated = try runCLI(["task", "title", taskID, "--prompt", prompt])["result"]
+            if variant == "title-success" {
+                let generatedTitle = try XCTUnwrap(generated as? [String: Any])
+                XCTAssertEqual(generatedTitle["title"] as? String, expectedTitle)
+                XCTAssertEqual(generatedTitle["provider"] as? String, "claude")
+            } else {
+                XCTAssertTrue(generated == nil || generated is NSNull, "A provider that returns no title leaves the caller to fall back.")
+            }
+            let reconciled = try XCTUnwrap(try runCLI(["task", "reconcile", taskID])["result"] as? [String: Any])
+            XCTAssertEqual(reconciled["id"] as? String, taskID)
+            XCTAssertEqual(reconciled["status"] as? String, record["status"] as? String)
+            XCTAssertEqual(reconciled["title"] as? String, expectedTitle)
             element("back-to-board-button").click()
             XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label == %@", expectedTitle)).firstMatch.waitForExistence(timeout: 10),
                           "The saved Claude title should appear on the board.")
@@ -6564,7 +6722,7 @@ final class StationAIUITests: XCTestCase {
         }, timeout: 10), "Upward scrolling must still reveal earlier messages after an in-place reload.")
     }
 
-    // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs.
+    // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs. A fresh `conversation subagent-history` read returns the completed child's stored conversation content.
     func test_conversation_shows_subagent_delegation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -6771,6 +6929,15 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000002").label.contains("finished working"), "The completed child should remain inspectable after reopening the task.")
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000003").label.contains("was interrupted"), "The interrupted child should remain inspectable after reopening the task.")
         XCTAssertTrue(element("codex-subagent-row-00000000-0000-0000-0000-000000000004").exists, "The unknown child kind should remain inspectable after reopening the task.")
+        let reopenedHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        let sandboxActivity = try XCTUnwrap((reopenedHistory["activities"] as? [[String: Any]])?.first {
+            $0["childThreadID"] as? String == "00000000-0000-0000-0000-000000000002"
+        })
+        let sandboxActivityJSON = try XCTUnwrap(String(data: JSONSerialization.data(withJSONObject: sandboxActivity), encoding: .utf8))
+        let inspected = try XCTUnwrap(try runCLI(["conversation", "subagent-history", taskID, "--activity", sandboxActivityJSON])["result"] as? [String: Any])
+        XCTAssertTrue((inspected["messages"] as? [[String: Any]] ?? []).contains {
+            ($0["text"] as? String)?.contains("found the required profile") == true
+        }, "A fresh read-only subagent inspection should return the child conversation's stored content.")
         attachScreenshot(named: "Conversation shows and opens a subagent")
     }
 
@@ -8713,7 +8880,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(element("message-composer").value as? String, "An unsent draft stays here.")
     }
 
-    // case-contract: test_codex_async_question_queued_answer_retries | An async question answered after its turn ends stays Pending when the first follow-up fails, rejects duplicate answers across fresh CLI/XPC connections, and becomes Answered only after an explicit queued retry succeeds. The paired UI keeps the card and queue action visible across reopening and then displays the delivered response.
+    // case-contract: test_codex_async_question_queued_answer_retries | An async question answered after its turn ends stays Pending when the first follow-up fails, rejects duplicate answers across fresh CLI/XPC connections, and becomes Answered only after an explicit queued retry succeeds. The paired UI keeps the card and queue action visible across reopening and then displays the delivered response. A fresh `conversation answered-async` read lists no answered questions while the answer is pending and lists the question once it is delivered.
     func test_codex_async_question_queued_answer_retries() throws {
         let created = try runCLI(["task", "create", "--title", "Queued async question", "--root", fixture.primary.path])
         let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
@@ -8740,6 +8907,8 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(queued["asyncQuestionItemID"] as? String, "item_stationai_async_question")
         let queuedID = try XCTUnwrap(queued["id"] as? String)
         XCTAssertEqual(queued["state"] as? String, "needsAction")
+        let pendingAnswered = try XCTUnwrap(try runCLI(["conversation", "answered-async", taskID])["result"] as? [String: Any])
+        XCTAssertEqual(pendingAnswered["itemIDs"] as? [String], [], "A pending async answer is not answered yet.")
         element("back-to-board-button").click()
         openTask(named: "Queued async question")
         XCTAssertTrue(card.waitForExistence(timeout: 5))
@@ -8747,11 +8916,16 @@ final class StationAIUITests: XCTestCase {
         let retry = element("retry-queued-message-\(queuedID.uppercased())")
         XCTAssertTrue(retry.waitForExistence(timeout: 5))
         retry.click()
-        let response = element("assistant-message-item_stationai_async_answer_2")
+        // The fixture numbers answer items per turn, so find the answer by content.
+        let response = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "assistant-message-item_stationai_async_answer_", "Answers received: Test and verify"))
+            .firstMatch
         XCTAssertTrue(response.waitForExistence(timeout: 10))
         XCTAssertTrue(response.label.contains("Answers received: Test and verify: Yes, update paired tests and run required verification"))
         XCTAssertTrue(response.label.contains("Additional detail: Retry this answer."))
         XCTAssertTrue(card.staticTexts["Answered"].exists)
+        let deliveredAnswered = try XCTUnwrap(try runCLI(["conversation", "answered-async", taskID])["result"] as? [String: Any])
+        XCTAssertEqual(deliveredAnswered["itemIDs"] as? [String], ["item_stationai_async_question"], "The delivered async answer should be recorded as answered.")
     }
 
     // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; clean and unexpected relaunch preserve the prompt and conversation and allow a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
@@ -9993,6 +10167,28 @@ final class StationAIUITests: XCTestCase {
 
     private func taskRecord(named title: String) throws -> [String: Any]? {
         try tasksFromBoardList().first { $0["title"] as? String == title }
+    }
+
+    /// The daemon's process ID, or nil while nothing answers on that service.
+    /// Unlike `runCLI`, a failed connection isn't a test failure here.
+    private func daemonProcessID(environment: [String: String]) throws -> Int? {
+        let process = Process()
+        process.executableURL = cliURL
+        process.arguments = ["status"]
+        var processEnvironment = ProcessInfo.processInfo.environment
+        processEnvironment["STATIONAI_DATA_DIRECTORY"] = dataDirectory.path
+        processEnvironment.merge(environment) { _, override in override }
+        process.environment = processEnvironment
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0,
+              let line = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .split(separator: "\n").last,
+              let response = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return nil }
+        return (response["result"] as? [String: Any])?["processID"] as? Int
     }
 
     private func taskRecord(id: String) throws -> [String: Any]? {

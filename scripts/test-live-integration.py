@@ -683,7 +683,11 @@ def main():
         str(Path(tempfile.gettempdir()) / "StationAI-DerivedData/Build/Products/Debug/StationAI.app"),
     ))
     cli = app_bundle / "Contents/MacOS/stationai-cli"
-    service_info = app_bundle / "Contents/XPCServices/StationAIBridge.xpc/Contents/Info.plist"
+    # The daemon and CLI resolve their identity from the app's own Info.plist
+    # via `Bundle.main` (no separate XPC bundle anymore), so the service name
+    # is just that identifier plus ".bridge", matching
+    # `BridgeContract.serviceName(forApplication:)`.
+    service_info = app_bundle / "Contents/Info.plist"
     fixture = Path(os.environ.get("STATIONAI_BRIDGE_TEST_FIXTURE_ROOT", "/tmp/stationai-bridge-workspaces"))
     require(cli.is_file(), f"Bundled CLI is missing: {cli}; run scripts/run.sh first.")
     marker = fixture / ".stationai-bridge-fixture"
@@ -695,7 +699,7 @@ def main():
         status = subprocess.run(["git", "-C", str(repository), "status", "--porcelain"], check=True, capture_output=True, text=True).stdout
         require(not status, f"Integration source fixture must start clean: {repository}: {status}")
     with service_info.open("rb") as plist_file:
-        service_name = plistlib.load(plist_file)["CFBundleIdentifier"]
+        service_name = plistlib.load(plist_file)["CFBundleIdentifier"] + ".bridge"
 
     plan = [(provider, scenario) for provider in providers for scenario in SHARED_SCENARIOS + UNIQUE_SCENARIOS[provider]]
     if arguments.provider == "all":

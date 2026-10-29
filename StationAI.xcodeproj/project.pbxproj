@@ -29,6 +29,9 @@
 		B4144B03272C978E6BEE8876 /* StationAIBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7A603F3AB342E594B68ED99 /* StationAIBridgeTests.swift */; };
 		D564A1A1B70481ED860871B3 /* StationAIUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60C95D59E3D25AB8C146839F /* StationAIUITests.swift */; };
 		FFFE07E201DA471E79F027E4 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D270EEC09920B3D8C0579AD1 /* Cocoa.framework */; };
+		A10000000000000000000016 /* DaemonClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000016 /* DaemonClient.swift */; };
+		A10000000000000000000017 /* RemoteConversationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000017 /* RemoteConversationManager.swift */; };
+		A10000000000000000000018 /* BridgeSocket.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000018 /* BridgeSocket.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -66,6 +69,9 @@
 		D270EEC09920B3D8C0579AD1 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.15.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
 		DDE3AE70DC05B141B7C58AFC /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.15.sdk/System/Library/Frameworks/XCTest.framework; sourceTree = DEVELOPER_DIR; };
 		F0A6DC7B7695FC1EF8FDFB21 /* StationAIUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = StationAIUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000000000000000000016 /* DaemonClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonClient.swift; sourceTree = "<group>"; };
+		A20000000000000000000017 /* RemoteConversationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteConversationManager.swift; sourceTree = "<group>"; };
+		A20000000000000000000018 /* BridgeSocket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Bridge/BridgeSocket.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -144,6 +150,9 @@
 				A2000000000000000000000D /* WorkspaceChanges.swift */,
 				A2000000000000000000000E /* MonacoDiffEditor.swift */,
 				A20000000000000000000015 /* CodeSyntaxHighlighter.swift */,
+				A20000000000000000000018 /* BridgeSocket.swift */,
+				A20000000000000000000017 /* RemoteConversationManager.swift */,
+				A20000000000000000000016 /* DaemonClient.swift */,
 			);
 			path = StationAI/App;
 			sourceTree = "<group>";
@@ -237,7 +246,7 @@
 				A60000000000000000000003 /* Sources */,
 				A60000000000000000000001 /* Frameworks */,
 				A60000000000000000000004 /* Resources */,
-				A60000000000000000000007 /* Build CLI and XPC service */,
+				A60000000000000000000007 /* Build CLI and bridge daemon */,
 			);
 			buildRules = (
 			);
@@ -313,7 +322,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		A60000000000000000000007 /* Build CLI and XPC service */ = {
+		A60000000000000000000007 /* Build CLI and bridge daemon */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -323,7 +332,8 @@
 				"$(SRCROOT)/scripts/app-profile.sh",
 				"$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
 				"$(SRCROOT)/StationAI/Bridge/BridgeContract.swift",
-				"$(SRCROOT)/StationAI/Bridge/XPCServiceMain.swift",
+				"$(SRCROOT)/StationAI/Bridge/BridgeSocket.swift",
+				"$(SRCROOT)/StationAI/Bridge/DaemonMain.swift",
 				"$(SRCROOT)/StationAI/CLI/BridgeClient.swift",
 				"$(SRCROOT)/StationAI/CLI/StationAICLI.swift",
 				"$(SRCROOT)/StationAI/App/BridgeCore.swift",
@@ -335,10 +345,10 @@
 				"$(SRCROOT)/StationAI/App/ClaudeCodeClient.swift",
 				"$(SRCROOT)/StationAI/App/ConversationTranscriptStore.swift",
 			);
-			name = "Build CLI and XPC service";
+			name = "Build CLI and bridge daemon";
 			outputPaths = (
 				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/stationai-cli",
-				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/XPCServices/StationAIBridge.xpc/Contents/MacOS/StationAIBridge",
+				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/stationai-daemon",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/bash;
@@ -382,6 +392,9 @@
 				A1000000000000000000000D /* WorkspaceChanges.swift in Sources */,
 				A1000000000000000000000E /* MonacoDiffEditor.swift in Sources */,
 				A10000000000000000000015 /* CodeSyntaxHighlighter.swift in Sources */,
+				A10000000000000000000018 /* BridgeSocket.swift in Sources */,
+				A10000000000000000000017 /* RemoteConversationManager.swift in Sources */,
+				A10000000000000000000016 /* DaemonClient.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

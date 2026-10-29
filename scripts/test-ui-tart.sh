@@ -124,7 +124,7 @@ if [[ "${STATIONAI_UI_TART_VM_LOCKED:-0}" != "1" ]]; then
 	runner="${STATIONAI_UI_TART_IMMUTABLE_PATH:-${script_path}}"
 	exec python3 "${repository_root}/scripts/with-file-lock.py" \
 		"/tmp/stationai-ui-tart-${vm_lock_name}.lock" \
-		env STATIONAI_UI_TART_VM_LOCKED=1 bash "${runner}" "${original_args[@]}"
+		env STATIONAI_UI_TART_VM_LOCKED=1 bash "${runner}" ${original_args[@]+"${original_args[@]}"}
 fi
 
 if ! command -v tart >/dev/null 2>&1; then

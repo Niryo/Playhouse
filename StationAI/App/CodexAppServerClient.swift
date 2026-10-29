@@ -86,7 +86,21 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     private var nextRequestID = 1
     private var initialized = false
     private var initializationTask: Task<Void, Error>?
-    private var resumedThreadIDs = Set<String>()
+    /// What a thread was last started/resumed with in this still-running
+    /// app-server process. Skipping a redundant `thread/resume` call is only
+    /// safe when a later call's own model/workspace parameters are identical
+    /// to what's already active for that thread in the app-server — otherwise
+    /// the app-server would silently keep using stale parameters from an
+    /// earlier, unrelated request. This only matters now that one
+    /// `CodexAppServerClient` instance can legitimately serve many separate
+    /// requests over its life (the bridge daemon), rather than exactly one.
+    private struct ResumeParameters: Equatable {
+        let modelID: String
+        let cwd: String
+        let roots: [String]
+        let developerInstructions: String?
+    }
+    private var resumedThreadParameters: [String: ResumeParameters] = [:]
     private var activeTurnID: String?
     private var conversationOperationsInFlight = 0
     private var applicationShutdownInterruptResult: String?
@@ -134,17 +148,26 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     private struct PendingUserInput {
         let nativeID: Any
         let request: ConversationUserInputRequest
+        /// The app-server process that asked. Only that process, while it is
+        /// still the running one, can receive a live answer.
+        weak var asker: Process?
     }
     private var userInputContexts: [String: UserInputContext] = [:]
     @Published private var pendingUserInputs: [String: PendingUserInput] = [:]
     private let codexExecutableOverride: String?
     private let codexHomeOverride: String?
     private let goalFeatureEnabled: Bool
+    /// This instance's own resolved data directory, fixed at construction time
+    /// (debug/test builds only; always `nil` in production). Forwarded into
+    /// this client's app-server child process instead of an ambient global, so
+    /// a different client instance's concurrently-resolved directory can never
+    /// leak into this one's child process environment.
+    private let dataDirectoryOverride: String?
     private var turnWaiters: [String: CheckedContinuation<Void, Error>] = [:]
     private var completedTurns: [String: Result<Void, Error>] = [:]
     private var rejectedTurnKeys = Set<String>()
 
-    init(codexExecutableOverride: String? = nil, codexHomeOverride: String? = nil, goalFeatureEnabled: Bool = false, goalRuntimeEnabled: Bool = false) {
+    init(codexExecutableOverride: String? = nil, codexHomeOverride: String? = nil, goalFeatureEnabled: Bool = false, goalRuntimeEnabled: Bool = false, dataDirectory: String? = nil) {
         self.codexExecutableOverride = ConversationProviderFixture.ownedExecutable(
             codexExecutableOverride,
             providerMarker: (".stationai-codex-fixture-owner", "StationAI test owns this Codex protocol fixture (v1).\n")
@@ -152,6 +175,49 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         self.codexHomeOverride = codexHomeOverride
         self.goalFeatureEnabled = goalFeatureEnabled
         self.goalRuntimeEnabled = goalRuntimeEnabled
+        self.dataDirectoryOverride = dataDirectory
+    }
+
+    /// One Codex client per distinct configuration, shared across every caller in
+    /// this process. The bridge daemon is a single long-lived process per data
+    /// directory, so this is what makes a Codex thread's app-server process (and
+    /// its in-memory turn/ownership state) reachable the same way no matter which
+    /// request handles a later steer/interrupt for it — mirroring
+    /// `ClaudeCodeClient.sharedPrimaryClient`, which already did this for Claude.
+    private static var sharedClients: [String: CodexAppServerClient] = [:]
+
+    /// `dataDirectory` only ever varies across calls in debug/test builds (via
+    /// `BridgeRequest.dataDirectory`); production always passes `nil`, so one
+    /// real app only ever has one entry here. It's part of the cache key so
+    /// that the bridge daemon — now a single long-lived process that can serve
+    /// many isolated test data directories in sequence or concurrently — gives
+    /// each one its own client (and thus its own app-server child process with
+    /// correctly scoped environment forwarding) instead of silently sharing
+    /// one across directories that happen to share a process.
+    static func sharedClient(
+        executableOverride: String?,
+        codexHomeOverride: String? = nil,
+        goalFeatureEnabled: Bool = false,
+        goalRuntimeEnabled: Bool = false,
+        dataDirectory: String? = nil
+    ) -> CodexAppServerClient {
+        let key = [
+            executableOverride.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? "__default__",
+            codexHomeOverride ?? "",
+            String(goalFeatureEnabled),
+            String(goalRuntimeEnabled),
+            dataDirectory.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? "",
+        ].joined(separator: "\u{1}")
+        if let client = sharedClients[key] { return client }
+        let client = CodexAppServerClient(
+            codexExecutableOverride: executableOverride,
+            codexHomeOverride: codexHomeOverride,
+            goalFeatureEnabled: goalFeatureEnabled,
+            goalRuntimeEnabled: goalRuntimeEnabled,
+            dataDirectory: dataDirectory
+        )
+        sharedClients[key] = client
+        return client
     }
 
     func diagnosticFields(_ additionalFields: [String: String]) -> [String: String] {
@@ -239,7 +305,9 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             throw ClientError.protocolFailure("Codex did not return a thread ID.")
         }
         try confirmModel(response["model"] as? String, expected: modelID)
-        resumedThreadIDs.insert(threadID)
+        resumedThreadParameters[threadID] = ResumeParameters(
+            modelID: modelID, cwd: workspace.cwd.path, roots: workspace.roots.map(\.path), developerInstructions: developerInstructions
+        )
         return threadID
     }
 
@@ -635,6 +703,14 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             return owner.answerUserInput(requestID: requestID, threadID: threadID, answers: answers)
         }
         guard let pending = pendingUserInputs[threadID], pending.request.id == requestID else { return false }
+        // A question is only live while the app-server that asked it is still
+        // the running one. Its exit can be handled before its last output is,
+        // and a later call may already have launched a replacement, so check
+        // the asker itself; otherwise the saved copy recovers it as a new turn.
+        guard let asker = pending.asker, asker === process, asker.isRunning else {
+            clearPendingUserInput(threadID: threadID)
+            return false
+        }
         let requestIDValue = pending.nativeID
         let pendingUserInputQuestions = Dictionary(uniqueKeysWithValues: pending.request.questions.map { ($0.id, $0) })
         let answersAreValid = Set(answers.keys) == Set(pendingUserInputQuestions.keys) &&
@@ -723,6 +799,29 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     func isObservingGoal(threadID: String) -> Bool {
         goalObservationThreadID == threadID
     }
+
+    /// Every thread with a running turn, a turn that is starting, or a question
+    /// waiting for an answer. What `isTurnActive(threadID:)` answers per thread.
+    var activeThreadIDsSnapshot: Set<String> {
+        var ids = startingThreadIDs
+        for (threadID, context) in turnContexts where context.turnID != nil { ids.insert(threadID) }
+        if let activeThreadID, activeTurnID != nil { ids.insert(activeThreadID) }
+        ids.formUnion(pendingUserInputs.keys)
+        return ids
+    }
+
+    var pendingUserInputsSnapshot: [String: ConversationUserInputRequest] {
+        pendingUserInputs.mapValues(\.request)
+    }
+
+    var interruptedThreadIDsSnapshot: Set<String> { interruptedThreadIDs }
+
+    var observedGoalThreadIDs: [String] {
+        goalObservationThreadID.map { [$0] } ?? []
+    }
+
+    /// Every client this process has created through `sharedClient`.
+    static var allSharedClients: [CodexAppServerClient] { Array(sharedClients.values) }
 
     func activeTurnOwnerProcessID(threadID: String) -> Int32? {
         if let target = Self.activeClientsByThreadID[threadID],
@@ -824,9 +923,9 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         child.standardOutput = stdout
         child.standardError = stderr
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = StationAIProcessEnvironment.current
         environment["PATH"] = Self.expandedSearchPath(environment["PATH"])
-        ConversationProcessEnvironment.forwardStationAIBridgeEnvironment(&environment)
+        ConversationProcessEnvironment.forwardStationAIBridgeEnvironment(&environment, dataDirectoryOverride: dataDirectoryOverride)
         if let codexHomeOverride { environment["CODEX_HOME"] = codexHomeOverride }
         child.environment = environment
 
@@ -836,14 +935,17 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         stderrPipe = stderr
         stdoutBuffer.removeAll(keepingCapacity: true)
 
+        // The provider's output and exit are handled outside the request that
+        // launched it; keep that request's environment and diagnostics routing.
+        let requestContext = StationAIRequestContext.capture()
         let stdoutQueue = outputQueue
-        stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            stdoutQueue.async { [weak self] in
+        stdout.fileHandleForReading.readabilityHandler = { [weak self, weak child] handle in
+            stdoutQueue.async { [weak self, weak child] in
                 let data = handle.availableData
                 guard !data.isEmpty else { return }
                 let consumed = DispatchSemaphore(value: 0)
-                Task { @MainActor [weak self] in
-                    await self?.consumeOutput(data)
+                Task { @MainActor [weak self, weak child] in
+                    await requestContext.run { await self?.consumeOutput(data, from: child) }
                     consumed.signal()
                 }
                 consumed.wait()
@@ -852,9 +954,19 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         stderr.fileHandleForReading.readabilityHandler = { handle in
             _ = handle.availableData
         }
-        child.terminationHandler = { [weak self] terminatedProcess in
-            Task { @MainActor [weak self] in
-                self?.processDidTerminate(terminatedProcess)
+        child.terminationHandler = { [weak self, weak child] terminatedProcess in
+            // Output the child wrote before exiting must be handled before its
+            // exit: a question or final message followed by a quick exit would
+            // otherwise be reported as a crash that lost it. The serial output
+            // queue orders this behind every read already in flight.
+            stdoutQueue.async { [weak self, weak child] in
+                let remaining = Self.readAvailableBytes(from: stdout.fileHandleForReading.fileDescriptor)
+                Task { @MainActor [weak self, weak child] in
+                    await requestContext.run {
+                        if !remaining.isEmpty { await self?.consumeOutput(remaining, from: child) }
+                        self?.processDidTerminate(terminatedProcess)
+                    }
+                }
             }
         }
 
@@ -884,7 +996,10 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         sensitiveUserInputAnswerValues: [String] = [],
         sensitiveConversation: Bool = false
     ) async throws {
-        if resumedThreadIDs.contains(threadID), process?.isRunning == true, initialized {
+        let currentParameters = ResumeParameters(
+            modelID: modelID, cwd: workspace.cwd.path, roots: workspace.roots.map(\.path), developerInstructions: developerInstructions
+        )
+        if resumedThreadParameters[threadID] == currentParameters, process?.isRunning == true, initialized {
             return
         }
 
@@ -917,7 +1032,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             throw error
         }
         try confirmModel(response["model"] as? String, expected: modelID)
-        resumedThreadIDs.insert(threadID)
+        resumedThreadParameters[threadID] = currentParameters
         StationAIDiagnostics.record("codex.thread.resumed", fields: diagnosticFields([
             "threadID": threadID,
         ]))
@@ -1138,17 +1253,17 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         }
     }
 
-    private func consumeOutput(_ data: Data) async {
+    private func consumeOutput(_ data: Data, from source: Process?) async {
         stdoutBuffer.append(data)
         let newline = Data([0x0A])
         while let range = stdoutBuffer.range(of: newline) {
             let line = stdoutBuffer.subdata(in: stdoutBuffer.startIndex..<range.lowerBound)
             stdoutBuffer.removeSubrange(stdoutBuffer.startIndex..<range.upperBound)
-            await consume(line: line)
+            await consume(line: line, from: source)
         }
     }
 
-    private func consume(line: Data) async {
+    private func consume(line: Data, from source: Process?) async {
         guard !line.isEmpty,
               let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else {
             return
@@ -1158,7 +1273,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             if let requestID = message["id"] {
                 let params = message["params"] as? [String: Any] ?? [:]
                 StationAIDiagnostics.record("codex.rpc.server_request", fields: Self.diagnosticNotificationFields(method: method, params: params))
-                await handleServerRequest(method: method, params: params, requestID: requestID)
+                await handleServerRequest(method: method, params: params, requestID: requestID, from: source)
             } else {
                 let params = message["params"] as? [String: Any] ?? [:]
                 if Self.highVolumeDeltaMethods.contains(method) {
@@ -1441,7 +1556,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         }
     }
 
-    private func handleServerRequest(method: String, params: [String: Any], requestID: Any) async {
+    private func handleServerRequest(method: String, params: [String: Any], requestID: Any, from source: Process?) async {
         let normalizedMethod = method.lowercased()
         if normalizedMethod.contains("approval") || normalizedMethod.contains("item/tool/") ||
             normalizedMethod.contains("elicitation"),
@@ -1489,7 +1604,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 isBlocking: context.mode == .plan || (params["isBlocking"] as? Bool ?? true),
                 mode: context.mode
             )
-            pendingUserInputs[threadID] = PendingUserInput(nativeID: requestID, request: request)
+            pendingUserInputs[threadID] = PendingUserInput(nativeID: requestID, request: request, asker: source)
             pendingUserInputRequest = request
             await context.handler(request)
             return
@@ -1551,6 +1666,21 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         throw ClientError.protocolFailure("Codex accepted the Goal but did not start a work turn within 30 seconds.")
     }
 
+    /// Everything already in the pipe, without waiting for more: a descendant
+    /// of the child can keep the write end open after the child itself exits.
+    nonisolated private static func readAvailableBytes(from descriptor: Int32) -> Data {
+        var collected = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            var pollDescriptor = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+            guard poll(&pollDescriptor, 1, 0) > 0, pollDescriptor.revents & Int16(POLLIN) != 0 else { break }
+            let count = read(descriptor, &buffer, buffer.count)
+            guard count > 0 else { break }
+            collected.append(buffer, count: count)
+        }
+        return collected
+    }
+
     private func processDidTerminate(_ terminatedProcess: Process) {
         guard process === terminatedProcess else { return }
 
@@ -1573,7 +1703,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         outputPipe = nil
         stderrPipe = nil
         initialized = false
-        resumedThreadIDs.removeAll()
+        resumedThreadParameters.removeAll()
         activeThreadID = nil
 
         for continuation in pendingRequests.values {
@@ -1720,7 +1850,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             "\(home)/.local/bin/codex",
             "\(home)/.npm-global/bin/codex"
         ]
-        let pathEntries = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+        let pathEntries = (StationAIProcessEnvironment.current["PATH"] ?? "")
             .split(separator: ":")
             .map(String.init)
             .map { URL(fileURLWithPath: $0).appendingPathComponent("codex").path }

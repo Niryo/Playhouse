@@ -246,8 +246,7 @@ struct TaskConversationView: View {
     }
 
     @Environment(\.modelContext) private var modelContext
-    @EnvironmentObject private var codexClient: CodexAppServerClient
-    @EnvironmentObject private var claudeClient: ClaudeCodeClient
+    @EnvironmentObject private var conversationRuntime: ConversationRuntimeModel
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage(WorkspaceSettings.defaultParentFolderKey, store: WorkspaceSettings.preferencesStore) private var defaultParentFolderPath = ""
 
@@ -374,40 +373,28 @@ struct TaskConversationView: View {
 
     private var canPauseResponse: Bool {
         guard let threadID = task.activeConversationID else { return false }
-        return providerClient.canInterruptActiveTurn(threadID: threadID)
+        return conversationRuntime.canInterruptActiveTurn(threadID: threadID)
     }
 
     private var provider: ConversationProvider { task.conversationProvider }
-
-    private var conversationClients: ConversationClients {
-        ConversationClients(codex: codexClient, claude: claudeClient)
-    }
-
-    /// The runtime that runs this task's turns.
-    private var providerClient: ConversationProviderClient {
-        conversationClients.client(for: provider)
-    }
 
     /// Observed so the view refreshes when this task's turn starts or ends.
     /// Claude runs conversations in parallel, so a client-wide flag would miss
     /// this task's edge while another conversation keeps running.
     private var providerTurnIsActive: Bool {
-        guard provider == .claude else { return codexClient.isTurnActive(threadID: task.activeConversationID ?? "") }
-        guard let threadID = task.activeConversationID else { return claudeClient.isTurnActive }
-        return claudeClient.activeThreadIDs.contains(threadID)
+        guard let threadID = task.activeConversationID else { return false }
+        return conversationRuntime.isTurnActive(threadID: threadID)
     }
 
     /// Claude can hold a pending question in several conversations at once, so
     /// this task reads the question from its own session rather than from the
     /// client-wide value.
     private var providerPendingUserInputRequest: ConversationUserInputRequest? {
-        provider == .claude
-            ? claudeClient.pendingUserInputRequest(forThread: task.activeConversationID ?? "")
-            : codexClient.pendingUserInputRequest(forThread: task.activeConversationID ?? "")
+        conversationRuntime.pendingUserInputRequest(forThread: task.activeConversationID ?? "")
     }
 
     private var isConversationTurnActive: Bool {
-        providerClient.isTurnActive(threadID: task.activeConversationID ?? "")
+        conversationRuntime.isTurnActive(threadID: task.activeConversationID ?? "")
     }
 
     /// Provider switches wait for active turns and queued follow-ups to settle.
@@ -726,8 +713,7 @@ struct TaskConversationView: View {
         .task {
             if !isReadOnly { refreshQueuedMessages() }
             if !isReadOnly {
-                _ = try? await BoardTaskManager(modelContext: modelContext)
-                    .reconcileLifecycleStatusOnOpen(task.id, clients: conversationClients)
+                _ = try? await conversationManager.reconcileLifecycleStatusOnOpen(taskID: task.id)
             }
             if !isReadOnly, let request = providerPendingUserInputRequest, request.threadID == task.activeConversationID {
                 userInputRequest = request
@@ -766,23 +752,23 @@ struct TaskConversationView: View {
             let completedTurnIsVisible = hasCompletedAssistantResponse && !isTurnActive
             isResponding = completedTurnIsVisible
                 ? false
-                : submittedTurnIsPending || (isTurnActive && providerClient.isTurnActive(threadID: taskThreadID))
+                : submittedTurnIsPending || (isTurnActive && conversationRuntime.isTurnActive(threadID: taskThreadID))
         }
-        .onChange(of: codexClient.goalStateRevision) { _, _ in
-            guard codexClient.goalStateThreadID == task.codexThreadID else { return }
+        .onChange(of: conversationRuntime.snapshot.goal.stateRevision) { _, _ in
+            guard conversationRuntime.snapshot.goal.stateThreadID == task.codexThreadID else { return }
             Task { @MainActor in
                 activeGoal = try? await conversationManager.goal(taskID: task.id)
                 if let activeGoal { reconcileGoalGeneration(with: activeGoal) }
                 goalStatusUpdatedAt = .now
             }
         }
-        .onChange(of: codexClient.goalTurnRevision) { _, _ in
-            guard let threadID = task.codexThreadID, codexClient.isObservingGoal(threadID: threadID) else { return }
+        .onChange(of: conversationRuntime.snapshot.goal.turnRevision) { _, _ in
+            guard let threadID = task.codexThreadID, conversationRuntime.isObservingGoal(threadID: threadID) else { return }
             Task { @MainActor in await refreshGoalConversation() }
         }
-        .onChange(of: codexClient.goalTurnCompletedRevision) { _, _ in
-            guard let threadID = task.codexThreadID, codexClient.isObservingGoal(threadID: threadID) else { return }
-            let completedTurnID = codexClient.goalTurnCompletedTurnID
+        .onChange(of: conversationRuntime.snapshot.goal.turnCompletedRevision) { _, _ in
+            guard let threadID = task.codexThreadID, conversationRuntime.isObservingGoal(threadID: threadID) else { return }
+            let completedTurnID = conversationRuntime.snapshot.goal.turnCompletedTurnID
             Task { @MainActor in
                 activeGoal = try? await conversationManager.goal(taskID: task.id)
                 goalStatusUpdatedAt = .now
@@ -1949,6 +1935,17 @@ struct TaskConversationView: View {
                     scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
                 }
             }
+            }
+            .onChange(of: userInputRequest?.id) { _, requestID in
+                // The question form sits below the latest message; bring it into view
+                // whether it arrives with the history or later from the daemon.
+                guard requestID != nil else { return }
+                Task { @MainActor in
+                    await Task.yield()
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        scrollProxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
+                    }
+                }
             }
         }
     }
@@ -3194,7 +3191,7 @@ struct TaskConversationView: View {
                     .background(Color.primary.opacity(0.10), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1) }
                     .accessibilityElement(children: .contain)
-                    .accessibilityValue(codexClient.goalTurnStartedThreadID == task.codexThreadID ? "Work started" : (codexClient.isTurnActive(threadID: task.codexThreadID ?? "") ? "Working" : "Waiting"))
+                    .accessibilityValue(conversationRuntime.snapshot.goal.turnStartedThreadID == task.codexThreadID ? "Work started" : (conversationRuntime.isTurnActive(threadID: task.codexThreadID ?? "") ? "Working" : "Waiting"))
                     .accessibilityIdentifier("active-goal-progress-row")
                     if isGoalExpanded {
                         Text(activeGoal.objective).font(.system(size: 13)).foregroundStyle(.secondary)
@@ -3600,7 +3597,7 @@ struct TaskConversationView: View {
             userInputOtherSelected = []
             await loadConversation()
         } catch {
-            isResponding = providerClient.isTurnActive(threadID: request.threadID)
+            isResponding = conversationRuntime.isTurnActive(threadID: request.threadID)
             errorMessage = error.localizedDescription
         }
     }
@@ -3688,7 +3685,11 @@ struct TaskConversationView: View {
             isResponding = hasPendingSubmittedPrompt
                 && (task.status == .inProgress || task.status == .waitingResponse)
             if let threadID = task.activeConversationID {
-                isResponding = isResponding || providerClient.isTurnActive(threadID: threadID)
+                isResponding = isResponding || conversationRuntime.isTurnActive(threadID: threadID)
+                // A turn paused while this view was closed can still be continued.
+                if !isResponding, task.status == .waitingResponse, conversationRuntime.wasLastTurnInterrupted(threadID: threadID) {
+                    hasPausedResponse = true
+                }
             }
             if isResponding {
                 responseStartedAt = defaults.object(forKey: responseStartedAtDefaultsKey) as? Date ?? Date()
@@ -3865,7 +3866,8 @@ struct TaskConversationView: View {
             Task { @MainActor in
                 let started = await mutateGoal("set", objective: text, observeRuntime: true)
                 isPreparingSubmittedMessage = false
-                isResponding = started && codexClient.isTurnActive(threadID: task.codexThreadID ?? "")
+                await conversationRuntime.refresh()
+                isResponding = started && conversationRuntime.isTurnActive(threadID: task.codexThreadID ?? "")
                 isComposerFocused = true
             }
             return
@@ -4036,9 +4038,11 @@ struct TaskConversationView: View {
                                 UserDefaults.standard.set(duration, forKey: completedResponseDurationDefaultsKey)
                                 UserDefaults.standard.removeObject(forKey: responseStartedAtDefaultsKey)
                             }
-                            if let completedTurnID = history.messages.reversed().first(where: {
-                                $0.role == .assistant && $0.phase == "final_answer"
-                            })?.turnID ?? history.messages.last?.turnID {
+                            let finalAnswer = history.messages.last { (message: ConversationMessage) -> Bool in
+                                message.role == .assistant && message.phase == "final_answer"
+                            }
+                            let completedTurnID: String? = finalAnswer?.turnID ?? history.messages.last?.turnID
+                            if let completedTurnID {
                                 collapsedProgressTurnIDs.insert(completedTurnID)
                             }
                             if activities.isEmpty {
@@ -4099,7 +4103,7 @@ struct TaskConversationView: View {
                 }
                 responseStartedAt = nil
                 UserDefaults.standard.removeObject(forKey: responseStartedAtDefaultsKey)
-                if providerClient.wasLastTurnInterrupted(threadID: task.activeConversationID ?? "") {
+                if conversationRuntime.wasLastTurnInterrupted(threadID: task.activeConversationID ?? "") {
                     hasPausedResponse = true
                 } else {
                     messages.removeAll { $0.id == userMessageID || $0.id == assistantMessageID }
@@ -4575,16 +4579,7 @@ struct TaskConversationView: View {
     }
 
     private func generateTaskTitle(from prompt: String) async -> (title: String, provider: ConversationProvider)? {
-        guard let workspace = try? ConversationWorkspaceContext(roots: workspaceRootURLs) else {
-            StationAIDiagnostics.record("task.title_generation.failed", fields: [
-                "taskID": task.id.uuidString,
-                "phase": "workspace-resolution",
-                "reason": "workspace_unavailable"
-            ])
-            return nil
-        }
-        return await ConversationTitleGenerator(clients: conversationClients.helperClients(preferring: provider))
-            .generateTitle(from: prompt, workspace: workspace, taskID: task.id)
+        await conversationManager.generateTitle(taskID: task.id, prompt: prompt)
     }
 
     private var providerMenu: some View {
@@ -4712,11 +4707,9 @@ struct TaskConversationView: View {
         task.workspaceRootPaths.map { URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL }
     }
 
-    private var conversationManager: ConversationManager {
-        ConversationManager(
-            tasks: BoardTaskManager(modelContext: modelContext),
-            clients: conversationClients
-        )
+    /// Provider-owning operations run in the bridge daemon, not in this window.
+    private var conversationManager: RemoteConversationManager {
+        RemoteConversationManager(daemon: conversationRuntime.client, runtime: conversationRuntime, modelContext: modelContext)
     }
 
     private var workspaceManager: WorkspaceManager {
@@ -4840,7 +4833,8 @@ struct TaskConversationView: View {
             // one is told apart from the one already in view.
             lastScrolledUserMessageID = renderedConversationMessages.last(where: { $0.role == .user })?.id
             let scroll = {
-                if let latestMessageID {
+                // A pending question renders below the latest message.
+                if let latestMessageID, userInputRequest == nil {
                     proxy.scrollTo(latestMessageID, anchor: .bottom)
                 } else {
                     proxy.scrollTo("conversation-latest-anchor", anchor: .bottom)

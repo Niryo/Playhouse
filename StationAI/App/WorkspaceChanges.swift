@@ -602,7 +602,7 @@ enum WorkspaceChangeScanner {
     }
 
     private static func gitExecutable() throws -> URL {
-        let environmentPaths = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+        let environmentPaths = (StationAIProcessEnvironment.current["PATH"] ?? "")
             .split(separator: ":")
             .map { URL(fileURLWithPath: String($0), isDirectory: true).appendingPathComponent("git").path }
         let candidates = ["/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"] + environmentPaths
@@ -617,7 +617,7 @@ enum WorkspaceChangeScanner {
         process.executableURL = try gitExecutable()
         process.arguments = ["-c", "core.fsmonitor=false", "-C", repository.path] + arguments
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = StationAIProcessEnvironment.current
         environment["GIT_OPTIONAL_LOCKS"] = "0"
         environment["GIT_TERMINAL_PROMPT"] = "0"
         environment["GIT_PAGER"] = "cat"
