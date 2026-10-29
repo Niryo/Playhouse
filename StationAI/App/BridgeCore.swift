@@ -289,6 +289,7 @@ enum StationAIStore {
                    t0.ZCREATEDAT, t0.ZCODEXTHREADID, t0.ZSAVEDPROMPT,
                    t0.ZPENDINGSUBMITTEDPROMPT, t0.ZWORKSPACEROOTPATHSDATA,
                    t0.ZREPOSITORYWORKTREESDATA, t0.ZCONTEXTFOLDERPATHSDATA,
+                   t0.ZVIEWEDWORKSPACECHANGESDATA,
                    t0.ZDRAFTIMAGEDATAURLSDATA
             FROM ZBOARDTASK t0 LIMIT 0
             """
@@ -2635,6 +2636,15 @@ final class BoardTaskManager {
         try requireTask(id)
     }
 
+    func setViewedWorkspaceChange(_ snapshot: WorkspaceViewedChange, taskID: UUID) async throws {
+        let task = try requireTask(taskID)
+        var snapshots = task.viewedWorkspaceChanges
+        snapshots.removeAll { $0.repository == snapshot.repository && $0.path == snapshot.path }
+        snapshots.append(snapshot)
+        task.viewedWorkspaceChanges = snapshots
+        try await saveTaskContext(operation: "BoardTaskManager.setViewedWorkspaceChange", taskID: taskID)
+    }
+
     fileprivate func isRepositoryAttached(_ record: RepositoryWorktreeRecord, to taskID: UUID) throws -> Bool {
         do {
             return try requireTask(taskID).repositoryWorktrees.contains {
@@ -3267,17 +3277,32 @@ final class WorkspaceManager {
     }
 
     func changes(for taskID: UUID) async throws -> WorkspaceChangeInventory {
-        guard taskManager != nil else {
+        guard let taskManager else {
             throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.")
         }
         StationAIDiagnostics.record("workspace.changes.read.started", fields: ["taskID": taskID.uuidString])
-        let inventory = try await WorkspaceChangeScanner.inventory(workspaceRoots: roots(for: taskID))
+        let task = try taskManager.taskModel(taskID)
+        let branchFrom = Dictionary(task.repositoryWorktrees.map { (URL(fileURLWithPath: $0.worktreePath, isDirectory: true).standardizedFileURL.path, $0.branchFrom) }) { existing, _ in existing }
+        let inventory = try await WorkspaceChangeScanner.inventory(workspaceRoots: roots(for: taskID), branchFromByRepository: branchFrom, viewedChanges: task.viewedWorkspaceChanges)
         StationAIDiagnostics.record("workspace.changes.read.succeeded", fields: [
             "taskID": taskID.uuidString,
-            "stagedCount": String(inventory.staged.count),
-            "workingCount": String(inventory.working.count)
+            "unviewedCount": String(inventory.unviewed.count),
+            "viewedCount": String(inventory.viewed.count)
         ])
         return inventory
+    }
+
+    func markViewed(for taskID: UUID, repository: String, path: String) async throws {
+        guard let taskManager else {
+            throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.")
+        }
+        let task = try taskManager.taskModel(taskID)
+        let inventory = try await changes(for: taskID)
+        guard inventory.unviewed.contains(where: { $0.repository == URL(fileURLWithPath: repository).standardizedFileURL.path && $0.path == path }) else {
+            throw BridgeCommandError(code: "not_found", message: "The file isn't currently an unviewed change.")
+        }
+        let snapshot = try await WorkspaceChangeScanner.captureViewedChange(workspaceRoots: task.workspaceRootPaths, repositoryPath: repository, relativePath: path)
+        try await taskManager.setViewedWorkspaceChange(snapshot, taskID: taskID)
     }
 
     func diff(
@@ -3286,12 +3311,17 @@ final class WorkspaceManager {
         path: String,
         group: String
     ) async throws -> WorkspaceFileDiff {
-        guard taskManager != nil else {
+        guard let taskManager else {
             throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.")
         }
         guard let changeGroup = WorkspaceChangeGroup(rawValue: group) else {
-            throw BridgeCommandError(code: "invalid_argument", message: "Change group must be 'staged' or 'working'.")
+            throw BridgeCommandError(code: "invalid_argument", message: "Change group must be 'unviewed' or 'viewed'.")
         }
+        let task = try taskManager.taskModel(taskID)
+        let normalizedRepository = URL(fileURLWithPath: repository, isDirectory: true).standardizedFileURL.path
+        let branchFrom = task.repositoryWorktrees.first {
+            URL(fileURLWithPath: $0.worktreePath, isDirectory: true).standardizedFileURL.path == normalizedRepository
+        }?.branchFrom ?? "HEAD"
         StationAIDiagnostics.record("workspace.diff.read.started", fields: [
             "taskID": taskID.uuidString,
             "repositoryPath": repository,
@@ -3302,7 +3332,9 @@ final class WorkspaceManager {
             workspaceRoots: roots(for: taskID),
             repositoryPath: repository,
             relativePath: path,
-            group: changeGroup
+            group: changeGroup,
+            branchFrom: branchFrom,
+            viewedChanges: task.viewedWorkspaceChanges
         )
         StationAIDiagnostics.record("workspace.diff.read.succeeded", fields: [
             "taskID": taskID.uuidString,
@@ -5811,6 +5843,13 @@ final class StationAIBridgeRuntime {
                 result = try Self.value(await workspaces.setRoots(roots, for: request.requiredUUID("taskID")))
             case "task.changes.list":
                 result = try Self.value(await workspaces.changes(for: request.requiredUUID("taskID")))
+            case "task.changes.mark-viewed":
+                try await workspaces.markViewed(
+                    for: request.requiredUUID("taskID"),
+                    repository: request.requiredString("repository"),
+                    path: request.requiredString("path")
+                )
+                result = .object(["viewed": .boolean(true)])
             case "task.changes.diff":
                 result = try Self.value(await workspaces.diff(
                     for: request.requiredUUID("taskID"),

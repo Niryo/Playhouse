@@ -603,6 +603,8 @@ class StationAIBridgeTests(unittest.TestCase):
         if not marker.is_file() or marker.read_text(encoding="utf-8") != "StationAI bridge tests own this deterministic fixture (v1).\n":
             raise RuntimeError(f"Refusing to modify the Git fixture without its ownership marker: {self.fixture}")
 
+        self.run_git(self.changes, "reset", "--mixed", "HEAD")
+        self.run_git(self.changes, "checkout", "--", ".")
         (self.changes / "staged.txt").write_text("Staged index version.\n", encoding="utf-8")
         (self.changes / "shared.txt").write_text("Shared index version.\n", encoding="utf-8")
         (self.changes / "syntax.json").write_text('{"value":"working version"}\n', encoding="utf-8")
@@ -633,10 +635,10 @@ class StationAIBridgeTests(unittest.TestCase):
             text=True,
         ).returncode == 0
 
-    def changes_diff(self, task_id, path, group, expected_status=0):
+    def changes_diff(self, task_id, path, group, expected_status=0, repository=None):
         response, _ = self.call_cli(
             "task", "changes", "diff", task_id,
-            "--repository", self.changes,
+            "--repository", repository or self.changes,
             "--path", path,
             "--group", group,
             expected_status=expected_status,
@@ -6136,72 +6138,139 @@ class StationAIBridgeTests(unittest.TestCase):
         recovered_thread, _ = self.call_cli("task", "get", threaded_restart["id"])
         self.assertEqual(self.assert_success(recovered_thread)["status"], "Review")
 
-    # case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation. Diagnostics record inventory and file-read outcomes with paths and byte counts, without logging file contents.
+    # case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view lists every file changed from the task branch's recorded base in a Changes section below a collapsed Viewed section, including committed branch changes and current staged, unstaged, and untracked edits, and excluding commits unique to the base branch. Marking a file viewed saves its current contents, stages the file in Git, and adds a Viewed entry that keeps showing the reviewed work from the branch base to that snapshot. Work done after that review is listed again under Changes and diffed against the saved snapshot, so one file can appear in both sections at once; a path with no content in the branch base and no current file is zero net change and is hidden entirely, even with a stale viewed snapshot, rather than showing a ghost entry. Selecting text or JSON files opens a calculated side-by-side diff whose header names the baseline used. Viewed snapshots persist across fresh CLI/XPC connections. Files that aren't current Changes entries, including already-viewed and unknown paths, are rejected by the mark-viewed CLI operation, and the UI offers that action only for Changes entries. Uncommitted filenames are green. Diagnostics record inventory and file-read outcomes without logging file contents.
     def test_task_workspace_changes_group_staged_and_unstaged_diffs(self):
         self.prepare_workspace_changes()
         task_id = self.create_task(title="Workspace changes", roots=[self.changes])["id"]
 
         response, _ = self.call_cli("task", "changes", "list", task_id)
         inventory = self.assert_success(response)
-        staged = {entry["path"]: entry for entry in inventory["staged"]}
-        working = {entry["path"]: entry for entry in inventory["working"]}
-        self.assertEqual(set(staged), {"shared.txt", "staged-deleted.txt", "staged.txt"})
-        self.assertEqual(set(working), {"deleted.txt", "shared.txt", "syntax.json", "untracked.txt", "working.txt"})
-        self.assertEqual(staged["staged-deleted.txt"]["status"], "deleted")
-        self.assertEqual(working["deleted.txt"]["status"], "deleted")
-        self.assertEqual(working["untracked.txt"]["status"], "untracked")
+        unviewed = {entry["path"]: entry for entry in inventory["unviewed"]}
+        self.assertEqual(set(unviewed), {"deleted.txt", "shared.txt", "staged-deleted.txt", "staged.txt", "syntax.json", "untracked.txt", "working.txt"})
+        self.assertEqual(inventory["viewed"], [])
+        self.assertEqual(unviewed["deleted.txt"]["status"], "deleted")
+        self.assertEqual(unviewed["untracked.txt"]["status"], "untracked")
+        self.assertTrue(unviewed["shared.txt"]["isUncommitted"])
+        self.assertFalse(unviewed["shared.txt"]["hasViewedSnapshot"], "A never-viewed file has no saved snapshot baseline.")
 
-        staged_shared = self.assert_success(self.changes_diff(task_id, "shared.txt", "staged"))
-        self.assertEqual(staged_shared["original"], "Shared baseline.\n")
-        self.assertEqual(staged_shared["modified"], "Shared index version.\n")
-        self.assertNotEqual(staged_shared["original"], staged_shared["modified"])
-        self.assertTrue(staged_shared["isText"])
-
-        working_shared = self.assert_success(self.changes_diff(task_id, "shared.txt", "working"))
-        self.assertEqual(working_shared["original"], "Shared index version.\n")
-        self.assertEqual(working_shared["modified"], "Shared working version.\n")
-
-        syntax = self.assert_success(self.changes_diff(task_id, "syntax.json", "working"))
+        shared = self.assert_success(self.changes_diff(task_id, "shared.txt", "unviewed"))
+        self.assertEqual(shared["original"], "Shared baseline.\n")
+        self.assertEqual(shared["modified"], "Shared working version.\n")
+        syntax = self.assert_success(self.changes_diff(task_id, "syntax.json", "unviewed"))
         self.assertEqual(syntax["original"], '{"value":"baseline"}\n')
         self.assertEqual(syntax["modified"], '{"value":"working version"}\n')
-        self.assertTrue(syntax["isText"])
-
-        untracked = self.assert_success(self.changes_diff(task_id, "untracked.txt", "working"))
+        untracked = self.assert_success(self.changes_diff(task_id, "untracked.txt", "unviewed"))
         self.assertEqual(untracked["original"], "")
         self.assertEqual(untracked["modified"], "Untracked file.\n")
-
-        deleted = self.assert_success(self.changes_diff(task_id, "deleted.txt", "working"))
+        deleted = self.assert_success(self.changes_diff(task_id, "deleted.txt", "unviewed"))
         self.assertEqual(deleted["original"], "Deleted baseline.\n")
         self.assertEqual(deleted["modified"], "")
 
-        staged_deleted = self.assert_success(self.changes_diff(task_id, "staged-deleted.txt", "staged"))
-        self.assertEqual(staged_deleted["original"], "Staged deletion baseline.\n")
-        self.assertEqual(staged_deleted["modified"], "")
+        marked, _ = self.call_cli("task", "changes", "mark-viewed", task_id, "--repository", str(self.changes), "--path", "shared.txt")
+        self.assertEqual(self.assert_success(marked), {"viewed": True})
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        self.assertNotIn("shared.txt", [entry["path"] for entry in inventory["unviewed"]])
+        viewed = {entry["path"]: entry for entry in inventory["viewed"]}
+        self.assertIn("shared.txt", viewed, "A newly viewed file stays visible in Viewed before it changes again.")
+        self.assertTrue(viewed["shared.txt"]["hasViewedSnapshot"])
+        viewed_diff = self.assert_success(self.changes_diff(task_id, "shared.txt", "viewed"))
+        self.assertEqual(viewed_diff["original"], "Shared baseline.\n", "A viewed entry keeps showing the reviewed work from the branch base.")
+        self.assertEqual(viewed_diff["modified"], "Shared working version.\n")
+        remark, _ = self.call_cli("task", "changes", "mark-viewed", task_id, "--repository", str(self.changes), "--path", "shared.txt", expected_status=3)
+        self.assert_failure(remark, "not_found")
 
-        self.assert_failure(self.changes_diff(task_id, "stale.txt", "working", expected_status=3), "not_found")
+        (self.changes / "shared.txt").write_text("Edited after viewing.\n", encoding="utf-8")
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        viewed = {entry["path"]: entry for entry in inventory["viewed"]}
+        unviewed = {entry["path"]: entry for entry in inventory["unviewed"]}
+        self.assertIn("shared.txt", viewed, "A later edit leaves the reviewed work listed under Viewed.")
+        self.assertEqual(viewed["shared.txt"]["statusCode"], "M ", "A snapshot row badges its own state, not the live index state.")
+        self.assertEqual(unviewed["shared.txt"]["statusCode"], "M ")
+        self.assertIn("shared.txt", unviewed, "A later edit is also listed as a change still to review.")
+        self.assertTrue(unviewed["shared.txt"]["isUncommitted"])
+        self.assertTrue(unviewed["shared.txt"]["hasViewedSnapshot"])
+        unchanged_viewed_diff = self.assert_success(self.changes_diff(task_id, "shared.txt", "viewed"))
+        self.assertEqual(unchanged_viewed_diff["original"], "Shared baseline.\n", "The viewed diff is unaffected by work done after the review.")
+        self.assertEqual(unchanged_viewed_diff["modified"], "Shared working version.\n")
+        pending_diff = self.assert_success(self.changes_diff(task_id, "shared.txt", "unviewed"))
+        self.assertEqual(pending_diff["original"], "Shared working version.\n", "A re-edited file diffs against its saved viewed snapshot, not the branch base.")
+        self.assertEqual(pending_diff["modified"], "Edited after viewing.\n")
+
+        marked_untracked, _ = self.call_cli("task", "changes", "mark-viewed", task_id, "--repository", str(self.changes), "--path", "untracked.txt")
+        self.assertEqual(self.assert_success(marked_untracked), {"viewed": True})
+        staged_status = self.run_git(self.changes, "status", "--porcelain", "--", "untracked.txt")
+        self.assertEqual(staged_status.strip(), "A  untracked.txt", "Marking a file viewed stages its untracked contents.")
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        viewed = {entry["path"]: entry for entry in inventory["viewed"]}
+        self.assertIn("untracked.txt", viewed)
+        self.assertEqual(viewed["untracked.txt"]["status"], "added")
+        new_file_viewed_diff = self.assert_success(self.changes_diff(task_id, "untracked.txt", "viewed"))
+        self.assertEqual(new_file_viewed_diff["original"], "")
+        self.assertEqual(new_file_viewed_diff["modified"], "Untracked file.\n")
+        (self.changes / "untracked.txt").write_text("Untracked file, edited after viewing.\n", encoding="utf-8")
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        self.assertIn("untracked.txt", [entry["path"] for entry in inventory["viewed"]])
+        unviewed = {entry["path"]: entry for entry in inventory["unviewed"]}
+        self.assertIn("untracked.txt", unviewed, "Editing a viewed new file lists it as a change still to review.")
+        self.assertEqual(unviewed["untracked.txt"]["status"], "modified")
+        untracked_diff = self.assert_success(self.changes_diff(task_id, "untracked.txt", "unviewed"))
+        self.assertEqual(untracked_diff["original"], "Untracked file.\n")
+        self.assertEqual(untracked_diff["modified"], "Untracked file, edited after viewing.\n")
+
+        marked_deleted, _ = self.call_cli("task", "changes", "mark-viewed", task_id, "--repository", str(self.changes), "--path", "deleted.txt")
+        self.assertEqual(self.assert_success(marked_deleted), {"viewed": True})
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        viewed = {entry["path"]: entry for entry in inventory["viewed"]}
+        self.assertEqual(viewed["deleted.txt"]["status"], "deleted")
+        deleted_viewed_diff = self.assert_success(self.changes_diff(task_id, "deleted.txt", "viewed"))
+        self.assertEqual(deleted_viewed_diff["original"], "Deleted baseline.\n")
+        self.assertEqual(deleted_viewed_diff["modified"], "")
+        (self.changes / "deleted.txt").write_text("Recreated after viewing.\n", encoding="utf-8")
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        recreated = {entry["path"]: entry for entry in inventory["unviewed"]}
+        self.assertIn("deleted.txt", recreated, "Recreating a viewed deleted file lists it as a change still to review.")
+        self.assertEqual(recreated["deleted.txt"]["status"], "added")
+        self.assertEqual(recreated["deleted.txt"]["statusCode"], "A ")
+        viewed = {entry["path"]: entry for entry in inventory["viewed"]}
+        self.assertEqual(viewed["deleted.txt"]["status"], "deleted", "The reviewed row keeps reporting the deletion it reviewed.")
+        self.assertEqual(viewed["deleted.txt"]["statusCode"], "D ")
+        recreated_diff = self.assert_success(self.changes_diff(task_id, "deleted.txt", "unviewed"))
+        self.assertEqual(recreated_diff["original"], "")
+        self.assertEqual(recreated_diff["modified"], "Recreated after viewing.\n")
+        self.assert_failure(self.changes_diff(task_id, "stale.txt", "unviewed", expected_status=3), "not_found")
+        stale_mark, _ = self.call_cli("task", "changes", "mark-viewed", task_id, "--repository", str(self.changes), "--path", "stale.txt", expected_status=3)
+        self.assert_failure(stale_mark, "not_found")
+
+        # A file that never existed in the branch base, created then renamed away by two
+        # separate file operations (not `git mv`, which Git would recognize as one rename),
+        # nets to zero change once both the deletion and the replacement are reviewed.
+        (self.changes / "ephemeral.txt").write_text("Ephemeral content.\n", encoding="utf-8")
+        marked_ephemeral, _ = self.call_cli("task", "changes", "mark-viewed", task_id, "--repository", str(self.changes), "--path", "ephemeral.txt")
+        self.assertEqual(self.assert_success(marked_ephemeral), {"viewed": True})
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        viewed = {entry["path"]: entry for entry in inventory["viewed"]}
+        self.assertEqual(viewed["ephemeral.txt"]["status"], "added")
+        (self.changes / "ephemeral.txt").unlink()
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        unviewed = {entry["path"]: entry for entry in inventory["unviewed"]}
+        self.assertEqual(unviewed["ephemeral.txt"]["status"], "deleted", "Deleting a reviewed new file lists the deletion as a change still to review.")
+        marked_ephemeral_deleted, _ = self.call_cli("task", "changes", "mark-viewed", task_id, "--repository", str(self.changes), "--path", "ephemeral.txt")
+        self.assertEqual(self.assert_success(marked_ephemeral_deleted), {"viewed": True})
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        self.assertNotIn("ephemeral.txt", [entry["path"] for entry in inventory["viewed"]], "A reviewed file with no base content and no current file is zero net change, not a ghost entry.")
+        self.assertNotIn("ephemeral.txt", [entry["path"] for entry in inventory["unviewed"]])
+        (self.changes / "ephemeral.txt").write_text("Reborn content.\n", encoding="utf-8")
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        unviewed = {entry["path"]: entry for entry in inventory["unviewed"]}
+        self.assertEqual(unviewed["ephemeral.txt"]["status"], "added", "Recreating the file afterward surfaces it as a fresh change to review.")
+
         diagnostics = self.diagnostic_events()
-        self.assertTrue(any(
-            event.get("event") == "workspace.files.inventory.succeeded"
-            and int(event.get("stagedCount", "0")) == 3
-            and int(event.get("workingCount", "0")) == 5
-            for event in diagnostics
-        ))
-        staged_read = next(
-            event for event in diagnostics
-            if event.get("event") == "workspace.file.read.succeeded"
-            and event.get("path") == "shared.txt"
-            and event.get("group") == "staged"
-        )
-        self.assertGreater(int(staged_read["originalBytes"]), 0)
-        self.assertGreater(int(staged_read["modifiedBytes"]), 0)
-        self.assertTrue(any(
-            event.get("event") == "workspace.file.read.failed" and event.get("path") == "stale.txt"
-            for event in diagnostics
-        ))
-        serialized_diagnostics = json.dumps(diagnostics)
-        self.assertNotIn("Shared index version.", serialized_diagnostics)
+        self.assertTrue(any(event.get("event") == "workspace.files.inventory.succeeded" and int(event.get("unviewedCount", "0")) > 0 for event in diagnostics))
+        self.assertTrue(any(event.get("event") == "workspace.file.read.succeeded" and event.get("group") == "viewed" for event in diagnostics))
+        self.assertTrue(any(event.get("event") == "workspace.file.read.failed" and event.get("path") == "stale.txt" for event in diagnostics))
+        self.assertNotIn("Shared working version.", json.dumps(diagnostics))
 
-    # case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | External file edits and Git commits update the open task's changes sidebar automatically, and fresh CLI connections report the same Git status.
+    # case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory.
     def test_external_git_edits_and_commit_refresh_workspace_changes(self):
         repository = self.data_directory / "external-git"
         repository.mkdir()
@@ -6211,32 +6280,50 @@ class StationAIBridgeTests(unittest.TestCase):
         self.run_git(repository, "config", "user.email", "stationai-bridge-test@example.invalid")
         self.run_git(repository, "add", "tracked.txt")
         self.run_git(repository, "commit", "-m", "Baseline")
-        task_id = self.create_task(title="External Git", roots=[repository])["id"]
+        task_id = self.create_task(title="External Git", roots=[])["id"]
+        added, _ = self.call_cli("task", "repository", "add", task_id, "--repo", str(repository))
+        task_record = self.assert_success(added)
+        record = next(item for item in task_record["repositoryWorktrees"] if item["repositoryPath"] == str(repository))
+        self.assertEqual(record["branchFrom"], "main")
+        worktree = Path(record["worktreePath"])
 
-        response, _ = self.call_cli("task", "changes", "list", task_id)
-        self.assertEqual(self.assert_success(response), {"staged": [], "working": []})
-
-        (repository / "tracked.txt").write_text("Edited externally.\n", encoding="utf-8")
         response, _ = self.call_cli("task", "changes", "list", task_id)
         inventory = self.assert_success(response)
-        self.assertEqual(inventory["staged"], [])
-        self.assertEqual([entry["path"] for entry in inventory["working"]], ["tracked.txt"])
+        self.assertEqual(inventory["unviewed"], [])
+        self.assertEqual(inventory["viewed"], [])
 
-        self.run_git(repository, "add", "tracked.txt")
+        (worktree / "tracked.txt").write_text("Branch commit.\n", encoding="utf-8")
+        self.run_git(worktree, "add", "tracked.txt")
+        self.run_git(worktree, "commit", "-m", "Task branch commit")
+        (repository / "base-only.txt").write_text("Base-only commit.\n", encoding="utf-8")
+        self.run_git(repository, "add", "base-only.txt")
+        self.run_git(repository, "commit", "-m", "Base-only commit")
+
         response, _ = self.call_cli("task", "changes", "list", task_id)
         inventory = self.assert_success(response)
-        self.assertEqual([entry["path"] for entry in inventory["staged"]], ["tracked.txt"])
-        self.assertEqual(inventory["working"], [])
+        entries = {entry["path"]: entry for entry in inventory["unviewed"]}
+        self.assertEqual(set(entries), {"tracked.txt"})
+        self.assertFalse(entries["tracked.txt"]["isUncommitted"])
+        self.assertNotIn("base-only.txt", entries)
+        branch_diff = self.assert_success(self.changes_diff(task_id, "tracked.txt", "unviewed", repository=worktree))
+        self.assertEqual(branch_diff["original"], "Baseline.\n")
+        self.assertEqual(branch_diff["modified"], "Branch commit.\n")
 
-        self.run_git(repository, "commit", "-m", "External commit")
+        (worktree / "tracked.txt").write_text("Edited externally.\n", encoding="utf-8")
+        (worktree / "untracked.txt").write_text("Untracked external file.\n", encoding="utf-8")
         response, _ = self.call_cli("task", "changes", "list", task_id)
-        self.assertEqual(self.assert_success(response), {"staged": [], "working": []})
-        response, _ = self.call_cli(
-            "task", "changes", "diff", task_id,
-            "--repository", repository, "--path", "tracked.txt", "--group", "staged",
-            expected_status=3,
-        )
-        self.assert_failure(response, "not_found")
+        inventory = self.assert_success(response)
+        entries = {entry["path"]: entry for entry in inventory["unviewed"]}
+        self.assertEqual(set(entries), {"tracked.txt", "untracked.txt"})
+        self.assertTrue(entries["tracked.txt"]["isUncommitted"])
+        self.assertTrue(entries["untracked.txt"]["isUncommitted"])
+        self.run_git(worktree, "add", "tracked.txt", "untracked.txt")
+        self.run_git(worktree, "commit", "-m", "Second task branch commit")
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        entries = {entry["path"]: entry for entry in self.assert_success(response)["unviewed"]}
+        self.assertEqual(set(entries), {"tracked.txt", "untracked.txt"})
+        self.assertFalse(entries["tracked.txt"]["isUncommitted"])
+        self.assertNotIn("base-only.txt", entries)
 
 
 
