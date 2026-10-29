@@ -4677,7 +4677,9 @@ private final class ChatEditorScrollView: NSScrollView {
         textLayoutNeeded = true
         layoutRequestGeneration += 1
         let generation = layoutRequestGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+        // Let NSTextView finish its edit/layout pass, then update the viewport
+        // before another typing burst can reach the next wrapped line.
+        DispatchQueue.main.async { [weak self] in
             guard let self, self.layoutRequestGeneration == generation else { return }
             self.needsLayout = true
             self.layoutSubtreeIfNeeded()
@@ -4711,14 +4713,19 @@ private final class ChatEditorScrollView: NSScrollView {
         editor.setFrameSize(NSSize(width: width, height: editor.frame.height))
         let font = editor.font ?? NSFont.systemFont(ofSize: 14)
         let inset = editor.textContainerInset
-        let textWidth = max(1, width - inset.width * 2)
-        let measured = (editor.string as NSString).boundingRect(
-            with: NSSize(width: textWidth, height: CGFloat.greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: font]
-        )
+        let laidOutTextHeight: CGFloat
+        if let layoutManager = editor.layoutManager, let textContainer = editor.textContainer {
+            // Measure with the same TextKit container that wraps the live editor.
+            // A separate boundingRect calculation ignores line-fragment padding,
+            // so it can report one fewer line exactly as text crosses a wrap.
+            layoutManager.ensureLayout(for: textContainer)
+            let usedRect = layoutManager.usedRect(for: textContainer)
+            laidOutTextHeight = max(usedRect.maxY, layoutManager.extraLineFragmentRect.maxY)
+        } else {
+            laidOutTextHeight = 0
+        }
         let lineHeight = editor.layoutManager?.defaultLineHeight(for: font) ?? font.pointSize * 1.2
-        let contentHeight = ceil(max(lineHeight, measured.height) + inset.height * 2)
+        let contentHeight = ceil(max(lineHeight, laidOutTextHeight) + inset.height * 2)
         let documentHeight = max(28, contentHeight)
         editor.setFrameSize(NSSize(width: width, height: documentHeight))
         documentHeightDidChange(documentHeight)
