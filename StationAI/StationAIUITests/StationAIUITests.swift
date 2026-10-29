@@ -3704,7 +3704,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Unsent task prompt is saved after returning to backlog")
     }
 
-    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation; if it is concurrently renamed while title generation is pending, the custom title determines the auto branch. A standalone Untitled task starts and persists its provider thread while background title generation is still pending. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
+    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. As content is typed in short increments through successive wrapped lines after a line break, the newest insertion remains inside the visible composer viewport while its internal document follows the caret without scrolling backward. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation; if it is concurrently renamed while title generation is pending, the custom title determines the auto branch. A standalone Untitled task starts and persists its provider thread while background title generation is still pending. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
     func test_conversation_composer_rejects_blank_and_supports_live_turn_controls() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -3735,13 +3735,32 @@ final class StationAIUITests: XCTestCase {
         draftEditor.typeText("Edited after reopening.")
         let editedDraft = longDraft + "Edited after reopening."
         XCTAssertTrue(waitUntil({ draftEditor.value as? String == editedDraft }, timeout: 5), "The reopened long draft must respond to editing.")
-        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: longDraftTaskID)?["savedPrompt"] as? String) == editedDraft }, timeout: 10))
+        let documentTopBeforeLineBreak = draftEditor.frame.minY
+        draftEditor.typeKey(.return, modifierFlags: .shift)
+        var typedAfterLineBreak = ""
+        var previousDocumentTop = documentTopBeforeLineBreak
+        let wrapText = String(repeating: "First characters stay visible across wrapped lines. ", count: 3)
+        let wrapChunks = stride(from: 0, to: wrapText.count, by: 2).map { String(wrapText.dropFirst($0).prefix(2)) }
+        for chunk in wrapChunks {
+            draftEditor.typeText(chunk)
+            typedAfterLineBreak += chunk
+            XCTAssertTrue(waitUntil({ (draftEditor.value as? String ?? "").hasSuffix(typedAfterLineBreak) }, timeout: 5), "Each increment after a line break must remain present in the composer.")
+            let currentDocumentTop = draftEditor.frame.minY
+            XCTAssertLessThanOrEqual(currentDocumentTop, previousDocumentTop + 2, "Typing through successive wrapped lines must not scroll the document back and hide the newest characters.")
+            let insertionPointY = draftEditor.frame.maxY - 5
+            XCTAssertGreaterThanOrEqual(insertionPointY, editorViewport.frame.minY, "The newest insertion must remain below the visible viewport’s top edge at every wrap checkpoint.")
+            XCTAssertLessThanOrEqual(insertionPointY, editorViewport.frame.maxY + 2, "The newest insertion must remain inside the visible viewport at every wrap checkpoint.")
+            previousDocumentTop = currentDocumentTop
+        }
+        XCTAssertLessThan(previousDocumentTop, documentTopBeforeLineBreak - 20, "The composer’s internal document must follow the caret as wrapped content grows.")
+        let lineBreakDraft = editedDraft + "\n" + typedAfterLineBreak
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: longDraftTaskID)?["savedPrompt"] as? String) == lineBreakDraft }, timeout: 10))
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5), "Back must remain responsive after editing a long draft.")
         app.terminate()
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Blank message")
-        XCTAssertEqual(draftEditor.value as? String, editedDraft)
+        XCTAssertEqual(draftEditor.value as? String, lineBreakDraft)
         XCTAssertTrue(waitUntil({ editorViewport.frame.height >= 205 }, timeout: 5), "The editor must also expand to its 12-line viewport after restarting with a saved draft.")
         draftEditor.click()
         draftEditor.typeKey("a", modifierFlags: .command)
