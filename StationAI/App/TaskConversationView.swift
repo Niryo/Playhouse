@@ -302,6 +302,7 @@ struct TaskConversationView: View {
     /// Natural height of the rendered transcript, before the filler that keeps
     /// the newest turn pinnable to the top of the viewport.
     @State private var conversationContentHeight: CGFloat = 0
+    @State private var lastScrolledUserMessageID: String?
     @State private var annotations: [ConversationAnnotation] = []
     @State private var annotationSelection: AnnotationSelection?
     @State private var currentTextSelection: AnnotationSelection?
@@ -315,7 +316,8 @@ struct TaskConversationView: View {
     @State private var subagentHistory: ConversationHistory?
     @State private var isLoadingSubagent = false
     @State private var subagentError: String?
-    @State private var changeInventory = WorkspaceChangeInventory(staged: [], working: [])
+    @State private var changeInventory = WorkspaceChangeInventory(unviewed: [], viewed: [])
+    @State private var isViewedSectionExpanded = false
     @State private var isLoadingChanges = false
     @State private var changesNeedRefresh = false
     @State private var changeWatcher: WorkspaceChangeWatcher?
@@ -557,6 +559,10 @@ struct TaskConversationView: View {
         }
         oldestRenderedMessageID = turnStartID
         isOlderConversationRevealArmed = false
+        // This pin already puts the newest question at the top, so record it as
+        // the one in view; otherwise the next message count change scrolls to it
+        // a second time as though it had just been sent.
+        lastScrolledUserMessageID = conversationMessages.last(where: { $0.role == .user })?.id
         Task { @MainActor in
             await Task.yield()
             var transaction = Transaction()
@@ -885,8 +891,8 @@ struct TaskConversationView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 15) {
-                        changeSection(title: "Staged Changes", entries: changeInventory.staged)
-                        changeSection(title: "Changes", entries: changeInventory.working)
+                        changeSection(title: "Viewed", entries: changeInventory.viewed)
+                        changeSection(title: "Changes", entries: changeInventory.unviewed)
                     }
                     .padding(.vertical, 12)
                 }
@@ -901,24 +907,42 @@ struct TaskConversationView: View {
         .accessibilityIdentifier("task-sidebar")
     }
 
+    /// A Viewed row always shows the reviewed work from the branch base; only a change made
+    /// after that review is measured from the saved snapshot.
+    private func diffBaselineLabel(_ entry: WorkspaceChangeEntry) -> String {
+        entry.group == .unviewed && entry.hasViewedSnapshot ? "Since last viewed" : "Since branch base"
+    }
+
     private func changeSection(title: String, entries: [WorkspaceChangeEntry]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 7) {
-                Image(systemName: title == "Staged Changes" ? "checkmark.circle.fill" : "circle.dashed")
+                Image(systemName: title == "Viewed" ? "checkmark.circle.fill" : "circle.dashed")
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(title == "Staged Changes" ? .green : .secondary)
+                    .foregroundStyle(title == "Viewed" ? .green : .secondary)
                 Text(title)
                     .font(.system(size: 11, weight: .semibold))
                     .lineLimit(1)
+                    .accessibilityIdentifier(title == "Viewed" ? "viewed-changes-title" : "unviewed-changes-title")
                 Text("\(entries.count)")
                     .font(.system(size: 10, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
+                if title == "Viewed" {
+                    Image(systemName: isViewedSectionExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(.horizontal, 14)
-            .accessibilityIdentifier(title == "Staged Changes" ? "staged-changes-section" : "working-changes-section")
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if title == "Viewed" { isViewedSectionExpanded.toggle() }
+            }
+            .accessibilityIdentifier(title == "Viewed" ? "viewed-changes-section" : "unviewed-changes-section")
 
-            if entries.isEmpty {
+            if title == "Viewed" && !isViewedSectionExpanded {
+                EmptyView()
+            } else if entries.isEmpty {
                 Text("No files")
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
@@ -927,7 +951,7 @@ struct TaskConversationView: View {
             } else {
                 let groups = repositoryGroups(entries)
                 ForEach(groups, id: \.repository) { repositoryGroup in
-                    if Set(changeInventory.staged.map(\.repository) + changeInventory.working.map(\.repository)).count > 1 {
+                    if Set(changeInventory.unviewed.map(\.repository) + changeInventory.viewed.map(\.repository)).count > 1 {
                         Text(repositoryLabel(repositoryGroup.repository))
                             .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(.secondary)
@@ -938,38 +962,53 @@ struct TaskConversationView: View {
                             .accessibilityIdentifier("workspace-repository-\(repositoryGroup.repository.hashValue)")
                     }
                     ForEach(repositoryGroup.entries) { entry in
-                        Button {
-                            openDiff(entry)
-                        } label: {
-                            HStack(spacing: 7) {
+                        HStack(spacing: 2) {
+                            Button {
+                                openDiff(entry)
+                            } label: {
+                                HStack(spacing: 7) {
                                 Image(systemName: changeSymbol(for: entry.status))
                                     .font(.system(size: 10, weight: .medium))
                                     .foregroundStyle(changeColor(for: entry.status))
                                     .frame(width: 12)
                                 Text(entry.path)
                                     .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(entry.isUncommitted ? Color.green : Color.primary)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
+                                    .accessibilityIdentifier("workspace-change-name-\(entry.group.rawValue)-\(entry.path)")
+                                    .accessibilityValue(entry.isUncommitted ? "Uncommitted, green" : "Committed, primary")
                                 Spacer(minLength: 0)
                                 Text(statusBadge(for: entry))
                                     .font(.system(size: 9, weight: .medium, design: .monospaced))
                                     .foregroundStyle(changeColor(for: entry.status))
                             }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 5)
-                            .contentShape(Rectangle())
-                            .background(
-                                selectedChange?.id == entry.id
-                                    ? Color.accentColor.opacity(0.15)
-                                    : Color.clear,
-                                in: RoundedRectangle(cornerRadius: 5)
-                            )
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .contentShape(Rectangle())
+                                .background(selectedChange?.id == entry.id ? Color.accentColor.opacity(0.15) : Color.clear, in: RoundedRectangle(cornerRadius: 5))
+                            }
+                            .buttonHoverPointer()
+                            .buttonStyle(.plain)
+                            .help("View \(entry.group.displayName) diff for \(entry.path)")
+                            .accessibilityLabel("\(entry.path), \(entry.status), \(entry.group.displayName)")
+                            .accessibilityIdentifier("workspace-change-\(entry.group.rawValue)-\(entry.path)")
+                            if entry.group == .unviewed {
+                                Button {
+                                    Task { await markViewed(entry) }
+                                } label: {
+                                    Image(systemName: "checkmark.circle")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 20, height: 22)
+                                }
+                                .buttonStyle(.plain)
+                                .buttonHoverPointer()
+                                .help("Mark as viewed")
+                                .accessibilityLabel("Mark \(entry.path) as viewed")
+                                .accessibilityIdentifier("mark-viewed-\(entry.path)")
+                            }
                         }
-                        .buttonHoverPointer()
-                        .buttonStyle(.plain)
-                        .help("View \(entry.group.rawValue) diff for \(entry.path)")
-                        .accessibilityLabel("\(entry.path), \(entry.status), \(entry.group.rawValue)")
-                        .accessibilityIdentifier("workspace-change-\(entry.group.rawValue)-\(entry.path)")
                         .padding(.horizontal, 7)
                     }
                 }
@@ -1093,7 +1132,7 @@ struct TaskConversationView: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                             .accessibilityIdentifier("workspace-diff-title")
-                        Text("\(repositoryLabel(selectedChange.repository)) · \(selectedChange.group == .staged ? "Staged" : "Working tree")")
+                        Text("\(repositoryLabel(selectedChange.repository)) · \(diffBaselineLabel(selectedChange))")
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                             .accessibilityIdentifier("workspace-diff-source")
@@ -1248,6 +1287,15 @@ struct TaskConversationView: View {
         }
     }
 
+    private func markViewed(_ entry: WorkspaceChangeEntry) async {
+        do {
+            try await workspaceManager.markViewed(for: task.id, repository: entry.repository, path: entry.path)
+            await refreshWorkspaceChanges()
+        } catch {
+            changesError = error.localizedDescription
+        }
+    }
+
     private func refreshWorkspaceChanges() async {
         guard !isLoadingChanges else {
             changesNeedRefresh = true
@@ -1263,7 +1311,7 @@ struct TaskConversationView: View {
                 changeInventory = inventory
                 changesError = nil
                 if let selectedChange {
-                    if let current = (inventory.staged + inventory.working).first(where: { $0.id == selectedChange.id }) {
+                    if let current = (inventory.unviewed + inventory.viewed).first(where: { $0.id == selectedChange.id }) {
                         self.selectedChange = current
                         if isDiffPresented {
                             do {
@@ -1869,10 +1917,12 @@ struct TaskConversationView: View {
                 presentLatestConversationTurn(using: scrollProxy)
             }
             .onChange(of: messages.count) { _, _ in
-                scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
+                scrollToLatestUserMessage(using: scrollProxy, viewportHeight: viewport.size.height)
             }
             .onChange(of: messages.map(\.text)) { _, _ in
-                scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
+                if !hasPresentedLatestConversation {
+                    scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
+                }
             }
             .onChange(of: hasCompletedAssistantResponse) { _, hasCompletedResponse in
                 if hasCompletedResponse && activities.isEmpty {
@@ -1880,16 +1930,24 @@ struct TaskConversationView: View {
                 }
             }
             .onChange(of: activities) { _, _ in
-                if isResponding { scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height) }
+                if isResponding && !hasPresentedLatestConversation {
+                    scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
+                }
             }
             .onChange(of: isResponding) { _, _ in
-                scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
+                if !hasPresentedLatestConversation {
+                    scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
+                }
             }
             .onChange(of: activeGoal?.status) { _, status in
-                if status == "complete" { scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height) }
+                if status == "complete" && !hasPresentedLatestConversation {
+                    scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
+                }
             }
             .onChange(of: goalAchievementTimelineEntries.count) { _, _ in
-                scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
+                if !hasPresentedLatestConversation {
+                    scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
+                }
             }
             }
         }
@@ -2482,10 +2540,18 @@ struct TaskConversationView: View {
             : "Response from \((message.provider ?? provider).displayName)"
         let responseAnnotations = responseAnnotationReferences(for: message)
         return VStack(alignment: .leading, spacing: 6) {
-            Text(assistantLabel(for: message))
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("assistant-provider-\(message.id)")
+            HStack(spacing: 6) {
+                if let createdAt = message.createdAt {
+                    Text(createdAt, format: .dateTime.hour().minute())
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .accessibilityIdentifier("message-time-\(message.id)")
+                }
+                Text(assistantLabel(for: message))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("assistant-provider-\(message.id)")
+            }
 
             ForEach(Array(message.imageDataURLs.enumerated()), id: \.offset) { index, dataURL in
                 if let image = Self.image(fromDataURL: dataURL) {
@@ -2504,12 +2570,6 @@ struct TaskConversationView: View {
                     .accessibilityElement(children: .contain)
                     .accessibilityLabel(accessibilityText)
                     .accessibilityIdentifier("assistant-message-\(message.id)")
-            }
-            if let createdAt = message.createdAt {
-                Text(createdAt, format: .dateTime.hour().minute())
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .accessibilityIdentifier("message-time-\(message.id)")
             }
         }
         .frame(maxWidth: 620, alignment: .leading)
@@ -4776,6 +4836,9 @@ struct TaskConversationView: View {
         let shouldAnimate = hasPresentedLatestConversation
         Task { @MainActor in
             await Task.yield()
+            // Record the question this presentation lands on, so a newly sent
+            // one is told apart from the one already in view.
+            lastScrolledUserMessageID = renderedConversationMessages.last(where: { $0.role == .user })?.id
             let scroll = {
                 if let latestMessageID {
                     proxy.scrollTo(latestMessageID, anchor: .bottom)
@@ -4800,6 +4863,26 @@ struct TaskConversationView: View {
                 withTransaction(settleTransaction, scroll)
             }
             hasPresentedLatestConversation = true
+        }
+    }
+
+    /// After the conversation is already settled, a newly sent question should land at the
+    /// top of the viewport and stay there while its answer streams in below — mirroring how
+    /// ChatGPT/Claude.ai keep your question in view instead of auto-scrolling to chase the
+    /// growing answer all the way to the bottom.
+    private func scrollToLatestUserMessage(using proxy: ScrollViewProxy, viewportHeight: CGFloat) {
+        guard hasPresentedLatestConversation else {
+            scrollToLatest(using: proxy, viewportHeight: viewportHeight)
+            return
+        }
+        guard let latestUserMessage = renderedConversationMessages.last(where: { $0.role == .user }),
+              latestUserMessage.id != lastScrolledUserMessageID else { return }
+        lastScrolledUserMessageID = latestUserMessage.id
+        Task { @MainActor in
+            await Task.yield()
+            withAnimation(.easeOut(duration: 0.2)) {
+                proxy.scrollTo(latestUserMessage.id, anchor: .top)
+            }
         }
     }
 }
@@ -4951,7 +5034,9 @@ private final class ChatEditorScrollView: NSScrollView {
         textLayoutNeeded = true
         layoutRequestGeneration += 1
         let generation = layoutRequestGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+        // Let NSTextView finish its edit/layout pass, then update the viewport
+        // before another typing burst can reach the next wrapped line.
+        DispatchQueue.main.async { [weak self] in
             guard let self, self.layoutRequestGeneration == generation else { return }
             self.needsLayout = true
             self.layoutSubtreeIfNeeded()
@@ -4985,14 +5070,19 @@ private final class ChatEditorScrollView: NSScrollView {
         editor.setFrameSize(NSSize(width: width, height: editor.frame.height))
         let font = editor.font ?? NSFont.systemFont(ofSize: 14)
         let inset = editor.textContainerInset
-        let textWidth = max(1, width - inset.width * 2)
-        let measured = (editor.string as NSString).boundingRect(
-            with: NSSize(width: textWidth, height: CGFloat.greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: font]
-        )
+        let laidOutTextHeight: CGFloat
+        if let layoutManager = editor.layoutManager, let textContainer = editor.textContainer {
+            // Measure with the same TextKit container that wraps the live editor.
+            // A separate boundingRect calculation ignores line-fragment padding,
+            // so it can report one fewer line exactly as text crosses a wrap.
+            layoutManager.ensureLayout(for: textContainer)
+            let usedRect = layoutManager.usedRect(for: textContainer)
+            laidOutTextHeight = max(usedRect.maxY, layoutManager.extraLineFragmentRect.maxY)
+        } else {
+            laidOutTextHeight = 0
+        }
         let lineHeight = editor.layoutManager?.defaultLineHeight(for: font) ?? font.pointSize * 1.2
-        let contentHeight = ceil(max(lineHeight, measured.height) + inset.height * 2)
+        let contentHeight = ceil(max(lineHeight, laidOutTextHeight) + inset.height * 2)
         let documentHeight = max(28, contentHeight)
         editor.setFrameSize(NSSize(width: width, height: documentHeight))
         documentHeightDidChange(documentHeight)

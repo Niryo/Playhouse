@@ -253,7 +253,7 @@ enum StationAICLI {
                 ])
             case "changes":
                 guard let action = tail.first else {
-                    throw CLIError.usage("Use: stationai task changes list <task-id> or task changes diff <task-id> --repository <path> --path <relative-path> --group <staged|working>")
+                    throw CLIError.usage("Use: stationai task changes list <task-id>, mark-viewed <task-id> --repository <path> --path <relative-path>, or diff <task-id> --repository <path> --path <relative-path> --group <unviewed|viewed>")
                 }
                 switch action {
                 case "list":
@@ -261,7 +261,7 @@ enum StationAICLI {
                     return BridgeRequest(command: "task.changes.list", arguments: ["taskID": .string(tail[1])])
                 case "diff":
                     guard tail.count >= 2 else {
-                        throw CLIError.usage("Use: stationai task changes diff <task-id> --repository <path> --path <relative-path> --group <staged|working>")
+                        throw CLIError.usage("Use: stationai task changes diff <task-id> --repository <path> --path <relative-path> --group <unviewed|viewed>")
                     }
                     let flags = try parseFlags(
                         Array(tail.dropFirst(2)),
@@ -272,6 +272,14 @@ enum StationAICLI {
                         "repository": .string(try requiredFlag("--repository", flags: flags).first!),
                         "path": .string(try requiredFlag("--path", flags: flags).first!),
                         "group": .string(try requiredFlag("--group", flags: flags).first!),
+                    ])
+                case "mark-viewed":
+                    guard tail.count >= 2 else { throw CLIError.usage("Use: stationai task changes mark-viewed <task-id> --repository <path> --path <relative-path>") }
+                    let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--repository", "--path"])
+                    return BridgeRequest(command: "task.changes.mark-viewed", arguments: [
+                        "taskID": .string(tail[1]),
+                        "repository": .string(try requiredFlag("--repository", flags: flags).first!),
+                        "path": .string(try requiredFlag("--path", flags: flags).first!),
                     ])
                 default:
                     throw CLIError.usage("Unknown task changes operation '\(action)'.")
@@ -555,7 +563,8 @@ enum StationAICLI {
       stationai task roots get <task-id>
       stationai task roots set <task-id> --root <path> [--root <path>...]
       stationai task changes list <task-id>
-      stationai task changes diff <task-id> --repository <path> --path <relative-path> --group <staged|working>
+      stationai task changes diff <task-id> --repository <path> --path <relative-path> --group <unviewed|viewed>
+      stationai task changes mark-viewed <task-id> --repository <path> --path <relative-path>
       stationai task delete <task-id>
       stationai task delete-check <task-id>
       stationai workspace suggest --parent <path>

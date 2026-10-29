@@ -3704,7 +3704,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Unsent task prompt is saved after returning to backlog")
     }
 
-    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation; if it is concurrently renamed while title generation is pending, the custom title determines the auto branch. A standalone Untitled task starts and persists its provider thread while background title generation is still pending. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
+    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. As content is typed in short increments through successive wrapped lines after a line break, the newest insertion remains inside the visible composer viewport while its internal document follows the caret without scrolling backward. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation; if it is concurrently renamed while title generation is pending, the custom title determines the auto branch. A standalone Untitled task starts and persists its provider thread while background title generation is still pending. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
     func test_conversation_composer_rejects_blank_and_supports_live_turn_controls() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -3735,13 +3735,32 @@ final class StationAIUITests: XCTestCase {
         draftEditor.typeText("Edited after reopening.")
         let editedDraft = longDraft + "Edited after reopening."
         XCTAssertTrue(waitUntil({ draftEditor.value as? String == editedDraft }, timeout: 5), "The reopened long draft must respond to editing.")
-        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: longDraftTaskID)?["savedPrompt"] as? String) == editedDraft }, timeout: 10))
+        let documentTopBeforeLineBreak = draftEditor.frame.minY
+        draftEditor.typeKey(.return, modifierFlags: .shift)
+        var typedAfterLineBreak = ""
+        var previousDocumentTop = documentTopBeforeLineBreak
+        let wrapText = String(repeating: "First characters stay visible across wrapped lines. ", count: 3)
+        let wrapChunks = stride(from: 0, to: wrapText.count, by: 2).map { String(wrapText.dropFirst($0).prefix(2)) }
+        for chunk in wrapChunks {
+            draftEditor.typeText(chunk)
+            typedAfterLineBreak += chunk
+            XCTAssertTrue(waitUntil({ (draftEditor.value as? String ?? "").hasSuffix(typedAfterLineBreak) }, timeout: 5), "Each increment after a line break must remain present in the composer.")
+            let currentDocumentTop = draftEditor.frame.minY
+            XCTAssertLessThanOrEqual(currentDocumentTop, previousDocumentTop + 2, "Typing through successive wrapped lines must not scroll the document back and hide the newest characters.")
+            let insertionPointY = draftEditor.frame.maxY - 5
+            XCTAssertGreaterThanOrEqual(insertionPointY, editorViewport.frame.minY, "The newest insertion must remain below the visible viewport’s top edge at every wrap checkpoint.")
+            XCTAssertLessThanOrEqual(insertionPointY, editorViewport.frame.maxY + 2, "The newest insertion must remain inside the visible viewport at every wrap checkpoint.")
+            previousDocumentTop = currentDocumentTop
+        }
+        XCTAssertLessThan(previousDocumentTop, documentTopBeforeLineBreak - 20, "The composer’s internal document must follow the caret as wrapped content grows.")
+        let lineBreakDraft = editedDraft + "\n" + typedAfterLineBreak
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: longDraftTaskID)?["savedPrompt"] as? String) == lineBreakDraft }, timeout: 10))
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5), "Back must remain responsive after editing a long draft.")
         app.terminate()
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Blank message")
-        XCTAssertEqual(draftEditor.value as? String, editedDraft)
+        XCTAssertEqual(draftEditor.value as? String, lineBreakDraft)
         XCTAssertTrue(waitUntil({ editorViewport.frame.height >= 205 }, timeout: 5), "The editor must also expand to its 12-line viewport after restarting with a saved draft.")
         draftEditor.click()
         draftEditor.typeKey("a", modifierFlags: .command)
@@ -6755,7 +6774,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "Conversation shows and opens a subagent")
     }
 
-    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics.
+    // case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in, the question that started it stays pinned near the top of the transcript instead of being auto-scrolled past as the answer grows, consistent with the user message preceding its final answer in CLI/XPC history.
     func test_plan_mode_renders_markdown_in_conversation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".stationai-bridge-fixture")
@@ -6847,6 +6866,13 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(assistantMarkdown.label.contains("workspace model"), "The partial plan should show its streamed content.")
         XCTAssertTrue(assistantMarkdown.label.contains("\n\n"), "Distinct Markdown paragraphs should retain visible spacing.")
         XCTAssertFalse(assistantMarkdown.label.contains("Final verification"), "The rest of the plan should wait for the fixture release.")
+        let planQuestion = app.staticTexts["Plan the task."]
+        let planTranscriptScrollView = element("conversation-scroll-view")
+        XCTAssertTrue(planQuestion.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitUntil({
+            planQuestion.frame.minY >= planTranscriptScrollView.frame.minY - 4
+                && planQuestion.frame.minY <= planTranscriptScrollView.frame.minY + 120
+        }, timeout: 5), "While the long plan is still streaming in below it, the question that started the turn should stay pinned near the top of the transcript instead of being auto-scrolled past; question=\(planQuestion.frame), viewport=\(planTranscriptScrollView.frame).")
         try Data().write(to: deltaRelease)
         XCTAssertTrue(waitUntil({ assistantMarkdown.label.contains("Final verification") }, timeout: 30), "The completed plan should replace the partial plan.")
         try FileManager.default.removeItem(at: deltaHold)
@@ -8896,7 +8922,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "StationAI recovers and continues work after an unexpected restart")
     }
 
-    // case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation. Diagnostics record inventory and file-read outcomes with paths and byte counts, without logging file contents.
+    // case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view lists every file changed from the task branch's recorded base in a Changes section below a collapsed Viewed section, including committed branch changes and current staged, unstaged, and untracked edits, and excluding commits unique to the base branch. Marking a file viewed saves its current contents, stages the file in Git, and adds a Viewed entry that keeps showing the reviewed work from the branch base to that snapshot. Work done after that review is listed again under Changes and diffed against the saved snapshot, so one file can appear in both sections at once; a path with no content in the branch base and no current file is zero net change and is hidden entirely, even with a stale viewed snapshot, rather than showing a ghost entry. Selecting text or JSON files opens a calculated side-by-side diff whose header names the baseline used. Viewed snapshots persist across fresh CLI/XPC connections. Files that aren't current Changes entries, including already-viewed and unknown paths, are rejected by the mark-viewed CLI operation, and the UI offers that action only for Changes entries. Uncommitted filenames are green. Diagnostics record inventory and file-read outcomes without logging file contents.
     func test_task_workspace_changes_group_staged_and_unstaged_diffs() throws {
         _ = try runCLI([
             "task", "create", "--title", "Git changes", "--root", fixture.changes.path
@@ -8904,97 +8930,176 @@ final class StationAIUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Git changes")
 
-        XCTAssertTrue(element("staged-changes-section").waitForExistence(timeout: 10))
-        XCTAssertTrue(element("working-changes-section").exists)
-        XCTAssertTrue(element("workspace-change-staged-shared.txt").exists)
-        XCTAssertTrue(element("workspace-change-working-shared.txt").exists)
-        XCTAssertTrue(element("workspace-change-working-untracked.txt").exists)
-        XCTAssertTrue(element("workspace-change-working-deleted.txt").exists)
-        XCTAssertTrue(element("workspace-change-working-syntax.json").exists)
-        XCTAssertTrue(element("workspace-change-staged-staged-deleted.txt").exists)
+        XCTAssertTrue(element("unviewed-changes-section").waitForExistence(timeout: 10))
+        assertText("unviewed-changes-title", equals: "Changes")
+        assertText("viewed-changes-title", equals: "Viewed")
+        XCTAssertTrue(element("viewed-changes-section").exists)
+        XCTAssertLessThan(element("viewed-changes-section").frame.minY, element("unviewed-changes-section").frame.minY)
+        XCTAssertTrue(element("workspace-change-unviewed-shared.txt").exists)
+        XCTAssertTrue(element("workspace-change-unviewed-untracked.txt").exists)
+        XCTAssertTrue(element("workspace-change-unviewed-deleted.txt").exists)
+        XCTAssertTrue(element("workspace-change-unviewed-syntax.json").exists)
+        XCTAssertTrue(element("mark-viewed-shared.txt").exists)
+        XCTAssertTrue(element("mark-viewed-deleted.txt").exists)
+        XCTAssertFalse(element("mark-viewed-stale.txt").exists)
+        XCTAssertEqual(app.buttons.matching(identifier: "workspace-change-unviewed-shared.txt").count, 1)
 
         let taskID = try taskID(named: "Git changes")
         let inventory = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
-        XCTAssertEqual((inventory?["staged"] as? [[String: Any]])?.count, 3)
-        XCTAssertEqual((inventory?["working"] as? [[String: Any]])?.count, 5)
-        let stagedDiff = try runCLI([
+        XCTAssertEqual((inventory?["unviewed"] as? [[String: Any]])?.count, 7)
+        XCTAssertEqual((inventory?["viewed"] as? [[String: Any]])?.count, 0)
+        let shared = try runCLI([
             "task", "changes", "diff", taskID,
             "--repository", fixture.changes.path,
             "--path", "shared.txt",
-            "--group", "staged"
+            "--group", "unviewed"
         ])["result"] as? [String: Any]
-        XCTAssertEqual(stagedDiff?["original"] as? String, "Shared baseline.\n")
-        XCTAssertEqual(stagedDiff?["modified"] as? String, "Shared index version.\n")
+        XCTAssertEqual(shared?["original"] as? String, "Shared baseline.\n")
+        XCTAssertEqual(shared?["modified"] as? String, "Shared working version.\n")
         assertCLIError(
             try runCLI([
                 "task", "changes", "diff", taskID,
                 "--repository", fixture.changes.path,
                 "--path", "stale.txt",
-                "--group", "working",
+                "--group", "unviewed",
             ], expectedStatus: 3),
             code: "not_found"
         )
-        let changeDiagnostics = try diagnosticEvents()
-        XCTAssertTrue(changeDiagnostics.contains {
-            $0["event"] as? String == "workspace.files.inventory.succeeded"
-                && $0["stagedCount"] as? String == "3"
-                && $0["workingCount"] as? String == "5"
-        })
-        let stagedRead = try XCTUnwrap(changeDiagnostics.first {
-            $0["event"] as? String == "workspace.file.read.succeeded"
-                && $0["path"] as? String == "shared.txt"
-                && $0["group"] as? String == "staged"
-        })
-        XCTAssertGreaterThan(Int(stagedRead["originalBytes"] as? String ?? "0") ?? 0, 0)
-        XCTAssertGreaterThan(Int(stagedRead["modifiedBytes"] as? String ?? "0") ?? 0, 0)
-        XCTAssertTrue(changeDiagnostics.contains {
-            $0["event"] as? String == "workspace.file.read.failed" && $0["path"] as? String == "stale.txt"
-        })
-        let serializedChangeDiagnostics = String(data: try JSONSerialization.data(withJSONObject: changeDiagnostics), encoding: .utf8) ?? ""
-        XCTAssertFalse(serializedChangeDiagnostics.contains("Shared index version."))
 
-        let uiDiffReadCountBeforeClick = try diagnosticEvents().filter {
-            $0["event"] as? String == "workspace.file.read.succeeded"
-                && $0["path"] as? String == "shared.txt"
-                && $0["group"] as? String == "staged"
-        }.count
-        element("workspace-change-staged-shared.txt").click()
+        element("workspace-change-unviewed-shared.txt").click()
         XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
-        XCTAssertTrue(waitUntil({
-            guard let events = try? self.diagnosticEvents() else { return false }
-            return events.filter {
-                $0["event"] as? String == "workspace.file.read.succeeded"
-                    && $0["path"] as? String == "shared.txt"
-                    && $0["group"] as? String == "staged"
-            }.count > uiDiffReadCountBeforeClick
-        }, timeout: 10), "Opening the visible file diff should record a new successful workspace file read.")
         assertText("workspace-diff-title", equals: "shared.txt")
-        assertText("workspace-diff-source", equals: "suggested-parent/changes · Staged")
+        assertText("workspace-diff-source", equals: "suggested-parent/changes · Since branch base")
+        assertText("workspace-diff-editor-status", equals: "Side-by-side")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertFalse(element("workspace-diff-overlay").waitForExistence(timeout: 2))
+
+        element("mark-viewed-shared.txt").click()
+        let marked = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        XCTAssertFalse(((marked?["unviewed"] as? [[String: Any]]) ?? []).contains { $0["path"] as? String == "shared.txt" })
+        XCTAssertTrue(((marked?["viewed"] as? [[String: Any]]) ?? []).contains { $0["path"] as? String == "shared.txt" })
+        element("viewed-changes-section").click()
+        XCTAssertTrue(element("workspace-change-viewed-shared.txt").waitForExistence(timeout: 10))
+        XCTAssertFalse(element("mark-viewed-shared.txt").exists, "Viewed entries must not offer the mark-viewed action.")
+        try "Edited after viewing.\n".write(to: fixture.changes.appendingPathComponent("shared.txt"), atomically: true, encoding: .utf8)
+        element("refresh-workspace-changes-button").click()
+        XCTAssertTrue(
+            element("workspace-change-unviewed-shared.txt").waitForExistence(timeout: 10),
+            "A later edit should be listed as a change still to review."
+        )
+        XCTAssertTrue(
+            element("workspace-change-viewed-shared.txt").exists,
+            "The already-reviewed work should stay listed under Viewed."
+        )
+        element("workspace-change-viewed-shared.txt").click()
+        XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
+        assertText("workspace-diff-source", equals: "suggested-parent/changes · Since branch base")
+        let reviewedMonacoValue = element("workspace-monaco-webview").value as? String ?? ""
+        XCTAssertTrue(reviewedMonacoValue.contains("Original:\nShared baseline.\n"))
+        XCTAssertTrue(
+            reviewedMonacoValue.contains("Modified:\nShared working version.\n"),
+            "The viewed diff must stay at the reviewed snapshot, not follow later edits."
+        )
+        app.typeKey(.escape, modifierFlags: [])
+        element("workspace-change-unviewed-shared.txt").click()
+        XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
+        assertText("workspace-diff-source", equals: "suggested-parent/changes · Since last viewed")
         assertText("workspace-diff-editor-status", equals: "Side-by-side")
         assertText("workspace-diff-highlight-status", equals: "1 change highlighted")
-        attachScreenshot(named: "Monaco staged diff overlays the task conversation")
+        let viewedMonacoValue = element("workspace-monaco-webview").value as? String ?? ""
+        XCTAssertTrue(viewedMonacoValue.contains("Original:\nShared working version.\n"))
+        XCTAssertTrue(viewedMonacoValue.contains("Modified:\nEdited after viewing.\n"))
+        XCTAssertEqual(element("workspace-change-name-unviewed-shared.txt").value as? String, "Uncommitted, green")
+        XCTAssertEqual(element("workspace-change-name-viewed-shared.txt").value as? String, "Uncommitted, green")
+        app.typeKey(.escape, modifierFlags: [])
+        attachScreenshot(named: "A re-edited file is listed under both Viewed and Changes")
 
-        element("workspace-change-working-shared.txt").click()
-        assertText("workspace-diff-source", equals: "suggested-parent/changes · Working tree")
-        assertText("workspace-diff-editor-status", equals: "Side-by-side")
-        assertText("workspace-diff-highlight-status", equals: "1 change highlighted")
+        element("mark-viewed-untracked.txt").click()
+        XCTAssertTrue(element("workspace-change-viewed-untracked.txt").waitForExistence(timeout: 10))
+        let stagedStatus = try runGitOutput(fixture.changes, "status", "--porcelain", "--", "untracked.txt")
+        XCTAssertEqual(
+            stagedStatus.trimmingCharacters(in: .whitespacesAndNewlines),
+            "A  untracked.txt",
+            "Marking a new file viewed should stage it so later edits are detected."
+        )
+        try "Untracked file, edited after viewing.\n".write(to: fixture.changes.appendingPathComponent("untracked.txt"), atomically: true, encoding: .utf8)
+        element("refresh-workspace-changes-button").click()
+        XCTAssertTrue(element("workspace-change-unviewed-untracked.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-change-viewed-untracked.txt").exists)
+        element("workspace-change-unviewed-untracked.txt").click()
+        XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
+        let recreatedUntrackedValue = element("workspace-monaco-webview").value as? String ?? ""
+        XCTAssertTrue(recreatedUntrackedValue.contains("Original:\nUntracked file.\n"))
+        XCTAssertTrue(recreatedUntrackedValue.contains("Modified:\nUntracked file, edited after viewing.\n"))
+        app.typeKey(.escape, modifierFlags: [])
 
-        element("workspace-change-working-untracked.txt").click()
+        element("mark-viewed-deleted.txt").click()
+        try "Recreated after viewing.\n".write(to: fixture.changes.appendingPathComponent("deleted.txt"), atomically: true, encoding: .utf8)
+        element("refresh-workspace-changes-button").click()
+        XCTAssertTrue(element("workspace-change-unviewed-deleted.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-change-viewed-deleted.txt").exists)
+        assertText("workspace-change-viewed-deleted.txt", equals: "deleted.txt, deleted, reviewed")
+        assertText("workspace-change-unviewed-deleted.txt", equals: "deleted.txt, added, pending")
+        element("workspace-change-unviewed-deleted.txt").click()
+        XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
+        let recreatedMonacoValue = element("workspace-monaco-webview").value as? String ?? ""
+        XCTAssertTrue(recreatedMonacoValue.contains("Original:\n\nModified:\nRecreated after viewing.\n"))
+        app.typeKey(.escape, modifierFlags: [])
+        assertCLIError(
+            try runCLI(["task", "changes", "mark-viewed", taskID, "--repository", fixture.changes.path, "--path", "stale.txt"], expectedStatus: 3),
+            code: "not_found"
+        )
+
+        // A file that never existed in the branch base, created then renamed away by two
+        // separate file operations (not `git mv`, which Git would recognize as one rename),
+        // nets to zero change once both the deletion and the replacement are reviewed.
+        try "Ephemeral content.\n".write(to: fixture.changes.appendingPathComponent("ephemeral.txt"), atomically: true, encoding: .utf8)
+        element("refresh-workspace-changes-button").click()
+        XCTAssertTrue(element("mark-viewed-ephemeral.txt").waitForExistence(timeout: 10))
+        element("mark-viewed-ephemeral.txt").click()
+        XCTAssertTrue(element("workspace-change-viewed-ephemeral.txt").waitForExistence(timeout: 10))
+        try FileManager.default.removeItem(at: fixture.changes.appendingPathComponent("ephemeral.txt"))
+        element("refresh-workspace-changes-button").click()
+        XCTAssertTrue(
+            element("workspace-change-unviewed-ephemeral.txt").waitForExistence(timeout: 10),
+            "Deleting a reviewed new file lists the deletion as a change still to review."
+        )
+        element("mark-viewed-ephemeral.txt").click()
+        element("refresh-workspace-changes-button").click()
+        XCTAssertFalse(
+            element("workspace-change-viewed-ephemeral.txt").waitForExistence(timeout: 5),
+            "A reviewed file with no base content and no current file is zero net change, not a ghost entry."
+        )
+        XCTAssertFalse(element("workspace-change-unviewed-ephemeral.txt").exists)
+        try "Reborn content.\n".write(to: fixture.changes.appendingPathComponent("ephemeral.txt"), atomically: true, encoding: .utf8)
+        element("refresh-workspace-changes-button").click()
+        XCTAssertTrue(
+            element("workspace-change-unviewed-ephemeral.txt").waitForExistence(timeout: 10),
+            "Recreating the file afterward surfaces it as a fresh change to review."
+        )
+
+        element("workspace-change-unviewed-untracked.txt").click()
         assertText("workspace-diff-title", equals: "untracked.txt")
         assertText("workspace-diff-editor-status", equals: "Side-by-side")
-
-        element("workspace-change-working-syntax.json").click()
+        element("workspace-change-unviewed-syntax.json").click()
         assertText("workspace-diff-title", equals: "syntax.json")
         assertText("workspace-diff-editor-status", equals: "Side-by-side")
         assertText("workspace-diff-highlight-status", equals: "1 change highlighted")
-        attachScreenshot(named: "Monaco JSON diff uses the local JSON language worker")
         app.typeKey(.escape, modifierFlags: [])
-        XCTAssertFalse(element("workspace-diff-overlay").waitForExistence(timeout: 2))
         XCTAssertTrue(element("empty-conversation").exists, "Closing the diff should reveal the conversation again.")
-        attachScreenshot(named: "Conversation returns after closing the Monaco diff")
+
+        let changeDiagnostics = try diagnosticEvents()
+        XCTAssertTrue(changeDiagnostics.contains {
+            $0["event"] as? String == "workspace.files.inventory.succeeded" && Int($0["unviewedCount"] as? String ?? "0") ?? 0 > 0
+        })
+        XCTAssertTrue(changeDiagnostics.contains { $0["event"] as? String == "workspace.file.read.succeeded" })
+        XCTAssertFalse(
+            String(describing: changeDiagnostics).contains("Shared working version."),
+            "Diagnostics must not log changed file contents."
+        )
     }
 
-    // case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | External file edits and Git commits update the open task's changes sidebar automatically, and fresh CLI connections report the same Git status.
+    // case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory.
     func test_external_git_edits_and_commit_refresh_workspace_changes() throws {
         let repository = runDirectory.appendingPathComponent("external-git", isDirectory: true)
         try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
@@ -9006,26 +9111,55 @@ final class StationAIUITests: XCTestCase {
         try runGit(repository, "add", "tracked.txt")
         try runGit(repository, "commit", "-m", "Baseline")
 
-        let created = try runCLI(["task", "create", "--title", "External Git", "--root", repository.path])
-        XCTAssertEqual(created["ok"] as? Bool, true)
+        let created = try runCLI(["task", "create", "--title", "External Git"])
         let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
+        let added = try runCLI(["task", "repository", "add", taskID, "--repo", repository.path])
+        let record = try XCTUnwrap(((added["result"] as? [String: Any])?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        XCTAssertEqual(record["branchFrom"] as? String, "main")
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String), isDirectory: true)
+
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "External Git")
         XCTAssertTrue(element("workspace-changes-empty").waitForExistence(timeout: 10))
+        let initialInventory = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        XCTAssertEqual((initialInventory?["unviewed"] as? [[String: Any]])?.count, 0)
+        XCTAssertEqual((initialInventory?["viewed"] as? [[String: Any]])?.count, 0)
 
-        try "Edited externally.\n".write(to: trackedFile, atomically: true, encoding: .utf8)
-        XCTAssertTrue(element("workspace-change-working-tracked.txt").waitForExistence(timeout: 10))
-        let working = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
-        XCTAssertEqual((working?["working"] as? [[String: Any]])?.map { $0["path"] as? String }, ["tracked.txt"])
+        let branchFile = worktree.appendingPathComponent("tracked.txt")
+        try "Branch commit.\n".write(to: branchFile, atomically: true, encoding: .utf8)
+        try runGit(worktree, "add", "tracked.txt")
+        try runGit(worktree, "commit", "-m", "Task branch commit")
+        let baseOnlyFile = repository.appendingPathComponent("base-only.txt")
+        try "Base-only commit.\n".write(to: baseOnlyFile, atomically: true, encoding: .utf8)
+        try runGit(repository, "add", "base-only.txt")
+        try runGit(repository, "commit", "-m", "Base-only commit")
 
-        try runGit(repository, "add", "tracked.txt")
-        XCTAssertTrue(element("workspace-change-staged-tracked.txt").waitForExistence(timeout: 10))
-        try runGit(repository, "commit", "-m", "External commit")
-        XCTAssertTrue(element("workspace-changes-empty").waitForExistence(timeout: 10))
-        let clean = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
-        XCTAssertEqual((clean?["staged"] as? [Any])?.count, 0)
-        XCTAssertEqual((clean?["working"] as? [Any])?.count, 0)
-        attachScreenshot(named: "External Git commit clears the open changes sidebar")
+        XCTAssertTrue(element("workspace-change-unviewed-tracked.txt").waitForExistence(timeout: 10))
+        XCTAssertFalse(element("workspace-change-unviewed-base-only.txt").exists)
+        let branchInventory = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        let branchEntries = branchInventory?["unviewed"] as? [[String: Any]] ?? []
+        XCTAssertEqual(branchEntries.map { $0["path"] as? String }, ["tracked.txt"])
+        XCTAssertEqual(branchEntries.first?["isUncommitted"] as? Bool, false)
+        XCTAssertEqual(element("workspace-change-name-unviewed-tracked.txt").value as? String, "Committed, primary")
+
+        try "Edited externally.\n".write(to: branchFile, atomically: true, encoding: .utf8)
+        try "Untracked external file.\n".write(to: worktree.appendingPathComponent("untracked.txt"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(element("workspace-change-unviewed-untracked.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-change-unviewed-tracked.txt").waitForExistence(timeout: 10))
+        let dirty = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        XCTAssertEqual((dirty?["unviewed"] as? [[String: Any]])?.map { $0["path"] as? String }, ["tracked.txt", "untracked.txt"])
+        XCTAssertTrue((dirty?["unviewed"] as? [[String: Any]])?.allSatisfy { $0["isUncommitted"] as? Bool == true } ?? false)
+        XCTAssertEqual(element("workspace-change-name-unviewed-tracked.txt").value as? String, "Uncommitted, green")
+
+        try runGit(worktree, "add", "tracked.txt", "untracked.txt")
+        try runGit(worktree, "commit", "-m", "Second task branch commit")
+        let committed = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        let committedEntries = committed?["unviewed"] as? [[String: Any]] ?? []
+        XCTAssertEqual(committedEntries.map { $0["path"] as? String }, ["tracked.txt", "untracked.txt"])
+        XCTAssertTrue(committedEntries.allSatisfy { $0["isUncommitted"] as? Bool == false })
+        XCTAssertTrue(waitUntil({ self.element("workspace-change-name-unviewed-tracked.txt").value as? String == "Committed, primary" }, timeout: 10))
+        XCTAssertFalse(committedEntries.contains { $0["path"] as? String == "base-only.txt" })
+        attachScreenshot(named: "Branch changes exclude base-only commits and retain task commits")
     }
 
     /// The real provider selected for opt-in live UI cases, or nil for the

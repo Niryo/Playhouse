@@ -45,6 +45,7 @@ struct MonacoDiffEditor: NSViewRepresentable {
         context.coordinator.attach(webView)
         webView.setAccessibilityIdentifier("workspace-monaco-webview")
         webView.setAccessibilityLabel("Side-by-side diff for \(diff.path)")
+        webView.setAccessibilityValue(accessibilityDiffValue(diff))
         webView.underPageBackgroundColor = theme == "vs-dark" ? NSColor(calibratedWhite: 0.12, alpha: 1) : .white
         context.coordinator.onReady = { ready in isReady = ready }
         context.coordinator.onError = { message in loadError = message }
@@ -88,10 +89,16 @@ struct MonacoDiffEditor: NSViewRepresentable {
     func updateNSView(_ webView: WKWebView, context: Context) {
         webView.underPageBackgroundColor = theme == "vs-dark" ? NSColor(calibratedWhite: 0.12, alpha: 1) : .white
         webView.setAccessibilityLabel("Side-by-side diff for \(diff.path)")
+        webView.setAccessibilityValue(accessibilityDiffValue(diff))
         context.coordinator.onReady = { ready in isReady = ready }
         context.coordinator.onError = { message in loadError = message }
         context.coordinator.onDiffComputed = { count in diffChangeCount = count }
         context.coordinator.update(diff: diff, theme: theme)
+    }
+
+    private func accessibilityDiffValue(_ diff: WorkspaceFileDiff) -> String {
+        guard diff.isText else { return diff.message ?? "Text diff unavailable." }
+        return "Original:\n\(diff.original ?? "")\nModified:\n\(diff.modified ?? "")"
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate {
