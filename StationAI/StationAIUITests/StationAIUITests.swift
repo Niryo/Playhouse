@@ -6446,11 +6446,16 @@ final class StationAIUITests: XCTestCase {
         XCTAssertLessThan(reloaded.frame.minY, app.staticTexts["Context compaction completed."].frame.minY)
     }
 
-    // case-contract: test_conversation_loads_newest_messages_before_older_history | A 120-message conversation initially presents its newest 40 messages; scrolling to the top reveals older messages in batches without losing the newest messages or changing order. CLI/XPC history remains complete and ordered across fresh reads.
+    // case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation immediately presents only the latest user question, pinned to the top of the viewport with its answer below. Scrolling upward loads earlier messages automatically in 40-message batches, including when the latest turn alone is shorter than the viewport, while keeping the anchored message in place and preserving chronological order. No separate control is needed on systems that report scroll position; below macOS 15 the transcript keeps an explicit Load earlier messages control inside that runway instead. A conversation that was empty when it opened establishes no window and keeps the newest 40 messages rendered as they arrive. Reloading history in place reopens on that same latest turn and keeps upward paging working. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch.
     func test_conversation_loads_newest_messages_before_older_history() throws {
         let fixtureCopy = WorkspaceFixture.root.appendingPathComponent("codex-fixture-long-history-success")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureCopy.path), "The UI runner must prepare the long-history fixture before launch.")
         codexFixtureExecutable = fixtureCopy.path
+        // The case switches provider to reload history in place; the Claude
+        // fixture keeps that switch from reaching an installed Claude CLI.
+        let claudeExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: claudeExecutable.path), "The UI runner must prepare the Claude fixture before launch.")
+        claudeFixtureExecutable = claudeExecutable.path
         launchApp(defaultParent: fixture.primary.path)
         try createTaskFixture(title: "Long conversation history", roots: [fixture.primary.path])
         openTask(named: "Long conversation history")
@@ -6461,35 +6466,102 @@ final class StationAIUITests: XCTestCase {
         composer.typeText("Create a long history.")
         element("send-message-button").click()
 
-        let latest = app.staticTexts["Long history assistant 60."]
-        let oldest = app.staticTexts["Long history user 01."]
-        XCTAssertTrue(latest.waitForExistence(timeout: 20), "The conversation should open at its newest message.")
+        let latest = element("assistant-message-item_long_history_assistant_60")
+        let latestQuestion = element("user-message-item_long_history_user_60")
+        let oldest = element("user-message-item_long_history_user_1")
+        // A conversation that was empty when it opened establishes no window,
+        // so the messages it receives while it stays open keep the newest
+        // batch rendered rather than collapsing to the turn being answered.
+        let liveScrollView = element("conversation-scroll-view")
+        XCTAssertTrue(waitUntil({
+            liveScrollView.value as? String == "Showing latest 40 of 120 messages"
+        }, timeout: 20), "A live session should keep the newest batch rendered, not collapse to the latest turn.")
+        XCTAssertTrue(waitUntil({
+            !self.element("codex-working-duration").exists
+        }, timeout: 20), "The streamed long history should settle before the conversation is reopened.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10), "The completed long history should return to the board before reopening.")
+        openTask(named: "Long conversation history")
         let scrollView = element("conversation-scroll-view")
-        XCTAssertEqual(scrollView.value as? String, "Showing latest 40 of 120 messages", "The initial transcript window should contain exactly the newest 40 messages.")
+        XCTAssertTrue(waitUntil({
+            scrollView.value as? String == "Showing latest 2 of 120 messages"
+        }, timeout: 20), "Reopening should render only the latest user turn.")
+        XCTAssertTrue(latestQuestion.exists, "The latest user question should be rendered with its answer.")
+        XCTAssertTrue(latestQuestion.isHittable, "The latest user question should be visible immediately.")
+        XCTAssertTrue(latest.exists, "Reopening a populated conversation should immediately present the newest message.")
+        XCTAssertTrue(latest.isHittable, "The newest message should be visible as soon as the latest page loads.")
+        let latestQuestionTopGap = latestQuestion.frame.minY - scrollView.frame.minY
+        XCTAssertGreaterThanOrEqual(latestQuestionTopGap, -30, "The latest question should not start above the initial viewport.")
+        XCTAssertLessThanOrEqual(latestQuestionTopGap, 120, "Reopening should pin the latest question to the top of the viewport without traversing older pages.")
+        XCTAssertGreaterThan(latest.frame.minY, latestQuestion.frame.minY, "The latest answer should be rendered below the latest question.")
         XCTAssertFalse(oldest.exists, "Older messages should not be rendered in the initial message window.")
+        XCTAssertFalse(element("conversation-load-older-button").exists, "Earlier history should load only through upward scrolling, without a separate button.")
         let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID(named: "Long conversation history")])["result"] as? [String: Any])
         XCTAssertEqual((history["messages"] as? [[String: Any]])?.count, 120, "The CLI should retain complete history while the UI renders a recent window.")
 
-        let intermediate = app.staticTexts["Long history user 21."]
-        for _ in 0..<8 where (scrollView.value as? String) != "Showing latest 80 of 120 messages" {
-            scrollView.swipeDown()
+        let intermediate = element("user-message-item_long_history_user_21")
+        let firstLoadedUser = element("user-message-item_long_history_user_40")
+        // Wheel scrolling keeps the gesture deterministic: a swipe carries
+        // momentum past the newly revealed batch.
+        func isVisible(_ candidate: XCUIElement) -> Bool {
+            candidate.exists && scrollView.frame.intersects(candidate.frame)
         }
-        XCTAssertEqual(scrollView.value as? String, "Showing latest 80 of 120 messages", "Reaching the top should reveal one older batch at a time.")
-        XCTAssertTrue(intermediate.exists, "The first older batch should include message 21.")
-        XCTAssertFalse(oldest.exists, "The first older batch should not yet include the oldest message.")
+        func scrollTranscript(by delta: CGFloat, until condition: () -> Bool, limit: Int = 40, settle: TimeInterval = 0) {
+            for _ in 0..<limit where !condition() {
+                scrollView.scroll(byDeltaX: 0, deltaY: delta)
+                // Revealing a batch and restoring its anchor is asynchronous;
+                // scrolling again before it lands would move past the anchor.
+                if settle > 0 { _ = waitUntil(condition, timeout: settle) }
+            }
+        }
+        XCTAssertEqual(scrollView.value as? String, "Showing latest 2 of 120 messages", "Opening the conversation must not render earlier turns.")
+        XCTAssertFalse(intermediate.exists, "The first message in the excluded prior page should not be rendered before scrolling.")
+        scrollView.scroll(byDeltaX: 0, deltaY: 200)
+        XCTAssertTrue(waitUntil({
+            scrollView.value as? String == "Showing latest 42 of 120 messages"
+        }, timeout: 10), "An upward scroll should reveal an older batch even when the latest turn alone has no scroll range.")
+        XCTAssertFalse(isVisible(oldest), "The first older batch should not yet reach the oldest message.")
+        XCTAssertTrue(waitUntil({ isVisible(latestQuestion) }, timeout: 5), "Revealing the first older batch should keep the message the reader was on in view instead of jumping.")
+        XCTAssertLessThanOrEqual(abs(latestQuestion.frame.minY - scrollView.frame.minY), 150, "The message that was at the top should stay at the top when the older batch is inserted above it.")
 
-        for _ in 0..<8 where !oldest.exists {
-            scrollView.swipeDown()
-        }
-        XCTAssertTrue(oldest.waitForExistence(timeout: 10), "Scrolling to the top should reveal the oldest message in an earlier batch.")
+        scrollTranscript(by: 400, until: { scrollView.value as? String == "Showing latest 82 of 120 messages" }, limit: 30, settle: 1)
+        XCTAssertEqual(scrollView.value as? String, "Showing latest 82 of 120 messages", "Scrolling to the top should automatically load the next older batch.")
+        XCTAssertTrue(waitUntil({ isVisible(firstLoadedUser) }, timeout: 5), "The message that was at the top before pagination should stay in view.")
+        XCTAssertLessThanOrEqual(abs(firstLoadedUser.frame.minY - scrollView.frame.minY), 150, "Automatic pagination should preserve the visible top anchor.")
+        XCTAssertFalse(isVisible(oldest), "The second batch should still leave the oldest page out of view.")
+        scrollTranscript(by: 400, until: { scrollView.value as? String == "Showing latest 120 of 120 messages" }, limit: 30, settle: 1)
         XCTAssertEqual(scrollView.value as? String, "Showing latest 120 of 120 messages")
-        let firstAssistant = app.staticTexts["Long history assistant 01."]
-        XCTAssertTrue(firstAssistant.exists)
+        scrollTranscript(by: 1500, until: { isVisible(oldest) }, limit: 40)
+        XCTAssertTrue(waitUntil({ isVisible(oldest) }, timeout: 5), "Scrolling to the top should bring the oldest message into view.")
+        let firstAssistant = element("assistant-message-item_long_history_assistant_1")
+        XCTAssertTrue(waitUntil({ isVisible(firstAssistant) }, timeout: 5))
         XCTAssertLessThan(oldest.frame.minY, firstAssistant.frame.minY, "Older messages should retain chronological order after batches are inserted.")
-        for _ in 0..<8 where !latest.isHittable {
-            scrollView.swipeUp()
-        }
-        XCTAssertTrue(latest.isHittable, "Loading earlier messages should preserve and return to the newest content.")
+        let lastOlderAssistant = element("assistant-message-item_long_history_assistant_59")
+        scrollTranscript(by: -1500, until: { isVisible(lastOlderAssistant) && isVisible(latestQuestion) }, limit: 40)
+        XCTAssertTrue(waitUntil({ isVisible(lastOlderAssistant) }, timeout: 5), "The last earlier answer should remain reachable after all pages load.")
+        XCTAssertTrue(waitUntil({ isVisible(latestQuestion) }, timeout: 5), "The start of the initially rendered latest turn should be reachable.")
+        XCTAssertLessThan(lastOlderAssistant.frame.minY, latestQuestion.frame.minY, "Earlier history should remain in chronological order across the boundary into the latest turn.")
+        scrollTranscript(by: -1500, until: { isVisible(latest) }, limit: 40)
+        XCTAssertTrue(waitUntil({ isVisible(latest) }, timeout: 5), "Loading earlier messages should preserve and return to the newest content.")
+
+        // An in-place reload must reopen on the latest turn and keep upward
+        // paging working; a provider switch reloads history without leaving the
+        // conversation.
+        let providerMenu = element("conversation-provider-menu")
+        XCTAssertTrue(waitUntil({ providerMenu.isEnabled }, timeout: 10), "The provider menu should be available once the long history settles.")
+        providerMenu.click()
+        let claudeChoice = app.menuItems["conversation-provider-claude"]
+        XCTAssertTrue(claudeChoice.waitForExistence(timeout: 5))
+        claudeChoice.click()
+        XCTAssertTrue(waitUntil({
+            scrollView.value as? String == "Showing latest 2 of 120 messages"
+        }, timeout: 20), "Reloading history in place should reopen on the latest turn instead of keeping the revealed history.")
+        XCTAssertTrue(waitUntil({ isVisible(latestQuestion) }, timeout: 5), "The latest question should be visible again after an in-place reload.")
+        XCTAssertFalse(oldest.exists, "An in-place reload should not keep older messages rendered.")
+        scrollView.scroll(byDeltaX: 0, deltaY: 200)
+        XCTAssertTrue(waitUntil({
+            scrollView.value as? String == "Showing latest 42 of 120 messages"
+        }, timeout: 10), "Upward scrolling must still reveal earlier messages after an in-place reload.")
     }
 
     // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs.

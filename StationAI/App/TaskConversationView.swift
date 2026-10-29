@@ -285,8 +285,23 @@ struct TaskConversationView: View {
     @State private var isSwitchingProvider = false
     @State private var providerNotice: String?
     @State private var messages: [ConversationMessage] = []
-    @State private var visibleConversationMessageCount = 40
+    // Oldest message currently rendered in the transcript. The transcript keeps a
+    // window that starts here and runs to the newest message; opening a
+    // conversation starts the window at the latest user turn.
+    @State private var oldestRenderedMessageID: String?
+    @State private var isRevealingOlderConversationMessages = false
+    /// Set once the transcript has settled at or above the top of its rendered
+    /// window, which is what makes the next upward scroll reveal older
+    /// messages. Position has to be observed, never assumed, or a layout pass
+    /// taken before the newest turn is pinned reveals a batch on open.
+    @State private var isOlderConversationRevealArmed = false
+    /// True from the start of a history load until the newest turn has been
+    /// pinned, so load-time scroll requests cannot follow the bottom past it.
+    @State private var isLatestConversationTurnPinPending = true
     @State private var hasPresentedLatestConversation = false
+    /// Natural height of the rendered transcript, before the filler that keeps
+    /// the newest turn pinnable to the top of the viewport.
+    @State private var conversationContentHeight: CGFloat = 0
     @State private var lastScrolledUserMessageID: String?
     @State private var annotations: [ConversationAnnotation] = []
     @State private var annotationSelection: AnnotationSelection?
@@ -434,27 +449,152 @@ struct TaskConversationView: View {
 
     private var conversationMessages: [ConversationMessage] {
         let completedProgressIDs = progressMessageIDs
+        // Read on every layout pass and every scroll sample, so the common case
+        // of nothing collapsed must not copy the transcript.
+        guard !completedProgressIDs.isEmpty else { return messages }
         return messages.filter { !completedProgressIDs.contains($0.id) }
     }
 
-    private static let initialVisibleConversationMessageCount = 40
     private static let olderConversationMessageBatchSize = 40
+    /// How far the transcript must be dragged past the oldest rendered message
+    /// before the next older batch is revealed.
+    private static let olderConversationRevealThreshold: CGFloat = 24
+    /// Corrective scroll passes after the first one, in nanoseconds. A
+    /// `LazyVStack` row that was not realized when the scroll began is placed
+    /// from an estimate, so the position has to be reapplied once it exists.
+    private static let scrollSettleDelays: [UInt64] = [50_000_000]
 
+    /// First message of the newest user turn. Opening a conversation renders
+    /// this message and everything after it, so the latest question sits at the
+    /// top of the viewport with its answer below.
+    private var latestConversationTurnStartID: String? {
+        let allMessages = conversationMessages
+        return allMessages.last(where: { $0.role == .user })?.id ?? allMessages.last?.id
+    }
+
+    /// The window runs from `oldestRenderedMessageID` to the newest message.
+    /// A conversation that was empty when it loaded establishes no window of
+    /// its own, so it keeps the newest batch rendered as messages arrive.
     private var renderedConversationMessages: [ConversationMessage] {
         let allMessages = conversationMessages
-        return Array(allMessages.suffix(visibleConversationMessageCount))
+        guard let oldestRenderedMessageID,
+              let startIndex = allMessages.firstIndex(where: { $0.id == oldestRenderedMessageID }) else {
+            return Array(allMessages.suffix(Self.olderConversationMessageBatchSize))
+        }
+        return Array(allMessages[startIndex...])
     }
 
     private var hasOlderConversationMessages: Bool {
-        conversationMessages.count > renderedConversationMessages.count
+        // Answered from indices rather than by building the rendered window:
+        // every scroll sample asks this question.
+        let allMessages = conversationMessages
+        guard let oldestRenderedMessageID,
+              let startIndex = allMessages.firstIndex(where: { $0.id == oldestRenderedMessageID }) else {
+            return allMessages.count > Self.olderConversationMessageBatchSize
+        }
+        return startIndex > allMessages.startIndex
     }
 
-    private func revealOlderConversationMessages() {
-        guard hasOlderConversationMessages else { return }
-        visibleConversationMessageCount = min(
-            conversationMessages.count,
-            visibleConversationMessageCount + Self.olderConversationMessageBatchSize
-        )
+    /// Reveals the next older batch, keeping the message that was at the top of
+    /// the viewport in place so the transcript does not jump under the pointer.
+    private func revealOlderConversationMessages(using proxy: ScrollViewProxy) {
+        guard hasOlderConversationMessages, !isRevealingOlderConversationMessages else { return }
+        let allMessages = conversationMessages
+        guard let currentTopID = renderedConversationMessages.first?.id,
+              let currentStartIndex = allMessages.firstIndex(where: { $0.id == currentTopID }) else { return }
+        let newStartIndex = max(0, currentStartIndex - Self.olderConversationMessageBatchSize)
+        guard newStartIndex < currentStartIndex else { return }
+        isRevealingOlderConversationMessages = true
+        isOlderConversationRevealArmed = false
+        oldestRenderedMessageID = allMessages[newStartIndex].id
+        Task { @MainActor in
+            await Task.yield()
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            let restoreAnchor = { proxy.scrollTo(currentTopID, anchor: .top) }
+            withTransaction(transaction, restoreAnchor)
+            // The batch that was just inserted above the anchor is positioned
+            // from estimates until its rows are realized, so the anchor has to
+            // be restored again once they are.
+            for delay in Self.scrollSettleDelays {
+                try? await Task.sleep(nanoseconds: delay)
+                withTransaction(transaction, restoreAnchor)
+            }
+            isRevealingOlderConversationMessages = false
+        }
+    }
+
+    /// Handles a new position for the top of the rendered window, measured from
+    /// the top of the viewport. Dragging it below the threshold means the user
+    /// scrolled past the oldest rendered message, which reveals the next batch.
+    private func handleConversationWindowTop(_ windowTopY: CGFloat, using proxy: ScrollViewProxy) {
+        // This runs for every scroll sample, and publishing state re-renders the
+        // whole transcript, so the armed flag is only ever written when it
+        // actually changes.
+        guard hasOlderConversationMessages, !isRevealingOlderConversationMessages else {
+            if isOlderConversationRevealArmed { isOlderConversationRevealArmed = false }
+            return
+        }
+        let isWithinWindowTop = windowTopY <= Self.olderConversationRevealThreshold
+        guard isOlderConversationRevealArmed else {
+            // Arm only once the window top has settled at or above the top of
+            // the viewport. Position has to be observed, never assumed, or the
+            // layout pass taken before the newest turn is pinned reveals a
+            // batch on open.
+            if isWithinWindowTop { isOlderConversationRevealArmed = true }
+            return
+        }
+        guard !isWithinWindowTop else { return }
+        revealOlderConversationMessages(using: proxy)
+    }
+
+    /// Collapses the transcript to the newest user turn and pins that question
+    /// to the top of the viewport.
+    private func presentLatestConversationTurn(using proxy: ScrollViewProxy) {
+        guard let turnStartID = latestConversationTurnStartID else {
+            // Nothing to pin: an empty conversation renders everything it
+            // receives while it stays open.
+            isLatestConversationTurnPinPending = false
+            return
+        }
+        oldestRenderedMessageID = turnStartID
+        isOlderConversationRevealArmed = false
+        // This pin already puts the newest question at the top, so record it as
+        // the one in view; otherwise the next message count change scrolls to it
+        // a second time as though it had just been sent.
+        lastScrolledUserMessageID = conversationMessages.last(where: { $0.role == .user })?.id
+        Task { @MainActor in
+            await Task.yield()
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            let pin = { proxy.scrollTo(turnStartID, anchor: .top) }
+            withTransaction(transaction, pin)
+            // The rows below the pin are realized by that first scroll; pinning
+            // again lands on their real positions instead of estimates.
+            for delay in Self.scrollSettleDelays {
+                try? await Task.sleep(nanoseconds: delay)
+                withTransaction(transaction, pin)
+            }
+            hasPresentedLatestConversation = true
+            isLatestConversationTurnPinPending = false
+        }
+    }
+
+    /// Timeline anchors resolve against the whole transcript, while the
+    /// transcript renders a window that starts at the newest turn. Clamp an
+    /// anchor that falls above the window to its first rendered message so the
+    /// row still appears instead of disappearing with the messages it follows.
+    ///
+    /// Provider boundaries and goal achievements are state transitions that
+    /// stay meaningful wherever they are shown, so they are clamped. Context
+    /// compaction rows are not: they are positional markers whose meaning comes
+    /// from the two messages they sit between, and they reappear with those
+    /// messages as older batches are revealed.
+    private func renderedAnchorMessageID(for anchorID: String?) -> String? {
+        guard let anchorID else { return nil }
+        let rendered = renderedConversationMessages
+        if rendered.contains(where: { $0.id == anchorID }) { return anchorID }
+        return rendered.first?.id ?? anchorID
     }
 
     private func goalAchievementAnchorMessageID(for entry: GoalAchievementTimelineEntry) -> String? {
@@ -1569,8 +1709,46 @@ struct TaskConversationView: View {
     }
 
     private var conversation: some View {
-        ScrollViewReader { scrollProxy in
+        GeometryReader { viewport in
+            ScrollViewReader { scrollProxy in
             ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    // Scroll runway above the rendered window. It keeps an
+                    // upward drag available even when the latest turn alone is
+                    // shorter than the viewport, and it is replaced by the
+                    // earlier messages as soon as they are revealed.
+                    if hasOlderConversationMessages {
+                        Color.clear
+                            .frame(height: viewport.size.height)
+                            .accessibilityHidden(true)
+                        // Scroll position is only observable from macOS 15 on,
+                        // so older systems keep an explicit control rather than
+                        // an upward drag that cannot be detected.
+                        if #unavailable(macOS 15) {
+                            Button("Load earlier messages") {
+                                revealOlderConversationMessages(using: scrollProxy)
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .buttonHoverPointer()
+                            .help("Load 40 earlier messages.")
+                            .accessibilityIdentifier("conversation-load-older-button")
+                        }
+                    }
+                    // Tracks how far the top of the rendered window sits below
+                    // the top of the viewport, which is how an upward scroll is
+                    // detected.
+                    GeometryReader { geometry in
+                        Color.clear.preference(
+                            key: ConversationTopMarkerPositionKey.self,
+                            value: geometry.frame(in: .named(Self.conversationScrollCoordinateSpace)).minY
+                        )
+                    }
+                    .frame(height: 0)
+
                 VStack(alignment: .leading, spacing: 16) {
                     if messages.isEmpty && activeGoal?.status != "complete" && !isLoadingHistory {
                         VStack(spacing: 0) {
@@ -1611,26 +1789,19 @@ struct TaskConversationView: View {
                             ForEach(providerBoundaries.filter { $0.afterMessageID == nil }) { boundary in
                                 providerBoundaryRow(boundary)
                             }
-                            if hasOlderConversationMessages {
-                                Color.clear
-                                    .frame(height: 1)
-                                    .onAppear {
-                                        guard hasPresentedLatestConversation else { return }
-                                        revealOlderConversationMessages()
-                                    }
-                                    .accessibilityIdentifier("conversation-load-older-anchor")
-                            }
                             ForEach(renderedConversationMessages) { message in
                                 if shouldShowActivityDisclosure, message.id == activityDisclosureAnchorID {
                                     activityList
                                 }
                                 messageBubble(message)
                                     .id(message.id)
-                                ForEach(providerBoundaries.filter { boundaryAnchorID(for: $0) == message.id }) { boundary in
+                                ForEach(providerBoundaries.filter {
+                                    renderedAnchorMessageID(for: boundaryAnchorID(for: $0)) == message.id
+                                }) { boundary in
                                     providerBoundaryRow(boundary)
                                 }
                                 ForEach(goalAchievementTimelineEntries.filter {
-                                    goalAchievementAnchorMessageID(for: $0) == message.id
+                                    renderedAnchorMessageID(for: goalAchievementAnchorMessageID(for: $0)) == message.id
                                 }) { entry in
                                     goalAchievementTimelineRow(entry)
                                         .id(entry.id)
@@ -1692,15 +1863,66 @@ struct TaskConversationView: View {
                 .padding(.vertical, 24)
                 .frame(maxWidth: 820)
                 .frame(maxWidth: .infinity)
+                .background {
+                    GeometryReader { geometry in
+                        Color.clear.preference(
+                            key: ConversationScrollContentHeightKey.self,
+                            value: geometry.size.height
+                        )
+                    }
+                }
+
+                // Filler below the rendered window. Together with the runway
+                // above it, this is what lets a turn that is shorter than the
+                // viewport still be scrolled to the top.
+                if hasOlderConversationMessages {
+                    Color.clear
+                        .frame(height: max(0, viewport.size.height - conversationContentHeight))
+                        .accessibilityHidden(true)
+                }
+                }
             }
+            .coordinateSpace(name: Self.conversationScrollCoordinateSpace)
             .scrollIndicators(.visible)
             .accessibilityIdentifier("conversation-scroll-view")
             .accessibilityValue("Showing latest \(renderedConversationMessages.count) of \(conversationMessages.count) messages")
+            .onPreferenceChange(ConversationTopMarkerPositionKey.self) { markerY in
+                // Exactly one source drives the reveal: the scroll observer
+                // where it exists, this marker where it does not.
+                if #unavailable(macOS 15) {
+                    handleConversationWindowTop(markerY, using: scrollProxy)
+                }
+            }
+            .modifier(ConversationScrollOffsetObserver { offsetY in
+                // The runway occupies everything above the rendered window, so
+                // the distance from the viewport top to the window top is what
+                // is left of it.
+                handleConversationWindowTop(
+                    hasOlderConversationMessages ? viewport.size.height - offsetY : -offsetY,
+                    using: scrollProxy
+                )
+            })
+            .onPreferenceChange(ConversationScrollContentHeightKey.self) { height in
+                // Only "shorter than the viewport?" is ever asked of this value,
+                // and a LazyVStack keeps revising its measured height as rows
+                // realize while scrolling. Publishing each revision re-renders
+                // the whole transcript, so cap it once the content overflows.
+                let clamped = min(height, viewport.size.height + 1)
+                if clamped != conversationContentHeight { conversationContentHeight = clamped }
+            }
+            .onChange(of: isLoadingHistory) { _, isLoading in
+                // Every completed history load reopens on the newest turn,
+                // including reloads that leave the messages unchanged.
+                guard !isLoading else { return }
+                presentLatestConversationTurn(using: scrollProxy)
+            }
             .onChange(of: messages.count) { _, _ in
-                scrollToLatestUserMessage(using: scrollProxy)
+                scrollToLatestUserMessage(using: scrollProxy, viewportHeight: viewport.size.height)
             }
             .onChange(of: messages.map(\.text)) { _, _ in
-                if !hasPresentedLatestConversation { scrollToLatest(using: scrollProxy) }
+                if !hasPresentedLatestConversation {
+                    scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
+                }
             }
             .onChange(of: hasCompletedAssistantResponse) { _, hasCompletedResponse in
                 if hasCompletedResponse && activities.isEmpty {
@@ -1708,19 +1930,30 @@ struct TaskConversationView: View {
                 }
             }
             .onChange(of: activities) { _, _ in
-                if isResponding && !hasPresentedLatestConversation { scrollToLatest(using: scrollProxy) }
+                if isResponding && !hasPresentedLatestConversation {
+                    scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
+                }
             }
             .onChange(of: isResponding) { _, _ in
-                if !hasPresentedLatestConversation { scrollToLatest(using: scrollProxy) }
+                if !hasPresentedLatestConversation {
+                    scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
+                }
             }
             .onChange(of: activeGoal?.status) { _, status in
-                if status == "complete" && !hasPresentedLatestConversation { scrollToLatest(using: scrollProxy) }
+                if status == "complete" && !hasPresentedLatestConversation {
+                    scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
+                }
             }
             .onChange(of: goalAchievementTimelineEntries.count) { _, _ in
-                if !hasPresentedLatestConversation { scrollToLatest(using: scrollProxy) }
+                if !hasPresentedLatestConversation {
+                    scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
+                }
+            }
             }
         }
     }
+
+    private static let conversationScrollCoordinateSpace = "conversation-transcript-scroll"
 
     private var emptyConversationRepositoryTitle: String {
         var repositoryNames = task.repositoryWorktrees.map {
@@ -3374,6 +3607,11 @@ struct TaskConversationView: View {
 
     private func loadConversation() async {
         isLoadingHistory = true
+        hasPresentedLatestConversation = false
+        isLatestConversationTurnPinPending = true
+        isOlderConversationRevealArmed = false
+        conversationContentHeight = 0
+        oldestRenderedMessageID = nil
         errorMessage = nil
         let draftAtLoadStart = draft
         defer { isLoadingHistory = false }
@@ -3383,6 +3621,10 @@ struct TaskConversationView: View {
                 actionNotice = approvalNotice
             }
             messages = history.messages
+            // Resolve the window as soon as the messages land. The assignment
+            // at the end of the load repeats it once progress collapsing has
+            // settled which rows the transcript renders.
+            oldestRenderedMessageID = latestConversationTurnStartID
             let savedUserInputRequest = history.pendingUserInputRequest?.threadID == task.activeConversationID
                 ? history.pendingUserInputRequest
                 : nil
@@ -3394,7 +3636,6 @@ struct TaskConversationView: View {
             // but before that request has been persisted. Keep the live request
             // visible instead of letting that older snapshot clear it.
             userInputRequest = savedUserInputRequest ?? liveUserInputRequest
-            visibleConversationMessageCount = Self.initialVisibleConversationMessageCount
             restoreAnnotations(from: history.messages)
             answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
             activities = history.activities
@@ -3475,6 +3716,9 @@ struct TaskConversationView: View {
                         && (!isResponding || $0.turnID != activeTurnID)
                 }
                 .compactMap(\.turnID))
+            // Open on the newest turn. Progress-message collapsing above changes
+            // which rows the transcript renders, so resolve the window start here.
+            oldestRenderedMessageID = latestConversationTurnStartID
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -4566,24 +4810,59 @@ struct TaskConversationView: View {
         }
     }
 
-    private func scrollToLatest(using proxy: ScrollViewProxy) {
+    private func scrollToLatest(using proxy: ScrollViewProxy, viewportHeight: CGFloat) {
         guard !messages.isEmpty || !activities.isEmpty || activeGoal?.status == "complete" else { return }
+        // A load in progress owns the scroll position: following the bottom now
+        // would scroll past the question the transcript is about to pin.
+        if isLatestConversationTurnPinPending {
+            presentLatestConversationTurn(using: proxy)
+            return
+        }
+        // While the newest turn still fits the viewport, keep its question
+        // pinned to the top instead of following the bottom into the filler
+        // that makes that pin reachable.
+        if let turnStartID = latestConversationTurnStartID,
+           oldestRenderedMessageID == turnStartID,
+           conversationContentHeight > 0,
+           conversationContentHeight <= viewportHeight {
+            presentLatestConversationTurn(using: proxy)
+            return
+        }
         // Scroll to the real latest row. A synthetic target after LazyVStack can
         // be positioned using its estimated content height before the lazy rows
         // have settled, leaving the viewport in the blank space below the chat.
         let latestMessageID = renderedConversationMessages.last?.id
         // Defer until the state-driven content update has had a layout pass.
+        let shouldAnimate = hasPresentedLatestConversation
         Task { @MainActor in
             await Task.yield()
-            hasPresentedLatestConversation = true
+            // Record the question this presentation lands on, so a newly sent
+            // one is told apart from the one already in view.
             lastScrolledUserMessageID = renderedConversationMessages.last(where: { $0.role == .user })?.id
-            withAnimation(.easeOut(duration: 0.2)) {
+            let scroll = {
                 if let latestMessageID {
                     proxy.scrollTo(latestMessageID, anchor: .bottom)
                 } else {
                     proxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
                 }
             }
+            if shouldAnimate {
+                withAnimation(.easeOut(duration: 0.2), scroll)
+            } else {
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction, scroll)
+            }
+            // A LazyVStack places rows it has not realized yet from estimated
+            // heights, so the first scroll can stop short of the real last row.
+            // Scrolling again after it has been realized lands on it.
+            var settleTransaction = Transaction()
+            settleTransaction.disablesAnimations = true
+            for delay in Self.scrollSettleDelays {
+                try? await Task.sleep(nanoseconds: delay)
+                withTransaction(settleTransaction, scroll)
+            }
+            hasPresentedLatestConversation = true
         }
     }
 
@@ -4591,9 +4870,9 @@ struct TaskConversationView: View {
     /// top of the viewport and stay there while its answer streams in below — mirroring how
     /// ChatGPT/Claude.ai keep your question in view instead of auto-scrolling to chase the
     /// growing answer all the way to the bottom.
-    private func scrollToLatestUserMessage(using proxy: ScrollViewProxy) {
+    private func scrollToLatestUserMessage(using proxy: ScrollViewProxy, viewportHeight: CGFloat) {
         guard hasPresentedLatestConversation else {
-            scrollToLatest(using: proxy)
+            scrollToLatest(using: proxy, viewportHeight: viewportHeight)
             return
         }
         guard let latestUserMessage = renderedConversationMessages.last(where: { $0.role == .user }),
@@ -4605,6 +4884,41 @@ struct TaskConversationView: View {
                 proxy.scrollTo(latestUserMessage.id, anchor: .top)
             }
         }
+    }
+}
+
+/// Reports the transcript's scroll offset where the platform supports it. The
+/// preference-based marker stays as the fallback for macOS 14.
+private struct ConversationScrollOffsetObserver: ViewModifier {
+    let onOffsetChange: (CGFloat) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.onScrollGeometryChange(for: CGFloat.self) { geometry in
+                geometry.contentOffset.y
+            } action: { _, offsetY in
+                onOffsetChange(offsetY)
+            }
+        } else {
+            content
+        }
+    }
+}
+
+private struct ConversationTopMarkerPositionKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private struct ConversationScrollContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 

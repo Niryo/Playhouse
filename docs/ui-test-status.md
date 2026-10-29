@@ -1,11 +1,11 @@
 # Visible UI test status
 
-Updated: 2026-10-27 22:19:10 UTC+02:00
+Updated: 2026-10-29 12:00:00 UTC+02:00
 
 This ledger is authoritative for focused Tart runs. Confirmed green cases are
 not rerun; red cases are rerun only after a targeted repair.
 
-## Confirmed green (48; last added: 2026-10-27 22:19:10 UTC+02:00)
+## Confirmed green (49; last added: 2026-10-29 12:00:00 UTC+02:00)
 
 - `test_new_task_has_empty_conversation_history`
 - `test_service_reports_bridge_version`
@@ -65,6 +65,7 @@ not rerun; red cases are rerun only after a targeted repair.
 - `test_task_pr_create_reports_real_gh_failure`
   - Green runs: `20261027T200636Z-99122` (33.650s), `20261027T201215Z-3164` (43.405s), `20261027T201539Z-6345` (44.543s).
   - Fix: preserve and visibly verify native hover help, and expose the same instructions as stable accessibility labels on active and archived PR creation controls.
+- `test_conversation_loads_newest_messages_before_older_history`
 
 ## Confirmed red (19)
 
@@ -463,7 +464,6 @@ do not yet have focused Tart evidence recorded in this ledger:
 - `test_claude_stop_leaves_parallel_conversation_running`
 - `test_claude_agent_image_published_during_active_turn`
 - `test_codex_agent_image_published_during_active_turn`
-- `test_conversation_loads_newest_messages_before_older_history`
 - `test_claude_empty_question_request_is_rejected`
 - `test_claude_pending_question_recovers_after_provider_process_restarts`
 - `test_claude_pending_plan_mode_question_recovers_in_plan_mode`

@@ -4680,7 +4680,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertLess(user["timelineOrder"], reloaded_rows[0]["timelineOrder"])
         self.assertLess(reloaded_rows[0]["timelineOrder"], assistant["timelineOrder"])
 
-    # case-contract: test_conversation_loads_newest_messages_before_older_history | A 120-message conversation initially presents its newest 40 messages; scrolling to the top reveals older messages in batches without losing the newest messages or changing order. CLI/XPC history remains complete and ordered across fresh reads.
+    # case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation immediately presents only the latest user question, pinned to the top of the viewport with its answer below. Scrolling upward loads earlier messages automatically in 40-message batches, including when the latest turn alone is shorter than the viewport, while keeping the anchored message in place and preserving chronological order. No separate control is needed on systems that report scroll position; below macOS 15 the transcript keeps an explicit Load earlier messages control inside that runway instead. A conversation that was empty when it opened establishes no window and keeps the newest 40 messages rendered as they arrive. Reloading history in place reopens on that same latest turn and keeps upward paging working. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch.
     def test_conversation_loads_newest_messages_before_older_history(self):
         task_id = self.create_task(title="Long conversation history")["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -4705,6 +4705,14 @@ class StationAIBridgeTests(unittest.TestCase):
         fresh_response, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         fresh_messages = self.assert_success(fresh_response)["messages"]
         self.assertEqual([message["text"] for message in fresh_messages], [message["text"] for message in messages])
+        # An in-place reload (the provider switch the UI performs without
+        # leaving the conversation) must keep the whole transcript available to
+        # the window the transcript reopens on.
+        switched, _ = self.call_cli("conversation", "provider", task_id, "set", "claude", extra_environment=env)
+        self.assertEqual(self.assert_success(switched)["conversationProvider"], "claude")
+        reloaded_response, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        reloaded_messages = self.assert_success(reloaded_response)["messages"]
+        self.assertEqual([message["text"] for message in reloaded_messages], [message["text"] for message in messages])
 
     # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs.
     def test_conversation_shows_subagent_delegation(self):
