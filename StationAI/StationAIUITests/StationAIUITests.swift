@@ -8824,7 +8824,7 @@ final class StationAIUITests: XCTestCase {
         attachScreenshot(named: "StationAI recovers and continues work after an unexpected restart")
     }
 
-    // case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation. Diagnostics record inventory and file-read outcomes with paths and byte counts, without logging file contents.
+    // case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view lists every file changed from the task branch's recorded base in a Changes section below a collapsed Viewed section, including committed branch changes and current staged, unstaged, and untracked edits, and excluding commits unique to the base branch. Marking a file viewed saves its current contents, stages the file in Git, and adds a Viewed entry that keeps showing the reviewed work from the branch base to that snapshot. Work done after that review is listed again under Changes and diffed against the saved snapshot, so one file can appear in both sections at once; a path with no content in the branch base and no current file is zero net change and is hidden entirely, even with a stale viewed snapshot, rather than showing a ghost entry. Selecting text or JSON files opens a calculated side-by-side diff whose header names the baseline used. Viewed snapshots persist across fresh CLI/XPC connections. Files that aren't current Changes entries, including already-viewed and unknown paths, are rejected by the mark-viewed CLI operation, and the UI offers that action only for Changes entries. Uncommitted filenames are green. Diagnostics record inventory and file-read outcomes without logging file contents.
     func test_task_workspace_changes_group_staged_and_unstaged_diffs() throws {
         _ = try runCLI([
             "task", "create", "--title", "Git changes", "--root", fixture.changes.path
@@ -8832,97 +8832,176 @@ final class StationAIUITests: XCTestCase {
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "Git changes")
 
-        XCTAssertTrue(element("staged-changes-section").waitForExistence(timeout: 10))
-        XCTAssertTrue(element("working-changes-section").exists)
-        XCTAssertTrue(element("workspace-change-staged-shared.txt").exists)
-        XCTAssertTrue(element("workspace-change-working-shared.txt").exists)
-        XCTAssertTrue(element("workspace-change-working-untracked.txt").exists)
-        XCTAssertTrue(element("workspace-change-working-deleted.txt").exists)
-        XCTAssertTrue(element("workspace-change-working-syntax.json").exists)
-        XCTAssertTrue(element("workspace-change-staged-staged-deleted.txt").exists)
+        XCTAssertTrue(element("unviewed-changes-section").waitForExistence(timeout: 10))
+        assertText("unviewed-changes-title", equals: "Changes")
+        assertText("viewed-changes-title", equals: "Viewed")
+        XCTAssertTrue(element("viewed-changes-section").exists)
+        XCTAssertLessThan(element("viewed-changes-section").frame.minY, element("unviewed-changes-section").frame.minY)
+        XCTAssertTrue(element("workspace-change-unviewed-shared.txt").exists)
+        XCTAssertTrue(element("workspace-change-unviewed-untracked.txt").exists)
+        XCTAssertTrue(element("workspace-change-unviewed-deleted.txt").exists)
+        XCTAssertTrue(element("workspace-change-unviewed-syntax.json").exists)
+        XCTAssertTrue(element("mark-viewed-shared.txt").exists)
+        XCTAssertTrue(element("mark-viewed-deleted.txt").exists)
+        XCTAssertFalse(element("mark-viewed-stale.txt").exists)
+        XCTAssertEqual(app.buttons.matching(identifier: "workspace-change-unviewed-shared.txt").count, 1)
 
         let taskID = try taskID(named: "Git changes")
         let inventory = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
-        XCTAssertEqual((inventory?["staged"] as? [[String: Any]])?.count, 3)
-        XCTAssertEqual((inventory?["working"] as? [[String: Any]])?.count, 5)
-        let stagedDiff = try runCLI([
+        XCTAssertEqual((inventory?["unviewed"] as? [[String: Any]])?.count, 7)
+        XCTAssertEqual((inventory?["viewed"] as? [[String: Any]])?.count, 0)
+        let shared = try runCLI([
             "task", "changes", "diff", taskID,
             "--repository", fixture.changes.path,
             "--path", "shared.txt",
-            "--group", "staged"
+            "--group", "unviewed"
         ])["result"] as? [String: Any]
-        XCTAssertEqual(stagedDiff?["original"] as? String, "Shared baseline.\n")
-        XCTAssertEqual(stagedDiff?["modified"] as? String, "Shared index version.\n")
+        XCTAssertEqual(shared?["original"] as? String, "Shared baseline.\n")
+        XCTAssertEqual(shared?["modified"] as? String, "Shared working version.\n")
         assertCLIError(
             try runCLI([
                 "task", "changes", "diff", taskID,
                 "--repository", fixture.changes.path,
                 "--path", "stale.txt",
-                "--group", "working",
+                "--group", "unviewed",
             ], expectedStatus: 3),
             code: "not_found"
         )
-        let changeDiagnostics = try diagnosticEvents()
-        XCTAssertTrue(changeDiagnostics.contains {
-            $0["event"] as? String == "workspace.files.inventory.succeeded"
-                && $0["stagedCount"] as? String == "3"
-                && $0["workingCount"] as? String == "5"
-        })
-        let stagedRead = try XCTUnwrap(changeDiagnostics.first {
-            $0["event"] as? String == "workspace.file.read.succeeded"
-                && $0["path"] as? String == "shared.txt"
-                && $0["group"] as? String == "staged"
-        })
-        XCTAssertGreaterThan(Int(stagedRead["originalBytes"] as? String ?? "0") ?? 0, 0)
-        XCTAssertGreaterThan(Int(stagedRead["modifiedBytes"] as? String ?? "0") ?? 0, 0)
-        XCTAssertTrue(changeDiagnostics.contains {
-            $0["event"] as? String == "workspace.file.read.failed" && $0["path"] as? String == "stale.txt"
-        })
-        let serializedChangeDiagnostics = String(data: try JSONSerialization.data(withJSONObject: changeDiagnostics), encoding: .utf8) ?? ""
-        XCTAssertFalse(serializedChangeDiagnostics.contains("Shared index version."))
 
-        let uiDiffReadCountBeforeClick = try diagnosticEvents().filter {
-            $0["event"] as? String == "workspace.file.read.succeeded"
-                && $0["path"] as? String == "shared.txt"
-                && $0["group"] as? String == "staged"
-        }.count
-        element("workspace-change-staged-shared.txt").click()
+        element("workspace-change-unviewed-shared.txt").click()
         XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
-        XCTAssertTrue(waitUntil({
-            guard let events = try? self.diagnosticEvents() else { return false }
-            return events.filter {
-                $0["event"] as? String == "workspace.file.read.succeeded"
-                    && $0["path"] as? String == "shared.txt"
-                    && $0["group"] as? String == "staged"
-            }.count > uiDiffReadCountBeforeClick
-        }, timeout: 10), "Opening the visible file diff should record a new successful workspace file read.")
         assertText("workspace-diff-title", equals: "shared.txt")
-        assertText("workspace-diff-source", equals: "suggested-parent/changes · Staged")
+        assertText("workspace-diff-source", equals: "suggested-parent/changes · Since branch base")
+        assertText("workspace-diff-editor-status", equals: "Side-by-side")
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertFalse(element("workspace-diff-overlay").waitForExistence(timeout: 2))
+
+        element("mark-viewed-shared.txt").click()
+        let marked = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        XCTAssertFalse(((marked?["unviewed"] as? [[String: Any]]) ?? []).contains { $0["path"] as? String == "shared.txt" })
+        XCTAssertTrue(((marked?["viewed"] as? [[String: Any]]) ?? []).contains { $0["path"] as? String == "shared.txt" })
+        element("viewed-changes-section").click()
+        XCTAssertTrue(element("workspace-change-viewed-shared.txt").waitForExistence(timeout: 10))
+        XCTAssertFalse(element("mark-viewed-shared.txt").exists, "Viewed entries must not offer the mark-viewed action.")
+        try "Edited after viewing.\n".write(to: fixture.changes.appendingPathComponent("shared.txt"), atomically: true, encoding: .utf8)
+        element("refresh-workspace-changes-button").click()
+        XCTAssertTrue(
+            element("workspace-change-unviewed-shared.txt").waitForExistence(timeout: 10),
+            "A later edit should be listed as a change still to review."
+        )
+        XCTAssertTrue(
+            element("workspace-change-viewed-shared.txt").exists,
+            "The already-reviewed work should stay listed under Viewed."
+        )
+        element("workspace-change-viewed-shared.txt").click()
+        XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
+        assertText("workspace-diff-source", equals: "suggested-parent/changes · Since branch base")
+        let reviewedMonacoValue = element("workspace-monaco-webview").value as? String ?? ""
+        XCTAssertTrue(reviewedMonacoValue.contains("Original:\nShared baseline.\n"))
+        XCTAssertTrue(
+            reviewedMonacoValue.contains("Modified:\nShared working version.\n"),
+            "The viewed diff must stay at the reviewed snapshot, not follow later edits."
+        )
+        app.typeKey(.escape, modifierFlags: [])
+        element("workspace-change-unviewed-shared.txt").click()
+        XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
+        assertText("workspace-diff-source", equals: "suggested-parent/changes · Since last viewed")
         assertText("workspace-diff-editor-status", equals: "Side-by-side")
         assertText("workspace-diff-highlight-status", equals: "1 change highlighted")
-        attachScreenshot(named: "Monaco staged diff overlays the task conversation")
+        let viewedMonacoValue = element("workspace-monaco-webview").value as? String ?? ""
+        XCTAssertTrue(viewedMonacoValue.contains("Original:\nShared working version.\n"))
+        XCTAssertTrue(viewedMonacoValue.contains("Modified:\nEdited after viewing.\n"))
+        XCTAssertEqual(element("workspace-change-name-unviewed-shared.txt").value as? String, "Uncommitted, green")
+        XCTAssertEqual(element("workspace-change-name-viewed-shared.txt").value as? String, "Uncommitted, green")
+        app.typeKey(.escape, modifierFlags: [])
+        attachScreenshot(named: "A re-edited file is listed under both Viewed and Changes")
 
-        element("workspace-change-working-shared.txt").click()
-        assertText("workspace-diff-source", equals: "suggested-parent/changes · Working tree")
-        assertText("workspace-diff-editor-status", equals: "Side-by-side")
-        assertText("workspace-diff-highlight-status", equals: "1 change highlighted")
+        element("mark-viewed-untracked.txt").click()
+        XCTAssertTrue(element("workspace-change-viewed-untracked.txt").waitForExistence(timeout: 10))
+        let stagedStatus = try runGitOutput(fixture.changes, "status", "--porcelain", "--", "untracked.txt")
+        XCTAssertEqual(
+            stagedStatus.trimmingCharacters(in: .whitespacesAndNewlines),
+            "A  untracked.txt",
+            "Marking a new file viewed should stage it so later edits are detected."
+        )
+        try "Untracked file, edited after viewing.\n".write(to: fixture.changes.appendingPathComponent("untracked.txt"), atomically: true, encoding: .utf8)
+        element("refresh-workspace-changes-button").click()
+        XCTAssertTrue(element("workspace-change-unviewed-untracked.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-change-viewed-untracked.txt").exists)
+        element("workspace-change-unviewed-untracked.txt").click()
+        XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
+        let recreatedUntrackedValue = element("workspace-monaco-webview").value as? String ?? ""
+        XCTAssertTrue(recreatedUntrackedValue.contains("Original:\nUntracked file.\n"))
+        XCTAssertTrue(recreatedUntrackedValue.contains("Modified:\nUntracked file, edited after viewing.\n"))
+        app.typeKey(.escape, modifierFlags: [])
 
-        element("workspace-change-working-untracked.txt").click()
+        element("mark-viewed-deleted.txt").click()
+        try "Recreated after viewing.\n".write(to: fixture.changes.appendingPathComponent("deleted.txt"), atomically: true, encoding: .utf8)
+        element("refresh-workspace-changes-button").click()
+        XCTAssertTrue(element("workspace-change-unviewed-deleted.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-change-viewed-deleted.txt").exists)
+        assertText("workspace-change-viewed-deleted.txt", equals: "deleted.txt, deleted, reviewed")
+        assertText("workspace-change-unviewed-deleted.txt", equals: "deleted.txt, added, pending")
+        element("workspace-change-unviewed-deleted.txt").click()
+        XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
+        let recreatedMonacoValue = element("workspace-monaco-webview").value as? String ?? ""
+        XCTAssertTrue(recreatedMonacoValue.contains("Original:\n\nModified:\nRecreated after viewing.\n"))
+        app.typeKey(.escape, modifierFlags: [])
+        assertCLIError(
+            try runCLI(["task", "changes", "mark-viewed", taskID, "--repository", fixture.changes.path, "--path", "stale.txt"], expectedStatus: 3),
+            code: "not_found"
+        )
+
+        // A file that never existed in the branch base, created then renamed away by two
+        // separate file operations (not `git mv`, which Git would recognize as one rename),
+        // nets to zero change once both the deletion and the replacement are reviewed.
+        try "Ephemeral content.\n".write(to: fixture.changes.appendingPathComponent("ephemeral.txt"), atomically: true, encoding: .utf8)
+        element("refresh-workspace-changes-button").click()
+        XCTAssertTrue(element("mark-viewed-ephemeral.txt").waitForExistence(timeout: 10))
+        element("mark-viewed-ephemeral.txt").click()
+        XCTAssertTrue(element("workspace-change-viewed-ephemeral.txt").waitForExistence(timeout: 10))
+        try FileManager.default.removeItem(at: fixture.changes.appendingPathComponent("ephemeral.txt"))
+        element("refresh-workspace-changes-button").click()
+        XCTAssertTrue(
+            element("workspace-change-unviewed-ephemeral.txt").waitForExistence(timeout: 10),
+            "Deleting a reviewed new file lists the deletion as a change still to review."
+        )
+        element("mark-viewed-ephemeral.txt").click()
+        element("refresh-workspace-changes-button").click()
+        XCTAssertFalse(
+            element("workspace-change-viewed-ephemeral.txt").waitForExistence(timeout: 5),
+            "A reviewed file with no base content and no current file is zero net change, not a ghost entry."
+        )
+        XCTAssertFalse(element("workspace-change-unviewed-ephemeral.txt").exists)
+        try "Reborn content.\n".write(to: fixture.changes.appendingPathComponent("ephemeral.txt"), atomically: true, encoding: .utf8)
+        element("refresh-workspace-changes-button").click()
+        XCTAssertTrue(
+            element("workspace-change-unviewed-ephemeral.txt").waitForExistence(timeout: 10),
+            "Recreating the file afterward surfaces it as a fresh change to review."
+        )
+
+        element("workspace-change-unviewed-untracked.txt").click()
         assertText("workspace-diff-title", equals: "untracked.txt")
         assertText("workspace-diff-editor-status", equals: "Side-by-side")
-
-        element("workspace-change-working-syntax.json").click()
+        element("workspace-change-unviewed-syntax.json").click()
         assertText("workspace-diff-title", equals: "syntax.json")
         assertText("workspace-diff-editor-status", equals: "Side-by-side")
         assertText("workspace-diff-highlight-status", equals: "1 change highlighted")
-        attachScreenshot(named: "Monaco JSON diff uses the local JSON language worker")
         app.typeKey(.escape, modifierFlags: [])
-        XCTAssertFalse(element("workspace-diff-overlay").waitForExistence(timeout: 2))
         XCTAssertTrue(element("empty-conversation").exists, "Closing the diff should reveal the conversation again.")
-        attachScreenshot(named: "Conversation returns after closing the Monaco diff")
+
+        let changeDiagnostics = try diagnosticEvents()
+        XCTAssertTrue(changeDiagnostics.contains {
+            $0["event"] as? String == "workspace.files.inventory.succeeded" && Int($0["unviewedCount"] as? String ?? "0") ?? 0 > 0
+        })
+        XCTAssertTrue(changeDiagnostics.contains { $0["event"] as? String == "workspace.file.read.succeeded" })
+        XCTAssertFalse(
+            String(describing: changeDiagnostics).contains("Shared working version."),
+            "Diagnostics must not log changed file contents."
+        )
     }
 
-    // case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | External file edits and Git commits update the open task's changes sidebar automatically, and fresh CLI connections report the same Git status.
+    // case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory.
     func test_external_git_edits_and_commit_refresh_workspace_changes() throws {
         let repository = runDirectory.appendingPathComponent("external-git", isDirectory: true)
         try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
@@ -8934,26 +9013,55 @@ final class StationAIUITests: XCTestCase {
         try runGit(repository, "add", "tracked.txt")
         try runGit(repository, "commit", "-m", "Baseline")
 
-        let created = try runCLI(["task", "create", "--title", "External Git", "--root", repository.path])
-        XCTAssertEqual(created["ok"] as? Bool, true)
+        let created = try runCLI(["task", "create", "--title", "External Git"])
         let taskID = try XCTUnwrap((created["result"] as? [String: Any])?["id"] as? String)
+        let added = try runCLI(["task", "repository", "add", taskID, "--repo", repository.path])
+        let record = try XCTUnwrap(((added["result"] as? [String: Any])?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        XCTAssertEqual(record["branchFrom"] as? String, "main")
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String), isDirectory: true)
+
         launchApp(defaultParent: fixture.parent.path)
         openTask(named: "External Git")
         XCTAssertTrue(element("workspace-changes-empty").waitForExistence(timeout: 10))
+        let initialInventory = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        XCTAssertEqual((initialInventory?["unviewed"] as? [[String: Any]])?.count, 0)
+        XCTAssertEqual((initialInventory?["viewed"] as? [[String: Any]])?.count, 0)
 
-        try "Edited externally.\n".write(to: trackedFile, atomically: true, encoding: .utf8)
-        XCTAssertTrue(element("workspace-change-working-tracked.txt").waitForExistence(timeout: 10))
-        let working = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
-        XCTAssertEqual((working?["working"] as? [[String: Any]])?.map { $0["path"] as? String }, ["tracked.txt"])
+        let branchFile = worktree.appendingPathComponent("tracked.txt")
+        try "Branch commit.\n".write(to: branchFile, atomically: true, encoding: .utf8)
+        try runGit(worktree, "add", "tracked.txt")
+        try runGit(worktree, "commit", "-m", "Task branch commit")
+        let baseOnlyFile = repository.appendingPathComponent("base-only.txt")
+        try "Base-only commit.\n".write(to: baseOnlyFile, atomically: true, encoding: .utf8)
+        try runGit(repository, "add", "base-only.txt")
+        try runGit(repository, "commit", "-m", "Base-only commit")
 
-        try runGit(repository, "add", "tracked.txt")
-        XCTAssertTrue(element("workspace-change-staged-tracked.txt").waitForExistence(timeout: 10))
-        try runGit(repository, "commit", "-m", "External commit")
-        XCTAssertTrue(element("workspace-changes-empty").waitForExistence(timeout: 10))
-        let clean = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
-        XCTAssertEqual((clean?["staged"] as? [Any])?.count, 0)
-        XCTAssertEqual((clean?["working"] as? [Any])?.count, 0)
-        attachScreenshot(named: "External Git commit clears the open changes sidebar")
+        XCTAssertTrue(element("workspace-change-unviewed-tracked.txt").waitForExistence(timeout: 10))
+        XCTAssertFalse(element("workspace-change-unviewed-base-only.txt").exists)
+        let branchInventory = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        let branchEntries = branchInventory?["unviewed"] as? [[String: Any]] ?? []
+        XCTAssertEqual(branchEntries.map { $0["path"] as? String }, ["tracked.txt"])
+        XCTAssertEqual(branchEntries.first?["isUncommitted"] as? Bool, false)
+        XCTAssertEqual(element("workspace-change-name-unviewed-tracked.txt").value as? String, "Committed, primary")
+
+        try "Edited externally.\n".write(to: branchFile, atomically: true, encoding: .utf8)
+        try "Untracked external file.\n".write(to: worktree.appendingPathComponent("untracked.txt"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(element("workspace-change-unviewed-untracked.txt").waitForExistence(timeout: 10))
+        XCTAssertTrue(element("workspace-change-unviewed-tracked.txt").waitForExistence(timeout: 10))
+        let dirty = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        XCTAssertEqual((dirty?["unviewed"] as? [[String: Any]])?.map { $0["path"] as? String }, ["tracked.txt", "untracked.txt"])
+        XCTAssertTrue((dirty?["unviewed"] as? [[String: Any]])?.allSatisfy { $0["isUncommitted"] as? Bool == true } ?? false)
+        XCTAssertEqual(element("workspace-change-name-unviewed-tracked.txt").value as? String, "Uncommitted, green")
+
+        try runGit(worktree, "add", "tracked.txt", "untracked.txt")
+        try runGit(worktree, "commit", "-m", "Second task branch commit")
+        let committed = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        let committedEntries = committed?["unviewed"] as? [[String: Any]] ?? []
+        XCTAssertEqual(committedEntries.map { $0["path"] as? String }, ["tracked.txt", "untracked.txt"])
+        XCTAssertTrue(committedEntries.allSatisfy { $0["isUncommitted"] as? Bool == false })
+        XCTAssertTrue(waitUntil({ self.element("workspace-change-name-unviewed-tracked.txt").value as? String == "Committed, primary" }, timeout: 10))
+        XCTAssertFalse(committedEntries.contains { $0["path"] as? String == "base-only.txt" })
+        attachScreenshot(named: "Branch changes exclude base-only commits and retain task commits")
     }
 
     /// The real provider selected for opt-in live UI cases, or nil for the

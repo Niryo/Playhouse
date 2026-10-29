@@ -101,6 +101,7 @@ final class BoardTask {
     var draftImageDataURLsData: Data?
     var conversationActivityDurationsData: Data?
     var answeredAsyncQuestionIDsData: Data?
+    var viewedWorkspaceChangesData: Data?
 
     var answeredAsyncQuestionIDs: [String] {
         get {
@@ -215,6 +216,7 @@ final class BoardTask {
         draftImageDataURLsData = nil
         conversationActivityDurationsData = nil
         answeredAsyncQuestionIDsData = nil
+        viewedWorkspaceChangesData = nil
     }
 }
 

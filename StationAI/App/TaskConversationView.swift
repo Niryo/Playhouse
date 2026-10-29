@@ -300,7 +300,8 @@ struct TaskConversationView: View {
     @State private var subagentHistory: ConversationHistory?
     @State private var isLoadingSubagent = false
     @State private var subagentError: String?
-    @State private var changeInventory = WorkspaceChangeInventory(staged: [], working: [])
+    @State private var changeInventory = WorkspaceChangeInventory(unviewed: [], viewed: [])
+    @State private var isViewedSectionExpanded = false
     @State private var isLoadingChanges = false
     @State private var changesNeedRefresh = false
     @State private var changeWatcher: WorkspaceChangeWatcher?
@@ -749,8 +750,8 @@ struct TaskConversationView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 15) {
-                        changeSection(title: "Staged Changes", entries: changeInventory.staged)
-                        changeSection(title: "Changes", entries: changeInventory.working)
+                        changeSection(title: "Viewed", entries: changeInventory.viewed)
+                        changeSection(title: "Changes", entries: changeInventory.unviewed)
                     }
                     .padding(.vertical, 12)
                 }
@@ -765,24 +766,42 @@ struct TaskConversationView: View {
         .accessibilityIdentifier("task-sidebar")
     }
 
+    /// A Viewed row always shows the reviewed work from the branch base; only a change made
+    /// after that review is measured from the saved snapshot.
+    private func diffBaselineLabel(_ entry: WorkspaceChangeEntry) -> String {
+        entry.group == .unviewed && entry.hasViewedSnapshot ? "Since last viewed" : "Since branch base"
+    }
+
     private func changeSection(title: String, entries: [WorkspaceChangeEntry]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 7) {
-                Image(systemName: title == "Staged Changes" ? "checkmark.circle.fill" : "circle.dashed")
+                Image(systemName: title == "Viewed" ? "checkmark.circle.fill" : "circle.dashed")
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(title == "Staged Changes" ? .green : .secondary)
+                    .foregroundStyle(title == "Viewed" ? .green : .secondary)
                 Text(title)
                     .font(.system(size: 11, weight: .semibold))
                     .lineLimit(1)
+                    .accessibilityIdentifier(title == "Viewed" ? "viewed-changes-title" : "unviewed-changes-title")
                 Text("\(entries.count)")
                     .font(.system(size: 10, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
+                if title == "Viewed" {
+                    Image(systemName: isViewedSectionExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(.horizontal, 14)
-            .accessibilityIdentifier(title == "Staged Changes" ? "staged-changes-section" : "working-changes-section")
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if title == "Viewed" { isViewedSectionExpanded.toggle() }
+            }
+            .accessibilityIdentifier(title == "Viewed" ? "viewed-changes-section" : "unviewed-changes-section")
 
-            if entries.isEmpty {
+            if title == "Viewed" && !isViewedSectionExpanded {
+                EmptyView()
+            } else if entries.isEmpty {
                 Text("No files")
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
@@ -791,7 +810,7 @@ struct TaskConversationView: View {
             } else {
                 let groups = repositoryGroups(entries)
                 ForEach(groups, id: \.repository) { repositoryGroup in
-                    if Set(changeInventory.staged.map(\.repository) + changeInventory.working.map(\.repository)).count > 1 {
+                    if Set(changeInventory.unviewed.map(\.repository) + changeInventory.viewed.map(\.repository)).count > 1 {
                         Text(repositoryLabel(repositoryGroup.repository))
                             .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(.secondary)
@@ -802,38 +821,53 @@ struct TaskConversationView: View {
                             .accessibilityIdentifier("workspace-repository-\(repositoryGroup.repository.hashValue)")
                     }
                     ForEach(repositoryGroup.entries) { entry in
-                        Button {
-                            openDiff(entry)
-                        } label: {
-                            HStack(spacing: 7) {
+                        HStack(spacing: 2) {
+                            Button {
+                                openDiff(entry)
+                            } label: {
+                                HStack(spacing: 7) {
                                 Image(systemName: changeSymbol(for: entry.status))
                                     .font(.system(size: 10, weight: .medium))
                                     .foregroundStyle(changeColor(for: entry.status))
                                     .frame(width: 12)
                                 Text(entry.path)
                                     .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(entry.isUncommitted ? Color.green : Color.primary)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
+                                    .accessibilityIdentifier("workspace-change-name-\(entry.group.rawValue)-\(entry.path)")
+                                    .accessibilityValue(entry.isUncommitted ? "Uncommitted, green" : "Committed, primary")
                                 Spacer(minLength: 0)
                                 Text(statusBadge(for: entry))
                                     .font(.system(size: 9, weight: .medium, design: .monospaced))
                                     .foregroundStyle(changeColor(for: entry.status))
                             }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 5)
-                            .contentShape(Rectangle())
-                            .background(
-                                selectedChange?.id == entry.id
-                                    ? Color.accentColor.opacity(0.15)
-                                    : Color.clear,
-                                in: RoundedRectangle(cornerRadius: 5)
-                            )
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .contentShape(Rectangle())
+                                .background(selectedChange?.id == entry.id ? Color.accentColor.opacity(0.15) : Color.clear, in: RoundedRectangle(cornerRadius: 5))
+                            }
+                            .buttonHoverPointer()
+                            .buttonStyle(.plain)
+                            .help("View \(entry.group.displayName) diff for \(entry.path)")
+                            .accessibilityLabel("\(entry.path), \(entry.status), \(entry.group.displayName)")
+                            .accessibilityIdentifier("workspace-change-\(entry.group.rawValue)-\(entry.path)")
+                            if entry.group == .unviewed {
+                                Button {
+                                    Task { await markViewed(entry) }
+                                } label: {
+                                    Image(systemName: "checkmark.circle")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 20, height: 22)
+                                }
+                                .buttonStyle(.plain)
+                                .buttonHoverPointer()
+                                .help("Mark as viewed")
+                                .accessibilityLabel("Mark \(entry.path) as viewed")
+                                .accessibilityIdentifier("mark-viewed-\(entry.path)")
+                            }
                         }
-                        .buttonHoverPointer()
-                        .buttonStyle(.plain)
-                        .help("View \(entry.group.rawValue) diff for \(entry.path)")
-                        .accessibilityLabel("\(entry.path), \(entry.status), \(entry.group.rawValue)")
-                        .accessibilityIdentifier("workspace-change-\(entry.group.rawValue)-\(entry.path)")
                         .padding(.horizontal, 7)
                     }
                 }
@@ -957,7 +991,7 @@ struct TaskConversationView: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                             .accessibilityIdentifier("workspace-diff-title")
-                        Text("\(repositoryLabel(selectedChange.repository)) · \(selectedChange.group == .staged ? "Staged" : "Working tree")")
+                        Text("\(repositoryLabel(selectedChange.repository)) · \(diffBaselineLabel(selectedChange))")
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                             .accessibilityIdentifier("workspace-diff-source")
@@ -1112,6 +1146,15 @@ struct TaskConversationView: View {
         }
     }
 
+    private func markViewed(_ entry: WorkspaceChangeEntry) async {
+        do {
+            try await workspaceManager.markViewed(for: task.id, repository: entry.repository, path: entry.path)
+            await refreshWorkspaceChanges()
+        } catch {
+            changesError = error.localizedDescription
+        }
+    }
+
     private func refreshWorkspaceChanges() async {
         guard !isLoadingChanges else {
             changesNeedRefresh = true
@@ -1127,7 +1170,7 @@ struct TaskConversationView: View {
                 changeInventory = inventory
                 changesError = nil
                 if let selectedChange {
-                    if let current = (inventory.staged + inventory.working).first(where: { $0.id == selectedChange.id }) {
+                    if let current = (inventory.unviewed + inventory.viewed).first(where: { $0.id == selectedChange.id }) {
                         self.selectedChange = current
                         if isDiffPresented {
                             do {
