@@ -25,6 +25,8 @@ enum StationAICLI {
         configuredRequest.dataDirectory = dataDirectory
         configuredRequest.defaultsSuite = defaultsSuite
         configuredRequest.worktreeDirectory = ProcessInfo.processInfo.environment["STATIONAI_E2E_WORKTREE_DIRECTORY"]
+        configuredRequest.environment = ProcessInfo.processInfo.environment
+            .filter { BridgeContract.sessionEnvironmentNames.contains($0.key) }
         if let fixtureExecutable = ProcessInfo.processInfo.environment["STATIONAI_E2E_CODEX_EXECUTABLE"] {
             configuredRequest.arguments["__codexExecutable"] = .string(fixtureExecutable)
         }
@@ -155,6 +157,15 @@ enum StationAICLI {
                 return BridgeRequest(command: "task.outcome", arguments: [
                     "taskID": .string(tail[0]), "outcome": .string(tail[1])
                 ])
+            case "reconcile":
+                guard tail.count == 1 else { throw CLIError.usage("Use: stationai task reconcile <task-id>") }
+                return BridgeRequest(command: "task.reconcile", arguments: ["taskID": .string(tail[0])])
+            case "title":
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--prompt"])
+                guard let taskID = tail.first, let prompt = flags["--prompt"]?.first else {
+                    throw CLIError.usage("Use: stationai task title <task-id> --prompt <text>")
+                }
+                return BridgeRequest(command: "task.title.generate", arguments: ["taskID": .string(taskID), "prompt": .string(prompt)])
             case "rename":
                 guard let id = tail.first else { throw CLIError.usage("Use: stationai task rename <task-id> --title <title>") }
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--title"])
@@ -314,6 +325,10 @@ enum StationAICLI {
         case "conversation":
             guard let operation = rest.first else { throw CLIError.usage("Missing conversation operation.") }
             let tail = Array(rest.dropFirst())
+            if operation == "runtime" {
+                guard tail.isEmpty || tail == ["--watch"] else { throw CLIError.usage("Use: stationai conversation runtime [--watch]") }
+                return BridgeRequest(command: tail.isEmpty ? "conversation.runtime" : "conversation.runtime.subscribe")
+            }
             guard let id = tail.first else { throw CLIError.usage("A task ID is required.") }
             switch operation {
             case "history": return BridgeRequest(command: "conversation.history", arguments: ["taskID": .string(id)])
@@ -378,6 +393,14 @@ enum StationAICLI {
             case "queue":
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message"])
                 return BridgeRequest(command: "conversation.queue", arguments: ["taskID": .string(id), "message": .string(flags["--message"]?.first ?? "")])
+            case "subagent-history":
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--activity"])
+                guard let activityJSON = flags["--activity"]?.first,
+                      let activity = try? JSONDecoder().decode(BridgeValue.self, from: Data(activityJSON.utf8)) else {
+                    throw CLIError.usage("Use: stationai conversation subagent-history <task-id> --activity <activity-json>")
+                }
+                return BridgeRequest(command: "conversation.subagent_history", arguments: ["taskID": .string(id), "activity": activity])
+            case "answered-async": return BridgeRequest(command: "conversation.answered_async", arguments: ["taskID": .string(id)])
             case "queue-list": return BridgeRequest(command: "conversation.queue.list", arguments: ["taskID": .string(id)])
             case "queue-retry":
                 guard tail.count == 2 else { throw CLIError.usage("Use: stationai conversation queue-retry <task-id> <message-id>") }
@@ -527,7 +550,7 @@ enum StationAICLI {
     }
 
     private static let helpText = """
-    StationAI CLI (uses the XPC service bundled in StationAI.app)
+    StationAI CLI (talks to the bridge daemon bundled in StationAI.app, starting it on demand)
 
     Usage:
       stationai status
@@ -565,6 +588,11 @@ enum StationAICLI {
       stationai conversation present-image <task-id> --image <path> [--caption <text>]
       stationai conversation queue <task-id> --message <text>
       stationai conversation queue-list <task-id>
+      stationai conversation runtime [--watch]
+      stationai conversation answered-async <task-id>
+      stationai conversation subagent-history <task-id> --activity <activity-json>
+      stationai task reconcile <task-id>
+      stationai task title <task-id> --prompt <text>
       stationai conversation queue-retry <task-id> <message-id>
       stationai conversation queue-remove <task-id> <message-id>
       stationai conversation queue-steer <task-id> <message-id>

@@ -4,8 +4,7 @@ import SwiftUI
 
 struct KanbanBoardView: View {
     @Environment(\.modelContext) private var modelContext
-    @EnvironmentObject private var codexClient: CodexAppServerClient
-    @EnvironmentObject private var claudeClient: ClaudeCodeClient
+    @EnvironmentObject private var conversationRuntime: ConversationRuntimeModel
     @Query(filter: #Predicate<BoardTask> { $0.statusRawValue != "Done" }, sort: \BoardTask.createdAt, order: .reverse) private var tasks: [BoardTask]
     @State private var isCreatingNewTask = false
     @State private var saveError: String?
@@ -40,8 +39,9 @@ struct KanbanBoardView: View {
     @State private var boardSearchText = ""
     @FocusState private var isBoardSearchFocused: Bool
 
-    private var conversationClients: ConversationClients {
-        ConversationClients(codex: codexClient, claude: claudeClient)
+    /// Provider-owning operations run in the bridge daemon.
+    private var remoteConversations: RemoteConversationManager {
+        RemoteConversationManager(daemon: conversationRuntime.client, runtime: conversationRuntime, modelContext: modelContext)
     }
 
     var body: some View {
@@ -111,10 +111,7 @@ struct KanbanBoardView: View {
                 guard let taskBeingDeleted else { return }
                 Task { @MainActor in
                     do {
-                        try await BoardTaskManager(modelContext: modelContext).delete(
-                            taskBeingDeleted.id,
-                            diagnostics: codexClient.diagnosticFields()
-                        )
+                        try await remoteConversations.deleteTask(taskID: taskBeingDeleted.id)
                     } catch {
                         presentSaveError("\(error.localizedDescription)\n\nDiagnostic log: \(StationAIDiagnostics.logURL.path)")
                     }
@@ -319,8 +316,7 @@ struct KanbanBoardView: View {
             do {
                 try await Task.sleep(for: .milliseconds(250))
                 guard !Task.isCancelled else { return }
-                let manager = ConversationManager(tasks: BoardTaskManager(modelContext: modelContext), clients: conversationClients)
-                let records = try await manager.searchArchive(query: query)
+                let records = try await remoteConversations.searchArchive(query: query)
                 guard !Task.isCancelled else { return }
                 archiveSearchResults = records.compactMap { try? BoardTaskManager(modelContext: modelContext).taskModel($0.id) }
             } catch is CancellationError {
@@ -817,7 +813,7 @@ struct KanbanBoardView: View {
                 if !conflictRepositories.isEmpty {
                     throw BridgeCommandError(code: "conflicts_require_confirmation", message: "Resolve conflicts in the task worktree before creating pull requests.")
                 }
-                _ = try await manager.createPullRequests(task.id, clients: conversationClients)
+                _ = try await remoteConversations.createPullRequests(taskID: task.id)
             } catch {
                 pullRequestError = error.localizedDescription
             }

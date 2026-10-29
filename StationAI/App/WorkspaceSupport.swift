@@ -64,7 +64,7 @@ enum WorkspaceSettings {
 
     static var preferencesStore: UserDefaults {
         #if DEBUG
-        if let suiteName = ProcessInfo.processInfo.environment["STATIONAI_E2E_DEFAULTS_SUITE"],
+        if let suiteName = StationAIProcessEnvironment.current["STATIONAI_E2E_DEFAULTS_SUITE"],
            let suite = UserDefaults(suiteName: suiteName) {
             return suite
         }
@@ -541,6 +541,52 @@ enum RepositoryScanner {
     }
 }
 
+/// The environment work should run with. The bridge daemon scopes each request
+/// to its caller's environment (`BridgeRequest.environment`) for the life of
+/// that request's task, including across suspension points while other requests
+/// interleave on the main actor. Outside a request, such as in the GUI app, this
+/// is simply this process's own environment.
+enum StationAIProcessEnvironment {
+    @TaskLocal static var requestEnvironment: [String: String]?
+
+    static var current: [String: String] {
+        requestEnvironment ?? ProcessInfo.processInfo.environment
+    }
+}
+
+/// One bridge request's diagnostics routing. A single daemon process serves
+/// requests for different stores, so each request keeps its own store-directory
+/// selection (as each XPC service process once had), and records it makes
+/// before choosing that directory wait for it instead of landing elsewhere.
+/// Only touched on the main actor.
+final class StationAIDiagnosticsScope: @unchecked Sendable {
+    let id = UUID()
+    var directoryOverride: URL?
+    var awaitingDirectory = true
+}
+
+/// What a request's background work needs to keep behaving as part of that
+/// request after the request has returned: its environment and its diagnostics
+/// scope. `Task.detached` doesn't inherit task-local values.
+struct StationAIRequestContext: Sendable {
+    @TaskLocal static var diagnosticsScope: StationAIDiagnosticsScope?
+
+    let environment: [String: String]?
+    let scope: StationAIDiagnosticsScope?
+
+    @MainActor static func capture() -> StationAIRequestContext {
+        StationAIRequestContext(environment: StationAIProcessEnvironment.requestEnvironment, scope: diagnosticsScope)
+    }
+
+    func run<T>(_ operation: () async throws -> T) async rethrows -> T {
+        try await StationAIProcessEnvironment.$requestEnvironment.withValue(environment) {
+            try await Self.$diagnosticsScope.withValue(scope) {
+                try await operation()
+            }
+        }
+    }
+}
+
 enum StationAIAppIdentity {
     static var applicationIdentifier: String {
         Bundle.main.infoDictionary?["StationAIApplicationBundleIdentifier"] as? String
@@ -583,7 +629,7 @@ enum StationAIAppIdentity {
 enum StationAIWorktreeManager {
     static func defaultRoot() -> URL {
         #if DEBUG
-        if let override = ProcessInfo.processInfo.environment["STATIONAI_E2E_WORKTREE_DIRECTORY"], !override.isEmpty {
+        if let override = StationAIProcessEnvironment.current["STATIONAI_E2E_WORKTREE_DIRECTORY"], !override.isEmpty {
             return URL(fileURLWithPath: override, isDirectory: true).standardizedFileURL
         }
         #endif
@@ -918,7 +964,7 @@ enum StationAIWorktreeManager {
     private struct GitResult { let status: Int32; let output: String }
 
     private static func git(_ path: String, _ arguments: [String], allowFailure: Bool = false) throws -> GitResult {
-        let candidates = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map {
+        let candidates = (StationAIProcessEnvironment.current["PATH"] ?? "").split(separator: ":").map {
             URL(fileURLWithPath: String($0)).appendingPathComponent("git").path
         } + ["/opt/homebrew/bin/git", "/usr/local/bin/git", "/usr/bin/git"]
         guard let executable = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
@@ -976,6 +1022,7 @@ enum StationAIProcessRunner {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        process.environment = StationAIProcessEnvironment.current
         if let directory {
             process.currentDirectoryURL = URL(fileURLWithPath: directory, isDirectory: true)
         }
@@ -1465,8 +1512,10 @@ enum StationAIDiagnostics {
     nonisolated(unsafe) private static var openedLockPath: String?
     nonisolated(unsafe) private static var openedLogPath: String?
     nonisolated(unsafe) private static var flushScheduled = false
-    nonisolated(unsafe) private static var bufferedEvents = Data()
-    nonisolated(unsafe) private static var bufferedURL: URL?
+    /// Buffered records keyed by where each was routed when recorded. One
+    /// process can serve requests for different stores (the bridge daemon), so
+    /// a flush must not move one request's records into another's log.
+    nonisolated(unsafe) private static var bufferedEvents: [Destination: Data] = [:]
     nonisolated(unsafe) private static var pendingWriterBytes = 0
     nonisolated(unsafe) private static var droppedBufferedEvents = 0
     nonisolated(unsafe) private static var failedWriteCount = 0
@@ -1480,14 +1529,52 @@ enum StationAIDiagnostics {
     nonisolated private static let writerQueue = DispatchQueue(label: "com.stationai.diagnostics.writer", qos: .utility)
 
     static func useDataDirectory(_ path: String?) {
-        directoryOverride = path.map { URL(fileURLWithPath: $0, isDirectory: true) }
+        let url = path.map { URL(fileURLWithPath: $0, isDirectory: true) }
+        guard let scope = StationAIRequestContext.diagnosticsScope else {
+            directoryOverride = url
+            return
+        }
+        scope.directoryOverride = url
+        if scope.awaitingDirectory { releaseHeldRecords(of: scope) }
+    }
+
+    /// The store directory diagnostics route to: this request's own selection
+    /// inside a bridge request, otherwise the process-wide one.
+    static var currentDirectoryOverride: URL? {
+        if let scope = StationAIRequestContext.diagnosticsScope { return scope.directoryOverride }
+        return directoryOverride
+    }
+
+    private enum Destination: Hashable {
+        case file(URL)
+        case awaitingDirectory(UUID)
+    }
+
+    private static var logDestination: Destination {
+        if let scope = StationAIRequestContext.diagnosticsScope, scope.awaitingDirectory {
+            return .awaitingDirectory(scope.id)
+        }
+        return .file(logURL)
+    }
+
+    /// Sends the records a request made before choosing its store directory
+    /// to that request's log; later records go there directly.
+    private static func releaseHeldRecords(of scope: StationAIDiagnosticsScope) {
+        scope.awaitingDirectory = false
+        let target = logURL
+        let held = Destination.awaitingDirectory(scope.id)
+        writerQueue.async {
+            if let records = bufferedEvents.removeValue(forKey: held) {
+                bufferedEvents[.file(target), default: Data()].append(records)
+            }
+        }
     }
 
     static var logURL: URL {
         let directory: URL
-        if let directoryOverride {
+        if let directoryOverride = currentDirectoryOverride {
             directory = directoryOverride
-        } else if let dataDirectory = ProcessInfo.processInfo.environment["STATIONAI_DATA_DIRECTORY"] {
+        } else if let dataDirectory = StationAIProcessEnvironment.current["STATIONAI_DATA_DIRECTORY"] {
             directory = URL(fileURLWithPath: dataDirectory, isDirectory: true)
         } else if StationAIAppIdentity.worktreeKey != nil,
                   let worktreeDirectory = try? StationAIAppIdentity.defaultDataDirectory() {
@@ -1507,9 +1594,9 @@ enum StationAIDiagnostics {
 
     static var storeURL: URL {
         let directory: URL
-        if let directoryOverride {
+        if let directoryOverride = currentDirectoryOverride {
             directory = directoryOverride
-        } else if let dataDirectory = ProcessInfo.processInfo.environment["STATIONAI_DATA_DIRECTORY"] {
+        } else if let dataDirectory = StationAIProcessEnvironment.current["STATIONAI_DATA_DIRECTORY"] {
             directory = URL(fileURLWithPath: dataDirectory, isDirectory: true)
         } else if let supportDirectory = try? StationAIAppIdentity.defaultDataDirectory() {
             directory = supportDirectory
@@ -1623,6 +1710,9 @@ enum StationAIDiagnostics {
     }
 
     static func endBatch() async {
+        if let scope = StationAIRequestContext.diagnosticsScope, scope.awaitingDirectory {
+            releaseHeldRecords(of: scope)
+        }
         let ingressDrops = ingressDroppedEvents
         ingressDroppedEvents = 0
         let url = logURL
@@ -1686,7 +1776,7 @@ enum StationAIDiagnostics {
         ingressPendingBytes += estimatedBytes
         let ingressDrops = ingressDroppedEvents
         ingressDroppedEvents = 0
-        let url = logURL
+        let destination = logDestination
         let transfer = DiagnosticValueTransfer(structuredFields)
         writerQueue.async {
             droppedBufferedEvents += ingressDrops
@@ -1694,7 +1784,7 @@ enum StationAIDiagnostics {
             for (key, value) in transfer.value {
                 encodedEntry[key] = jsonString(value)
             }
-            appendSerializedEvent(encodedEntry, at: url)
+            appendSerializedEvent(encodedEntry, at: destination)
             Task { @MainActor in
                 ingressPendingBytes = max(0, ingressPendingBytes - estimatedBytes)
             }
@@ -1734,7 +1824,7 @@ enum StationAIDiagnostics {
         return min(16, overLimit)
     }
 
-    nonisolated private static func appendSerializedEvent(_ originalEntry: [String: String], at url: URL) {
+    nonisolated private static func appendSerializedEvent(_ originalEntry: [String: String], at url: Destination) {
         var entry = originalEntry
         guard var data = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys]) else { return }
         if data.count + 1 > eventLimit {
@@ -1782,26 +1872,40 @@ enum StationAIDiagnostics {
         buffer(data, at: url)
     }
 
-    nonisolated private static func buffer(_ data: Data, at url: URL) {
-        if bufferedURL == nil { bufferedURL = url }
-        bufferedEvents.append(data)
-        if bufferedEvents.count >= batchLimit {
-            flushBufferedEvents(at: url)
+    nonisolated private static func buffer(_ data: Data, at destination: Destination) {
+        bufferedEvents[destination, default: Data()].append(data)
+        if bufferedEvents.values.reduce(0, { $0 + $1.count }) >= batchLimit {
+            flushBufferedEvents()
         } else if !flushScheduled {
             flushScheduled = true
             writerQueue.asyncAfter(deadline: .now() + .milliseconds(250)) {
                 flushScheduled = false
-                flushBufferedEvents(at: url)
+                flushBufferedEvents()
             }
         }
     }
 
+    /// Writes every record routed to a log so far to that log; records still
+    /// waiting for their request's store directory stay buffered. `url` only
+    /// receives a pending loss report when nothing else is written.
     nonisolated private static func flushBufferedEvents(at url: URL? = nil) {
-        guard !bufferedEvents.isEmpty || droppedBufferedEvents > 0 || failedWriteCount > 0 else { return }
-        var data = bufferedEvents
-        bufferedEvents.removeAll(keepingCapacity: true)
-        let targetURL = url ?? bufferedURL ?? URL(fileURLWithPath: "/")
-        bufferedURL = nil
+        var files: [(URL, Data)] = []
+        for (destination, data) in bufferedEvents {
+            if case .file(let fileURL) = destination { files.append((fileURL, data)) }
+        }
+        for (fileURL, _) in files { bufferedEvents.removeValue(forKey: .file(fileURL)) }
+        if files.isEmpty {
+            guard droppedBufferedEvents > 0 || failedWriteCount > 0 else { return }
+            write(Data(), reportingLossTo: url ?? URL(fileURLWithPath: "/"))
+            return
+        }
+        for (targetURL, data) in files {
+            write(data, reportingLossTo: targetURL)
+        }
+    }
+
+    nonisolated private static func write(_ events: Data, reportingLossTo targetURL: URL) {
+        var data = events
         do {
             try FileManager.default.createDirectory(
                 at: targetURL.deletingLastPathComponent(),

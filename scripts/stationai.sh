@@ -31,7 +31,10 @@ fi
 STATIONAI_DATA_DIRECTORY="$(python3 "${repository_root}/scripts/validate-app-launch.py" \
   "${app_bundle}" "${repository_root}" "${STATIONAI_PROFILE_BUNDLE_ID}" "${STATIONAI_PROFILE_DATA_DIRECTORY}")"
 export STATIONAI_DATA_DIRECTORY
-service_info="${app_bundle}/Contents/XPCServices/StationAIBridge.xpc/Contents/Info.plist"
-export STATIONAI_BRIDGE_SERVICE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${service_info}")"
+# The CLI resolves its own bridge identity from the app bundle's Info.plist via
+# `Bundle.main` (it lives at Contents/MacOS alongside the app executable), the
+# same way the daemon does, so no separate `.xpc`-bundle lookup is needed here
+# anymore. `STATIONAI_BRIDGE_SERVICE_NAME` remains available as an override for
+# test isolation, but this normal entry point doesn't need to set it.
 
 exec "${cli_path}" "$@"

@@ -7,8 +7,7 @@ struct StationAIApp: App {
     @NSApplicationDelegateAdaptor(StationAIApplicationDelegate.self) private var applicationDelegate
     private let modelContainer: ModelContainer
     private let appPreferences: UserDefaults
-    @StateObject private var codexClient: CodexAppServerClient
-    @StateObject private var claudeClient: ClaudeCodeClient
+    @StateObject private var conversationRuntime: ConversationRuntimeModel
 
     private var windowTitle: String {
         let configuredTitle = ProcessInfo.processInfo.environment["STATIONAI_WINDOW_TITLE"]?
@@ -21,17 +20,12 @@ struct StationAIApp: App {
 
     init() {
         let environment = ProcessInfo.processInfo.environment
-        _codexClient = StateObject(wrappedValue: CodexAppServerClient(
-            codexExecutableOverride: environment["STATIONAI_E2E_CODEX_EXECUTABLE"],
-            goalRuntimeEnabled: true
-        ))
-        _claudeClient = StateObject(wrappedValue: ClaudeCodeClient.sharedPrimaryClient(
-            executableOverride: environment["STATIONAI_E2E_CLAUDE_EXECUTABLE"]
-        ))
-        StationAIApplicationDelegate.terminationHandler = { [weak codex = _codexClient.wrappedValue, weak claude = _claudeClient.wrappedValue] in
-            // Both runtimes drain within their own bounded deadlines.
-            await codex?.prepareForApplicationTermination()
-            await claude?.prepareForApplicationTermination()
+        let runtime = ConversationRuntimeModel(client: DaemonClient())
+        _conversationRuntime = StateObject(wrappedValue: runtime)
+        // The bridge daemon owns every provider turn, so quitting the window
+        // doesn't stop one; it just stops watching.
+        StationAIApplicationDelegate.terminationHandler = { [weak runtime] in
+            runtime?.stop()
         }
         #if DEBUG
         if let suiteName = environment["STATIONAI_E2E_DEFAULTS_SUITE"],
@@ -83,8 +77,7 @@ struct StationAIApp: App {
     private var mainWindowContent: some View {
         MainWindowView()
             .modelContainer(modelContainer)
-            .environmentObject(codexClient)
-            .environmentObject(claudeClient)
+            .environmentObject(conversationRuntime)
             .defaultAppStorage(appPreferences)
     }
 }
@@ -110,6 +103,7 @@ private final class StationAIApplicationDelegate: NSObject, NSApplicationDelegat
 private struct MainWindowView: View {
     @AppStorage(WorkspaceSettings.appearanceKey, store: WorkspaceSettings.preferencesStore) private var appearance = "dark"
     @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject private var conversationRuntime: ConversationRuntimeModel
     @State private var lifecycleError: String?
     @State private var isLifecycleReady = false
 
@@ -137,6 +131,7 @@ private struct MainWindowView: View {
                     container: modelContext.container,
                     dataDirectory: ProcessInfo.processInfo.environment["STATIONAI_DATA_DIRECTORY"]
                 )
+                conversationRuntime.start()
                 isLifecycleReady = true
             } catch {
                 lifecycleError = error.localizedDescription

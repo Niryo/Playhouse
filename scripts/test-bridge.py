@@ -278,6 +278,19 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIn("id", response)
         return response, [json.loads(line) for line in lines[:-1]]
 
+    def restart_provider(self, executable):
+        # The bridge daemon keeps one provider process alive across CLI calls, so
+        # a fresh CLI read no longer implies a fresh provider. Stop this test's own
+        # fixture provider (its path is unique to the test) so the next call
+        # relaunches it and loads the thread again, as after a provider restart.
+        subprocess.run(["pkill", "-f", str(executable)], check=False)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if subprocess.run(["pgrep", "-f", str(executable)], capture_output=True).returncode != 0:
+                return
+            time.sleep(0.05)
+        self.fail(f"The fixture provider did not stop: {executable}")
+
     def assert_success(self, response):
         self.assertTrue(response.get("ok"), response.get("error"))
         return response.get("result")
@@ -341,6 +354,11 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(ready.is_file(), f"{provider} should reach its active thinking fixture before Stop.")
         active = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(active["status"], "In Progress")
+        thread_id = active["codexThreadID"] if provider == "codex" else active["claudeSessionID"]
+        self.assertTrue(thread_id, f"The {provider} turn should have a native conversation ID while it thinks.")
+        thinking = self.assert_success(self.call_cli("conversation", "runtime")[0])
+        self.assertIn(thread_id, thinking["activeThreadIDs"], "The daemon should report the thinking turn as active.")
+        self.assertIn(thread_id, thinking["interruptibleThreadIDs"], "The daemon should report the thinking turn as interruptible.")
 
         def stop_turn():
             try:
@@ -370,6 +388,9 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(received.is_file(), f"The {provider} fixture should confirm it received the native interrupt.")
         persisted = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(persisted["status"], "Waiting Response")
+        settled = self.assert_success(self.call_cli("conversation", "runtime")[0])
+        self.assertNotIn(thread_id, settled["activeThreadIDs"], "A stopped turn is no longer active in the daemon.")
+        self.assertIn(thread_id, settled["interruptedThreadIDs"], "The daemon should remember that the turn was paused.")
         events = self.diagnostic_events()
         self.assertTrue(any(
             event.get("event") == "conversation.interrupt.finished"
@@ -383,17 +404,204 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIsNotNone(failed_send, "The stopped provider turn should settle through the send failure path.")
         self.assertIsNone(persisted.get("statusMessage"))
 
-    # case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted.
+    # case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles.
     def test_codex_stop_interrupts_thinking_turn_and_waits_for_response(self):
         self.assert_user_stop_pauses_provider_turn(
             "Codex stop while thinking", "codex", "STATIONAI_E2E_CODEX_EXECUTABLE", "codex-app-server-fixture.py"
         )
 
-    # case-contract: test_claude_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Claude reasoning immediately moves the task to Waiting Response and sends Claude's session-scoped control interrupt. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted.
+    # case-contract: test_claude_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Claude reasoning immediately moves the task to Waiting Response and sends Claude's session-scoped control interrupt. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles.
     def test_claude_stop_interrupts_thinking_turn_and_waits_for_response(self):
         self.assert_user_stop_pauses_provider_turn(
             "Claude stop while thinking", "claude", "STATIONAI_E2E_CLAUDE_EXECUTABLE", "claude-code-fixture.py"
         )
+
+    def read_watcher_snapshot(self, watcher, predicate, timeout=15):
+        """Reads `conversation runtime --watch` event lines until one runtime snapshot satisfies `predicate`."""
+        deadline = time.monotonic() + timeout
+        seen = []
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([watcher.stdout], [], [], 0.1)
+            if not readable:
+                continue
+            line = watcher.stdout.readline()
+            if not line.strip():
+                continue
+            event = json.loads(line.decode("utf-8"))
+            if event.get("type") != "runtime_state":
+                continue
+            seen.append(event["payload"])
+            if predicate(event["payload"]):
+                return event["payload"]
+        self.fail(f"No matching runtime snapshot arrived within {timeout}s; saw {seen}")
+
+    @staticmethod
+    def process_is_running(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    def wait_until_process_exits(self, pid, timeout):
+        deadline = time.monotonic() + timeout
+        while self.process_is_running(pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        return not self.process_is_running(pid)
+
+    # case-contract: test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle | The bridge daemon starts on the first request, serves later requests from the same process, and stays alive while any connection (such as a window's runtime watcher) is open. A watcher receives the daemon's runtime snapshots as a turn starts and stops, and the daemon exits by itself once the last connection closes and no request is running; the next request starts a fresh daemon on demand without any manual step.
+    def test_bridge_daemon_starts_on_demand_serves_watchers_and_exits_when_idle(self):
+        service = f"{arguments.service_name}.lifecycle-{uuid.uuid4().hex[:8]}"
+        fixture_source = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-hold-interrupt"
+        shutil.copyfile(fixture_source, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {
+            "STATIONAI_BRIDGE_SERVICE_NAME": service,
+            "STATIONAI_BRIDGE_IDLE_GRACE_SECONDS": "3",
+            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
+        }
+        task = self.create_task("Daemon watcher", provider="codex")
+
+        first = self.assert_success(self.call_cli("status", extra_environment=environment)[0])
+        daemon_pid = first["processID"]
+        self.assertTrue(self.process_is_running(daemon_pid), "The first request should have started a daemon.")
+        second = self.assert_success(self.call_cli("status", extra_environment=environment)[0])
+        self.assertEqual(second["processID"], daemon_pid, "Later requests should reuse the running daemon.")
+
+        watcher = self.start_cli("conversation", "runtime", "--watch", extra_environment=environment, binary_output=True)
+        try:
+            idle = self.read_watcher_snapshot(watcher, lambda snapshot: True)
+            self.assertEqual(idle["activeThreadIDs"], [], "A daemon with no turns reports nothing active.")
+            time.sleep(4.5)
+            self.assertTrue(self.process_is_running(daemon_pid), "An open watcher keeps the daemon alive past its idle grace.")
+            self.assertEqual(
+                self.assert_success(self.call_cli("status", extra_environment=environment)[0])["processID"], daemon_pid
+            )
+
+            ready = Path(str(executable) + ".interrupt-ready")
+            release = Path(str(executable) + ".interrupt-release")
+            sent = {}
+
+            def send_turn():
+                sent["response"], _ = self.call_cli(
+                    "conversation", "send", task["id"], "--message", "Hold until stopped.",
+                    expected_status=1, timeout=45, extra_environment=environment,
+                )
+
+            sender = threading.Thread(target=send_turn, daemon=True)
+            sender.start()
+            deadline = time.monotonic() + 15
+            while not ready.is_file() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(ready.is_file(), "The held turn should be thinking before the watcher is checked.")
+            thread_id = self.assert_success(self.call_cli("task", "get", task["id"])[0])["codexThreadID"]
+            running = self.read_watcher_snapshot(watcher, lambda snapshot: thread_id in snapshot["activeThreadIDs"])
+            self.assertIn(thread_id, running["interruptibleThreadIDs"])
+
+            stopper = threading.Thread(
+                target=lambda: self.call_cli("conversation", "stop", task["id"], timeout=20, extra_environment=environment),
+                daemon=True,
+            )
+            stopper.start()
+            received = Path(str(executable) + ".interrupt-received")
+            deadline = time.monotonic() + 10
+            while not received.is_file() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            release.write_text("acknowledge interrupt\n", encoding="utf-8")
+            stopper.join(timeout=20)
+            sender.join(timeout=20)
+            stopped = self.read_watcher_snapshot(watcher, lambda snapshot: thread_id not in snapshot["activeThreadIDs"])
+            self.assertIn(thread_id, stopped["interruptedThreadIDs"])
+        finally:
+            watcher.terminate()
+            watcher.wait(timeout=10)
+
+        self.assertTrue(
+            self.wait_until_process_exits(daemon_pid, timeout=20),
+            "The daemon should exit by itself once its last connection closes and no request is running.",
+        )
+        restarted = self.assert_success(self.call_cli("status", extra_environment=environment)[0])
+        self.assertNotEqual(restarted["processID"], daemon_pid, "The next request should start a fresh daemon on demand.")
+        self.assertTrue(self.process_is_running(restarted["processID"]))
+
+    # case-contract: test_bridge_daemon_death_fails_the_turn_and_recovers_on_next_request | When the bridge daemon dies in the middle of a turn, that turn's send fails with a connection error instead of hanging. The next request starts a fresh daemon on demand, which reconciles the task out of In Progress into a resumable Waiting Response, and that daemon can run and stop a new turn.
+    def test_bridge_daemon_death_fails_the_turn_and_recovers_on_next_request(self):
+        service = f"{arguments.service_name}.death-{uuid.uuid4().hex[:8]}"
+        fixture_source = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-hold-interrupt"
+        shutil.copyfile(fixture_source, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {
+            "STATIONAI_BRIDGE_SERVICE_NAME": service,
+            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
+        }
+        task = self.create_task("Daemon death", provider="codex")
+        first_pid = self.assert_success(self.call_cli("status", extra_environment=environment)[0])["processID"]
+        ready = Path(str(executable) + ".interrupt-ready")
+        received = Path(str(executable) + ".interrupt-received")
+        release = Path(str(executable) + ".interrupt-release")
+        sent = {}
+
+        def send_turn(key, expected_status):
+            sent[key], _ = self.call_cli(
+                "conversation", "send", task["id"], "--message", "Hold until the daemon dies.",
+                expected_status=expected_status, timeout=45, extra_environment=environment,
+            )
+
+        sender = threading.Thread(target=send_turn, args=("first", 69), daemon=True)
+        sender.start()
+        deadline = time.monotonic() + 15
+        while not ready.is_file() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(ready.is_file(), "The turn should be running before the daemon dies.")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "In Progress")
+
+        os.kill(first_pid, signal.SIGKILL)
+        sender.join(timeout=20)
+        self.assertFalse(sender.is_alive(), "A send must fail promptly when its daemon dies, not hang.")
+        self.assert_failure(sent["first"], "service_unavailable")
+        self.restart_provider(executable)
+
+        # The next request starts a fresh daemon, which settles the orphaned turn.
+        self.assert_success(self.call_cli("conversation", "history", task["id"], extra_environment=environment)[0])
+        recovered = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(recovered["status"], "Waiting Response")
+        self.assertIn("closed while this turn was running", recovered.get("statusMessage") or "")
+        second_pid = self.assert_success(self.call_cli("status", extra_environment=environment)[0])["processID"]
+        self.assertNotEqual(second_pid, first_pid)
+        self.assertTrue(self.process_is_running(second_pid))
+
+        # The fresh daemon owns turns again: run one and stop it.
+        for marker in (ready, received, release):
+            marker.unlink(missing_ok=True)
+        rerun = threading.Thread(target=send_turn, args=("second", 1), daemon=True)
+        rerun.start()
+        deadline = time.monotonic() + 15
+        while not ready.is_file() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(ready.is_file(), "The fresh daemon should run a new turn.")
+        stopper = threading.Thread(
+            target=lambda: self.call_cli("conversation", "stop", task["id"], timeout=20, extra_environment=environment),
+            daemon=True,
+        )
+        stopper.start()
+        deadline = time.monotonic() + 10
+        while not received.is_file() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        release.write_text("acknowledge interrupt\n", encoding="utf-8")
+        stopper.join(timeout=20)
+        rerun.join(timeout=20)
+        self.assertFalse(rerun.is_alive())
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Waiting Response")
 
     def assert_rejected_stop_restores_active_status(self, provider, environment_name, fixture_name):
         task = self.create_task(f"{provider.title()} rejected stop", provider=provider)
@@ -646,7 +854,11 @@ class StationAIBridgeTests(unittest.TestCase):
     # case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, uses the same foreground artwork for the Dock AppIcon on a solid #2C2F36 background, and the bridge reports API version 1.
     def test_service_reports_bridge_version(self):
         response, _ = self.call_cli("status")
-        self.assertEqual(self.assert_success(response), {"bridgeVersion": 1, "service": "StationAI"})
+        status = self.assert_success(response)
+        process_id = status.pop("processID")
+        self.assertEqual(status, {"bridgeVersion": 1, "service": "StationAI"})
+        self.assertGreater(process_id, 0, "The bridge should report the daemon process that answered.")
+        self.assertTrue(self.process_is_running(process_id))
         app_bundle = self.cli.parent.parent.parent
         assets_catalog = app_bundle / "Contents" / "Resources" / "Assets.car"
         catalog = subprocess.run(
@@ -781,11 +993,13 @@ class StationAIBridgeTests(unittest.TestCase):
             ["bash", "-c", verify_build, "profile-check", str(script), str(self.primary), linked_profile["bundleID"] + ".e2e.fixture"],
             capture_output=True, text=True,
         ).returncode, 0)
+        # The bridge daemon and CLI ship flat in Contents/MacOS and resolve
+        # their identity from this same Info.plist via `Bundle.main` (no
+        # separate XPC bundle/Info.plist to cross-check anymore); the service
+        # name is just that identifier plus ".bridge", matching
+        # `BridgeContract.serviceName(forApplication:)`.
         app_info = plistlib.loads((self.cli.parent.parent / "Info.plist").read_bytes())
-        service_info = plistlib.loads((self.cli.parent.parent / "XPCServices/StationAIBridge.xpc/Contents/Info.plist").read_bytes())
-        self.assertEqual(service_info["CFBundleIdentifier"], app_info["CFBundleIdentifier"] + ".bridge")
-        self.assertEqual(service_info["StationAIApplicationBundleIdentifier"], app_info["CFBundleIdentifier"])
-        self.assertEqual(arguments.service_name, service_info["CFBundleIdentifier"])
+        self.assertEqual(arguments.service_name, app_info["CFBundleIdentifier"] + ".bridge")
 
         task = self.assert_success(self.call_cli("task", "create", "--title", "Profile restart", "--root", self.primary)[0])
         saved = self.assert_success(self.call_cli(
@@ -3610,7 +3824,7 @@ class StationAIBridgeTests(unittest.TestCase):
             [item for item in comment_only_history["messages"] if item["role"] == "assistant"][-1]["text"],
         )
 
-    # case-contract: test_claude_auto_branch_uses_generated_title_and_fallback | An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree.
+    # case-contract: test_claude_auto_branch_uses_generated_title_and_fallback | An Untitled Claude task with a pending auto repository branch uses its selected provider to generate the title before worktree creation; the branch and title persist across fresh CLI/XPC reads and the visible task. If Claude title generation returns no title, the prompt becomes the title and branch fallback, and the conversation still starts in that worktree. A fresh `task title` request reproduces the generated title and provider (null when generation yields nothing), and `task reconcile` returns the settled task unchanged.
     def test_claude_auto_branch_uses_generated_title_and_fallback(self):
         source = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         for suffix, prompt, title, branch in [
@@ -3648,6 +3862,17 @@ class StationAIBridgeTests(unittest.TestCase):
             fixture_turns = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
             self.assertTrue(any(turn["userText"].startswith("Write a concise task title") for turn in fixture_turns))
             self.assertEqual(Path(fixture_turns[-1]["cwd"]).resolve(), Path(record["worktreePath"]).resolve())
+            generated = self.assert_success(self.call_cli(
+                "task", "title", task["id"], "--prompt", prompt, extra_environment=environment
+            )[0])
+            if suffix == "title-success":
+                self.assertEqual(generated, {"title": title, "provider": "claude"})
+            else:
+                self.assertIsNone(generated, "A provider that returns no title leaves the caller to fall back.")
+            reconciled = self.assert_success(self.call_cli(
+                "task", "reconcile", task["id"], extra_environment=environment
+            )[0])
+            self.assertEqual((reconciled["id"], reconciled["status"], reconciled["title"]), (task["id"], fresh["status"], title))
 
     # case-contract: test_conversation_runs_concurrent_claude_sends_in_parallel | Claude turns for different conversations run at the same time instead of queueing on a shared turn slot. While one task's turn is held active, a second task's send starts in its own Claude process, runs its own tool, and completes with its own user and assistant messages before the held turn is released. Each turn's process uses its own task working directory, each conversation keeps only its own activity rows and measured durations, diagnostics record no queued-slot event and no prompt text, and the second conversation's answer is available while the first turn is still running.
     def test_conversation_runs_concurrent_claude_sends_in_parallel(self):
@@ -4704,7 +4929,7 @@ class StationAIBridgeTests(unittest.TestCase):
         fresh_messages = self.assert_success(fresh_response)["messages"]
         self.assertEqual([message["text"] for message in fresh_messages], [message["text"] for message in messages])
 
-    # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs.
+    # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs. A fresh `conversation subagent-history` read returns the completed child's stored conversation content.
     def test_conversation_shows_subagent_delegation(self):
         task_id = self.create_task(title="Subagent delegation")["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -4859,6 +5084,13 @@ class StationAIBridgeTests(unittest.TestCase):
             {thread_id: activity["status"] for thread_id, activity in children.items()},
         )
         self.assertTrue(any("subagent inspected" in message["text"].lower() for message in history["messages"]))
+        inspected = self.assert_success(self.call_cli(
+            "conversation", "subagent-history", task_id, "--activity", json.dumps(sandbox_review), extra_environment=env
+        )[0])
+        self.assertTrue(
+            any("found the required profile" in message["text"] for message in inspected["messages"]),
+            "A fresh read-only subagent inspection should return the child conversation's stored content.",
+        )
 
     # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics.
     def test_plan_mode_renders_markdown_in_conversation(self):
@@ -5807,6 +6039,8 @@ class StationAIBridgeTests(unittest.TestCase):
         diagnostics = (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8")
         self.assertNotIn("fixture-secret", diagnostics)
         Path(str(executable) + ".history-error").unlink()
+        # A resume failure needs a provider that has to load the thread again.
+        self.restart_provider(executable)
         Path(str(executable) + ".resume-error").write_text(
             "StationAI owns this Codex fixture resume failure marker.\n", encoding="utf-8"
         )
@@ -5879,6 +6113,10 @@ class StationAIBridgeTests(unittest.TestCase):
             expected_status=1, extra_environment=env,
         )
         self.assertFalse(failed.get("ok", True), failed)
+        self.assertEqual(
+            self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress",
+            "A saved non-blocking question keeps the task In Progress as soon as the provider exits.",
+        )
         restored, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         history = self.assert_success(restored)
         request = history.get("pendingUserInputRequest")
@@ -5979,7 +6217,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(any("Answers received: One more check: Finish after the turn." in message["text"]
                             for message in completed_history["messages"]))
 
-    # case-contract: test_codex_async_question_queued_answer_retries | An async question answered after its turn ends stays Pending when the first follow-up fails, rejects duplicate answers across fresh CLI/XPC connections, and becomes Answered only after an explicit queued retry succeeds. The paired UI keeps the card and queue action visible across reopening and then displays the delivered response.
+    # case-contract: test_codex_async_question_queued_answer_retries | An async question answered after its turn ends stays Pending when the first follow-up fails, rejects duplicate answers across fresh CLI/XPC connections, and becomes Answered only after an explicit queued retry succeeds. The paired UI keeps the card and queue action visible across reopening and then displays the delivered response. A fresh `conversation answered-async` read lists no answered questions while the answer is pending and lists the question once it is delivered.
     def test_codex_async_question_queued_answer_retries(self):
         task_id = self.create_task("Queued async question", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -6003,6 +6241,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(queued_item["asyncQuestionItemID"], question["id"])
         pending, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         self.assertEqual(self.assert_success(pending)["answeredAsyncQuestionIDs"], [])
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "answered-async", task_id)[0])["itemIDs"], [])
         duplicate, _ = self.call_cli("conversation", "answer-async", task_id, question["id"],
                                      "--answer", "No, leave tests and verification for later",
                                      "--answer", "Duplicate.", expected_status=1, extra_environment=env)
@@ -6012,6 +6251,7 @@ class StationAIBridgeTests(unittest.TestCase):
         delivered, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         delivered_history = self.assert_success(delivered)
         self.assertEqual(delivered_history["answeredAsyncQuestionIDs"], [question["id"]])
+        self.assertEqual(self.assert_success(self.call_cli("conversation", "answered-async", task_id)[0])["itemIDs"], [question["id"]])
         expected_reply = ("Test and verify: Yes, update paired tests and run required verification\n"
                           "Additional detail: Retry this answer.")
         self.assertTrue(any(message["text"] == "Answers received: " + expected_reply

@@ -295,8 +295,11 @@ build_stamp="${derived_data_dir}/stationai-ui-build-input.sha256"
 test_runner_product="${derived_data_dir}/Build/Products/Debug/StationAIUITests-Runner.app"
 compiled_app="${derived_data_dir}/Build/Products/Debug/StationAI.app"
 compiled_bundle_is_compatible=0
-if [[ -f "${compiled_app}/Contents/Info.plist" &&
-  -f "${compiled_app}/Contents/XPCServices/StationAIBridge.xpc/Contents/Info.plist" ]]; then
+# The bridge daemon and CLI ship flat in Contents/MacOS and read their identity
+# from this same Info.plist via `Bundle.main` (no separate XPC bundle anymore),
+# so a single compatibility-version check on the app's own Info.plist covers
+# all three.
+if [[ -f "${compiled_app}/Contents/Info.plist" ]]; then
   if python3 - "${compiled_app}" <<'PY'
 import plistlib
 import sys
@@ -305,15 +308,9 @@ from pathlib import Path
 app = Path(sys.argv[1])
 try:
     app_info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
-    bridge_info = plistlib.loads(
-        (app / "Contents/XPCServices/StationAIBridge.xpc/Contents/Info.plist").read_bytes()
-    )
 except (OSError, plistlib.InvalidFileException):
     raise SystemExit(0)
-if (
-    app_info.get("StationAIStoreCompatibilityVersion") == "2"
-    and bridge_info.get("StationAIStoreCompatibilityVersion") == "2"
-):
+if app_info.get("StationAIStoreCompatibilityVersion") == "2":
     raise SystemExit(1)
 raise SystemExit(0)
 PY
@@ -366,6 +363,19 @@ batch_size=1
 batch_count=$(( (${#selected_cases[@]} + batch_size - 1) / batch_size ))
 overall_failed=0
 ui_test_timeout_seconds="${STATIONAI_UI_TEST_TIMEOUT_SECONDS:-120}"
+# The UI test runner is App Sandboxed, and the CLI it launches inherits that, so a
+# daemon started by the CLI could not bind its socket. Start the bridge daemon
+# from this unsandboxed script instead, and keep it alive for the whole run by
+# holding one watcher connection (the daemon exits when its last one closes).
+bridge_watcher_pid=""
+# A daemon left from an earlier build would silently serve this run's requests.
+pkill -f "${compiled_app}/Contents/MacOS/stationai-daemon" 2>/dev/null || true
+if [[ -x "${compiled_app}/Contents/MacOS/stationai-cli" ]]; then
+  STATIONAI_BRIDGE_SERVICE_NAME="${app_bundle_identifier}.bridge" \
+    "${compiled_app}/Contents/MacOS/stationai-cli" conversation runtime --watch >/dev/null 2>&1 &
+  bridge_watcher_pid=$!
+  trap 'kill "${bridge_watcher_pid}" 2>/dev/null || true; cleanup' EXIT
+fi
 for (( batch_index=0; batch_index<batch_count; batch_index++ )); do
   first_case=$(( batch_index * batch_size ))
   batch_cases=("${selected_cases[@]:first_case:batch_size}")
