@@ -7741,7 +7741,7 @@ final class StationAIUITests: XCTestCase {
         assertTaskVisible("Empty Claude question", inColumn: "Blocked")
     }
 
-    // case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from StationAI history, clears pending state, and returns to Waiting Response.
+    // case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from StationAI history, clears pending state, and returns to Waiting Response. The answered question stops being pending as soon as its recovery turn runs, not only after that turn ends; if that recovery dies mid-turn, the question returns for retry with the task in Waiting Response, and answering again succeeds.
     func test_claude_pending_question_recovers_after_provider_process_restarts() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-restart-question")
         try FileManager.default.copyItem(
@@ -7784,6 +7784,41 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
         assertTaskVisible("Restart-safe Claude question", inColumn: "Waiting Response")
         openTask(named: "Restart-safe Claude question")
+        let recoveryPause = URL(fileURLWithPath: executable.path + ".recovery-pause")
+        let recoveryReady = URL(fileURLWithPath: executable.path + ".recovery-ready")
+        let recoveryRelease = URL(fileURLWithPath: executable.path + ".recovery-release")
+        try "Hold the recovery turn open.\n".write(to: recoveryPause, atomically: true, encoding: .utf8)
+        defer { try? "Release after assertion failure.\n".write(to: recoveryRelease, atomically: true, encoding: .utf8) }
+        element("ai-question-option-question-1-Green").click()
+        element("submit-ai-answers-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: recoveryReady.path) }, timeout: 15),
+                      "The fixture should hold the recovery turn open.")
+        XCTAssertTrue(waitUntil({ !self.element("conversation-user-input-request").exists }, timeout: 5),
+                      "The answered question card should leave while its recovery turn runs.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        openTask(named: "Restart-safe Claude question")
+        XCTAssertTrue(app.staticTexts["Ask a structured question."].waitForExistence(timeout: 10),
+                      "The reopened conversation should load its saved history.")
+        XCTAssertFalse(waitUntil({ self.element("conversation-user-input-request").exists }, timeout: 2),
+                       "Reopening the task mid-recovery must not bring back the answered question.")
+        let applyingHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        XCTAssertNil(applyingHistory["pendingUserInputRequest"] as? [String: Any])
+        XCTAssertFalse(app.staticTexts["Recovered answer: Green."].exists)
+
+        // Closing StationAI mid-recovery must bring the question back for retry.
+        app.terminate()
+        XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12), "StationAI should finish its bounded shutdown before relaunch.")
+        try "Release the orphaned recovery turn.\n".write(to: recoveryRelease, atomically: true, encoding: .utf8)
+        for marker in [recoveryPause, recoveryReady, recoveryRelease] {
+            try? FileManager.default.removeItem(at: marker)
+        }
+        relaunchApp()
+        openTask(named: "Restart-safe Claude question")
+        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10),
+                      "A recovery interrupted mid-turn should show its question again.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         element("ai-question-option-question-1-Green").click()
         element("submit-ai-answers-button").click()
         XCTAssertTrue(app.staticTexts["Recovered answer: Green."].waitForExistence(timeout: 15))

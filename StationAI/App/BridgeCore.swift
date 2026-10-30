@@ -2316,8 +2316,14 @@ final class BoardTaskManager {
                   !hasActiveReservation else {
                 return BoardTaskRecord(task: task)
             }
-            let pendingQuestion = try conversationTranscriptStore().read(id).pendingUserInputRequest
+            let transcriptStore = try conversationTranscriptStore()
+            let pendingQuestion = try transcriptStore.read(id).pendingUserInputRequest
             if let pendingQuestion, pendingQuestion.threadID == threadID, task.status != .done {
+                // No turn holds the reservation, so a recovery that was applying
+                // this answer ended without clearing its marker.
+                try transcriptStore.mutate(id) { transcript in
+                    transcript.applyingUserInputRequestID = nil
+                }
                 let pendingStatus: TaskStatus = pendingQuestion.isBlocking ? .waitingResponse : .inProgress
                 let pendingStatusMessage = pendingQuestion.isBlocking
                     ? "Waiting for your saved question to be answered."
@@ -3436,7 +3442,7 @@ final class ConversationManager {
                     : codex.activities.filter { $0.turnID.map(Self.sensitiveCodexTurnIDs(transcript).contains) != true },
                 diff: Self.shouldHideCodexDiff(transcript, codex: codex) ? nil : codex.diff,
                 answeredAsyncQuestionIDs: answered,
-                pendingUserInputRequest: transcript.pendingUserInputRequest
+                pendingUserInputRequest: visiblePendingUserInputRequest(taskID: taskID, transcript: transcript)
             )
         }
         // Codex can't list a thread before its first turn, so a mixed transcript
@@ -3473,7 +3479,7 @@ final class ConversationManager {
             activities: transcript.pendingSensitiveUserInputRedaction == true ? [] : composed.activities,
             diff: transcript.pendingSensitiveUserInputRedaction == true ? nil : composed.diff,
             answeredAsyncQuestionIDs: answered,
-            pendingUserInputRequest: transcript.pendingUserInputRequest,
+            pendingUserInputRequest: visiblePendingUserInputRequest(taskID: taskID, transcript: transcript),
             providerBoundaries: composed.providerBoundaries
         )
     }
@@ -3538,6 +3544,15 @@ final class ConversationManager {
         let sensitiveCodexTurnIDsBeforeRecovery = Set(try transcripts.read(taskID).sensitiveCodexTurnIDs ?? [])
         try transcripts.mutate(taskID) { transcript in
             transcript.pendingSensitiveUserInputRedaction = true
+            transcript.applyingUserInputRequestID = request.id
+        }
+        // The recovery turn can run for a long time; history hides the answered
+        // question until it ends. A failed turn leaves the question for retry.
+        defer {
+            try? transcripts.mutate(taskID) { transcript in
+                guard transcript.applyingUserInputRequestID == request.id else { return }
+                transcript.applyingUserInputRequestID = nil
+            }
         }
         let secretNote = request.questions.contains(where: \.isSecret)
             ? "The user re-entered the requested secret answer(s) after restart. Apply them now; do not ask for them again."
@@ -3622,13 +3637,25 @@ final class ConversationManager {
         }
         try transcripts.mutate(taskID) { transcript in
             transcript.pendingUserInputRequest = request
+            transcript.applyingUserInputRequestID = nil
         }
+    }
+
+    /// Hides a saved question while a recovery turn that holds the task's turn
+    /// reservation applies its answer. Without the reservation the recovery
+    /// ended or crashed, so the question is shown again.
+    private func visiblePendingUserInputRequest(taskID: UUID, transcript: ConversationTranscript) -> ConversationUserInputRequest? {
+        guard let request = transcript.pendingUserInputRequest else { return nil }
+        guard transcript.applyingUserInputRequestID == request.id,
+              (try? tasks.hasConversationTurnReservation(taskID)) == true else { return request }
+        return nil
     }
 
     private func clearPendingUserInputRequest(taskID: UUID, requestID: String) throws {
         try transcripts.mutate(taskID) { transcript in
             guard transcript.pendingUserInputRequest?.id == requestID else { return }
             transcript.pendingUserInputRequest = nil
+            transcript.applyingUserInputRequestID = nil
         }
     }
 

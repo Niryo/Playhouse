@@ -249,7 +249,7 @@
   },
   {
     "id": "test_claude_pending_question_recovers_after_provider_process_restarts",
-    "expectation": "Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from StationAI history, clears pending state, and returns to Waiting Response."
+    "expectation": "Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from StationAI history, clears pending state, and returns to Waiting Response. The answered question stops being pending as soon as its recovery turn runs, not only after that turn ends; if that recovery dies mid-turn, the question returns for retry with the task in Waiting Response, and answering again succeeds."
   },
   {
     "id": "test_claude_pending_plan_mode_question_recovers_in_plan_mode",

@@ -3575,6 +3575,9 @@ struct TaskConversationView: View {
         }
         isResponding = true
         errorMessage = nil
+        // After a restart the answer runs as a whole recovery turn before this
+        // call returns, so hide the answered card meanwhile.
+        userInputRequest = nil
         do {
             let accepted = try await conversationManager.answerUserInput(
                 taskID: task.id,
@@ -3591,6 +3594,7 @@ struct TaskConversationView: View {
             )
             guard accepted else {
                 isResponding = false
+                userInputRequest = request
                 errorMessage = "\(provider.displayName) couldn't accept those answers. Please check the responses and try again."
                 return
             }
@@ -3600,6 +3604,12 @@ struct TaskConversationView: View {
             userInputOtherSelected = []
             await loadConversation()
         } catch {
+            // A failed recovery keeps its saved question for retry.
+            if userInputRequest == nil,
+               let saved = try? await conversationManager.history(taskID: task.id).pendingUserInputRequest,
+               saved.threadID == task.activeConversationID {
+                userInputRequest = saved
+            }
             isResponding = providerClient.isTurnActive(threadID: request.threadID)
             errorMessage = error.localizedDescription
         }
