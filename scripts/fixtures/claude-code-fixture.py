@@ -26,6 +26,7 @@ INSPECTION_ANSWER = "Inspection done: the workspace is ready."
 UNANSWERED_FIRST = "Starting the checks."
 UNANSWERED_LAST = "Checks are running; results will follow."
 SIMPLE_ANSWER = "OK."
+PENDING_QUESTION_SUCCESS_MARKER = "finish while a structured question remains pending"
 
 
 def write(value):
@@ -70,7 +71,11 @@ def run_tool(tool_id, name, tool_input, command=None):
     return output
 
 
-def respond(user_text, instructions):
+background_result_sent = False
+
+
+def respond(user_text, instructions, preserve_no_outcome=False):
+    global background_result_sent
     commands = []
     if user_text.startswith("Classify the latest user message for StationAI's continuous chat page index."):
         hold = Path(str(sys.argv[0]) + ".hold-classifier")
@@ -111,6 +116,36 @@ def respond(user_text, instructions):
             text("msg_page_classification", '{"continues":false,"title":"Saturn Rings"}')
         else:
             text("msg_page_classification", '{"continues":false,"title":"Volcanoes"}')
+    elif PENDING_QUESTION_SUCCESS_MARKER in user_text.lower():
+        question_input = {
+            "questions": [{
+                "header": "Color",
+                "question": "Which color should I use?",
+                "options": [{"label": "Blue"}, {"label": "Green"}],
+                "multiSelect": False,
+            }]
+        }
+        assistant("msg_pending_question_success", [{"type": "tool_use", "id": "toolu_question", "name": "AskUserQuestion", "input": question_input}])
+        write({"type": "control_request", "request_id": "question-request-1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
+        }})
+    elif "stationai internal outcome reminder:" in user_text.lower() and "outcome-reminder-question" in Path(sys.argv[0]).name:
+        question_input = {
+            "questions": [{
+                "header": "Color",
+                "question": "Which color should I use?",
+                "options": [{"label": "Blue"}, {"label": "Green"}],
+                "multiSelect": False,
+            }]
+        }
+        assistant("msg_private_reminder_question", [{"type": "tool_use", "id": "toolu_question", "name": "AskUserQuestion", "input": question_input}])
+        write({"type": "control_request", "request_id": "question-request-1", "request": {
+            "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
+        }})
+    elif "stationai internal outcome reminder:" in user_text.lower() and not preserve_no_outcome:
+        command = report_command(instructions, " task outcome ", "waiting-response")
+        if command:
+            commands.append({"command": command, "output": run_tool("toolu_outcome_reminder", "Bash", {"command": command}, command)})
     elif "answer to the pending question from the prior stationai session" in user_text.lower():
         answer = user_text.split("Answer: ", 1)[-1].splitlines()[0].strip()
         text("msg_recovered_question_answer", f"Recovered answer: {answer}.")
@@ -250,12 +285,65 @@ def respond(user_text, instructions):
         run_tool("toolu_checks_first", "Read", {"file_path": os.path.join(os.getcwd(), "README.md")})
         text("msg_checks_last", UNANSWERED_LAST)
         run_tool("toolu_checks_last", "Read", {"file_path": os.path.join(os.getcwd(), "README.md")})
+    elif "background agent" in user_text.lower():
+        # Mirrors the real `claude` CLI's --forward-subagent-text protocol for a
+        # backgrounded Agent/Task call: the launch confirmation tool_result is not
+        # completion, and the real outcome arrives later as system task events.
+        tool_id = "toolu_background_agent"
+        task_id = "bgtask-fixture-1"
+        did_fail = "background agent failure" in user_text.lower()
+        terminal_status = "failed" if did_fail else "completed"
+        result_summary = "Background check failed." if did_fail else "Background check finished."
+        assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": "Agent", "input": {
+            "subagent_type": "Explore", "description": "Background check", "prompt": "check something",
+            "run_in_background": True,
+        }}])
+        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tool_id, "content": "Async agent launched successfully.", "is_error": False},
+        ]}})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
+            {"task_id": task_id, "run_id": "fixture-run-1", "task_type": "local_agent",
+             "subagent_type": "Explore", "description": "Background check"},
+        ]})
+        write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "description": "Background check", "subagent_type": "Explore",
+               "is_backgrounded": True, "spawn_depth": 1, "task_type": "local_agent"})
+        write({"type": "system", "subtype": "task_progress", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "description": "Running Bash", "subagent_type": "Explore",
+               "last_tool_name": "Bash"})
+        text("msg_background_started", "STARTED")
+        if not did_fail:
+            # Model the provider finishing its parent response before it sends
+            # the background agent's terminal notification. The bridge must
+            # keep the send open while that result is still outstanding.
+            write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+            background_result_sent = True
+        write({"type": "system", "subtype": "task_updated", "task_id": task_id, "run_id": "fixture-run-1",
+               "patch": {"status": terminal_status, "end_time": 0}})
+        if not did_fail:
+            # This empty snapshot can clear the client's outstanding task set
+            # before task_notification carries the actual result.
+            write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+        summary_pause = Path(str(sys.argv[0]) + ".background-summary-pause")
+        if summary_pause.exists() and not did_fail:
+            summary_ready = Path(str(sys.argv[0]) + ".background-summary-ready")
+            summary_release = Path(str(sys.argv[0]) + ".background-summary-release")
+            summary_ready.write_text("Status-only completion sent.\n", encoding="utf-8")
+            summary_deadline = time.monotonic() + 30
+            while not summary_release.exists() and time.monotonic() < summary_deadline:
+                time.sleep(0.02)
+            if not summary_release.exists():
+                raise TimeoutError("The test did not release the background-agent summary event.")
+        write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "status": terminal_status, "output_file": "", "summary": result_summary})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
     else:
         text("msg_simple", SIMPLE_ANSWER)
     return commands
 
 
 def main():
+    global background_result_sent
     history_path = Path(str(sys.argv[0]) + ".history")
     instructions = argument("--append-system-prompt") or ""
     turn = {
@@ -309,6 +397,10 @@ def main():
             updated_input = response.get("updatedInput", {})
             answers = updated_input.get("answers", {})
             if response.get("behavior") != "allow" or not isinstance(answers, dict) or not answers:
+                if "stationai internal outcome reminder:" in turn.get("userText", "").lower():
+                    rejection_log = Path(str(sys.argv[0]) + ".private-reminder-question-rejection")
+                    with rejection_log.open("a", encoding="utf-8") as stream:
+                        stream.write(response.get("message", "") + "\n")
                 write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
                     {"type": "tool_result", "tool_use_id": "toolu_question", "content": response.get("message", "Question was rejected."), "is_error": True},
                 ]}})
@@ -327,6 +419,7 @@ def main():
                 history["turns"][-1]["questionAnswers"] = answers
             history_path.write_text(json.dumps(history), encoding="utf-8")
         elif message.get("type") == "user":
+            background_result_sent = False
             content = message.get("message", {}).get("content", [])
             user_text = "".join(block.get("text", "") for block in content if block.get("type") == "text")
             turn["userText"] = user_text
@@ -340,16 +433,32 @@ def main():
                 write({"type": "result", "subtype": "error", "is_error": True,
                        "result": "Fixture provider echoed Answer: Green and the private recovery prompt."})
                 continue
-            turn["reportCommands"] = respond(user_text, instructions)
+            prior_turns = json.loads(history_path.read_text(encoding="utf-8")).get("turns", []) if history_path.exists() else []
+            previous_prompt = next((
+                prior.get("userText", "").lower()
+                for prior in reversed(prior_turns)
+                if "stationai internal outcome reminder:" not in prior.get("userText", "").lower()
+            ), "")
+            preserve_no_outcome = any(marker in previous_prompt for marker in ("please inspect the workspace", "start the checks"))
+            turn["reportCommands"] = respond(user_text, instructions, preserve_no_outcome=preserve_no_outcome)
             history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else {"turns": []}
             history["turns"].append(turn)
             history_path.write_text(json.dumps(history), encoding="utf-8")
-            if "structured question" in user_text.lower():
+            if PENDING_QUESTION_SUCCESS_MARKER in user_text.lower():
+                # Exercise a completed provider turn whose question remains unanswered.
+                # Let StationAI persist and emit the request before reporting success.
+                time.sleep(0.1)
+                write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+            elif "structured question" in user_text.lower() or (
+                "stationai internal outcome reminder:" in user_text.lower()
+                and "outcome-reminder-question" in Path(str(sys.argv[0])).name
+            ):
                 # Keep the provider turn alive until StationAI answers or rejects
                 # the control request; otherwise a pending question races with
                 # an already successful result.
                 continue
-            write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+            if not background_result_sent:
+                write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
     return 0
 
 

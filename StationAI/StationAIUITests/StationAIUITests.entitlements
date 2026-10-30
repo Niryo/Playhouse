@@ -4,12 +4,18 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
+	<key>com.apple.security.temporary-exception.sbpl</key>
+	<array>
+		<string>(allow network-outbound (subpath "/private/tmp/stationai-bridge/"))</string>
+	</array>
 	<key>com.apple.security.temporary-exception.files.absolute-path.read-write</key>
 	<array>
 		<string>/tmp/stationai-bridge-workspaces/</string>
 		<string>/private/tmp/stationai-bridge-workspaces/</string>
 		<string>/tmp/stationai-ui-test-fixtures/</string>
 		<string>/private/tmp/stationai-ui-test-fixtures/</string>
+		<string>/tmp/stationai-bridge/</string>
+		<string>/private/tmp/stationai-bridge/</string>
 		<string>/tmp/stationai-ui-test-data/</string>
 		<string>/private/tmp/stationai-ui-test-data/</string>
 	</array>

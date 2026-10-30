@@ -1,12 +1,38 @@
+import CryptoKit
+import Darwin
 import Foundation
 
 enum BridgeContract {
     static let currentVersion = 1
     static let serviceName = "com.stationai.app.bridge"
 
-    /// The bundled XPC service is named after its app (see scripts/build-bridge.sh).
+    /// The login-session variables work runs with: what the XPC service this
+    /// replaced received from launchd, with the caller's values. Everything else
+    /// in a caller's environment (shell setup, IDE or agent session variables,
+    /// per-test overrides) stays out of the daemon and its provider children;
+    /// per-invocation StationAI settings travel as `BridgeRequest` fields.
+    static let sessionEnvironmentNames: Set<String> = [
+        "HOME", "LANG", "LOGNAME", "PATH", "SHELL", "SSH_AUTH_SOCK", "TMPDIR", "USER", "__CF_USER_TEXT_ENCODING",
+    ]
+
+    /// The daemon's launchd label is named after its app (see scripts/build-bridge.sh).
     static func serviceName(forApplication applicationIdentifier: String) -> String {
         applicationIdentifier.isEmpty ? serviceName : applicationIdentifier + ".bridge"
+    }
+
+    /// A Unix domain socket's path is limited to ~104 bytes on macOS
+    /// (`sizeof(sockaddr_un.sun_path)`), which a per-worktree-profile path under
+    /// `~/Library/Application Support/...` can exceed. The socket lives at a short,
+    /// content-derived path under `/tmp` rather than `$TMPDIR`: every process of
+    /// this user must agree on it, and `TMPDIR` differs between a login shell,
+    /// the app, and a test runner. The directory is private to this user.
+    static func socketURL(forServiceName serviceName: String) -> URL {
+        let digest = SHA256.hash(data: Data(serviceName.utf8))
+        let hex = digest.map { String(format: "%02x", $0) }.joined()
+        return URL(fileURLWithPath: "/tmp", isDirectory: true)
+            .appendingPathComponent("stationai-bridge", isDirectory: true)
+            .appendingPathComponent(String(getuid()), isDirectory: true)
+            .appendingPathComponent("\(hex.prefix(32)).sock")
     }
 }
 
@@ -53,6 +79,17 @@ enum BridgeValue: Codable, Equatable {
     var object: [String: BridgeValue]? { if case .object(let value) = self { value } else { nil } }
 }
 
+extension BridgeValue {
+    /// This value as a model type, going through the same JSON it was encoded from.
+    func decoded<T: Decodable>(_ type: T.Type = T.self) throws -> T {
+        try BridgeFraming.decoder.decode(T.self, from: JSONEncoder().encode(self))
+    }
+
+    static func encoding<T: Encodable>(_ value: T) throws -> BridgeValue {
+        try JSONDecoder().decode(BridgeValue.self, from: BridgeFraming.encoder.encode(value))
+    }
+}
+
 struct BridgeRequest: Codable {
     var version = BridgeContract.currentVersion
     var id = UUID().uuidString
@@ -61,6 +98,11 @@ struct BridgeRequest: Codable {
     var dataDirectory: String?
     var defaultsSuite: String?
     var worktreeDirectory: String?
+    /// The caller's `BridgeContract.sessionEnvironmentNames` values. The daemon
+    /// serves many callers from one long-lived process, so work done for this
+    /// request (executable lookup, `git`/`gh`, provider launches) uses these
+    /// rather than those of whichever caller happened to start it. Never logged.
+    var environment: [String: String]?
 }
 
 struct BridgeFailure: Codable, Equatable {
@@ -104,13 +146,87 @@ struct BridgeEvent: Codable {
     }
 }
 
-@objc protocol StationAIBridgeProtocol {
-    func perform(
-        _ requestData: Data,
-        reply: @escaping (Data) -> Void
-    )
+/// One connection carries exactly one `BridgeRequest`, followed by zero or more
+/// `.event` frames streamed while it runs, followed by exactly one `.response`
+/// frame. Framed as a 4-byte big-endian length prefix + JSON payload so a reader
+/// can tell where one message ends and the next begins over a byte stream.
+enum BridgeWireMessage: Codable {
+    case event(BridgeEvent)
+    case response(BridgeResponse)
+
+    private enum Kind: String, Codable { case event, response }
+    private enum CodingKeys: String, CodingKey { case kind, value }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(Kind.self, forKey: .kind) {
+        case .event: self = .event(try container.decode(BridgeEvent.self, forKey: .value))
+        case .response: self = .response(try container.decode(BridgeResponse.self, forKey: .value))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .event(let event):
+            try container.encode(Kind.event, forKey: .kind)
+            try container.encode(event, forKey: .value)
+        case .response(let response):
+            try container.encode(Kind.response, forKey: .kind)
+            try container.encode(response, forKey: .value)
+        }
+    }
 }
 
-@objc protocol StationAIBridgeClientProtocol {
-    func receiveEvent(_ eventData: Data)
+/// Length-prefixed JSON framing shared by both directions of the connection: a
+/// client frames a single `BridgeRequest`; the daemon frames a stream of
+/// `BridgeWireMessage`s back. Generic so both sides use the exact same byte
+/// format without the two ends being able to drift apart.
+enum BridgeFraming {
+    struct FramingError: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
+    /// A single value as a length-prefixed byte frame.
+    static func frame(_ value: some Encodable) throws -> Data {
+        let payload = try Self.encoder.encode(value)
+        guard payload.count <= UInt32.max else {
+            throw FramingError(message: "Bridge message is too large to frame (\(payload.count) bytes).")
+        }
+        var length = UInt32(payload.count).bigEndian
+        var framed = Data(bytes: &length, count: 4)
+        framed.append(payload)
+        return framed
+    }
+
+    /// Drains every complete frame currently in `buffer`, removing their bytes
+    /// (including the length prefix) and leaving only a trailing partial frame,
+    /// if any, for the next read to complete.
+    static func extractMessages<T: Decodable>(from buffer: inout Data, as type: T.Type) throws -> [T] {
+        var messages: [T] = []
+        while buffer.count >= 4 {
+            let lengthBytes = buffer.prefix(4)
+            let length = Int(lengthBytes.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian)
+            guard buffer.count >= 4 + length else { break }
+            let payloadStart = buffer.startIndex + 4
+            let payloadEnd = payloadStart + length
+            let payload = buffer.subdata(in: payloadStart..<payloadEnd)
+            messages.append(try decoder.decode(T.self, from: payload))
+            buffer.removeSubrange(buffer.startIndex..<payloadEnd)
+        }
+        return messages
+    }
+
+    static var encoder: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }
+
+    static var decoder: JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
 }

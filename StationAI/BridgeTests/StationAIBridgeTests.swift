@@ -6,7 +6,10 @@ final class StationAIBridgeTests: XCTestCase {
         let productsDirectory = Bundle(for: Self.self).bundleURL.deletingLastPathComponent()
         let appBundle = productsDirectory.appendingPathComponent("StationAI.app", isDirectory: true)
         let cli = appBundle.appendingPathComponent("Contents/MacOS/stationai-cli")
-        let serviceInfo = appBundle.appendingPathComponent("Contents/XPCServices/StationAIBridge.xpc/Contents/Info.plist")
+        // The bridge daemon and CLI ship flat in Contents/MacOS and resolve
+        // their identity from the app's own Info.plist via `Bundle.main` (no
+        // separate XPC bundle/Info.plist anymore).
+        let serviceInfo = appBundle.appendingPathComponent("Contents/Info.plist")
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -35,7 +38,7 @@ final class StationAIBridgeTests: XCTestCase {
         let plist = try XCTUnwrap(
             PropertyListSerialization.propertyList(from: plistData, format: nil) as? [String: Any]
         )
-        let serviceIdentifier = try XCTUnwrap(plist["CFBundleIdentifier"] as? String)
+        let serviceIdentifier = try XCTUnwrap(plist["CFBundleIdentifier"] as? String) + ".bridge"
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         process.arguments = [

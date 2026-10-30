@@ -1,24 +1,39 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repository_root="${STATIONAI_UI_TART_REPOSITORY_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 script_path="${repository_root}/scripts/test-ui-tart.sh"
 vm_name="${STATIONAI_UI_TART_VM:-stationai-ui}"
 artifact_root="${STATIONAI_UI_TART_ARTIFACTS:-${TMPDIR:-/tmp}/stationai-ui-tart-artifacts}"
+export STATIONAI_UI_LOCK_TIMEOUT_SECONDS="${STATIONAI_UI_LOCK_TIMEOUT_SECONDS:-120}"
 
 # Hold the host checkout's UI-test lock for the entire VM run.
 # test-ui.sh sets the marker only when its caller already owns that host lock.
 if [[ "${STATIONAI_UI_TART_HOST_LOCKED:-0}" != "1" ]]; then
 	exec "${repository_root}/scripts/with-e2e-lock.sh" -- env STATIONAI_UI_TART_HOST_LOCKED=1 bash "${script_path}" "$@"
 fi
+if [[ "${STATIONAI_UI_TART_IMMUTABLE:-0}" != "1" ]]; then
+	immutable_runner="$(mktemp "${TMPDIR:-/tmp}/stationai-ui-tart-runner.XXXXXX")"
+	cp "${script_path}" "${immutable_runner}"
+	chmod 700 "${immutable_runner}"
+	exec env \
+		STATIONAI_UI_TART_IMMUTABLE=1 \
+		STATIONAI_UI_TART_IMMUTABLE_PATH="${immutable_runner}" \
+		STATIONAI_UI_TART_REPOSITORY_ROOT="${repository_root}" \
+		bash "${immutable_runner}" "$@"
+fi
+original_args=("$@")
 
 usage() {
 	cat <<'USAGE'
-Usage: scripts/test-ui-tart.sh [--vm <tart-vm>] [--show-vm] [--live-provider <claude|codex>] [--case <case-id>]...
+Usage: scripts/test-ui-tart.sh [--vm <tart-vm>] [--stop-vm-after-run] [--reset-vm-state] [--show-vm] [--live-provider <claude|codex>] [--case <case-id>]...
 
-Runs visible UI tests in a stopped Tart macOS VM. It snapshots the checkout
+Runs visible UI tests in a persistent Tart macOS VM. It snapshots the checkout
 inside the VM and copies test artifacts back to the host.
 Pass --show-vm to open the VM display through Screen Sharing.
+The VM remains running for subsequent focused runs by default.
+Pass --stop-vm-after-run to stop it after this invocation.
+Pass --reset-vm-state to terminate leftover app/test processes first.
 The runner holds the host repository's .e2e.lock for the full UI test session.
 Pass --live-provider only when the guest has that provider's CLI and a login
 (Claude Code for claude, Codex CLI for codex). --live-codex is shorthand for
@@ -28,12 +43,16 @@ Environment:
   STATIONAI_UI_TART_VM         VM name (default: stationai-ui)
   STATIONAI_UI_TART_ARTIFACTS  Host artifact root
   --live-provider <provider>   Run live UI cases against claude or codex; guest access is required
+  --stop-vm-after-run          Stop the persistent VM after this run
+  --reset-vm-state             Reset guest app/test processes before this run
 USAGE
 }
 
 ui_cases=()
 show_vm=0
 live_provider=""
+keep_vm=1
+reset_vm_state=0
 while (($#)); do
 	case "$1" in
 		--vm)
@@ -54,6 +73,18 @@ while (($#)); do
 			;;
 		--show-vm)
 			show_vm=1
+			shift
+			;;
+		--keep-vm)
+			keep_vm=1
+			shift
+			;;
+		--stop-vm-after-run)
+			keep_vm=0
+			shift
+			;;
+		--reset-vm-state)
+			reset_vm_state=1
 			shift
 			;;
 		--live-codex)
@@ -86,6 +117,16 @@ if ((${#ui_cases[@]} == 0)); then
 	ui_cases=(--all-cases)
 fi
 
+# Repository locks are worktree-local, while a Tart VM is shared host-wide.
+# Serialize ownership checks, startup, execution, and cleanup for each VM.
+if [[ "${STATIONAI_UI_TART_VM_LOCKED:-0}" != "1" ]]; then
+	vm_lock_name="${vm_name//\//_}"
+	runner="${STATIONAI_UI_TART_IMMUTABLE_PATH:-${script_path}}"
+	exec python3 "${repository_root}/scripts/with-file-lock.py" \
+		"/tmp/stationai-ui-tart-${vm_lock_name}.lock" \
+		env STATIONAI_UI_TART_VM_LOCKED=1 bash "${runner}" ${original_args[@]+"${original_args[@]}"}
+fi
+
 if ! command -v tart >/dev/null 2>&1; then
 	printf 'Tart is required but was not found in PATH.\n' >&2
 	exit 1
@@ -100,18 +141,36 @@ run_artifacts="${artifact_root}/${run_id}"
 mkdir -p "$run_artifacts"
 launch_log="${run_artifacts}/tart-run.log"
 vm_pid=""
+vm_started=0
+# VM ownership is global per host VM, not per checkout's TMPDIR. A
+# TMPDIR-scoped marker lets two worktrees both believe they own the same
+# persistent VM and causes Tart guest transport collisions.
+session_marker="${STATIONAI_UI_TART_SESSION_MARKER:-/tmp/stationai-ui-tart-${vm_name}.session}"
+session_value="${repository_root}"$'\n'"${artifact_root}"
+session_marker_owned=0
+if [[ -L "$session_marker" ]]; then
+	printf 'Refusing to use a symlink as the Tart session marker: %s\n' "$session_marker" >&2
+	exit 74
+fi
 
 cleanup() {
 	status=$?
 	trap - EXIT INT TERM
-	if [[ -n "$vm_pid" ]] && kill -0 "$vm_pid" 2>/dev/null; then
+	if (( vm_started == 1 && session_marker_owned == 0 )) ||
+		(( keep_vm == 0 )) && (( vm_started == 1 || session_marker_owned == 1 )); then
 		tart stop "$vm_name" >/dev/null 2>&1 || true
-		wait "$vm_pid" 2>/dev/null || true
+		if [[ -n "$vm_pid" ]]; then
+			wait "$vm_pid" 2>/dev/null || true
+		fi
+	fi
+	if (( session_marker_owned == 1 && keep_vm == 0 )); then
+		rm -f "$session_marker"
 	fi
 	if (( status != 0 )) && [[ -f "$launch_log" ]]; then
 		printf '\nTart VM launch log: %s\n' "$launch_log" >&2
 		tail -40 "$launch_log" >&2 || true
 	fi
+	rm -f "${STATIONAI_UI_TART_IMMUTABLE_PATH:-}"
 }
 trap cleanup EXIT INT TERM
 
@@ -125,28 +184,68 @@ for vm in json.load(sys.stdin):
         raise SystemExit(0)
 raise SystemExit(1)
 ' "$vm_name"; then
-	printf 'Tart VM %q is already running. Stop it before using this runner so Tart can attach the source and artifact shares.\n' "$vm_name" >&2
-	exit 1
-fi
+	if [[ ! -f "$session_marker" ]] || [[ "$(cat "$session_marker")" != "$session_value" ]]; then
+		printf 'Tart VM %q is running but was not retained by this checkout/artifact session.\n' "$vm_name" >&2
+		printf 'Stop it manually, then start a new --keep-vm session.\n' >&2
+		exit 1
+	fi
+	session_marker_owned=1
+	printf 'Reusing already-running Tart VM %s.\n' "$vm_name"
+else
+	if [[ -e "$session_marker" ]]; then
+		if [[ "$(cat "$session_marker" 2>/dev/null || true)" != "$session_value" ]]; then
+			printf 'Refusing to remove an unrelated Tart session marker: %s\n' "$session_marker" >&2
+			exit 74
+		fi
+		printf 'Discarding the retained-session marker because the Tart VM is stopped.\n'
+		rm -f "$session_marker"
+	fi
+	printf 'Starting Tart VM %s for UI run %s...\n' "$vm_name" "$run_id"
+	tart_display_args=(--no-graphics)
+	if (( show_vm == 1 )); then
+		tart_display_args=(--vnc)
+	fi
+	python3 - "$launch_log" "${tart_display_args[@]}" \
+		--dir="source:${repository_root}:ro" \
+		--dir="artifacts:${artifact_root}" \
+		"$vm_name" <<'PY' &
+import subprocess
+import sys
+import os
 
-printf 'Starting Tart VM %s for UI run %s...\n' "$vm_name" "$run_id"
-tart_display_args=(--no-graphics)
-if (( show_vm == 1 )); then
-	tart_display_args=(--vnc)
+log_path = sys.argv[1]
+arguments = sys.argv[2:]
+try:
+    os.setsid()
+except PermissionError:
+    pass
+for descriptor in range(3, 256):
+    try:
+        os.close(descriptor)
+    except OSError:
+        pass
+with open(log_path, "ab", buffering=0) as log_file:
+    child = subprocess.Popen(
+        ["tart", "run", *arguments],
+        stdin=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        env={key: value for key, value in os.environ.items() if key != "CI"},
+        close_fds=True,
+    )
+    raise SystemExit(child.wait())
+PY
+	vm_pid=$!
+	vm_started=1
 fi
-env -u CI tart run "${tart_display_args[@]}" \
-	--dir="source:${repository_root}:ro" \
-	--dir="artifacts:${artifact_root}" \
-	"$vm_name" >"$launch_log" 2>&1 &
-vm_pid=$!
-
 guest_ready=0
 for _ in $(seq 1 180); do
 	if tart exec "$vm_name" /usr/bin/true >/dev/null 2>&1; then
 		guest_ready=1
 		break
 	fi
-	if ! kill -0 "$vm_pid" 2>/dev/null; then
+	if (( vm_started == 1 )) && ! kill -0 "$vm_pid" 2>/dev/null; then
 		printf 'Tart VM exited before the guest agent became available.\n' >&2
 		exit 1
 	fi
@@ -155,6 +254,21 @@ done
 if (( guest_ready == 0 )); then
 	printf 'Timed out waiting for Tart guest agent in VM %q.\n' "$vm_name" >&2
 	exit 1
+fi
+if (( keep_vm == 1 )); then
+	if ! session_marker_tmp="$(mktemp "${session_marker}.tmp.XXXXXX")"; then
+		printf 'Could not create the Tart session marker temporary file.\n' >&2
+		keep_vm=0
+		exit 74
+	fi
+	if ! printf '%s\n' "$session_value" > "$session_marker_tmp" ||
+		! mv -f "$session_marker_tmp" "$session_marker"; then
+		rm -f "$session_marker_tmp"
+		printf 'Could not write the Tart session marker; stopping the newly started VM.\n' >&2
+		keep_vm=0
+		exit 74
+	fi
+	session_marker_owned=1
 fi
 
 if (( show_vm == 1 )); then
@@ -167,15 +281,43 @@ if (( show_vm == 1 )); then
 fi
 
 printf 'Running UI tests in VM-local source snapshot...\n'
+source_sync_root="${run_artifacts}/source"
+mkdir -p "$source_sync_root"
+if ! rsync -a --delete --exclude='__pycache__/' --exclude='*.pyc' "${repository_root}/" "${source_sync_root}/"; then
+	printf 'Could not synchronize the current checkout into the Tart artifact share.\n' >&2
+	exit 74
+fi
 set +e
-tart exec -i "$vm_name" /bin/bash -s -- "$run_id" "${live_provider:-none}" "${ui_cases[@]}" <<'GUEST_SCRIPT'
+tart exec -i "$vm_name" /bin/bash -s -- "$run_id" "${live_provider:-none}" "$reset_vm_state" "${ui_cases[@]}" <<'GUEST_SCRIPT'
 set -uo pipefail
 run_id="$1"
 shift
 live_provider="$1"
 shift
+reset_vm_state="$1"
+shift
 if [[ "$live_provider" == "none" ]]; then
 	live_provider=""
+fi
+reset_failed=0
+if [[ "$reset_vm_state" == "1" ]]; then
+	pkill -x StationAI >/dev/null 2>&1 || true
+	pkill -x StationAIUITests-Runner >/dev/null 2>&1 || true
+	pkill -x "Diagnostics Reporter" >/dev/null 2>&1 || true
+	pkill -f 'xcodebuild.*StationAI' >/dev/null 2>&1 || true
+	for _ in $(seq 1 40); do
+		if ! pgrep -x StationAI >/dev/null 2>&1 &&
+			! pgrep -x StationAIUITests-Runner >/dev/null 2>&1 &&
+			! pgrep -f 'xcodebuild.*StationAI' >/dev/null 2>&1; then
+			break
+		fi
+		sleep 0.25
+	done
+	if pgrep -x StationAI >/dev/null 2>&1 ||
+		pgrep -x StationAIUITests-Runner >/dev/null 2>&1 ||
+		pgrep -f 'xcodebuild.*StationAI' >/dev/null 2>&1; then
+		reset_failed=1
+	fi
 fi
 if [[ "${1:-}" == "--all-cases" ]]; then
 	shift
@@ -184,8 +326,8 @@ if [[ ! "$run_id" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]]; then
 	printf 'Invalid Tart UI run ID: %s\n' "$run_id" >&2
 	exit 2
 fi
-source_root="/Volumes/My Shared Files/source"
 artifact_root="/Volumes/My Shared Files/artifacts"
+source_root="${artifact_root}/${run_id}/source"
 snapshot_root="${HOME}/StationAIUITestRuns/${run_id}"
 source_snapshot_root="${HOME}/StationAIUITestRuns/SourceSnapshot"
 source_snapshot_owner="${HOME}/StationAIUITestRuns/.source-snapshot-owner"
@@ -194,6 +336,17 @@ guest_tmp="/tmp/stationai-ui-tart-${run_id}"
 guest_log="${snapshot_root}/ui-test.log"
 guest_artifacts="${artifact_root}/${run_id}"
 
+export_early_failure() {
+	status=$?
+	mkdir -p "$snapshot_root" "$guest_tmp" "$guest_artifacts" 2>/dev/null || exit "$status"
+	if [[ ! -f "$guest_log" ]]; then
+		printf 'Guest UI runner exited before XCTest started (status %s).\n' "$status" > "$guest_log"
+	fi
+	ditto "$guest_log" "${guest_artifacts}/ui-test.log" >/dev/null 2>&1 || true
+	printf '%s\n' "$status" > "${guest_artifacts}/exit-status.txt" 2>/dev/null || true
+	exit "$status"
+}
+trap export_early_failure EXIT
 mkdir -p "$snapshot_root" "$guest_tmp"
 if ! mkdir -p "$guest_artifacts"; then
 	printf 'Cannot create host artifact share path %s; guest run data is retained at %s.\n' "$guest_artifacts" "$snapshot_root" >&2
@@ -212,6 +365,10 @@ if [[ -n "$live_provider" ]] && ! command -v "$live_provider" >/dev/null 2>&1; t
 	exit 2
 fi
 
+if [[ -L "$source_snapshot_owner" ]]; then
+	printf 'Refusing to use a symlink as the VM source snapshot ownership marker: %s\n' "$source_snapshot_owner" >&2
+	exit 74
+fi
 if [[ -e "$source_snapshot_owner" ]] && [[ "$(cat "$source_snapshot_owner")" != "$source_snapshot_owner_contents" ]]; then
 	printf 'Refusing to replace the VM source snapshot without its ownership marker: %s\n' "$source_snapshot_root" >&2
 	exit 74
@@ -225,7 +382,7 @@ if [[ -e "$source_snapshot_root" ]]; then
 fi
 mkdir -p "$source_snapshot_root"
 printf '%s\n' "$source_snapshot_owner_contents" > "$source_snapshot_owner"
-if ! ditto "$source_root" "$source_snapshot_root"; then
+if ! rsync -a --exclude='__pycache__/' --exclude='*.pyc' "${source_root}/" "${source_snapshot_root}/"; then
 	printf 'Could not create the VM-local source snapshot; guest run data is retained at %s.\n' "$snapshot_root" >&2
 	exit 74
 fi
@@ -242,6 +399,10 @@ printf 'Xcode: %s\n' "$(xcodebuild -version | tr '\n' ' ')"
 # The base image restores a large Terminal window over newly launched apps.
 # Close it so macOS UI automation sees the app's visible window consistently.
 osascript -e 'tell application "Terminal" to quit' >/dev/null 2>&1 || true
+# XCTest intentionally exercises process failures. Keep macOS crash reports in
+# artifacts/logs instead of letting Diagnostics Reporter block later UI actions.
+defaults write com.apple.CrashReporter DialogType none
+pkill -x "Diagnostics Reporter" >/dev/null 2>&1 || true
 sleep 2
 
 if [[ -n "$live_provider" ]]; then
@@ -249,25 +410,33 @@ if [[ -n "$live_provider" ]]; then
 	export STATIONAI_RUN_LIVE_INTEGRATION=1
 	export STATIONAI_LIVE_PROVIDER="$live_provider"
 fi
-set +e
-STATIONAI_UI_TART_GUEST=1 STATIONAI_UI_DASHBOARD=0 TMPDIR="$guest_tmp" "${source_snapshot_root}/scripts/test-ui.sh" "$@" 2>&1 | tee "$guest_log"
-test_status=${PIPESTATUS[0]}
-set -e
+if (( reset_failed == 1 )); then
+	printf 'Guest reset did not finish: an existing StationAI or Xcode test process is still running.\n' | tee "$guest_log"
+	test_status=74
+else
+	set +e
+	STATIONAI_UI_TART_GUEST=1 STATIONAI_UI_TESTS_CONFIRMED=1 STATIONAI_UI_DASHBOARD=0 TMPDIR="$guest_tmp" "${source_snapshot_root}/scripts/test-ui.sh" "$@" 2>&1 | tee "$guest_log"
+	test_status=${PIPESTATUS[0]}
+	set -e
+fi
 if [[ -n "$live_provider" ]]; then
 	rm -f /tmp/stationai-live-ui-integration
 fi
 
 artifact_copy_status=0
+trap - EXIT
 if ! ditto "$guest_log" "${guest_artifacts}/ui-test.log"; then
 	printf 'Failed to copy the UI test log to the host artifact share.\n' >&2
 	artifact_copy_status=1
 fi
-while IFS= read -r -d '' test_output; do
-	if ! ditto "$test_output" "${guest_artifacts}/$(basename "$test_output")"; then
-		printf 'Failed to copy test output %s to the host artifact share.\n' "$test_output" >&2
-		artifact_copy_status=1
-	fi
-done < <(find "$guest_tmp" -maxdepth 1 -type d -name 'stationai-ui.*' -print0)
+if [[ -n "${guest_tmp:-}" && -d "$guest_tmp" ]]; then
+	while IFS= read -r -d '' test_output; do
+		if ! ditto "$test_output" "${guest_artifacts}/$(basename "$test_output")"; then
+			printf 'Failed to copy test output %s to the host artifact share.\n' "$test_output" >&2
+			artifact_copy_status=1
+		fi
+	done < <(find "$guest_tmp" -maxdepth 1 -type d -name 'stationai-ui.*' -print0)
+fi
 if ! printf '%s\n' "$test_status" > "${guest_artifacts}/exit-status.txt"; then
 	printf 'Failed to write the UI test exit status to the host artifact share.\n' >&2
 	artifact_copy_status=1
@@ -277,8 +446,13 @@ if (( artifact_copy_status != 0 )); then
 	exit 74
 fi
 printf 'Host artifacts: %s\n' "$guest_artifacts"
+if (( test_status != 0 )); then
+	printf 'Failure diagnostics are attached in the xcresult bundles under %s.\n' "$guest_artifacts"
+fi
 rm -rf -- "$snapshot_root"
-rm -rf -- "$guest_tmp"
+if [[ -n "${guest_tmp:-}" ]]; then
+	rm -rf -- "$guest_tmp"
+fi
 exit "$test_status"
 GUEST_SCRIPT
 test_status=$?

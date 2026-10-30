@@ -70,12 +70,22 @@ struct ConversationTranscript: Codable, Equatable {
     /// ID is useful only while its provider process is alive; this durable copy
     /// lets the UI restore the question and continue the saved session later.
     var pendingUserInputRequest: ConversationUserInputRequest?
+    struct UserInputRepair: Codable, Equatable {
+        let sourceTaskID: UUID
+        let request: ConversationUserInputRequest
+    }
+    /// Retained after answering, so retrying an interrupted two-file repair
+    /// cannot resurrect the source's old question.
+    var userInputRepairs: [UserInputRepair]?
     /// Private recovery turns. The submitted answers and prompt are never stored
     /// raw; provider activity and diffs for these turns stay hidden.
     var sensitiveTurnIDs: [String]?
     /// Codex turn IDs containing private recovery prompts. Codex-only tasks may
     /// not have a transcript segment to associate these IDs with.
     var sensitiveCodexTurnIDs: [String]?
+    /// Codex recovery turns whose assistant responses must stay hidden because
+    /// their recovered user input included a secret answer.
+    var sensitiveCodexSecretTurnIDs: [String]?
     /// Locally sanitized message copies for private Codex recovery turns. Raw
     /// provider messages can be replaced after restart without losing safe text.
     var sensitiveCodexTurnMessages: [String: [ConversationMessage]]?
@@ -125,6 +135,68 @@ struct ConversationTranscriptStore {
             _ = Darwin.chmod(url.path, mode_t(0o600))
         }
         return result
+    }
+
+    /// Hold both transcript locks in a stable order. Publish the destination
+    /// before clearing the misplaced source, so an interrupted repair is retryable.
+    func reassignPendingUserInput(from sourceID: UUID, to targetID: UUID, threadID: String) throws -> ConversationUserInputRequest {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var descriptors: [Int32] = []
+        defer {
+            for descriptor in descriptors.reversed() {
+                var lock = flock()
+                lock.l_type = Int16(F_UNLCK)
+                lock.l_whence = Int16(SEEK_SET)
+                _ = Darwin.fcntl(descriptor, F_SETLK, &lock)
+                _ = Darwin.close(descriptor)
+            }
+        }
+        for id in [sourceID, targetID].sorted(by: { $0.uuidString < $1.uuidString }) {
+            let descriptor = Darwin.open(fileURL(id).appendingPathExtension("lock").path, O_CREAT | O_RDWR | O_CLOEXEC, mode_t(0o600))
+            guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+            descriptors.append(descriptor)
+            var lock = flock()
+            lock.l_type = Int16(F_WRLCK)
+            lock.l_whence = Int16(SEEK_SET)
+            guard Darwin.fcntl(descriptor, F_SETLKW, &lock) == 0 else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            }
+        }
+        var source = try read(sourceID)
+        var target = try read(targetID)
+        guard let request = source.pendingUserInputRequest else {
+            if let repaired = target.pendingUserInputRequest, repaired.threadID == threadID { return repaired }
+            throw BridgeCommandError(code: "not_found", message: "The source task has no pending question to repair.")
+        }
+        guard request.threadID == threadID else {
+            throw BridgeCommandError(code: "invalid_transition", message: "The source question does not belong to the destination conversation.")
+        }
+        let receipt = ConversationTranscript.UserInputRepair(sourceTaskID: sourceID, request: request)
+        guard target.pendingUserInputRequest != nil || !(target.userInputRepairs ?? []).contains(receipt) else {
+            throw BridgeCommandError(code: "invalid_transition", message: "This question was already repaired and is no longer pending.")
+        }
+        guard target.pendingUserInputRequest == nil || target.pendingUserInputRequest == request else {
+            throw BridgeCommandError(code: "invalid_transition", message: "The destination conversation already has a different pending question.")
+        }
+        let backup = directory.appendingPathComponent("question-repair-backups", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: backup, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        for (id, original) in [(sourceID, source), (targetID, target)] {
+            let url = backup.appendingPathComponent("\(id.uuidString).json")
+            try JSONEncoder().encode(original).write(to: url, options: .atomic)
+            _ = Darwin.chmod(url.path, mode_t(0o600))
+        }
+        target.pendingUserInputRequest = request
+        if !(target.userInputRepairs ?? []).contains(receipt) {
+            target.userInputRepairs = (target.userInputRepairs ?? []) + [receipt]
+        }
+        source.pendingUserInputRequest = nil
+        for (id, updated) in [(targetID, target), (sourceID, source)] {
+            let url = fileURL(id)
+            try JSONEncoder().encode(updated).write(to: url, options: .atomic)
+            _ = Darwin.chmod(url.path, mode_t(0o600))
+        }
+        return request
     }
 
     func remove(_ taskID: UUID) {

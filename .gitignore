@@ -9,3 +9,6 @@ scripts/monaco-diff/dist/
 __pycache__/
 *.py[cod]
 **/xcuserdata/
+.tmp-plan-attachments/
+.tmp-plan-results.json
+.tmp-xcresult-*/

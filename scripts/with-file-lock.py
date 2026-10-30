@@ -15,12 +15,24 @@ descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
 started = time.monotonic()
 queued_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
 next_wait_report = started
+timeout_value = os.environ.get("STATIONAI_UI_LOCK_TIMEOUT_SECONDS")
+wait_timeout = float(timeout_value) if timeout_value else None
 while True:
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         break
     except BlockingIOError:
         now = time.monotonic()
+        if wait_timeout is not None and now - started >= wait_timeout:
+            holder = os.pread(descriptor, 4096, 0).decode("utf-8", errors="replace")
+            print(
+                f"Lock wait timed out path={lock_path} queued_at={queued_at} "
+                f"wait_seconds={now - started:.3f} holder={holder or 'unknown (older wrapper)'}",
+                file=sys.stderr,
+                flush=True,
+            )
+            os.close(descriptor)
+            raise SystemExit(124)
         if now >= next_wait_report:
             holder = os.pread(descriptor, 4096, 0).decode("utf-8", errors="replace")
             print(

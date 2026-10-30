@@ -4,8 +4,7 @@ import SwiftUI
 
 struct KanbanBoardView: View {
     @Environment(\.modelContext) private var modelContext
-    @EnvironmentObject private var codexClient: CodexAppServerClient
-    @EnvironmentObject private var claudeClient: ClaudeCodeClient
+    @EnvironmentObject private var conversationRuntime: ConversationRuntimeModel
     @Query(
         filter: #Predicate<BoardTask> { $0.statusRawValue != "Done" && !$0.isStandaloneChat },
         sort: \BoardTask.createdAt, order: .reverse
@@ -46,8 +45,9 @@ struct KanbanBoardView: View {
     @State private var chatTask: BoardTask?
     @State private var isOpeningChatSidebar = false
 
-    private var conversationClients: ConversationClients {
-        ConversationClients(codex: codexClient, claude: claudeClient)
+    /// Provider-owning operations run in the bridge daemon.
+    private var remoteConversations: RemoteConversationManager {
+        RemoteConversationManager(daemon: conversationRuntime.client, runtime: conversationRuntime, modelContext: modelContext)
     }
 
     var body: some View {
@@ -102,7 +102,14 @@ struct KanbanBoardView: View {
                 lifecycleResetNotice = "Existing tasks were cleared. These dirty managed worktrees were kept:\n\n" + retained.joined(separator: "\n")
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .stationAIShowBoardSearch)) { _ in
+            withAnimation(.easeInOut(duration: 0.18)) { isShowingBoardSearch = true }
+            isBoardSearchFocused = true
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            checkReviewPullRequests()
+        }
+        .task(id: reviewPullRequestSignature) {
             checkReviewPullRequests()
         }
         .sheet(isPresented: Binding(
@@ -115,7 +122,7 @@ struct KanbanBoardView: View {
                         do {
                             _ = try await BoardTaskManager(modelContext: modelContext).rename(taskBeingRenamed.id, title: title)
                         } catch {
-                            saveError = error.localizedDescription
+                            presentSaveError(error.localizedDescription)
                         }
                     }
                     self.taskBeingRenamed = nil
@@ -131,12 +138,9 @@ struct KanbanBoardView: View {
                 guard let taskBeingDeleted else { return }
                 Task { @MainActor in
                     do {
-                        try await BoardTaskManager(modelContext: modelContext).delete(
-                            taskBeingDeleted.id,
-                            diagnostics: codexClient.diagnosticFields()
-                        )
+                        try await remoteConversations.deleteTask(taskID: taskBeingDeleted.id)
                     } catch {
-                        saveError = "\(error.localizedDescription)\n\nDiagnostic log: \(StationAIDiagnostics.logURL.path)"
+                        presentSaveError("\(error.localizedDescription)\n\nDiagnostic log: \(StationAIDiagnostics.logURL.path)")
                     }
                     self.taskBeingDeleted = nil
                 }
@@ -152,15 +156,6 @@ struct KanbanBoardView: View {
             .accessibilityIdentifier("cancel-delete-task-button")
         } message: {
             Text("The task conversation and saved working folders will also be deleted.")
-        }
-        .alert("Couldn't save changes", isPresented: isShowingSaveError) {
-            Button("OK", role: .cancel) {
-                saveError = nil
-            }
-            .buttonHoverPointer()
-            .help("Dismiss save error")
-        } message: {
-            Text(saveError ?? "Please try again.")
         }
         .alert("Pull request operation failed", isPresented: Binding(
             get: { pullRequestError != nil },
@@ -212,6 +207,15 @@ struct KanbanBoardView: View {
                 .help("Dismiss worktree notice")
         } message: {
             Text(lifecycleResetNotice ?? "")
+        }
+        .alert("Couldn't save changes", isPresented: isShowingSaveError) {
+            Button("OK", role: .cancel) {
+                saveError = nil
+            }
+            .buttonHoverPointer()
+            .help("Dismiss save error")
+        } message: {
+            Text(saveError ?? "Please try again.")
         }
     }
 
@@ -305,16 +309,6 @@ struct KanbanBoardView: View {
             }
         }
         .background(DragEndEventMonitor(draggedTaskID: $draggedTaskID))
-        .background {
-            Button("Search tasks") {
-                withAnimation(.easeInOut(duration: 0.18)) { isShowingBoardSearch = true }
-                isBoardSearchFocused = true
-            }
-            .keyboardShortcut("f", modifiers: .command)
-            .buttonHoverPointer()
-            .help("Search tasks (⌘F)")
-            .hidden()
-        }
         .overlay(alignment: .topTrailing) {
             if isShowingBoardSearch {
                 boardSearchBar
@@ -349,14 +343,13 @@ struct KanbanBoardView: View {
             do {
                 try await Task.sleep(for: .milliseconds(250))
                 guard !Task.isCancelled else { return }
-                let manager = ConversationManager(tasks: BoardTaskManager(modelContext: modelContext), clients: conversationClients)
-                let records = try await manager.searchArchive(query: query)
+                let records = try await remoteConversations.searchArchive(query: query)
                 guard !Task.isCancelled else { return }
                 archiveSearchResults = records.compactMap { try? BoardTaskManager(modelContext: modelContext).taskModel($0.id) }
             } catch is CancellationError {
                 return
             } catch {
-                saveError = error.localizedDescription
+                presentSaveError(error.localizedDescription)
                 archiveSearchResults = []
             }
         }
@@ -444,6 +437,7 @@ struct KanbanBoardView: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.primary.opacity(0.12), lineWidth: 1))
         .shadow(color: .black.opacity(0.10), radius: 10, y: 3)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("board-search-bar")
     }
 
@@ -476,6 +470,20 @@ struct KanbanBoardView: View {
                     .accessibilityLabel("Task count")
                     .accessibilityValue("\(activeTaskCount)")
                     .accessibilityIdentifier("task-count")
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) { isShowingBoardSearch = true }
+                    isBoardSearchFocused = true
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 14, weight: .semibold))
+                        .frame(width: 30, height: 30)
+                }
+                .buttonHoverPointer()
+                .buttonStyle(.bordered)
+                .help("Search tasks")
+                .accessibilityLabel("Search tasks")
+                .accessibilityIdentifier("board-search-button")
 
                 Button {
                     withAnimation(.easeInOut(duration: 0.24)) { isShowingDoneArchive.toggle() }
@@ -563,9 +571,9 @@ struct KanbanBoardView: View {
                     LazyVStack(spacing: 5) {
                         ForEach(results) { task in
                             Button {
-                                closeDoneArchive()
                                 selectedTask = task
                                 isSelectedTaskNew = false
+                                closeDoneArchive()
                             } label: {
                                 HStack(spacing: 10) {
                                     Image(systemName: "checkmark.circle.fill").foregroundStyle(TaskStatus.done.accent)
@@ -616,12 +624,16 @@ struct KanbanBoardView: View {
                     ProgressView().controlSize(.mini)
                 } else {
                     Text("PR").font(.system(size: 10, weight: .semibold))
+                            .frame(minWidth: 30, minHeight: 30)
                 }
             }
             .actionButtonHoverEmphasis()
             .buttonHoverPointer()
             .help("Create a pull request for each repository linked to this completed task")
             .disabled(taskCreatingPullRequests.contains(task.id))
+            .frame(width: 30, height: 30)
+            .contentShape(Rectangle())
+            .accessibilityLabel("Create a pull request for each repository linked to this completed task")
             .accessibilityIdentifier("done-archive-create-pr-\(task.id.uuidString)")
         } else {
             HStack(spacing: 5) {
@@ -629,9 +641,12 @@ struct KanbanBoardView: View {
                     if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
                         Link("#\(number)", destination: url)
                             .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .frame(minWidth: 30, minHeight: 30)
                             .actionButtonHoverEmphasis()
                             .buttonHoverPointer()
                             .help("Open pull request #\(number) in your browser")
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
                             .accessibilityIdentifier("done-archive-pr-link-\(task.id.uuidString)-\(number)")
                     }
                 }
@@ -655,7 +670,7 @@ struct KanbanBoardView: View {
             archiveOffset += page.count
             archiveHasMore = page.count == 40
         } catch {
-            saveError = error.localizedDescription
+            presentSaveError(error.localizedDescription)
             archiveHasMore = false
         }
         isLoadingArchivePage = false
@@ -668,6 +683,10 @@ struct KanbanBoardView: View {
         archiveSearchResults = nil
         archiveOffset = 0
         archiveHasMore = true
+    }
+
+    private func presentSaveError(_ message: String) {
+        saveError = message
     }
 
     private var isShowingSaveError: Binding<Bool> {
@@ -742,7 +761,7 @@ struct KanbanBoardView: View {
                     "errorCode": String(nsError.code),
                     "errorDescription": error.localizedDescription
                 ])
-                saveError = error.localizedDescription
+                presentSaveError(error.localizedDescription)
             }
         }
     }
@@ -790,6 +809,17 @@ struct KanbanBoardView: View {
                 return
             }
         }
+        let reviewTasks = tasks.filter { task in
+            task.status == .review && task.repositoryWorktrees.contains {
+                !$0.isPending && $0.pullRequestNumber != nil
+            }
+        }
+        let reviewIDs = reviewTasks.map(\.id)
+        guard !reviewIDs.isEmpty else {
+            mergedReviewTaskIDs = []
+            conflictedReviewTaskIDs = []
+            return
+        }
         lastMergedPullRequestCheckAt = now
         checkingMergedPullRequests = true
         Task { @MainActor in
@@ -800,24 +830,23 @@ struct KanbanBoardView: View {
                     checkReviewPullRequests()
                 }
             }
-            let reviewIDs = tasks.filter { task in
-                task.status == .review && task.repositoryWorktrees.contains { !$0.isPending && $0.pullRequestNumber != nil }
-            }.map(\.id)
-            guard !reviewIDs.isEmpty else {
-                mergedReviewTaskIDs = []
-                conflictedReviewTaskIDs = []
-                return
-            }
             let manager = BoardTaskManager(modelContext: modelContext)
             await withTaskGroup(of: (UUID, [PullRequestReviewState]?, String?).self) { group in
-                for id in reviewIDs {
+                for task in reviewTasks {
                     group.addTask {
-                        do { return (id, try await manager.reviewPullRequests(id), nil) }
-                        catch { return (id, nil, error.localizedDescription) }
+                        do { return (task.id, try await manager.reviewPullRequests(task), nil) }
+                        catch { return (task.id, nil, error.localizedDescription) }
                     }
                 }
                 for await (id, states, error) in group {
                     if let states {
+                        if states.isEmpty {
+                            // The persisted query can briefly lag the visible
+                            // SwiftData task after an external store update.
+                            // Allow the already-coalesced appearance/focus check
+                            // to retry immediately with the refreshed records.
+                            lastMergedPullRequestCheckAt = nil
+                        }
                         if !states.isEmpty && states.allSatisfy(\.merged) { mergedReviewTaskIDs.insert(id) }
                         else { mergedReviewTaskIDs.remove(id) }
                         if states.contains(where: \.requiresConflictResolution) { conflictedReviewTaskIDs.insert(id) }
@@ -834,6 +863,17 @@ struct KanbanBoardView: View {
         }
     }
 
+    private var reviewPullRequestSignature: [String] {
+        tasks.flatMap { task in
+            task.repositoryWorktrees.compactMap { record in
+                guard task.status == .review, let number = record.pullRequestNumber else {
+                    return nil
+                }
+                return "\(task.id.uuidString):\(record.repositoryPath):\(number)"
+            }
+        }.sorted()
+    }
+
     private func createPullRequests(for task: BoardTask) {
         guard taskCreatingPullRequests.insert(task.id).inserted else { return }
         Task { @MainActor in
@@ -844,7 +884,7 @@ struct KanbanBoardView: View {
                 if !conflictRepositories.isEmpty {
                     throw BridgeCommandError(code: "conflicts_require_confirmation", message: "Resolve conflicts in the task worktree before creating pull requests.")
                 }
-                _ = try await manager.createPullRequests(task.id, clients: conversationClients)
+                _ = try await remoteConversations.createPullRequests(taskID: task.id)
             } catch {
                 pullRequestError = error.localizedDescription
             }
@@ -891,9 +931,10 @@ private struct DragEndEventMonitor: NSViewRepresentable {
         }
 
         func uninstall() {
-            guard let mouseUpMonitor else { return }
-            NSEvent.removeMonitor(mouseUpMonitor)
-            self.mouseUpMonitor = nil
+            if let mouseUpMonitor {
+                NSEvent.removeMonitor(mouseUpMonitor)
+                self.mouseUpMonitor = nil
+            }
         }
     }
 }
@@ -1048,8 +1089,9 @@ private struct KanbanColumnView: View {
             hasPullRequestConflicts: conflictedReviewTaskIDs.contains(task.id),
             onMoveToDone: task.status == .review ? { onMoveTask(task.id, .done) } : nil
         )
-
-        if task.status == .review {
+        if task.status == .waitingResponse {
+            card
+        } else if task.status == .review {
             card.onDrag {
                 draggedTaskID = task.id
                 return NSItemProvider(object: task.id.uuidString as NSString)
@@ -1303,10 +1345,13 @@ private struct TaskCardView: View {
         }
         .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
-            Button(action: onOpen) {
+            Button(action: {
+                DispatchQueue.main.async(execute: onOpen)
+            }) {
                 Color.clear
                     .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .buttonHoverPointer()
             .buttonStyle(.plain)
             .help("Open task: \(task.title)")
@@ -1318,19 +1363,23 @@ private struct TaskCardView: View {
         .overlay(alignment: .topTrailing) {
             if task.status != .backlog && !task.repositoryWorktrees.isEmpty {
                 HStack(spacing: 5) {
-                    let linked = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
+                    let linked = linkedPullRequests
                     if linked.isEmpty {
                         Button(action: onCreatePullRequests) {
                             if isCreatingPullRequests {
                                 ProgressView().controlSize(.mini)
                             } else {
                                 Text("PR").font(.system(size: 10, weight: .semibold))
+                                    .frame(minWidth: 30, minHeight: 30)
                             }
                         }
                         .actionButtonHoverEmphasis(padding: 10)
                         .buttonHoverPointer()
                         .help("Create a pull request for each repository linked to this task")
                         .disabled(isCreatingPullRequests)
+                        .frame(width: 30, height: 30)
+                        .contentShape(Rectangle())
+                        .accessibilityLabel("Create a pull request for each repository linked to this task")
                         .accessibilityIdentifier("task-create-pr-\(task.id.uuidString)")
                     } else {
                         if isPullRequestMerged, let onMoveToDone {
@@ -1342,6 +1391,8 @@ private struct TaskCardView: View {
                             .actionButtonHoverEmphasis(padding: 10)
                             .buttonHoverPointer()
                             .help("Complete task: all linked pull requests have merged")
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
                             .accessibilityLabel("Green checkmark. Complete task, all linked pull requests merged")
                             .accessibilityIdentifier("task-complete-merged-pr-\(task.id.uuidString)")
                         } else {
@@ -1358,14 +1409,19 @@ private struct TaskCardView: View {
                                 .help("Resolve pull request conflicts with \(task.conversationProvider.displayName)")
                                 .accessibilityLabel("Resolve pull request conflicts")
                                 .accessibilityIdentifier("task-resolve-pr-conflicts-\(task.id.uuidString)")
+                                .frame(minWidth: 30, minHeight: 30)
+                                .contentShape(Rectangle())
                             }
                             ForEach(linked, id: \.repositoryPath) { record in
                                 if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
                                     Link("#\(number)", destination: url)
                                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                        .frame(minWidth: 30, minHeight: 30)
                                         .actionButtonHoverEmphasis(padding: 10)
                                         .buttonHoverPointer()
                                         .help("Open pull request #\(number) in your browser")
+                                        .frame(width: 30, height: 30)
+                                        .contentShape(Rectangle())
                                         .accessibilityIdentifier("task-pr-link-\(task.id.uuidString)-\(number)")
                                 }
                             }
@@ -1375,6 +1431,7 @@ private struct TaskCardView: View {
                 .buttonStyle(.borderless)
                 .padding(.trailing, 14)
                 .padding(.top, 12)
+                .zIndex(2)
             }
         }
         .contextMenu {
@@ -1393,6 +1450,10 @@ private struct TaskCardView: View {
             .help("Delete Task")
                 .accessibilityIdentifier("delete-task-menu-item")
         }
+    }
+
+    private var linkedPullRequests: [RepositoryWorktreeRecord] {
+        task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
     }
 
     private func workingDuration(at date: Date) -> String {

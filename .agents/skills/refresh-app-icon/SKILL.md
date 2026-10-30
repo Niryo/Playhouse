@@ -32,3 +32,19 @@ killall Dock
 Confirm the running process path matches the profile's app bundle. Inspect that bundle's `Contents/Resources/AppIcon.icns` if there is doubt about what was built; `sips -s format png <path-to-AppIcon.icns> --out /tmp/stationai-app-icon-check.png` makes it viewable. Then inspect the **visible Dock** or a screenshot of it. The running app tile is on the app side of the Dock divider and has a dot beneath it. A playhouse image on the other side of the divider can be a minimized window thumbnail and does not prove the app tile changed.
 
 If the tile still shows older artwork, inspect its **Options → Show in Finder** target if it is pinned, and compare all running StationAI process paths. Close only the confirmed stale copy, relaunch the intended worktree app, and restart Dock once more. Do not report success from the bundle icon or `NSRunningApplication.icon` alone; both can show new artwork while the Dock still shows an old tile.
+
+If the active (running-dot) tile is still old even though the intended bundle's `AppIcon.icns` is new and it is the only running StationAI process, check for duplicate Launch Services registrations. Xcode, E2E, and scratchpad builds can register the same `com.stationai.app` identifier with different icons:
+
+```bash
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+"$LSREGISTER" -dump
+```
+
+Inspect only records whose identifier is exactly `com.stationai.app` (ignore test identifiers such as `com.stationai.app.e2e`). For each candidate path, confirm that it exists, is not the intended bundle, is not running, and that its `Contents/Resources/AppIcon.icns` contains the stale artwork. Do not unregister every duplicate or delete any build. Unregister only the confirmed stale registration, then force-register the intended bundle:
+
+```bash
+"$LSREGISTER" -u "/exact/path/to/confirmed-stale/StationAI.app"
+"$LSREGISTER" -f "/exact/path/to/current/StationAI.app"
+```
+
+Repeat the refresh sequence above, then inspect a screenshot of the visible Dock. In the reported incident, an old Claude scratchpad build was registered first for the same bundle identifier and carried the old U icon; removing just that registration and registering the `scripts/run.sh` bundle fixed the active Dock tile. This Launch Services cleanup is a fallback, not a routine first step.

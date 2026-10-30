@@ -71,6 +71,27 @@ final class ClaudeSessionRunner {
     private var pendingTextSpansOutcomeReport = false
     private var toolActivities: [String: ConversationActivity] = [:]
     private var activityStartedAtUptime: [String: UInt64] = [:]
+    /// Background Agent/Task calls currently reported as outstanding by the most
+    /// recent `background_tasks_changed` event. The turn must not settle while
+    /// any of these are still running, or their results and the activity rows
+    /// tracking them would be lost when the process is torn down.
+    private var outstandingBackgroundTaskIDs: Set<String> = []
+    /// A task_updated terminal status is not the final report. Wait for the
+    /// distinct task_notification event even if background_tasks_changed has
+    /// already removed the task from its outstanding list.
+    private var pendingBackgroundTaskNotificationIDs: Set<String> = []
+    /// Maps the provider's own background task id to the tool-use id (the
+    /// activity's `childThreadID`) that launched it, learned from `task_started`.
+    private var backgroundTaskToolUseIDs: [String: String] = [:]
+    /// Task ids owned by a subagent itself (for example a nested Bash call the
+    /// background agent ran), not a top-level Agent/Task call StationAI tracks
+    /// as its own activity row. Their notifications are internal to the agent's
+    /// own work and must not spawn a stray top-level activity.
+    private var nestedBackgroundTaskIDs: Set<String> = []
+    /// Tool-use ids for Agent/Task calls launched with `run_in_background: true`,
+    /// so their instant launch-confirmation tool_result isn't mistaken for the
+    /// agent's actual completion.
+    private var backgroundedToolUseIDs: Set<String> = []
 
     private(set) var activeTurnID: String?
     private(set) var isTurnActive = false
@@ -314,6 +335,7 @@ final class ClaudeSessionRunner {
             "--output-format", "stream-json",
             "--verbose",
             "--include-partial-messages",
+            "--forward-subagent-text",
             "--permission-prompt-tool", "stdio",
             "--permission-mode", mode == .plan ? "plan" : "default",
             resume ? "--resume" : "--session-id", sessionID
@@ -321,17 +343,19 @@ final class ClaudeSessionRunner {
         if modelID != ClaudeCodeClient.defaultModelID { arguments += ["--model", modelID] }
         if !persistsSessions { arguments.append("--no-session-persistence") }
         for root in workspace.roots.dropFirst() { arguments += ["--add-dir", root.path] }
-        // Each turn's process exits when the turn ends, so work Claude moves to the
-        // background is lost and its turn stops early. Keep every command in the foreground.
+        // Backgrounded shell commands have no completion protocol StationAI can
+        // observe (unlike the Agent tool's task events), so a `&`-backgrounded Bash
+        // command would be silently lost once the turn settles. Keep shell work
+        // in the foreground; background Agent/Task calls are tracked separately.
         var systemPrompt = ClaudeCodeClient.foregroundExecutionInstruction
         if let developerInstructions, !developerInstructions.isEmpty {
             systemPrompt += "\n\n" + developerInstructions
         }
         arguments += ["--append-system-prompt", systemPrompt]
 
-        var environment = ProcessInfo.processInfo.environment
+        var environment = StationAIProcessEnvironment.current
         environment["PATH"] = ClaudeCodeClient.expandedSearchPath(environment["PATH"])
-        ConversationProcessEnvironment.forwardStationAIBridgeEnvironment(&environment)
+        ConversationProcessEnvironment.forwardStationAIBridgeEnvironment(&environment, dataDirectoryOverride: owner?.dataDirectoryOverride ?? nil)
         // Claude Code finds its keychain sign-in by user name; services started by
         // launchd are not guaranteed a login environment.
         environment["HOME"] = environment["HOME"] ?? NSHomeDirectory()
@@ -359,6 +383,9 @@ final class ClaudeSessionRunner {
         stdoutBuffer.removeAll(keepingCapacity: true)
         stderrTail = ""
         sessionWasMissing = false
+        // The provider's output and exit are handled outside the request that
+        // launched it; keep that request's environment and diagnostics routing.
+        let requestContext = StationAIRequestContext.capture()
         let queue = outputQueue
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
             queue.async { [weak self] in
@@ -366,7 +393,7 @@ final class ClaudeSessionRunner {
                 guard !data.isEmpty else { return }
                 let consumed = DispatchSemaphore(value: 0)
                 Task { @MainActor [weak self] in
-                    await self?.consumeOutput(data)
+                    await requestContext.run { await self?.consumeOutput(data) }
                     consumed.signal()
                 }
                 consumed.wait()
@@ -381,7 +408,7 @@ final class ClaudeSessionRunner {
             }
         }
         child.terminationHandler = { [weak self] terminated in
-            Task { @MainActor [weak self] in self?.processDidTerminate(terminated) }
+            Task { @MainActor [weak self] in await requestContext.run { self?.processDidTerminate(terminated) } }
         }
         do {
             try child.run()
@@ -460,7 +487,9 @@ final class ClaudeSessionRunner {
     }
 
     private func waitForTurnCompletion() async throws {
-        if turnCompletion.resultReceived, pendingCommandUUIDs.isEmpty || !sawCommandLifecycle {
+        if turnCompletion.resultReceived, pendingCommandUUIDs.isEmpty || !sawCommandLifecycle,
+           outstandingBackgroundTaskIDs.isEmpty,
+           pendingBackgroundTaskNotificationIDs.isEmpty {
             if let error = turnCompletion.resultError { throw error }
             return
         }
@@ -575,6 +604,8 @@ final class ClaudeSessionRunner {
             handleAssistant(message)
         case "user":
             handleToolResults(message)
+        case "system":
+            handleSystem(message)
         case "result":
             handleResult(message)
         default:
@@ -638,7 +669,7 @@ final class ClaudeSessionRunner {
             self.pendingAssistantText = nil
         }
         pendingQuestion = PendingQuestion(controlRequestID: requestID, sessionID: sessionID, input: input, questions: questions)
-        let request = ConversationUserInputRequest(id: requestID, threadID: sessionID, questions: questions, isBlocking: true)
+        let request = ConversationUserInputRequest(id: requestID, threadID: sessionID, questions: questions, isBlocking: true, mode: activeMode)
         pendingUserInputRequest = request
         owner?.runnerStateChanged(self)
         let handler = userInputHandler
@@ -691,6 +722,9 @@ final class ClaudeSessionRunner {
                     pendingTextSpansOutcomeReport = false
                 }
                 activityStartedAtUptime[toolID] = DispatchTime.now().uptimeNanoseconds
+                if (name == "Task" || name == "Agent"), input["run_in_background"] as? Bool == true {
+                    backgroundedToolUseIDs.insert(toolID)
+                }
                 let activity = ClaudeCodeClient.activity(toolID: toolID, name: name, input: input, status: "inProgress", turnID: activeTurnID)
                 toolActivities[toolID] = activity
                 activityHandler?(activity)
@@ -713,6 +747,9 @@ final class ClaudeSessionRunner {
               let content = body["content"] as? [[String: Any]] else { return }
         for block in content where block["type"] as? String == "tool_result" {
             guard let toolID = block["tool_use_id"] as? String, var activity = toolActivities[toolID] else { continue }
+            // A backgrounded Agent/Task call's tool_result only confirms the launch,
+            // not completion; its real outcome arrives later as a system task event.
+            if backgroundedToolUseIDs.contains(toolID) { continue }
             let isError = block["is_error"] as? Bool ?? false
             let output = ClaudeCodeClient.resultText(block["content"])
             var detail = activity.detail
@@ -731,6 +768,100 @@ final class ClaudeSessionRunner {
             if let duration { activityDurations[activity.id] = duration }
             toolActivities[toolID] = activity
             activityHandler?(activity)
+        }
+    }
+
+    /// Background Agent/Task progress arrives as `system` events (enabled by
+    /// `--forward-subagent-text`), not as a `tool_result` on the launching turn,
+    /// since the agent can keep running after that turn's own answer is given.
+    private func handleSystem(_ message: [String: Any]) {
+        guard let subtype = message["subtype"] as? String else { return }
+        switch subtype {
+        case "background_tasks_changed":
+            let tasks = message["tasks"] as? [[String: Any]] ?? []
+            outstandingBackgroundTaskIDs = Set(tasks.compactMap { $0["task_id"] as? String })
+            completeTurnIfSettled()
+        case "task_started":
+            guard let taskID = message["task_id"] as? String,
+                  let toolUseID = message["tool_use_id"] as? String else { return }
+            guard message["task_type"] as? String == "local_agent" else {
+                nestedBackgroundTaskIDs.insert(taskID)
+                return
+            }
+            pendingBackgroundTaskNotificationIDs.insert(taskID)
+            backgroundTaskToolUseIDs[taskID] = toolUseID
+            guard var activity = toolActivities[toolUseID] else { return }
+            activity.backgroundTaskID = taskID
+            toolActivities[toolUseID] = activity
+            activityHandler?(activity)
+        case "task_progress":
+            guard let taskID = message["task_id"] as? String, !nestedBackgroundTaskIDs.contains(taskID),
+                  let toolUseID = (message["tool_use_id"] as? String) ?? backgroundTaskToolUseIDs[taskID],
+                  var activity = toolActivities[toolUseID] else { return }
+            let lastTool = message["last_tool_name"] as? String
+            activity.detail = [activity.agentPath, lastTool.map { "Using \($0)" }].compactMap { $0 }.joined(separator: "\n")
+            activity.backgroundTaskID = taskID
+            toolActivities[toolUseID] = activity
+            activityHandler?(activity)
+        case "task_updated", "task_notification":
+            guard let taskID = message["task_id"] as? String else { return }
+            let isTaskNotification = subtype == "task_notification"
+            if isTaskNotification {
+                outstandingBackgroundTaskIDs.remove(taskID)
+                pendingBackgroundTaskNotificationIDs.remove(taskID)
+            }
+            guard !nestedBackgroundTaskIDs.contains(taskID) else { return }
+            let patch = message["patch"] as? [String: Any]
+            guard let rawStatus = (message["status"] as? String) ?? (patch?["status"] as? String) else {
+                completeTurnIfSettled()
+                return
+            }
+            let status = Self.resolvedBackgroundTaskStatus(rawStatus)
+            let summary = message["summary"] as? String
+            // A task_updated event can report a terminal status before Claude
+            // sends the task_notification containing the actual agent result.
+            // Keep the activity and parent turn open until that result arrives.
+            if !isTaskNotification, status != "inProgress" {
+                pendingBackgroundTaskNotificationIDs.insert(taskID)
+                completeTurnIfSettled()
+                return
+            }
+            if let toolUseID = (message["tool_use_id"] as? String) ?? backgroundTaskToolUseIDs[taskID],
+               let existing = toolActivities[toolUseID] {
+                let duration = activityStartedAtUptime.removeValue(forKey: toolUseID).map {
+                    max(1, Int((DispatchTime.now().uptimeNanoseconds - $0) / 1_000_000))
+                }
+                let activity = ConversationActivity(
+                    id: existing.id, title: existing.title, detail: summary ?? existing.detail, status: status,
+                    childThreadID: existing.childThreadID, agentPath: existing.agentPath, model: existing.model,
+                    toolKind: existing.toolKind, server: existing.server, tool: existing.tool,
+                    durationMs: duration ?? existing.durationMs, turnID: existing.turnID, backgroundTaskID: taskID,
+                    backgroundTaskSummary: summary ?? existing.backgroundTaskSummary
+                )
+                if let duration { activityDurations[activity.id] = duration }
+                toolActivities[toolUseID] = activity
+                activityHandler?(activity)
+            } else {
+                // No in-memory record: a prior process started this agent and this
+                // runner never saw its task_started. Surface a synthetic update keyed
+                // only by backgroundTaskID so the owner can resolve it against the
+                // persisted activity from whichever earlier turn launched it.
+                activityHandler?(ConversationActivity(
+                    id: taskID, title: "Background agent", detail: summary ?? "", status: status,
+                    backgroundTaskID: taskID, backgroundTaskSummary: summary
+                ))
+            }
+            completeTurnIfSettled()
+        default:
+            break
+        }
+    }
+
+    private static func resolvedBackgroundTaskStatus(_ status: String) -> String {
+        switch status {
+        case "completed": "completed"
+        case "stopped": "stopped"
+        default: "failed"
         }
     }
 
@@ -757,7 +888,9 @@ final class ClaudeSessionRunner {
     }
 
     private func completeTurnIfSettled() {
-        guard turnCompletion.resultReceived, pendingCommandUUIDs.isEmpty || !sawCommandLifecycle else { return }
+        guard turnCompletion.resultReceived, pendingCommandUUIDs.isEmpty || !sawCommandLifecycle,
+              outstandingBackgroundTaskIDs.isEmpty,
+              pendingBackgroundTaskNotificationIDs.isEmpty else { return }
         if let error = turnCompletion.resultError {
             finishTurn(.failure(error))
             return
@@ -861,6 +994,12 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     private let executableOverride: String?
     private let configDirectoryOverride: String?
     private let persistsSessions: Bool
+    /// This instance's own resolved data directory, fixed at construction time
+    /// (debug/test builds only; always `nil` in production). Forwarded by each
+    /// `ClaudeSessionRunner` into its own child process instead of an ambient
+    /// global, so a different client instance's concurrently-resolved
+    /// directory can never leak into this one's child process environment.
+    fileprivate let dataDirectoryOverride: String?
     private var runners: [String: ClaudeSessionRunner] = [:]
     private var newSessionIDs = Set<String>()
     private var startingSessionIDs = Set<String>()
@@ -872,10 +1011,21 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     private var lastFinishedThreadID: String?
     private var conversationOperationsInFlight = 0
 
-    static func sharedPrimaryClient(executableOverride: String?) -> ClaudeCodeClient {
-        let key = executableOverride.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? "__default__"
+    /// `dataDirectory` only ever varies across calls in debug/test builds (via
+    /// `BridgeRequest.dataDirectory`); production always passes `nil`, so one
+    /// real app only ever has one entry here. It's part of the cache key so
+    /// that the bridge daemon — now a single long-lived process that can serve
+    /// many isolated test data directories in sequence or concurrently — gives
+    /// each one its own client (and thus its own child process with correctly
+    /// scoped environment forwarding) instead of silently sharing one across
+    /// directories that happen to share a process.
+    static func sharedPrimaryClient(executableOverride: String?, dataDirectory: String? = nil) -> ClaudeCodeClient {
+        let key = [
+            executableOverride.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? "__default__",
+            dataDirectory.map { URL(fileURLWithPath: $0).standardizedFileURL.path } ?? "",
+        ].joined(separator: "\u{1}")
         if let client = sharedPrimaryClients[key] { return client }
-        let client = ClaudeCodeClient(executableOverride: executableOverride)
+        let client = ClaudeCodeClient(executableOverride: executableOverride, dataDirectory: dataDirectory)
         sharedPrimaryClients[key] = client
         return client
     }
@@ -883,7 +1033,8 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     init(
         executableOverride: String? = nil,
         configDirectoryOverride: String? = nil,
-        persistsSessions: Bool = true
+        persistsSessions: Bool = true,
+        dataDirectory: String? = nil
     ) {
         self.executableOverride = ConversationProviderFixture.ownedExecutable(
             executableOverride,
@@ -891,6 +1042,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         )
         self.configDirectoryOverride = configDirectoryOverride
         self.persistsSessions = persistsSessions
+        self.dataDirectoryOverride = dataDirectory
     }
 
     static func markProcessActive(sessionID: String) { processActiveSessionIDs.insert(sessionID) }
@@ -1096,6 +1248,21 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         Self.processActiveSessionIDs.contains(threadID)
     }
 
+    /// Every session with a running turn, a turn that is starting, or a
+    /// question waiting for an answer.
+    var activeThreadIDsSnapshot: Set<String> {
+        Set(runners.keys.filter { isTurnActive(threadID: $0) }).union(startingSessionIDs)
+    }
+
+    var pendingUserInputsSnapshot: [String: ConversationUserInputRequest] {
+        runners.compactMapValues(\.pendingUserInputRequest)
+    }
+
+    var interruptedThreadIDsSnapshot: Set<String> { interruptedThreadIDs }
+
+    /// Every client this process has created through `sharedPrimaryClient`.
+    static var allSharedPrimaryClients: [ClaudeCodeClient] { Array(sharedPrimaryClients.values) }
+
     func canInterruptActiveTurn(threadID: String) -> Bool {
         runners[threadID]?.canInterrupt == true
     }
@@ -1277,7 +1444,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
 
     static func findExecutable() -> String? {
         let home = NSHomeDirectory()
-        let pathEntries = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+        let pathEntries = (StationAIProcessEnvironment.current["PATH"] ?? "")
             .split(separator: ":").map { URL(fileURLWithPath: String($0)).appendingPathComponent("claude").path }
         let common = [
             "\(home)/.local/bin/claude", "\(home)/.claude/local/claude", "/opt/homebrew/bin/claude",

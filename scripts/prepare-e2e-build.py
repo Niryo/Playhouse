@@ -94,20 +94,17 @@ cache_root.mkdir(parents=True, exist_ok=True)
 
 
 def cache_bundle_is_valid():
-    bridge = app / "Contents/XPCServices/StationAIBridge.xpc/Contents/Info.plist"
+    # The bridge daemon and CLI ship flat in Contents/MacOS and resolve their
+    # identity from this same Info.plist via `Bundle.main` (no separate XPC
+    # bundle/Info.plist to cross-check anymore).
     try:
         app_info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
-        bridge_info = plistlib.loads(bridge.read_bytes())
     except (OSError, plistlib.InvalidFileException):
         return False
     return (
         app_info.get("CFBundleIdentifier") == bundle_id
         and app_info.get("StationAISourceWorktree") == str(root)
         and app_info.get("StationAIStoreCompatibilityVersion") == "2"
-        and bridge_info.get("CFBundleIdentifier") == bundle_id + ".bridge"
-        and bridge_info.get("StationAIApplicationBundleIdentifier") == bundle_id
-        and bridge_info.get("StationAISourceWorktree") == str(root)
-        and bridge_info.get("StationAIStoreCompatibilityVersion") == "2"
     )
 
 

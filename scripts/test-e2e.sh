@@ -70,8 +70,12 @@ if [[ ! -x "${cli_path}" ]]; then
   exit 1
 fi
 
-service_info="${app_bundle}/Contents/XPCServices/StationAIBridge.xpc/Contents/Info.plist"
-service_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${service_info}")"
+# The bridge daemon resolves its identity from the app's own Info.plist via
+# `Bundle.main` (it ships flat in Contents/MacOS, no separate bundle anymore),
+# so its service name is just the app's identifier plus the same ".bridge"
+# suffix `BridgeContract.serviceName(forApplication:)` derives at runtime.
+app_info="${app_bundle}/Contents/Info.plist"
+service_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${app_info}").bridge"
 bridge_arguments=(
   "${repository_root}/scripts/test-bridge.py"
   --cli "${cli_path}"

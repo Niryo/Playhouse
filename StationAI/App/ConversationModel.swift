@@ -128,9 +128,10 @@ struct ConversationUserInputRequest: Identifiable, Codable, Equatable {
     let threadID: String
     let questions: [ConversationUserQuestion]
     let isBlocking: Bool
+    let mode: ConversationMode
 }
 
-enum ConversationMode: String, CaseIterable, Hashable {
+enum ConversationMode: String, CaseIterable, Hashable, Codable {
     case code = "default"
     case plan
 
@@ -366,6 +367,87 @@ extension ConversationProviderClient {
     }
 }
 
+/// What a window needs to know about the turns the bridge daemon is running,
+/// so it can show progress, questions, and goal changes without owning any
+/// provider process itself.
+struct ConversationRuntimeSnapshot: Codable, Equatable {
+    struct Goal: Codable, Equatable {
+        var stateThreadID: String?
+        var stateRevision = 0
+        var turnRevision = 0
+        var turnCompletedRevision = 0
+        var turnCompletedTurnID: String?
+        var turnStartedThreadID: String?
+        var observedThreadIDs: [String] = []
+    }
+
+    /// Sorted, so equal snapshots compare equal.
+    var activeThreadIDs: [String] = []
+    /// The active conversations whose turn can be paused right now.
+    var interruptibleThreadIDs: [String] = []
+    /// Conversations whose most recent turn was paused rather than finished.
+    var interruptedThreadIDs: [String] = []
+    var pendingUserInput: [String: ConversationUserInputRequest] = [:]
+    var goal = Goal()
+
+    func isTurnActive(threadID: String) -> Bool { activeThreadIDs.contains(threadID) }
+    func canInterruptActiveTurn(threadID: String) -> Bool { interruptibleThreadIDs.contains(threadID) }
+    func wasLastTurnInterrupted(threadID: String) -> Bool { interruptedThreadIDs.contains(threadID) }
+
+    @MainActor
+    static func current() -> ConversationRuntimeSnapshot {
+        var snapshot = ConversationRuntimeSnapshot()
+        var active = Set<String>()
+        var interruptible = Set<String>()
+        var interrupted = Set<String>()
+        for client in CodexAppServerClient.allSharedClients {
+            active.formUnion(client.activeThreadIDsSnapshot)
+            interruptible.formUnion(client.activeThreadIDsSnapshot.filter { client.canInterruptActiveTurn(threadID: $0) })
+            interrupted.formUnion(client.interruptedThreadIDsSnapshot)
+            snapshot.pendingUserInput.merge(client.pendingUserInputsSnapshot) { current, _ in current }
+            guard client.goalRuntimeEnabled else { continue }
+            snapshot.goal.stateThreadID = client.goalStateThreadID
+            snapshot.goal.stateRevision = client.goalStateRevision
+            snapshot.goal.turnRevision = client.goalTurnRevision
+            snapshot.goal.turnCompletedRevision = client.goalTurnCompletedRevision
+            snapshot.goal.turnCompletedTurnID = client.goalTurnCompletedTurnID
+            snapshot.goal.turnStartedThreadID = client.goalTurnStartedThreadID
+            snapshot.goal.observedThreadIDs = client.observedGoalThreadIDs
+        }
+        for client in ClaudeCodeClient.allSharedPrimaryClients {
+            active.formUnion(client.activeThreadIDsSnapshot)
+            interruptible.formUnion(client.activeThreadIDsSnapshot.filter { client.canInterruptActiveTurn(threadID: $0) })
+            interrupted.formUnion(client.interruptedThreadIDsSnapshot)
+            snapshot.pendingUserInput.merge(client.pendingUserInputsSnapshot) { current, _ in current }
+        }
+        snapshot.activeThreadIDs = active.sorted()
+        snapshot.interruptibleThreadIDs = interruptible.sorted()
+        snapshot.interruptedThreadIDs = interrupted.sorted()
+        return snapshot
+    }
+
+    /// Emits the snapshot now and again whenever it changes, until the
+    /// consumer stops iterating. Provider state is in this process's memory, so
+    /// sampling it is cheap and needs no cross-process signalling.
+    @MainActor
+    static func changes() -> AsyncStream<ConversationRuntimeSnapshot> {
+        AsyncStream { continuation in
+            let task = Task { @MainActor in
+                var last: ConversationRuntimeSnapshot?
+                while !Task.isCancelled {
+                    let snapshot = current()
+                    if snapshot != last {
+                        last = snapshot
+                        continuation.yield(snapshot)
+                    }
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}
+
 /// One client per provider, shared by a window or a single bridge request.
 @MainActor
 struct ConversationClients {
@@ -536,6 +618,14 @@ enum ConversationSteerMailbox {
 
     /// The live process that published an active turn for this thread, if any.
     static func activeTurnOwnerProcessID(threadID: String) -> Int32? {
+        activeTurn(threadID: threadID)?.processID
+    }
+
+    static func activeTurnID(threadID: String) -> String? {
+        activeTurn(threadID: threadID)?.turnID
+    }
+
+    private static func activeTurn(threadID: String) -> ConversationSteerMailboxActiveTurn? {
         guard let directory else { return nil }
         let activeURL = activeTurnURL(threadID: threadID, directory: directory)
         guard let active = try? JSONDecoder().decode(ConversationSteerMailboxActiveTurn.self, from: Data(contentsOf: activeURL)),
@@ -544,7 +634,7 @@ enum ConversationSteerMailbox {
             try? FileManager.default.removeItem(at: activeURL)
             return nil
         }
-        return active.processID
+        return active
     }
 
     private static func activeTurnURL(threadID: String, directory: URL) -> URL {
@@ -558,15 +648,26 @@ enum ConversationSteerMailbox {
 enum ConversationProcessEnvironment {
     /// Lets a provider's child process run `stationai` back into this app's service.
     /// The child inherits the launching process's environment (the GUI app or the
-    /// XPC service), not the CLI caller's, so the service name and store directory
+    /// bridge daemon), not the CLI caller's, so the service name and store directory
     /// must be passed on explicitly. The app identity is the same in both processes.
-    static func forwardStationAIBridgeEnvironment(_ environment: inout [String: String]) {
+    ///
+    /// `dataDirectoryOverride` must be the specific client instance's own resolved
+    /// data directory (its construction-time `sharedClient`/`sharedPrimaryClient`
+    /// cache-key input), not read from an ambient global: the bridge daemon is one
+    /// long-lived process that can serve several isolated test data directories
+    /// (debug/test builds only — production always has exactly one), and a shared
+    /// mutable "current data directory" would let one request's child process pick
+    /// up whichever directory a concurrently-running, unrelated request happened to
+    /// set most recently.
+    static func forwardStationAIBridgeEnvironment(_ environment: inout [String: String], dataDirectoryOverride: String? = nil) {
         if environment["STATIONAI_BRIDGE_SERVICE_NAME"] == nil {
             environment["STATIONAI_BRIDGE_SERVICE_NAME"] = BridgeContract.serviceName(
                 forApplication: StationAIAppIdentity.applicationIdentifier
             )
         }
-        if environment["STATIONAI_DATA_DIRECTORY"] == nil {
+        if let dataDirectoryOverride {
+            environment["STATIONAI_DATA_DIRECTORY"] = dataDirectoryOverride
+        } else if environment["STATIONAI_DATA_DIRECTORY"] == nil {
             environment["STATIONAI_DATA_DIRECTORY"] = StationAIDiagnostics.storeURL.deletingLastPathComponent().path
         }
     }
