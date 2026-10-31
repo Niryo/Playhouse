@@ -250,7 +250,7 @@ struct TaskConversationView: View {
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage(WorkspaceSettings.defaultParentFolderKey, store: WorkspaceSettings.preferencesStore) private var defaultParentFolderPath = ""
 
-    let task: BoardTask
+    let task: any ConversationSubject
     var isNewTask = false
     var isReadOnly = false
     var conflictResolutionRequested = false

@@ -40,6 +40,7 @@ fi
 
 shared_sources=(
   "${repository_root}/StationAI/App/BoardTask.swift"
+  "${repository_root}/StationAI/App/ConversationSubject.swift"
   "${repository_root}/StationAI/App/WorkspaceSupport.swift"
   "${repository_root}/StationAI/App/WorkspaceChanges.swift"
   "${repository_root}/StationAI/App/CodexAppServerClient.swift"

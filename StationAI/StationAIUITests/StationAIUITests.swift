@@ -3634,8 +3634,43 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(try tasksFromBoardList().isEmpty, "A failed create must not leave a persisted task.")
     }
 
-    // case-contract: test_standalone_chat_hidden_task_and_pages_round_trip | The Chat button opens a hidden, repo/worktree-free task in a sliding sidebar that never appears on the board, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, and the Changes sidebar. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. The hidden task's real lifecycle status changes (In Progress, then Waiting Response) during a send, and it still never renders as a card on the visible Kanban board in any status.
-    func test_standalone_chat_hidden_task_and_pages_round_trip() throws {
+    // case-contract: test_standalone_chat_legacy_hidden_task_migrates | A standalone chat left in the store as a hidden board task is converted once into its own model: it keeps its ID so the existing conversation transcript stays attached, keeps its provider session, carries its in-flight turn state across with the status message and progress report that explain it, is removed from the board so it never lists or resolves as a task, and reopening the chat returns that same migrated chat rather than creating a second one.
+    func test_standalone_chat_legacy_hidden_task_migrates() throws {
+        let legacyID = try seedLegacyStandaloneChatTask()
+        launchApp(defaultParent: fixture.parent.path)
+
+        // The board renders from its own SwiftData query, so this is where a leftover hidden
+        // task would actually surface as a card.
+        XCTAssertFalse(
+            element("task-card-\(legacyID)").waitForExistence(timeout: 3),
+            "A chat migrated off the board must not render as a card."
+        )
+        XCTAssertTrue(try tasksFromBoardList().isEmpty, "The migrated chat must no longer be a board task.")
+        assertCLIError(try runCLI(["task", "get", legacyID], expectedStatus: 3), code: "not_found")
+
+        let opened = try runCLI(["chat", "open"])["result"] as? [String: Any]
+        XCTAssertEqual(
+            opened?["id"] as? String, legacyID,
+            "The migrated chat must keep its ID so its existing transcript stays attached."
+        )
+        XCTAssertEqual(opened?["claudeSessionID"] as? String, "legacy-chat-session", "The chat's provider session must survive migration.")
+        // The turn state must arrive with its explanation, not just the raw status.
+        XCTAssertEqual(opened?["status"] as? String, "In Progress")
+        XCTAssertEqual(opened?["statusMessage"] as? String, "Carried from the legacy chat task.")
+        XCTAssertEqual(opened?["progressType"] as? String, "searching")
+        XCTAssertEqual(opened?["progressLabel"] as? String, "Searching")
+        XCTAssertEqual(opened?["progressDetail"] as? String, "Looking into volcanoes")
+
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10), "The migrated chat should still open in the sidebar.")
+        attachScreenshot(named: "Migrated standalone chat")
+
+        let reopened = try runCLI(["chat", "open"])["result"] as? [String: Any]
+        XCTAssertEqual(reopened?["id"] as? String, legacyID, "Migration must run once, not create a second chat.")
+    }
+
+    // case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, and the Changes sidebar. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state.
+    func test_standalone_chat_separate_model_and_pages_round_trip() throws {
         let fixtureSource = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureSource.path), "The prepared Codex fixture is missing or not executable.")
         let chatFixtureExecutable = dataDirectory.appendingPathComponent("codex-fixture-chat-unique-turns-hold-release")
@@ -3650,7 +3685,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10), "Clicking Chat should slide in the sidebar.")
         XCTAssertTrue(element("message-composer").waitForExistence(timeout: 10), "The sidebar should reuse the standard chat composer.")
         XCTAssertFalse(element("task-status-message").exists, "Standalone chat must not show task status.")
-        XCTAssertFalse(app.staticTexts["Backlog"].exists, "Standalone chat must not show the hidden task's status label.")
+        XCTAssertFalse(app.staticTexts["Backlog"].exists, "Standalone chat must not show a board status label.")
         XCTAssertFalse(element("conversation-repository-search").exists, "Standalone chat must not show repository controls.")
         XCTAssertFalse(element("add-conversation-repository-button").exists, "Standalone chat must not expose Add repository.")
         XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "conversation-repository-badge-")).count, 0, "Standalone chat must not show repository badges.")
@@ -3658,12 +3693,16 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(element("workspace-changes-empty").exists, "Standalone chat must not show task workspace changes.")
         attachScreenshot(named: "Standalone chat sidebar opened")
 
-        XCTAssertTrue(try tasksFromBoardList().isEmpty, "The hidden standalone chat task must never appear on the board.")
+        XCTAssertTrue(try tasksFromBoardList().isEmpty, "The standalone chat must never appear on the board.")
 
         let opened = try runCLI(["chat", "open"])["result"] as? [String: Any]
         let chatTaskID = try XCTUnwrap(opened?["id"] as? String)
         XCTAssertEqual(opened?["title"] as? String, "Chat")
         XCTAssertEqual((opened?["repositoryWorktrees"] as? [Any])?.count, 0)
+
+        // The chat is its own model, not a task, so task commands cannot reach it by ID.
+        assertCLIError(try runCLI(["task", "get", chatTaskID], expectedStatus: 3), code: "not_found")
+        assertCLIError(try runCLI(["task", "move", chatTaskID, "Done"], expectedStatus: 3), code: "not_found")
 
         let kyoto = try XCTUnwrap(
             (try runCLI(["chat", "page", "new", "--title", "Trip to Kyoto"])["result"] as? [String: Any])?["page"] as? [String: Any]
@@ -3742,20 +3781,34 @@ final class StationAIUITests: XCTestCase {
             try? FileManager.default.removeItem(at: releaseMarker)
         }
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The fixture should hold the standalone chat turn open for a close-turn report.")
+        // Queuing is a conversation action, so it must resolve the chat rather than look for a
+        // board task. The turn is held active here, which is exactly when a follow-up queues.
+        let queuedInChat = try XCTUnwrap(
+            try runCLI(["conversation", "queue", chatTaskID, "--message", "Queue this for after the chat turn."])["result"] as? [String: Any]
+        )
+        XCTAssertEqual(queuedInChat["text"] as? String, "Queue this for after the chat turn.")
+        XCTAssertEqual(queuedInChat["taskID"] as? String, chatTaskID)
+        _ = try runCLI(["conversation", "queue-remove", chatTaskID, try XCTUnwrap(queuedInChat["id"] as? String)])
+        // Selecting the provider the chat already uses is a no-op that must return the chat.
+        let unchangedProvider = try XCTUnwrap(
+            try runCLI(["conversation", "provider", chatTaskID, "set", "codex"])["result"] as? [String: Any]
+        )
+        XCTAssertEqual(unchangedProvider["id"] as? String, chatTaskID)
+        XCTAssertEqual(unchangedProvider["conversationProvider"] as? String, "codex")
         _ = try runCLI(["chat", "page", "close-turn", chatTaskID, "--continues", "true"])
         try "Release the completed fixture turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
         sendProcess.waitUntilExit()
         XCTAssertEqual(sendProcess.terminationStatus, 0, "The standalone chat turn should complete successfully.")
         try? FileManager.default.removeItem(at: holdMarker)
 
-        // A real send moves the hidden task's lifecycle status away from Backlog (In Progress,
-        // then Waiting Response), which is exactly what let it leak into the visible Kanban
-        // board: the board renders from SwiftUI's own @Query over BoardTask, not from the
-        // board.list CLI path that tasksFromBoardList() above already checked and which was
-        // already correctly filtered. Confirm the actual rendered board has no card for it.
+        // A send moves the chat's own turn state away from Backlog (In Progress, then Waiting
+        // Response). That state used to live on a hidden BoardTask, which is how the chat leaked
+        // onto the board: it renders from SwiftUI's own @Query over BoardTask, not the board.list
+        // CLI path that tasksFromBoardList() checks. The chat is no longer a BoardTask at all, so
+        // confirm the rendered board still has no card for it in that state.
         XCTAssertFalse(
             element("task-card-\(chatTaskID)").exists,
-            "The hidden standalone chat task must never render as a card on the visible Kanban board."
+            "The standalone chat must never render as a card on the visible Kanban board."
         )
 
         let recipesArchive = try XCTUnwrap(
@@ -10687,6 +10740,24 @@ final class StationAIUITests: XCTestCase {
     private func taskID(named title: String) throws -> String {
         let record = try XCTUnwrap(taskRecord(named: title), "No task named \(title) exists in the real store.")
         return try XCTUnwrap(record["id"] as? String)
+    }
+
+    /// Recreates a standalone chat stored as a hidden board task and returns its ID.
+    private func seedLegacyStandaloneChatTask(sessionID: String = "legacy-chat-session") throws -> String {
+        let seeder = WorkspaceFixture.root.appendingPathComponent("seed-legacy-standalone-chat-task")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: seeder.path), "The precompiled legacy chat seeder should be executable.")
+
+        let seed = Process()
+        seed.executableURL = seeder
+        seed.arguments = [dataDirectory.path, sessionID]
+        let seedOutput = Pipe()
+        seed.standardOutput = seedOutput
+        seed.standardError = seedOutput
+        try seed.run()
+        seed.waitUntilExit()
+        let seedText = String(data: seedOutput.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(seed.terminationStatus, 0, "The legacy hidden chat task should be seeded: \(seedText)")
+        return try XCTUnwrap(seedText.split(whereSeparator: \.isNewline).last.map(String.init))
     }
 
     private func seedTaskPullRequest(taskID: String, number: Int, url: String, repositoryIndex: Int = 0) throws {

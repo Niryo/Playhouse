@@ -268,7 +268,7 @@ enum StationAIStore {
 
     static func makeContainer(dataDirectory: String? = nil) throws -> ModelContainer {
         try validateTestDataDirectory(dataDirectory)
-        let schema = Schema([BoardTask.self])
+        let schema = Schema([BoardTask.self, StandaloneChat.self])
         let storeURL: URL
         do {
             storeURL = try Self.storeURL(dataDirectory: dataDirectory)
@@ -785,7 +785,9 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let contextFolders: [String]
     let draftImageDataURLs: [String]?
 
-    init(task: BoardTask, includeDraftImages: Bool = true) {
+    /// Accepts any conversation owner: a board task, or the standalone chat, which reports
+    /// empty workspace roots and worktrees because it has none.
+    init(task: any ConversationSubject, includeDraftImages: Bool = true) {
         id = task.id
         title = task.title
         status = task.status.rawValue
@@ -1073,7 +1075,7 @@ final class BoardTaskManager {
     func enqueueConversationMessage(taskID: UUID, text: String, imageDataURLs: [String] = [], asyncQuestionItemID: String? = nil) throws -> QueuedConversationMessage {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty || !imageDataURLs.isEmpty else { throw StationAIManagerError.invalidMessage }
-        let task = try taskModel(taskID)
+        let task = try conversationSubject(taskID)
         guard let threadID = task.activeConversationID else {
             throw BridgeCommandError(code: "invalid_transition", message: "A follow-up can only be queued after this conversation has a \(task.conversationProvider.displayName) conversation.")
         }
@@ -1478,16 +1480,23 @@ final class BoardTaskManager {
     }
 
     func list(status: TaskStatus? = nil) throws -> [BoardTaskRecord] {
+        // A chat left over as a hidden task would otherwise list as an ordinary card. This is
+        // best-effort maintenance on a read path: if the store itself is unreadable, the fetch
+        // below reports that with its own full diagnostics rather than failing here first.
+        do {
+            try migrateLegacyStandaloneChatTasks()
+        } catch {
+            StationAIDiagnostics.record("chat.legacy_task.migration_deferred", fields: StationAIDiagnostics.errorFields(error))
+        }
         let descriptor: FetchDescriptor<BoardTask>
         if let status {
             let statusRawValue = status.rawValue
             descriptor = FetchDescriptor(
-                predicate: #Predicate { $0.statusRawValue == statusRawValue && !$0.isStandaloneChat },
+                predicate: #Predicate { $0.statusRawValue == statusRawValue },
                 sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
             )
         } else {
             descriptor = FetchDescriptor(
-                predicate: #Predicate { !$0.isStandaloneChat },
                 sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
             )
         }
@@ -1568,21 +1577,69 @@ final class BoardTaskManager {
         }
     }
 
-    /// Returns the single hidden task backing the standalone chat sidebar, creating it the
-    /// first time it's needed. It has no repositories/worktree roots and never appears in
-    /// board.list/Kanban columns (see `list()`'s `isStandaloneChat` filter).
+    /// Converts any standalone chat still stored as a hidden board task into the dedicated
+    /// model, then deletes the board row.
+    ///
+    /// The chat's ID is carried over, because the conversation transcript is keyed by it — a
+    /// fresh ID would strand the user's existing chat history. Page content is keyed
+    /// separately in the chat archive and is unaffected either way. Without this, dropping the
+    /// hidden-task flag would let that row surface as an ordinary "Chat" card on the board.
+    func migrateLegacyStandaloneChatTasks() throws {
+        let legacy = try modelContext.fetch(
+            FetchDescriptor<BoardTask>(predicate: #Predicate { $0.legacyStandaloneChatMarker })
+        )
+        guard !legacy.isEmpty else { return }
+        var alreadyMigrated = try !modelContext.fetch(FetchDescriptor<StandaloneChat>()).isEmpty
+        for task in legacy {
+            if !alreadyMigrated {
+                let chat = StandaloneChat(provider: task.conversationProvider)
+                chat.id = task.id
+                chat.title = task.title
+                chat.createdAt = task.createdAt
+                chat.statusRawValue = task.statusRawValue
+                chat.lifecycleRevision = task.lifecycleRevision
+                // Carry the status's explanation and timing with the status itself: a chat
+                // migrated mid-turn would otherwise sit In Progress with no stated reason.
+                chat.statusMessage = task.statusMessage
+                chat.progressTypeRawValue = task.progressTypeRawValue
+                chat.progressLabel = task.progressLabel
+                chat.progressDetail = task.progressDetail
+                chat.inProgressStartedAt = task.inProgressStartedAt
+                chat.totalInProgressSeconds = task.totalInProgressSeconds
+                chat.codexThreadID = task.codexThreadID
+                chat.claudeSessionID = task.claudeSessionID
+                chat.conversationEffortRawValue = task.conversationEffortRawValue
+                chat.conversationModelIDsData = task.conversationModelIDsData
+                chat.savedPrompt = task.savedPrompt
+                chat.pendingSubmittedPrompt = task.pendingSubmittedPrompt
+                chat.draftImageDataURLsData = task.draftImageDataURLsData
+                chat.conversationActivityDurationsData = task.conversationActivityDurationsData
+                chat.answeredAsyncQuestionIDsData = task.answeredAsyncQuestionIDsData
+                modelContext.insert(chat)
+                alreadyMigrated = true
+            }
+            modelContext.delete(task)
+        }
+        try modelContext.save()
+        StationAIDiagnostics.record("chat.legacy_task.migrated", fields: ["count": String(legacy.count)])
+    }
+
+    /// Returns the single standalone chat, creating it the first time it's needed.
+    ///
+    /// The chat is its own model, not a task: it has no board column, repositories or
+    /// worktrees, so nothing needs to filter it out of `list()` or the Kanban columns.
     @discardableResult
-    func getOrCreateStandaloneChatTask(provider: ConversationProvider) async throws -> BoardTaskRecord {
-        let descriptor = FetchDescriptor<BoardTask>(predicate: #Predicate { $0.isStandaloneChat })
+    func getOrCreateStandaloneChat(provider: ConversationProvider) async throws -> BoardTaskRecord {
+        try migrateLegacyStandaloneChatTasks()
+        let descriptor = FetchDescriptor<StandaloneChat>(sortBy: [SortDescriptor(\.createdAt)])
         if let existing = try modelContext.fetch(descriptor).first {
             return BoardTaskRecord(task: existing)
         }
-        let task = BoardTask(title: "Chat", status: .backlog, workspaceRootPaths: [], conversationProvider: provider)
-        task.isStandaloneChat = true
-        modelContext.insert(task)
-        try await saveTaskContext(taskID: task.id)
-        StationAIDiagnostics.record("chat.task.created", fields: ["taskID": task.id.uuidString, "provider": provider.rawValue])
-        return BoardTaskRecord(task: task)
+        let chat = StandaloneChat(provider: provider)
+        modelContext.insert(chat)
+        try await saveTaskContext(taskID: chat.id)
+        StationAIDiagnostics.record("chat.created", fields: ["chatID": chat.id.uuidString, "provider": provider.rawValue])
+        return BoardTaskRecord(task: chat)
     }
 
     @discardableResult
@@ -2054,9 +2111,9 @@ final class BoardTaskManager {
         }
 
         let conversation = try await ConversationManager(tasks: self, clients: clients, settingsManager: settingsManager).history(taskID: id)
-        let helperClients = clients.helperClients(preferring: try requireTask(id).conversationProvider)
+        let helperClients = clients.helperClients(preferring: try requireSubject(id).conversationProvider)
         let conversationText = conversation.messages.map { "\($0.role.rawValue): \($0.text)" }.joined(separator: "\n\n")
-        let currentTitle = try requireTask(id).title
+        let currentTitle = try requireSubject(id).title
         let summary: String
         if !conversationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let roots = records.map { URL(fileURLWithPath: $0.worktreePath, isDirectory: true) }
@@ -2089,13 +2146,13 @@ final class BoardTaskManager {
             summary = "Implements: \(currentTitle)."
         }
 
-        let taskBeforeCreation = try requireTask(id)
+        let taskBeforeCreation = try requireSubject(id)
         guard taskBeforeCreation.repositoryWorktrees == records,
               taskBeforeCreation.title == currentTitle else {
             throw BridgeCommandError(code: "invalid_transition", message: "The task changed while its pull request summary was being prepared. Try again.")
         }
         return try await withTaskOperationLock(id) {
-            let taskAtCreation = try requireTask(id)
+            let taskAtCreation = try requireSubject(id)
             guard taskAtCreation.repositoryWorktrees == records,
                   taskAtCreation.title == currentTitle else {
                 throw BridgeCommandError(code: "invalid_transition", message: "The task changed while its pull request summary was being prepared. Try again.")
@@ -2175,7 +2232,7 @@ final class BoardTaskManager {
     }
 
     private func pullRequestConflictRepositoriesUnlocked(_ id: UUID) async throws -> [String] {
-        let task = try requireTask(id)
+        let task = try requireSubject(id)
         guard !task.repositoryWorktrees.isEmpty else { return [] }
         var conflicts: [String] = []
         for record in task.repositoryWorktrees where !record.isPending && record.pullRequestNumber == nil {
@@ -2190,7 +2247,7 @@ final class BoardTaskManager {
         }
         if action == "keep" { return try get(id) }
         return try await withTaskOperationLock(id) {
-            let records = try requireTask(id).repositoryWorktrees.filter { !$0.isPending && $0.pullRequestNumber == nil }
+            let records = try requireSubject(id).repositoryWorktrees.filter { !$0.isPending && $0.pullRequestNumber == nil }
             let conflicted = try await pullRequestConflictRepositoriesUnlocked(id)
             guard !conflicted.isEmpty else { return try get(id) }
             let affected = records.filter { conflicted.contains($0.repositoryPath) }
@@ -2212,7 +2269,7 @@ final class BoardTaskManager {
                 }
             }
             if needsCodexResolution {
-                let client = clients.client(for: try requireTask(id).conversationProvider)
+                let client = clients.client(for: try requireSubject(id).conversationProvider)
                 let thread = try await client.startThread(workspace: roots, modelID: client.provider.defaultModelID, developerInstructions: nil)
                 do {
                     try await client.sendMessage(
@@ -2261,7 +2318,7 @@ final class BoardTaskManager {
             "hasStatusMessage": String(message != nil)
         ])
         return try await withTaskOperationLock(id) {
-            let task = try requireTask(id)
+            let task = try requireSubject(id)
             guard task.status != .done else { return BoardTaskRecord(task: task) }
             task.status = status
             task.lifecycleRevision += 1
@@ -2278,7 +2335,7 @@ final class BoardTaskManager {
 
     func transitionLifecycleStatus(_ id: UUID, from expectedStatus: TaskStatus, to status: TaskStatus) async throws -> Int? {
         try await withTaskOperationLock(id) {
-            let task = try requireTask(id)
+            let task = try requireSubject(id)
             guard task.status == expectedStatus, task.status != .done else { return nil }
             task.status = status
             task.statusMessage = nil
@@ -2294,7 +2351,7 @@ final class BoardTaskManager {
 
     func restoreLifecycleStatus(_ id: UUID, to status: TaskStatus, ifRevision revision: Int) async throws -> Bool {
         try await withTaskOperationLock(id) {
-            let task = try requireTask(id)
+            let task = try requireSubject(id)
             guard task.status == .waitingResponse, task.lifecycleRevision == revision else { return false }
             task.status = status
             task.statusMessage = nil
@@ -2312,7 +2369,7 @@ final class BoardTaskManager {
         let activeTurnURL = try conversationTurnActiveURL(id)
         StationAIDiagnostics.record("task.lifecycle_status.user_input_resume.started", fields: ["taskID": id.uuidString])
         return try await withTaskOperationLock(id) {
-            let task = try requireTask(id)
+            let task = try requireSubject(id)
             guard task.status == .waitingResponse,
                   FileManager.default.fileExists(atPath: activeTurnURL.path) else {
                 StationAIDiagnostics.record("task.lifecycle_status.user_input_resume.skipped", fields: [
@@ -2351,7 +2408,7 @@ final class BoardTaskManager {
                     message: "Turn outcomes can only be reported during an active conversation turn."
                 )
             }
-            let task = try requireTask(id)
+            let task = try requireSubject(id)
             guard task.status == .inProgress else {
                 throw BridgeCommandError(
                     code: "invalid_transition",
@@ -2374,7 +2431,7 @@ final class BoardTaskManager {
             throw BridgeCommandError(code: "invalid_argument", message: "Progress details must be 200 characters or fewer.")
         }
         return try await withTaskOperationLock(id) {
-            let task = try requireTask(id)
+            let task = try requireSubject(id)
             guard task.status == .inProgress else {
                 throw BridgeCommandError(code: "invalid_transition", message: "Progress reports can only be published while a task is In Progress.")
             }
@@ -2389,7 +2446,7 @@ final class BoardTaskManager {
     func recordConversationActivityDuration(taskID: UUID, activityID: String, durationMs: Int) async throws {
         guard !activityID.isEmpty, durationMs >= 0 else { return }
         try await withTaskOperationLock(taskID) {
-            let task = try self.requireTask(taskID)
+            let task = try self.requireSubject(taskID)
             var durations = (try? task.conversationActivityDurationsData.map {
                 try JSONDecoder().decode([String: Int].self, from: $0)
             }) ?? [:]
@@ -2400,17 +2457,17 @@ final class BoardTaskManager {
     }
 
     func conversationActivityDurations(taskID: UUID) -> [String: Int] {
-        guard let task = try? requireTask(taskID), let data = task.conversationActivityDurationsData else { return [:] }
+        guard let task = try? requireSubject(taskID), let data = task.conversationActivityDurationsData else { return [:] }
         return (try? JSONDecoder().decode([String: Int].self, from: data)) ?? [:]
     }
 
     func answeredAsyncQuestionIDs(taskID: UUID) throws -> [String] {
-        try requireTask(taskID).answeredAsyncQuestionIDs
+        try requireSubject(taskID).answeredAsyncQuestionIDs
     }
 
     func recordAnsweredAsyncQuestion(taskID: UUID, itemID: String) async throws {
         try await withTaskOperationLock(taskID) {
-            let task = try self.requireTask(taskID)
+            let task = try self.requireSubject(taskID)
             if !task.answeredAsyncQuestionIDs.contains(itemID) {
                 task.answeredAsyncQuestionIDs.append(itemID)
                 try await self.saveTaskContext(taskID: taskID)
@@ -2421,26 +2478,26 @@ final class BoardTaskManager {
     @discardableResult
     func clearProgressReport(_ id: UUID) async throws -> BoardTaskRecord {
         return try await withTaskOperationLock(id) {
-            let task = try requireTask(id)
+            let task = try requireSubject(id)
             clearProgressReport(task)
             try await saveTaskContext(taskID: id)
             return BoardTaskRecord(task: task)
         }
     }
 
-    private func clearProgressReport(_ task: BoardTask) {
+    private func clearProgressReport(_ task: any ConversationSubject) {
         task.progressTypeRawValue = nil
         task.progressLabel = nil
         task.progressDetail = nil
     }
 
     func reconcileLifecycleStatusOnOpen(_ id: UUID, clients: ConversationClients) async throws -> BoardTaskRecord {
-        let currentTask = try requireTask(id)
+        let currentTask = try requireSubject(id)
         guard currentTask.activeConversationID != nil || currentTask.pendingSubmittedPrompt != nil else {
             return BoardTaskRecord(task: currentTask)
         }
         return try await withTaskOperationLock(id) {
-            let task = try requireTask(id)
+            let task = try requireSubject(id)
             let providerName = task.conversationProvider.displayName
             let client = clients.client(for: task.conversationProvider)
             guard let threadID = task.activeConversationID else {
@@ -2535,7 +2592,7 @@ final class BoardTaskManager {
             "titleByteCount": String(normalizedTitle.utf8.count)
         ])
         return try await withTaskOperationLock(id) {
-            let task = try requireTask(id)
+            let task = try requireSubject(id)
             task.title = normalizedTitle
             try await saveTaskContext(taskID: id)
             StationAIDiagnostics.record("task.rename.succeeded", fields: ["taskID": id.uuidString])
@@ -2548,7 +2605,7 @@ final class BoardTaskManager {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty else { throw StationAIManagerError.invalidTitle }
         return try await withTaskOperationLock(id) {
-            let task = try requireTask(id)
+            let task = try requireSubject(id)
             guard task.title == expectedTitle else { return nil }
             let previousTitle = task.title
             task.title = normalizedTitle
@@ -2580,7 +2637,7 @@ final class BoardTaskManager {
             throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
         }
         return try await withTaskOperationLock(id) {
-            let task = try requireTask(id)
+            let task = try requireSubject(id)
             task.savedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : prompt
             if let imageDataURLs { task.draftImageDataURLs = imageDataURLs }
             task.pendingSubmittedPrompt = submitted ? prompt : nil
@@ -2600,7 +2657,7 @@ final class BoardTaskManager {
 
     func clearPendingSubmittedPrompt(_ id: UUID) async throws {
         try await withTaskOperationLock(id) {
-            let task = try requireTask(id)
+            let task = try requireSubject(id)
             guard task.pendingSubmittedPrompt != nil else { return }
             task.pendingSubmittedPrompt = nil
             try await saveTaskContext(taskID: id)
@@ -2612,7 +2669,7 @@ final class BoardTaskManager {
             throw BridgeCommandError(code: "invalid_argument", message: "\(provider.displayName) returned an empty conversation ID.")
         }
         return try await withTaskOperationLock(id) {
-            let task = try requireTask(id)
+            let task = try requireSubject(id)
             let existing = task.conversationID(for: provider)
             // A standalone chat deliberately rotates sessions: each page owns one, and the task
             // pointer follows the active page. Board tasks keep exactly one conversation.
@@ -2642,7 +2699,7 @@ final class BoardTaskManager {
     /// checks that the conversation is settled and records the boundary.
     func setConversationProvider(_ id: UUID, provider: ConversationProvider) async throws -> BoardTaskRecord {
         try await withTaskOperationLock(id) {
-            let task = try requireTask(id)
+            let task = try requireSubject(id)
             guard task.conversationProvider != provider || task.conversationProviderRawValue == nil else { return BoardTaskRecord(task: task) }
             let previous = task.conversationProviderRawValue
             task.conversationProvider = provider
@@ -2658,7 +2715,7 @@ final class BoardTaskManager {
 
     func setConversationEffort(_ id: UUID, effort: ConversationEffort) async throws -> BoardTaskRecord {
         try await withTaskOperationLock(id) {
-            let task = try requireTask(id)
+            let task = try requireSubject(id)
             let previous = task.conversationEffortRawValue
             task.conversationEffort = effort.rawValue
             do {
@@ -2786,9 +2843,23 @@ final class BoardTaskManager {
         try requireTask(id)
     }
 
+    /// Resolves whatever owns the conversation with this ID: a board task or the standalone
+    /// chat. The conversation engine runs against this rather than against `BoardTask`, so a
+    /// chat never has to exist as a task to hold a conversation.
+    func conversationSubject(_ id: UUID) throws -> any ConversationSubject {
+        try requireSubject(id)
+    }
+
+    /// The standalone chat with this ID, or nil when the ID belongs to a board task.
+    func standaloneChatModel(_ id: UUID) throws -> StandaloneChat? {
+        var descriptor = FetchDescriptor<StandaloneChat>(predicate: #Predicate { $0.id == id })
+        descriptor.fetchLimit = 1
+        return try modelContext.fetch(descriptor).first
+    }
+
     fileprivate func isRepositoryAttached(_ record: RepositoryWorktreeRecord, to taskID: UUID) throws -> Bool {
         do {
-            return try requireTask(taskID).repositoryWorktrees.contains {
+            return try requireSubject(taskID).repositoryWorktrees.contains {
                 $0.repositoryPath == record.repositoryPath && $0.worktreePath == record.worktreePath
             }
         } catch StationAIManagerError.taskNotFound(_) {
@@ -2870,6 +2941,14 @@ final class BoardTaskManager {
         let hasSavedConversation = task.hasConversation
             || !(task.savedPrompt?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         return dirtyWorktree || hasSavedConversation
+    }
+
+    /// Resolves whichever creature owns this conversation. Conversation-level manager methods
+    /// use this so the standalone chat reaches the same shared logic board tasks do; methods
+    /// that genuinely need a workspace use `requireBoardTask` and reject a chat ID by type.
+    private func requireSubject(_ id: UUID) throws -> any ConversationSubject {
+        if let chat = try standaloneChatModel(id) { return chat }
+        return try requireTask(id)
     }
 
     private func requireTask(_ id: UUID) throws -> BoardTask {
@@ -3517,11 +3596,11 @@ final class ConversationManager {
         get throws { try tasks.conversationTranscriptStore() }
     }
 
-    private func client(for task: BoardTask) -> ConversationProviderClient {
+    private func client(for task: any ConversationSubject) -> ConversationProviderClient {
         clients.client(for: task.conversationProvider)
     }
 
-    private static func historyRoots(_ task: BoardTask) -> [String] {
+    private static func historyRoots(_ task: any ConversationSubject) -> [String] {
         task.workspaceRootPaths.isEmpty && task.status == .done
             ? task.repositoryWorktrees.map { $0.repositoryPath }
             : task.workspaceRootPaths
@@ -3533,7 +3612,7 @@ final class ConversationManager {
         sensitiveUserInputAnswerValues: [String] = [],
         restoringEarlierChatPages: Bool = false
     ) async throws -> ConversationHistory {
-        let task = try tasks.taskModel(taskID)
+        let task = try tasks.conversationSubject(taskID)
         let transcript = try transcripts.read(taskID)
         let answered = try tasks.answeredAsyncQuestionIDs(taskID: taskID)
         // Tasks that never left Codex keep reading their native Codex thread.
@@ -3640,7 +3719,7 @@ final class ConversationManager {
         modelID: String? = nil,
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in }
     ) async throws -> Bool {
-        let task = try tasks.taskModel(taskID)
+        let task = try tasks.conversationSubject(taskID)
         guard task.status != .done else {
             throw StationAIManagerError.invalidTransition("Done tasks are closed. Create a new task for follow-up work.")
         }
@@ -3750,8 +3829,8 @@ final class ConversationManager {
     /// Repairs the historical shared-callback bug without answering the question
     /// or resuming its provider. The native thread identity determines ownership.
     func repairPendingUserInput(taskID: UUID, sourceTaskID: UUID) async throws -> ConversationUserInputRequest {
-        let task = try tasks.taskModel(taskID)
-        let source = try tasks.taskModel(sourceTaskID)
+        let task = try tasks.conversationSubject(taskID)
+        let source = try tasks.conversationSubject(sourceTaskID)
         guard taskID != sourceTaskID, task.status != .done,
               let threadID = task.activeConversationID,
               source.activeConversationID != threadID else {
@@ -3769,7 +3848,7 @@ final class ConversationManager {
     }
 
     private func persistPendingUserInputRequest(_ request: ConversationUserInputRequest, taskID: UUID) throws {
-        guard try tasks.taskModel(taskID).activeConversationID == request.threadID else {
+        guard try tasks.conversationSubject(taskID).activeConversationID == request.threadID else {
             throw BridgeCommandError(code: "invalid_transition", message: "The question belongs to another conversation.")
         }
         try transcripts.mutate(taskID) { transcript in
@@ -3788,7 +3867,7 @@ final class ConversationManager {
     /// This is StationAI-owned presentation state, so both provider runtimes use
     /// the same transcript path.
     func publishImage(taskID: UUID, path: String, caption: String = "") async throws -> ConversationMessage {
-        let task = try tasks.taskModel(taskID)
+        let task = try tasks.conversationSubject(taskID)
         let provider = task.conversationProvider
         let codexClient = clients.codex
         let url = URL(fileURLWithPath: path)
@@ -3864,7 +3943,7 @@ final class ConversationManager {
     }
 
     private func codexHistory(
-        task: BoardTask,
+        task: any ConversationSubject,
         onActionRequest: @escaping () -> Void,
         sensitiveUserInputAnswerValues: [String] = []
     ) async throws -> ConversationHistory? {
@@ -4083,7 +4162,7 @@ final class ConversationManager {
 
     /// Reads a subagent's work without resuming or changing its turn.
     func subagentHistory(taskID: UUID, activity: ConversationActivity) async throws -> ConversationHistory {
-        let task = try tasks.taskModel(taskID)
+        let task = try tasks.conversationSubject(taskID)
         guard let childID = activity.childThreadID else {
             throw BridgeCommandError(code: "invalid_argument", message: "That activity is not a subagent.")
         }
@@ -4215,12 +4294,12 @@ final class ConversationManager {
     }
 
     func cachedModels(taskID: UUID) throws -> [ConversationModelOption] {
-        let task = try tasks.taskModel(taskID)
+        let task = try tasks.conversationSubject(taskID)
         return try cachedModels(provider: task.conversationProvider)
     }
 
     func cachedModels(taskID: UUID, provider: ConversationProvider) throws -> [ConversationModelOption] {
-        _ = try tasks.taskModel(taskID)
+        _ = try tasks.conversationSubject(taskID)
         return try cachedModels(provider: provider)
     }
 
@@ -4233,7 +4312,7 @@ final class ConversationManager {
 
     func models(taskID: UUID) async throws -> [ConversationModelOption] {
         StationAIDiagnostics.record("conversation.models.read.started", fields: ["taskID": taskID.uuidString])
-        let task = try tasks.taskModel(taskID)
+        let task = try tasks.conversationSubject(taskID)
         let workspace = try ConversationWorkspaceContext(roots: task.workspaceRootPaths.map {
             URL(fileURLWithPath: $0, isDirectory: true)
         })
@@ -4251,11 +4330,11 @@ final class ConversationManager {
     }
 
     func effort(taskID: UUID) throws -> ConversationEffort {
-        ConversationEffort(rawValue: try tasks.taskModel(taskID).conversationEffort) ?? .medium
+        ConversationEffort(rawValue: try tasks.conversationSubject(taskID).conversationEffort) ?? .medium
     }
 
     func modelID(taskID: UUID) throws -> String? {
-        let task = try tasks.taskModel(taskID)
+        let task = try tasks.conversationSubject(taskID)
         let key = selectedModelKey(for: task.conversationProvider)
         if let selectedModelID = preferences.string(forKey: key) {
             return selectedModelID
@@ -4274,7 +4353,7 @@ final class ConversationManager {
     }
 
     func setModelID(taskID: UUID, modelID: String) throws {
-        let task = try tasks.taskModel(taskID)
+        let task = try tasks.conversationSubject(taskID)
         preferences.set(modelID, forKey: selectedModelKey(for: task.conversationProvider))
     }
 
@@ -4284,7 +4363,7 @@ final class ConversationManager {
     /// starts Codex without MCP servers, apps, or hooks; Claude Code uses its own
     /// configuration.
     func providerCapabilities(taskID: UUID) async throws -> [ConversationProviderCapabilities] {
-        let task = try tasks.taskModel(taskID)
+        let task = try tasks.conversationSubject(taskID)
         let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
         let codex = ConversationProviderCapabilities(
             provider: .codex,
@@ -4299,14 +4378,14 @@ final class ConversationManager {
     /// current turn, pending questions, queued follow-ups, and background
     /// subagents to settle, and records a boundary in the transcript.
     func setProvider(taskID: UUID, provider: ConversationProvider) async throws -> BoardTaskRecord {
-        var task = try tasks.taskModel(taskID)
+        var task = try tasks.conversationSubject(taskID)
         StationAIDiagnostics.record("conversation.provider.switch.started", fields: [
             "taskID": taskID.uuidString, "from": task.conversationProvider.rawValue, "to": provider.rawValue
         ])
         guard task.status != .done else {
             throw StationAIManagerError.invalidTransition("Done tasks are closed. Create a new task to use another provider.")
         }
-        guard task.conversationProvider != provider else { return try tasks.get(taskID) }
+        guard task.conversationProvider != provider else { return BoardTaskRecord(task: task) }
         guard task.hasConversation else {
             return try await tasks.setConversationProvider(taskID, provider: provider)
         }
@@ -4338,7 +4417,7 @@ final class ConversationManager {
                 transcript.segments.append(.init(id: UUID().uuidString, provider: provider, startedAt: .now))
             }
         }
-        task = try tasks.taskModel(taskID)
+        task = try tasks.conversationSubject(taskID)
         let record = try await tasks.setConversationProvider(taskID, provider: provider)
         StationAIDiagnostics.record("conversation.provider.switch.succeeded", fields: [
             "taskID": taskID.uuidString, "provider": provider.rawValue,
@@ -4348,7 +4427,7 @@ final class ConversationManager {
     }
 
     /// Returns the visible history once nothing is still running or waiting.
-    private func requireSettledConversation(_ task: BoardTask) async throws -> ConversationHistory {
+    private func requireSettledConversation(_ task: any ConversationSubject) async throws -> ConversationHistory {
         let client = client(for: task)
         if try tasks.hasConversationTurnReservation(task.id) || activeSendTaskIDs.contains(task.id) {
             throw Self.switchBlocked("Wait for the current turn to finish before switching providers.")
@@ -4389,7 +4468,7 @@ final class ConversationManager {
     // MARK: - Goals (Codex only)
 
     func goal(taskID: UUID, objective: String? = nil, action: String = "get", observeRuntime: Bool = false) async throws -> CodexThreadGoal? {
-        var task = try tasks.taskModel(taskID)
+        var task = try tasks.conversationSubject(taskID)
         guard ["get", "set", "pause", "resume", "clear"].contains(action) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Goal action must be get, set, pause, resume, or clear.")
         }
@@ -4427,7 +4506,7 @@ final class ConversationManager {
                 )
             )
             _ = try await tasks.persistConversationID(taskID, provider: .codex, id: id)
-            task = try tasks.taskModel(taskID)
+            task = try tasks.conversationSubject(taskID)
         }
         guard let threadID = task.codexThreadID else { return nil }
         let workspace = try ConversationWorkspaceContext(roots: Self.historyRoots(task).map { URL(fileURLWithPath: $0, isDirectory: true) })
@@ -4457,7 +4536,7 @@ final class ConversationManager {
 
     func interrupt(taskID: UUID) async throws -> Bool {
         StationAIDiagnostics.record("conversation.interrupt.started", fields: ["taskID": taskID.uuidString])
-        let task = try tasks.taskModel(taskID)
+        let task = try tasks.conversationSubject(taskID)
         guard let threadID = task.activeConversationID else {
             StationAIDiagnostics.record("conversation.interrupt.skipped", fields: [
                 "taskID": taskID.uuidString,
@@ -4512,7 +4591,7 @@ final class ConversationManager {
         guard imageDataURLs.count <= 8, imageDataURLs.allSatisfy(Self.isValidImageDataURL) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
         }
-        let task = try tasks.taskModel(taskID)
+        let task = try tasks.conversationSubject(taskID)
         guard let threadID = task.activeConversationID else { return false }
         let client = client(for: task)
         // A turn owned by this process records its own steered input; a turn owned
@@ -4528,11 +4607,11 @@ final class ConversationManager {
     }
 
     func answerUserInput(taskID: UUID, requestID: String, threadID: String, answers: [String: [String]]) throws -> Bool {
-        client(for: try tasks.taskModel(taskID)).answerUserInput(requestID: requestID, threadID: threadID, answers: answers)
+        client(for: try tasks.conversationSubject(taskID)).answerUserInput(requestID: requestID, threadID: threadID, answers: answers)
     }
 
     func answerAsyncQuestion(taskID: UUID, question: ConversationMessage, answers: [String]) async throws -> (text: String, queued: Bool, history: ConversationHistory?) {
-        let providerName = try tasks.taskModel(taskID).conversationProvider.displayName
+        let providerName = try tasks.conversationSubject(taskID).conversationProvider.displayName
         guard let questions = question.asyncQuestions, !questions.isEmpty, questions.count == answers.count else {
             throw BridgeCommandError(code: "invalid_argument", message: "Supply one answer for every question in the \(providerName) item.")
         }
@@ -4661,7 +4740,7 @@ final class ConversationManager {
         hideSensitiveRecoveryPrompt: Bool = false,
         hideInternalOutcomeReminder: Bool = false
     ) async throws -> ConversationHistory {
-        let task = try tasks.taskModel(taskID)
+        let task = try tasks.conversationSubject(taskID)
         guard contextPageIDs.isEmpty || task.isStandaloneChat else {
             throw BridgeCommandError(
                 code: "invalid_argument",
@@ -4789,7 +4868,7 @@ final class ConversationManager {
                 }
             }
         } catch {
-            if retainQueuedMessagesOnFailure, let threadID = try? tasks.taskModel(taskID).activeConversationID {
+            if retainQueuedMessagesOnFailure, let threadID = try? tasks.conversationSubject(taskID).activeConversationID {
                 try? tasks.retainQueuedMessagesForUserAction(taskID: taskID, threadID: threadID)
                 onUpdate(ConversationUpdate(type: "queue_changed"))
             }
@@ -4804,7 +4883,7 @@ final class ConversationManager {
     /// The page this turn belongs to, creating the first one when the chat is brand new so the
     /// opening turn already runs inside its own page session.
     private func standaloneChatActivePage(taskID: UUID) -> StandaloneChatPage? {
-        guard let task = try? tasks.taskModel(taskID),
+        guard let task = try? tasks.conversationSubject(taskID),
               let chatManager = try? tasks.standaloneChatManager() else { return nil }
         if let existing = (try? chatManager.activePage()) ?? nil { return existing }
         return try? chatManager.createPage(
@@ -4838,14 +4917,14 @@ final class ConversationManager {
             }
         }
         guard !messages.isEmpty else { return nil }
-        let provider = (try? tasks.taskModel(taskID))?.conversationProvider ?? .claude
+        let provider = (try? tasks.conversationSubject(taskID))?.conversationProvider ?? .claude
         return ConversationHandoff.context(
             for: provider, messages: messages, preamble: ConversationHandoff.chatPagePreamble
         )
     }
 
     private func recordStandaloneChatTurn(
-        task: BoardTask,
+        task: any ConversationSubject,
         chatManager: StandaloneChatManager,
         history: ConversationHistory,
         latestTurnID: String,
@@ -4946,7 +5025,7 @@ final class ConversationManager {
             }
             return
         }
-        guard let task = try? tasks.taskModel(taskID), task.isStandaloneChat,
+        guard let task = try? tasks.conversationSubject(taskID), task.isStandaloneChat,
               let chatManager = try? tasks.standaloneChatManager(),
               let missedSignal = try? chatManager.lastTurnMissedSignal() else { return }
         let pending: StandaloneChatPendingFallback? = (try? chatManager.pendingFallback()) ?? nil
@@ -5047,7 +5126,7 @@ final class ConversationManager {
     ) async {
         let threadID: String
         do {
-            guard let value = try tasks.taskModel(taskID).activeConversationID else { return }
+            guard let value = try tasks.conversationSubject(taskID).activeConversationID else { return }
             threadID = value
         } catch { return }
         guard Self.dispatchingQueuedTaskIDs.insert(taskID).inserted else {
@@ -5243,7 +5322,7 @@ final class ConversationManager {
 
     /// Makes the task's provider the current segment and returns it with the
     /// handoff context its first prompt still needs, if any.
-    private func prepareSegment(task: BoardTask) async throws -> (segmentID: String, handoff: String?)? {
+    private func prepareSegment(task: any ConversationSubject) async throws -> (segmentID: String, handoff: String?)? {
         let provider = task.conversationProvider
         var transcript = try transcripts.read(task.id)
         if transcript.segments.last?.provider != provider || transcript.segments.isEmpty {
@@ -5299,7 +5378,7 @@ final class ConversationManager {
         guard imageDataURLs.count <= 8, imageDataURLs.allSatisfy(Self.isValidImageDataURL) else {
             throw BridgeCommandError(code: "invalid_argument", message: "Attach up to 8 valid PNG or JPEG images, each smaller than 10 MB.")
         }
-        var task = try tasks.taskModel(taskID)
+        var task = try tasks.conversationSubject(taskID)
         let provider = task.conversationProvider
         let client = clients.client(for: provider)
         let modelID = requestedModelID ?? provider.defaultModelID
@@ -5377,7 +5456,7 @@ final class ConversationManager {
                         clients: clients.helperClients(preferring: provider)
                     )
                 }
-                task = try tasks.taskModel(taskID)
+                task = try tasks.conversationSubject(taskID)
                 if ["Untitled task", "Generating title…"].contains(task.title) {
                     throw BridgeCommandError(
                         code: "invalid_transition",
@@ -5386,11 +5465,14 @@ final class ConversationManager {
                 }
                 resolvedWorktreeTitle = task.title
             }
-            task = try await tasks.prepareRepositoryWorktrees(
-                taskID,
-                fallbackPrompt: hideInternalOutcomeReminder ? (task.savedPrompt ?? persistedText) : persistedText,
-                resolvedTitle: resolvedWorktreeTitle ?? persistedText
-            )
+            // A standalone chat owns no repositories, so there is no worktree to prepare.
+            if !task.isStandaloneChat {
+                task = try await tasks.prepareRepositoryWorktrees(
+                    taskID,
+                    fallbackPrompt: hideInternalOutcomeReminder ? (task.savedPrompt ?? persistedText) : persistedText,
+                    resolvedTitle: resolvedWorktreeTitle ?? persistedText
+                )
+            }
             if !hideInternalOutcomeReminder, !normalizedText.isEmpty {
                 _ = try await tasks.savePrompt(taskID, prompt: persistedText, status: .inProgress, submitted: true)
             }
@@ -5398,7 +5480,7 @@ final class ConversationManager {
             workspace = try ConversationWorkspaceContext(roots: roots)
             _ = try await tasks.clearProgressReport(taskID)
             if shouldGenerateTitle && !resolveTitleBeforeWorktree {
-                let latest = try tasks.taskModel(taskID)
+                let latest = try tasks.conversationSubject(taskID)
                 let titleReserved = ["Untitled task", "Generating title…"].contains(latest.title)
                     ? try await tasks.renameIfTitleMatches(
                         taskID,
@@ -5442,7 +5524,7 @@ final class ConversationManager {
             // Read the visible history for the handoff before this provider gets a
             // new native thread: Codex can't list a thread that has no turns yet.
             phase = "transcript-segment"
-            let segment = try await prepareSegment(task: try tasks.taskModel(taskID))
+            let segment = try await prepareSegment(task: try tasks.conversationSubject(taskID))
             // A standalone chat page is its own context, so its recovery transcript is that page
             // alone; task conversations still hand off their whole visible history.
             let standaloneChatPage = task.isStandaloneChat ? standaloneChatActivePage(taskID: taskID) : nil
@@ -5938,7 +6020,7 @@ final class ConversationManager {
     /// rotation. The value returned to callers stays provider-truth, because `send` derives
     /// the turn it just ran from the last message.
     private func standaloneChatDisplayHistory(taskID: UUID, _ history: ConversationHistory) -> ConversationHistory {
-        guard (try? tasks.taskModel(taskID))?.isStandaloneChat == true else { return history }
+        guard (try? tasks.conversationSubject(taskID))?.isStandaloneChat == true else { return history }
         let restored = standaloneChatMessagesRestoringEarlierPages(taskID: taskID, history.messages)
         guard restored.count != history.messages.count else { return history }
         return ConversationHistory(
@@ -5963,9 +6045,9 @@ final class ConversationManager {
         let fallback = prompt.split(whereSeparator: \.isWhitespace).prefix(8).joined(separator: " ")
         let resolvedTitle = generated.flatMap { $0.isEmpty ? nil : $0 } ?? fallback
         let titleSource = result?.provider.rawValue ?? "prompt-fallback"
-        let latest: BoardTask
+        let latest: any ConversationSubject
         do {
-            latest = try tasks.taskModel(taskID)
+            latest = try tasks.conversationSubject(taskID)
         } catch {
             var fields = StationAIDiagnostics.errorFields(error)
             fields["taskID"] = taskID.uuidString
@@ -5990,7 +6072,7 @@ final class ConversationManager {
                 expectedTitle: "Generating title…",
                 title: resolvedTitle
             ) != nil else {
-                let currentTitle = (try? tasks.taskModel(taskID).title) ?? ""
+                let currentTitle = (try? tasks.conversationSubject(taskID).title) ?? ""
                 StationAIDiagnostics.record("task.title_apply.skipped", fields: [
                     "taskID": taskID.uuidString,
                     "reason": "title_changed",
@@ -6020,7 +6102,7 @@ final class ConversationManager {
                     expectedTitle: "Generating title…",
                     title: fallback
                 ) != nil else {
-                    let currentTitle = (try? tasks.taskModel(taskID).title) ?? ""
+                    let currentTitle = (try? tasks.conversationSubject(taskID).title) ?? ""
                     StationAIDiagnostics.record("task.title_apply.skipped", fields: [
                         "taskID": taskID.uuidString,
                         "reason": "title_changed",
@@ -6346,12 +6428,12 @@ final class StationAIBridgeRuntime {
                 let outcome = try await taskManager.reportTurnOutcome(taskID, outcome: request.requiredString("outcome"))
                 result = .object([
                     "outcome": .string(outcome),
-                    "taskStatus": .string(try taskManager.taskModel(taskID).status.rawValue)
+                    "taskStatus": .string(try taskManager.conversationSubject(taskID).status.rawValue)
                 ])
             case "chat.open":
-                result = try Self.value(await taskManager.getOrCreateStandaloneChatTask(provider: settings.defaultConversationProvider))
+                result = try Self.value(await taskManager.getOrCreateStandaloneChat(provider: settings.defaultConversationProvider))
             case "chat.status":
-                let chatTask = try await taskManager.getOrCreateStandaloneChatTask(provider: settings.defaultConversationProvider)
+                let chatTask = try await taskManager.getOrCreateStandaloneChat(provider: settings.defaultConversationProvider)
                 // The agent may ask for chat status from inside its active turn while
                 // holding this reservation. Never let a read-only status request wait
                 // for the turn that is currently waiting on that very tool result.
@@ -6574,7 +6656,7 @@ final class StationAIBridgeRuntime {
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = .object(["interrupted": .boolean(try await conversations.interrupt(taskID: request.requiredUUID("taskID")))])
             case "conversation.provider.get":
-                let task = try taskManager.taskModel(request.requiredUUID("taskID"))
+                let task = try taskManager.conversationSubject(request.requiredUUID("taskID"))
                 result = .object([
                     "provider": .string(task.conversationProvider.rawValue),
                     "supportsGoals": .boolean(task.conversationProvider.supportsGoals)
@@ -6892,10 +6974,11 @@ final class StationAIBridgeRuntime {
         String((DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
     }
 
-    /// The standalone chat's hidden task is never allowed to grow a repository/worktree —
-    /// it must stay general-purpose regardless of what the agent or a stray CLI call attempts.
+    /// A standalone chat owns no repositories or worktree roots. It is not a task, so these
+    /// commands could only ever fail for it; rejecting by chat identity reports why, instead
+    /// of the bare "task not found" the `BoardTask` lookup would otherwise produce.
     private static func rejectStandaloneChat(_ taskManager: BoardTaskManager, _ taskID: UUID) throws {
-        guard try taskManager.taskModel(taskID).isStandaloneChat else { return }
+        guard try taskManager.standaloneChatModel(taskID) != nil else { return }
         throw BridgeCommandError(code: "invalid_argument", message: "Standalone chat does not support repositories or worktree roots.")
     }
 

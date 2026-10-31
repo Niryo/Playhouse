@@ -6,7 +6,7 @@ struct KanbanBoardView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var conversationRuntime: ConversationRuntimeModel
     @Query(
-        filter: #Predicate<BoardTask> { $0.statusRawValue != "Done" && !$0.isStandaloneChat },
+        filter: #Predicate<BoardTask> { $0.statusRawValue != "Done" },
         sort: \BoardTask.createdAt, order: .reverse
     ) private var tasks: [BoardTask]
     @State private var isCreatingNewTask = false
@@ -42,7 +42,7 @@ struct KanbanBoardView: View {
     @State private var boardSearchText = ""
     @FocusState private var isBoardSearchFocused: Bool
     @State private var isShowingChatSidebar = false
-    @State private var chatTask: BoardTask?
+    @State private var chatTask: StandaloneChat?
     @State private var isOpeningChatSidebar = false
 
     /// Provider-owning operations run in the bridge daemon.
@@ -94,6 +94,9 @@ struct KanbanBoardView: View {
         .background(WorkspaceTheme.windowBackground)
         .frame(minWidth: 980, minHeight: 640)
         .onAppear {
+            // The board renders from its own @Query, not the board.list path, so it has to
+            // convert a chat still stored as a hidden task itself or that row shows as a card.
+            try? BoardTaskManager(modelContext: modelContext).migrateLegacyStandaloneChatTasks()
             checkReviewPullRequests()
             let retained = StationAIStore.takeLifecycleResetNotice(
                 dataDirectory: ProcessInfo.processInfo.environment["STATIONAI_DATA_DIRECTORY"]
@@ -659,7 +662,7 @@ struct KanbanBoardView: View {
         guard isShowingDoneArchive, archiveHasMore, !isLoadingArchivePage else { return }
         isLoadingArchivePage = true
         var descriptor = FetchDescriptor<BoardTask>(
-            predicate: #Predicate { $0.statusRawValue == "Done" && !$0.isStandaloneChat },
+            predicate: #Predicate { $0.statusRawValue == "Done" },
             sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
         )
         descriptor.fetchOffset = archiveOffset
@@ -714,11 +717,13 @@ struct KanbanBoardView: View {
             defer { isOpeningChatSidebar = false }
             do {
                 let manager = BoardTaskManager(modelContext: modelContext)
-                let record = try await manager.getOrCreateStandaloneChatTask(
+                let record = try await manager.getOrCreateStandaloneChat(
                     provider: WorkspaceSettingsManager().defaultConversationProvider
                 )
-                let task = try manager.taskModel(record.id)
-                chatTask = task
+                guard let chat = try manager.standaloneChatModel(record.id) else {
+                    throw BridgeCommandError(code: "operation_failed", message: "The standalone chat could not be opened.")
+                }
+                chatTask = chat
                 withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = true }
             } catch {
                 saveError = error.localizedDescription

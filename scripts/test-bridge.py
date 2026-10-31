@@ -798,6 +798,30 @@ class StationAIBridgeTests(unittest.TestCase):
             hold_marker.unlink(missing_ok=True)
         return self.assert_success(response)
 
+    def seed_legacy_standalone_chat_task(self, session_id="legacy-chat-session"):
+        """Recreate a standalone chat stored as a hidden board task, as before the split."""
+        repository_root = Path(__file__).resolve().parent.parent
+        executable = self.data_directory / "seed-legacy-standalone-chat-task"
+        subprocess.run(
+            [
+                # Self-contained: it declares the pre-split BoardTask itself, so compiling it
+                # against the current models would redeclare the entity.
+                "xcrun", "swiftc", "-parse-as-library", "-swift-version", "5", "-O",
+                str(repository_root / "scripts" / "seed-legacy-standalone-chat-task.swift"),
+                "-o", str(executable),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        result = subprocess.run(
+            [str(executable), str(self.data_directory), session_id],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip().splitlines()[-1]
+
     def seed_done_task_pull_request(self, task_id, number=123, repository_index=0):
         repository_root = Path(__file__).resolve().parent.parent
         executable = self.data_directory / "seed-task-pr-link"
@@ -805,6 +829,7 @@ class StationAIBridgeTests(unittest.TestCase):
             [
                 "xcrun", "swiftc", "-module-name", "StationAI",
                 str(repository_root / "StationAI" / "App" / "BoardTask.swift"),
+                str(repository_root / "StationAI" / "App" / "ConversationSubject.swift"),
                 str(repository_root / "scripts" / "seed-task-pr-link.swift"),
                 "-o", str(executable),
             ],
@@ -901,8 +926,39 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         return response
 
-    # case-contract: test_standalone_chat_hidden_task_and_pages_round_trip | The Chat button opens a hidden, repo/worktree-free task in a sliding sidebar that never appears on the board, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, and the Changes sidebar. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. The hidden task's real lifecycle status changes (In Progress, then Waiting Response) during a send, and it still never renders as a card on the visible Kanban board in any status.
-    def test_standalone_chat_hidden_task_and_pages_round_trip(self):
+    # case-contract: test_standalone_chat_legacy_hidden_task_migrates | A standalone chat left in the store as a hidden board task is converted once into its own model: it keeps its ID so the existing conversation transcript stays attached, keeps its provider session, carries its in-flight turn state across with the status message and progress report that explain it, is removed from the board so it never lists or resolves as a task, and reopening the chat returns that same migrated chat rather than creating a second one.
+    def test_standalone_chat_legacy_hidden_task_migrates(self):
+        # The seeded row is a real hidden board task, exactly as the old design stored it.
+        # Reading the board is itself a migration trigger, so the first read already asserts
+        # the converted state rather than the pre-migration one.
+        legacy_id = self.seed_legacy_standalone_chat_task(session_id="legacy-chat-session")
+
+        opened = self.assert_success(self.call_cli("chat", "open")[0])
+        self.assertEqual(
+            opened["id"], legacy_id,
+            "The migrated chat must keep its ID so its existing transcript stays attached.",
+        )
+        self.assertEqual(opened["claudeSessionID"], "legacy-chat-session", "The chat's provider session must survive migration.")
+        # The turn state must arrive with its explanation, not just the raw status.
+        self.assertEqual(opened["status"], "In Progress")
+        self.assertEqual(opened["statusMessage"], "Carried from the legacy chat task.")
+        self.assertEqual(opened["progressType"], "searching")
+        self.assertEqual(opened["progressLabel"], "Searching")
+        self.assertEqual(opened["progressDetail"], "Looking into volcanoes")
+        self.assertEqual(opened["repositoryWorktrees"], [])
+
+        self.assertEqual(
+            self.assert_success(self.call_cli("task", "list")[0])["tasks"], [],
+            "The migrated chat must no longer be a board task.",
+        )
+        response, _ = self.call_cli("task", "get", legacy_id, expected_status=3)
+        self.assert_failure(response, "not_found")
+
+        reopened = self.assert_success(self.call_cli("chat", "open")[0])
+        self.assertEqual(reopened["id"], legacy_id, "Migration must run once, not create a second chat.")
+
+    # case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, and the Changes sidebar. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state.
+    def test_standalone_chat_separate_model_and_pages_round_trip(self):
         opened = self.assert_success(self.call_cli("chat", "open")[0])
         self.assertEqual(opened["title"], "Chat")
         self.assertEqual(opened["repositoryWorktrees"], [])
@@ -910,15 +966,19 @@ class StationAIBridgeTests(unittest.TestCase):
         chat_task_id = opened["id"]
 
         reopened = self.assert_success(self.call_cli("chat", "open")[0])
-        self.assertEqual(reopened["id"], chat_task_id, "Opening chat twice must reuse the same hidden task.")
+        self.assertEqual(reopened["id"], chat_task_id, "Opening chat twice must reuse the same chat.")
 
         tasks = self.assert_success(self.call_cli("task", "list")[0])["tasks"]
         self.assertFalse(
             any(task["id"] == chat_task_id for task in tasks),
-            "The hidden standalone chat task must never appear in board.list/task.list.",
+            "The standalone chat must never appear in board.list/task.list.",
         )
-        fetched = self.assert_success(self.call_cli("task", "get", chat_task_id)[0])
-        self.assertEqual(fetched["id"], chat_task_id, "Reading the hidden task directly by ID still works.")
+        # The chat is its own model, not a task, so task commands cannot reach it at all.
+        # This is the separation itself, not a filter that could be forgotten somewhere.
+        response, _ = self.call_cli("task", "get", chat_task_id, expected_status=3)
+        self.assert_failure(response, "not_found")
+        response, _ = self.call_cli("task", "move", chat_task_id, "Done", expected_status=3)
+        self.assert_failure(response, "not_found")
         self.assert_success(self.call_cli("settings", "clear-parent")[0])
         self.assertIsNone(self.assert_success(self.call_cli("settings", "get")[0])["defaultParentFolder"])
 
@@ -993,15 +1053,14 @@ class StationAIBridgeTests(unittest.TestCase):
             any(message["role"] == "assistant" and message["text"] for message in recipes_messages),
             "The assistant's reply should also be persisted on that page.",
         )
-        # A real send moves the hidden task's lifecycle status away from Backlog (the status a
-        # normal task would show on its board card), which is exactly what let it leak into the
-        # visible Kanban board: the board renders from the GUI's own SwiftData query, not the
-        # board.list CLI path, which was already correctly filtered regardless of status.
-        chat_task_status = self.assert_success(self.call_cli("task", "get", chat_task_id)[0])["status"]
-        self.assertIn(chat_task_status, ["In Progress", "Waiting Response"], "A completed send should move the hidden task's real lifecycle status.")
+        # A send moves the chat's own turn state away from Backlog. That state used to belong to
+        # a hidden BoardTask, which is how the chat leaked onto the visible Kanban board; it now
+        # lives on the chat's own model, so no status value can put it in a board column.
+        chat_turn_state = self.assert_success(self.call_cli("chat", "open")[0])["status"]
+        self.assertIn(chat_turn_state, ["In Progress", "Waiting Response"], "A completed send should move the chat's own turn state.")
         self.assertEqual(
             self.assert_success(self.call_cli("task", "list")[0])["tasks"], [],
-            "The hidden standalone chat task must stay excluded from task/board listing in every lifecycle status.",
+            "The standalone chat must stay absent from task/board listing in every turn state.",
         )
         recipes_read = self.assert_success(self.call_cli("chat", "page", "read", recipes["id"])[0])
         self.assertEqual(recipes_read["filePath"], str(recipes_archive_path))
@@ -1084,6 +1143,20 @@ class StationAIBridgeTests(unittest.TestCase):
         while time.monotonic() < deadline and not followup_turn_active.exists():
             time.sleep(0.02)
         self.assertTrue(followup_turn_active.exists(), "The queued follow-up should reach the fixture after classification resolves.")
+        # Queuing is a conversation action, so it must resolve the chat and not look for a
+        # board task. The turn is held active here, which is exactly when a follow-up queues.
+        queued_in_chat = self.assert_success(
+            self.call_cli("conversation", "queue", chat_task_id, "--message", "Queue this for after the chat turn.")[0]
+        )
+        self.assertEqual(queued_in_chat["text"], "Queue this for after the chat turn.")
+        self.assertEqual(queued_in_chat["taskID"], chat_task_id)
+        self.assert_success(self.call_cli("conversation", "queue-remove", chat_task_id, queued_in_chat["id"])[0])
+        # Selecting the provider the chat already uses is a no-op that must return the chat.
+        unchanged_provider = self.assert_success(
+            self.call_cli("conversation", "provider", chat_task_id, "set", "codex")[0]
+        )
+        self.assertEqual(unchanged_provider["id"], chat_task_id)
+        self.assertEqual(unchanged_provider["conversationProvider"], "codex")
         followup_turn_release.write_text("Release follow-up turn.\n", encoding="utf-8")
         followup_response, _ = self.finish_cli(followup_process, followup_command)
         followup_turn_hold.unlink(missing_ok=True)
@@ -6162,7 +6235,7 @@ class StationAIBridgeTests(unittest.TestCase):
         # then read the durable result through the real bundled CLI/XPC.
         root = Path(__file__).resolve().parent.parent
         probe = self.data_directory / "codex-question-ownership-probe"
-        core = ["BoardTask", "WorkspaceSupport", "WorkspaceChanges", "CodexAppServerClient",
+        core = ["BoardTask", "ConversationSubject", "WorkspaceSupport", "WorkspaceChanges", "CodexAppServerClient",
                 "ConversationModel", "ClaudeCodeClient", "ConversationTranscriptStore",
                 "StandaloneChatStore", "BridgeCore"]
         command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone"]
