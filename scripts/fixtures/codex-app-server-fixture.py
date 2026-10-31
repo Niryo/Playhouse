@@ -115,7 +115,7 @@ def answer_text(user_message):
         if "Saturn's rings" in user_message:
             return '{"continues":false,"title":"Saturn Rings"}'
         return '{"continues":true,"title":null}'
-    if "stationai internal outcome reminder:" in (user_message or "").lower():
+    if "stationai internal outcome nudge:" in (user_message or "").lower():
         return "Fixture internal reminder reply."
     if user_message == "Follow up after private recovery.":
         return "Follow-up after private recovery complete."
@@ -616,7 +616,7 @@ def main():
                 TURN_ID = f"turn-{uuid.uuid4()}"
             turn_input = message.get("params", {}).get("input", [])
             turn_message = next((item.get("text") for item in turn_input if item.get("type") == "text"), None)
-            is_outcome_reminder = "stationai internal outcome reminder:" in (turn_message or "").lower()
+            is_outcome_reminder = "stationai internal outcome nudge:" in (turn_message or "").lower()
             if is_outcome_reminder:
                 TURN_ID = f"turn-{uuid.uuid4()}"
                 REMINDER_TURN_IDS.add(TURN_ID)
@@ -712,10 +712,19 @@ def main():
                 history_path.write_text(json.dumps(saved_history), encoding="utf-8")
             preserve_no_outcome = any(marker in mode for marker in ("nonblocking-slow", "nonblocking-restart-question", "hold-release", "question-isolation"))
             if is_outcome_reminder and not preserve_no_outcome:
-                instructions = turn_history.get("developerInstructions") or serial_history().get("threadStartDeveloperInstructions") or ""
+                # A fixture that only ever resumed an existing thread has no
+                # thread-start instructions of its own; its outcome command
+                # lives in the resume instructions StationAI sent instead.
+                saved = serial_history()
+                instructions = (
+                    turn_history.get("developerInstructions")
+                    or saved.get("threadStartDeveloperInstructions")
+                    or ((saved.get("threadResumeDeveloperInstructions") or [None])[-1])
+                    or ""
+                )
                 outcome_line = next((line.strip() for line in instructions.splitlines() if " task outcome " in line), None)
                 if outcome_line:
-                    outcome_command = outcome_line.replace("<completed|waiting-response>", "waiting-response")
+                    outcome_command = outcome_line.replace("<completed|in-progress|waiting-response>", "waiting-response")
                     completed = subprocess.run(shlex.split(outcome_command), capture_output=True, text=True, timeout=60)
                     if completed.returncode != 0:
                         raise RuntimeError(f"Fixture task outcome command failed: {completed.stderr.strip()}")
@@ -1437,7 +1446,7 @@ def main():
             if "error" in message:
                 answers = None
                 rejection_message = message.get("error", {}).get("message", "")
-                if "private StationAI outcome reminder" in rejection_message:
+                if "private StationAI status nudge" in rejection_message:
                     with Path(str(sys.argv[0]) + ".private-reminder-question-rejection").open("a", encoding="utf-8") as stream:
                         stream.write(rejection_message + "\n")
             else:
@@ -1615,7 +1624,7 @@ def main():
                             {"id": f"item_user_fixture_{index}", "type": "userMessage", "content": user_content},
                             assistant if echoed else {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "phase": "final_answer", "text": answer_text(user_message)},
                         ])
-                        if mode.endswith("-hold-release") and "stationai internal outcome reminder:" not in (user_message or "").lower():
+                        if mode.endswith("-hold-release") and "stationai internal outcome nudge:" not in (user_message or "").lower():
                             contents.append({
                                 "id": f"item_hold_release_file_change_{index}",
                                 "type": "fileChange",
@@ -1710,12 +1719,12 @@ def main():
             saved_turns = saved_history.get("messages") or saved_history.get("turns") or []
             ordinary_turn_indexes = [
                 index for index, saved_turn in enumerate(saved_turns)
-                if "stationai internal outcome reminder:" not in (saved_turn.get("userMessage") or "").lower()
+                if "stationai internal outcome nudge:" not in (saved_turn.get("userMessage") or "").lower()
             ]
             for turn_index, saved_turn in enumerate(saved_turns, start=1):
                 if (
                     "hold-release" in os.path.basename(sys.argv[0])
-                    and "stationai internal outcome reminder:" in (saved_turn.get("userMessage") or "").lower()
+                    and "stationai internal outcome nudge:" in (saved_turn.get("userMessage") or "").lower()
                 ):
                     contents.append({
                         "id": f"item_private_reminder_activity_{turn_index}",

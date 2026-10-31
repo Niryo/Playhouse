@@ -289,6 +289,8 @@ private final class RepositoryAllocationLockBarrier {
 
 final class StationAIUITests: XCTestCase {
     private static var suiteAbortReason: String?
+    /// Mirrors TurnOutcome.maxContinuations: private continuation/nudge turns per request.
+    private static let maxOutcomeContinuations = 5
 
     private var app: XCUIApplication!
     private var fixture: WorkspaceFixture!
@@ -2361,15 +2363,14 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
         assertTaskVisible("Waiting layout", inColumn: "Waiting Response")
 
+        // This task exists for board layout, so it settles explicitly rather than
+        // depending on the status-nudge fallback that other cases own.
+        XCTAssertEqual(
+            (try runCLI(["task", "outcome", activeTaskID, "waiting-response"])["result"] as? [String: Any])?["outcome"] as? String,
+            "waiting-response"
+        )
         try "Release the active turn.\n".write(to: activeTurn.releaseMarker, atomically: true, encoding: .utf8)
-        // The fixture also holds the private outcome reminders that follow; release each one.
-        XCTAssertTrue(waitUntil({
-            if FileManager.default.fileExists(atPath: activeTurn.activeMarker.path),
-               !FileManager.default.fileExists(atPath: activeTurn.releaseMarker.path) {
-                try? "Release the reminder turn.\n".write(to: activeTurn.releaseMarker, atomically: true, encoding: .utf8)
-            }
-            return !activeTurn.process.isRunning
-        }, timeout: 30), "The In Progress fixture conversation should finish after its reminders.")
+        XCTAssertTrue(waitUntil({ !activeTurn.process.isRunning }, timeout: 30), "The In Progress fixture conversation should finish once released.")
         activeTurn.process.waitUntilExit()
         let activeOutput = String(data: activeTurn.stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let activeError = String(data: activeTurn.stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
@@ -2391,7 +2392,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ lowestTask.exists && lowestTask.isHittable }, timeout: 10), "Vertical board scrolling should make lower backlog tasks reachable.")
     }
 
-    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to two private follow-up requests to report one; a completed report during either reminder moves the task to Review, a waiting-response report during a reminder stops retries and leaves the task in Waiting Response, and no report after both reminders falls back to Waiting Response. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. Private reminder prompts, replies, and turn-scoped activities remain absent from Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those reminders also retains the latest ordinary-turn diff while keeping reminder-only replies hidden.
+    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. Private nudge prompts, replies, and turn-scoped activities remain absent from Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while keeping nudge-only replies hidden.
     func test_task_progress_reports_publish_persist_and_clear() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Progress reports", roots: [fixture.primary.path])
@@ -2511,12 +2512,12 @@ final class StationAIUITests: XCTestCase {
         omittedProcess.standardError = omittedStderr
         try omittedProcess.run()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The no-outcome turn should resume the existing fixture thread.")
-        for reminderIndex in 0...2 {
-            XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress", "Waiting Response should be deferred until both private reminders finish.")
-            try "Release turn \(reminderIndex + 1).\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
-            if reminderIndex < 2 {
+        for nudgeIndex in 0...Self.maxOutcomeContinuations {
+            XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress", "The fallback status should be deferred until every private nudge finishes.")
+            try "Release turn \(nudgeIndex + 1).\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+            if nudgeIndex < Self.maxOutcomeContinuations {
                 XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The fixture should finish the current unreported turn.")
-                XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "StationAI should send the next private outcome reminder.")
+                XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "StationAI should send the next private status nudge.")
             }
         }
         omittedProcess.waitUntilExit()
@@ -2525,8 +2526,9 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(omittedProcess.terminationStatus, 0, "The no-outcome fixture conversation should finish successfully: \(omittedOutput) \(omittedError)")
 
         let finished = try XCTUnwrap(taskRecord(id: taskID))
-        XCTAssertEqual(finished["status"] as? String, "Waiting Response", "After two private reminders without an outcome, the task should fall back to Waiting Response.")
-        assertTaskVisible("Progress reports", inColumn: "Waiting Response")
+        XCTAssertEqual(finished["status"] as? String, "Blocked", "Unanswered nudges never asked the user anything, so the task is Blocked rather than Waiting Response.")
+        XCTAssertTrue((finished["statusMessage"] as? String)?.contains("nudges went unanswered") == true, "The Blocked reason should say the nudges went unanswered.")
+        assertTaskVisible("Progress reports", inColumn: "Blocked")
         assertCLIError(try runCLI(["task", "progress", "publish", taskID, "--type", "testing"], expectedStatus: 1), code: "invalid_transition")
         assertCLIError(try runCLI(["task", "outcome", taskID, "completed"], expectedStatus: 1), code: "invalid_transition")
         XCTAssertNil(finished["progressLabel"], "Turn completion should clear the last live report.")
@@ -2570,8 +2572,8 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
         assertTaskVisible("Progress reports", inColumn: "Review")
         openTask(named: "Progress reports")
-        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "StationAI internal outcome reminder:")).count, 0, "The private reminder prompt must not appear in the visible transcript.")
-        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "previous request finished without reporting")).count, 0, "Private reminder text must stay hidden while the task is visible.")
+        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "StationAI internal outcome nudge:")).count, 0, "The private reminder prompt must not appear in the visible transcript.")
+        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "ended without reporting a task outcome")).count, 0, "Private reminder text must stay hidden while the task is visible.")
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "StationAI private outcome reminder hidden")).count, 0, "Private reminder prompts should not be rendered in the transcript.")
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "StationAI private outcome response hidden")).count, 0, "Private reminder replies should not be rendered in the transcript.")
         let waitingReminderProcess = Process()
@@ -2599,13 +2601,14 @@ final class StationAIUITests: XCTestCase {
         let turnData = try Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
         let turn = try XCTUnwrap(try JSONSerialization.jsonObject(with: turnData) as? [String: Any])
         let hiddenTurns = try XCTUnwrap(turn["turns"] as? [[String: Any]])
-        XCTAssertEqual(hiddenTurns.count, 9, "The omitted outcome should trigger two reminders; reported outcomes should stop after one reminder.")
-        let reminderTurns = hiddenTurns.filter { ($0["userMessage"] as? String)?.contains("previous request finished without reporting") == true }
-        XCTAssertEqual(reminderTurns.count, 4, "Only the missing-outcome sends should receive private reminders.")
-        XCTAssertTrue(reminderTurns.allSatisfy { ($0["userMessage"] as? String)?.contains("task outcome") == true }, "Each reminder should explicitly direct the agent to report an outcome.")
+        XCTAssertEqual(hiddenTurns.count, 12, "The omitted outcome should exhaust every nudge; reported outcomes should stop after one nudge.")
+        let nudgeTurns = hiddenTurns.filter { ($0["userMessage"] as? String)?.contains("ended without reporting a task outcome") == true }
+        XCTAssertEqual(nudgeTurns.count, Self.maxOutcomeContinuations + 2, "Only the missing-outcome sends should receive private status nudges.")
+        XCTAssertTrue(nudgeTurns.allSatisfy { ($0["userMessage"] as? String)?.contains("task outcome") == true }, "Each nudge should explicitly direct the agent to report an outcome.")
+        XCTAssertTrue(nudgeTurns.allSatisfy { ($0["userMessage"] as? String)?.contains("`in-progress`") == true }, "A nudge must offer in-progress alongside completed and waiting-response.")
         let visibleHistory = try runCLI(["conversation", "history", taskID])
         let visibleMessages = try XCTUnwrap((visibleHistory["result"] as? [String: Any])?["messages"] as? [[String: Any]])
-        XCTAssertFalse(visibleMessages.contains { ($0["text"] as? String)?.contains("previous request finished") == true }, "Private reminder text must not appear in conversation history.")
+        XCTAssertFalse(visibleMessages.contains { ($0["text"] as? String)?.contains("ended without reporting a task outcome") == true }, "Private nudge text must not appear in conversation history.")
         let instructions = try XCTUnwrap(turn["threadStartDeveloperInstructions"] as? String)
         XCTAssertTrue(instructions.contains(cliURL.path))
         XCTAssertTrue(instructions.contains("task progress publish"))
@@ -2616,13 +2619,14 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(instructions.contains("CLI/XPC 3/8"))
         XCTAssertTrue(instructions.contains("under 80 characters"))
         XCTAssertTrue(instructions.contains("task outcome"))
-        XCTAssertTrue(instructions.contains("up to two private follow-up messages"))
+        XCTAssertTrue(instructions.contains("<completed|in-progress|waiting-response>"))
+        XCTAssertTrue(instructions.contains("Never end a turn mid-work without an outcome"))
         XCTAssertTrue(instructions.contains("waiting-response"))
         XCTAssertTrue(instructions.contains("final CLI action"))
         XCTAssertEqual(turn["threadStartCount"] as? Int, 1, "The follow-up should reuse the thread created with progress instructions.")
         XCTAssertGreaterThanOrEqual(turn["threadResumeCount"] as? Int ?? 0, 1)
         let turns = try XCTUnwrap(turn["turns"] as? [[String: Any]])
-        XCTAssertEqual(turns.count, 9)
+        XCTAssertEqual(turns.count, 12)
         XCTAssertTrue(turns.allSatisfy { $0["developerInstructions"] == nil || $0["developerInstructions"] is NSNull }, "Thread-scoped task instructions should not be repeated in turn requests.")
         let resumeInstructions = try XCTUnwrap(turn["threadResumeDeveloperInstructions"] as? [Any])
         XCTAssertFalse(resumeInstructions.isEmpty, "Resumed task threads should receive updated task instructions.")
@@ -2652,7 +2656,7 @@ final class StationAIUITests: XCTestCase {
         try "Release the composer turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 15), "An outcome reported with the provider's inherited environment should move the app-started turn to Review.")
         openTask(named: "Progress reports")
-        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "previous request finished without reporting")).count, 0, "A later composer history refresh must keep earlier private reminder prompts hidden.")
+        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "ended without reporting a task outcome")).count, 0, "A later composer history refresh must keep earlier private reminder prompts hidden.")
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "StationAI private outcome reminder hidden")).count, 0, "Earlier private reminders should stay absent after a normal composer turn.")
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "StationAI private outcome response hidden")).count, 0, "Earlier private reminder replies should stay absent after a normal composer turn.")
         let laterHistory = try runCLI(["conversation", "history", taskID])
@@ -2662,18 +2666,18 @@ final class StationAIUITests: XCTestCase {
         // A model can write its outcome command as answer text instead of running
         // it. The echo is hidden, and it counts only when it names this task.
         let echoedAnswers = app.groups.matching(NSPredicate(format: "label == %@", "Fixture answer with an echoed outcome."))
-        for (turnIndex, (echoedTaskID, expectedColumn)) in [(UUID().uuidString, "Waiting Response"), (taskID, "Review")].enumerated() {
+        for (turnIndex, (echoedTaskID, expectedColumn)) in [(UUID().uuidString, "Blocked"), (taskID, "Review")].enumerated() {
             XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15), "The composer should accept the echoed-outcome turn.")
             composer.click()
             composer.typeText("Echo the outcome command for \(echoedTaskID).")
             element("send-message-button").click()
             XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 15), "The echoed-outcome turn should hold the fixture turn open.")
-            let heldTurns = turnIndex == 0 ? 3 : 1
+            let heldTurns = turnIndex == 0 ? Self.maxOutcomeContinuations + 1 : 1
             for heldTurnIndex in 0..<heldTurns {
                 try "Release echoed turn \(heldTurnIndex + 1).\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
                 if heldTurnIndex < heldTurns - 1 {
-                    XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The current echoed turn should finish before a private reminder.")
-                    XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "StationAI should send a private reminder for an unreported echoed outcome.")
+                    XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The current echoed turn should finish before a private nudge.")
+                    XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "StationAI should send a private nudge for an unreported echoed outcome.")
                 }
             }
             XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == expectedColumn }, timeout: 15), "An echoed outcome for \(echoedTaskID) should leave the task in \(expectedColumn).")
@@ -2682,6 +2686,261 @@ final class StationAIUITests: XCTestCase {
         }
         relaunchApp()
         assertTaskVisible("Progress reports", inColumn: "Review")
+    }
+
+    // case-contract: test_task_outcome_in_progress_drives_continuations_until_blocked | An in-progress outcome is accepted during an active turn, leaves the task In Progress, and makes StationAI send a private continuation turn that names the in-progress report; a completed report during that continuation stops the loop at Review. When every turn reports in-progress, StationAI sends exactly five continuation turns, keeps the task In Progress throughout, and then marks it Blocked with a continuation-limit reason instead of Waiting Response, since the user was never asked anything. Continuation prompts and replies stay out of the visible conversation history. The user taking the work back ends StationAI's private driving: stopping a continuation keeps the Stop's Waiting Response with no failure reason, and a queued follow-up runs next instead of being buried under further continuations.
+    func test_task_outcome_in_progress_drives_continuations_until_blocked() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Continue in progress", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Continue in progress")
+        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-in-progress-continuation-hold-release")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
+        codexFixtureExecutable = executable.path
+        let activeMarker = URL(fileURLWithPath: executable.path + ".turn-active")
+        let releaseMarker = URL(fileURLWithPath: executable.path + ".turn-release")
+        try? FileManager.default.removeItem(at: activeMarker)
+        try? FileManager.default.removeItem(at: releaseMarker)
+        var environment = ProcessInfo.processInfo.environment
+        environment["STATIONAI_DATA_DIRECTORY"] = dataDirectory.path
+        environment["CODEX_HOME"] = dataDirectory.appendingPathComponent("codex-home").path
+        environment["STATIONAI_WORKTREE_LABEL"] = "StationAI UI Test Worktree"
+        environment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
+        environment["STATIONAI_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
+        environment["STATIONAI_BRIDGE_SERVICE_NAME"] = serviceName
+        environment["STATIONAI_E2E_CODEX_EXECUTABLE"] = executable.path
+
+        let process = Process()
+        process.executableURL = cliURL
+        process.arguments = ["conversation", "send", taskID, "--message", "Work on this task."]
+        process.environment = environment
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        defer {
+            if process.isRunning {
+                try? "Release the turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+                process.waitUntilExit()
+            }
+            try? FileManager.default.removeItem(at: activeMarker)
+            try? FileManager.default.removeItem(at: releaseMarker)
+        }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 15), "The fixture should hold the first turn open.")
+        let reported = try XCTUnwrap(try runCLI(["task", "outcome", taskID, "in-progress"])["result"] as? [String: Any])
+        XCTAssertEqual(reported["outcome"] as? String, "in-progress")
+        XCTAssertEqual(reported["taskStatus"] as? String, "In Progress", "The outcome is staged until the turn completes.")
+        try "Release the in-progress turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 15), "The in-progress turn should finish before its continuation.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 15), "StationAI should send a continuation turn after an in-progress report.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress", "The task stays In Progress while StationAI drives the continuation.")
+        assertTaskVisible("Continue in progress", inColumn: "In Progress")
+        XCTAssertEqual((try runCLI(["task", "outcome", taskID, "completed"])["result"] as? [String: Any])?["outcome"] as? String, "completed")
+        try "Release the continuation turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+        process.waitUntilExit()
+        let output = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let errorOutput = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 0, "The continuation conversation should finish successfully: \(output) \(errorOutput)")
+        assertTaskVisible("Continue in progress", inColumn: "Review")
+        let continuationHistory = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
+        )
+        let continuationTurns = try XCTUnwrap(continuationHistory["turns"] as? [[String: Any]])
+            .filter { ($0["userMessage"] as? String)?.contains("You reported `in-progress`") == true }
+        XCTAssertEqual(continuationTurns.count, 1, "One in-progress report earns exactly one continuation turn.")
+        XCTAssertTrue(
+            (continuationTurns[0]["userMessage"] as? String)?.contains("of \(Self.maxOutcomeContinuations)") == true,
+            "The continuation prompt should name the remaining budget."
+        )
+        openTask(named: "Continue in progress")
+        XCTAssertEqual(
+            app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "You reported")).count, 0,
+            "Private continuation prompts must not appear in the visible transcript."
+        )
+        for hidden in ["Fixture internal reminder reply.", "StationAI private outcome reminder hidden", "StationAI private outcome response hidden"] {
+            XCTAssertEqual(
+                app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", hidden)).count, 0,
+                "Private continuation replies must not appear in the visible transcript."
+            )
+        }
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+
+        // Every turn reports in-progress, so StationAI runs out of continuations.
+        try createTaskFixture(title: "Never settles", roots: [fixture.primary.path])
+        let cappedID = try self.taskID(named: "Never settles")
+        let cappedExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-in-progress-cap-hold-release")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: cappedExecutable.path))
+        codexFixtureExecutable = cappedExecutable.path
+        let cappedActive = URL(fileURLWithPath: cappedExecutable.path + ".turn-active")
+        let cappedRelease = URL(fileURLWithPath: cappedExecutable.path + ".turn-release")
+        try? FileManager.default.removeItem(at: cappedActive)
+        try? FileManager.default.removeItem(at: cappedRelease)
+        environment["STATIONAI_E2E_CODEX_EXECUTABLE"] = cappedExecutable.path
+        let cappedProcess = Process()
+        cappedProcess.executableURL = cliURL
+        cappedProcess.arguments = ["conversation", "send", cappedID, "--message", "Work on this task."]
+        cappedProcess.environment = environment
+        let cappedStdout = Pipe()
+        let cappedStderr = Pipe()
+        cappedProcess.standardOutput = cappedStdout
+        cappedProcess.standardError = cappedStderr
+        try cappedProcess.run()
+        defer {
+            if cappedProcess.isRunning {
+                try? "Release the capped turn.\n".write(to: cappedRelease, atomically: true, encoding: .utf8)
+                cappedProcess.waitUntilExit()
+            }
+            try? FileManager.default.removeItem(at: cappedActive)
+            try? FileManager.default.removeItem(at: cappedRelease)
+        }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: cappedActive.path) }, timeout: 15), "The capped fixture should hold its first turn open.")
+        for index in 0...Self.maxOutcomeContinuations {
+            XCTAssertEqual(
+                try taskRecord(id: cappedID)?["status"] as? String, "In Progress",
+                "Every continuation keeps the task In Progress until the limit is reached."
+            )
+            XCTAssertEqual(
+                (try runCLI(["task", "outcome", cappedID, "in-progress"])["result"] as? [String: Any])?["outcome"] as? String,
+                "in-progress"
+            )
+            try "Release turn \(index + 1).\n".write(to: cappedRelease, atomically: true, encoding: .utf8)
+            if index < Self.maxOutcomeContinuations {
+                XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: cappedActive.path) }, timeout: 15), "The fixture should finish the current continuation turn.")
+                XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: cappedActive.path) }, timeout: 15), "StationAI should send the next continuation turn.")
+            }
+        }
+        cappedProcess.waitUntilExit()
+        let cappedOutput = String(data: cappedStdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let cappedError = String(data: cappedStderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(cappedProcess.terminationStatus, 0, "The capped continuation conversation should finish successfully: \(cappedOutput) \(cappedError)")
+        let cappedRecord = try XCTUnwrap(taskRecord(id: cappedID))
+        XCTAssertEqual(cappedRecord["status"] as? String, "Blocked", "Running out of continuations is Blocked, not Waiting Response.")
+        XCTAssertTrue(
+            (cappedRecord["statusMessage"] as? String)?.contains("continuation turns") == true,
+            "The Blocked reason should name the continuation limit."
+        )
+        assertTaskVisible("Never settles", inColumn: "Blocked")
+        let cappedHistory = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: cappedExecutable.path + ".history"))) as? [String: Any]
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(cappedHistory["turns"] as? [[String: Any]])
+                .filter { ($0["userMessage"] as? String)?.contains("You reported `in-progress`") == true }.count,
+            Self.maxOutcomeContinuations,
+            "StationAI stops driving the work after the continuation limit."
+        )
+
+        // Stopping a private continuation is the user taking the work back.
+        try createTaskFixture(title: "Stopped mid continuation", roots: [fixture.primary.path])
+        let stopID = try self.taskID(named: "Stopped mid continuation")
+        let stopExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-in-progress-stop-hold-release")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: stopExecutable.path))
+        codexFixtureExecutable = stopExecutable.path
+        let stopActive = URL(fileURLWithPath: stopExecutable.path + ".turn-active")
+        let stopRelease = URL(fileURLWithPath: stopExecutable.path + ".turn-release")
+        try? FileManager.default.removeItem(at: stopActive)
+        try? FileManager.default.removeItem(at: stopRelease)
+        environment["STATIONAI_E2E_CODEX_EXECUTABLE"] = stopExecutable.path
+        let stopProcess = Process()
+        stopProcess.executableURL = cliURL
+        stopProcess.arguments = ["conversation", "send", stopID, "--message", "Work on this task."]
+        stopProcess.environment = environment
+        stopProcess.standardOutput = Pipe()
+        stopProcess.standardError = Pipe()
+        try stopProcess.run()
+        defer {
+            if stopProcess.isRunning {
+                try? "Release the stopped continuation.\n".write(to: stopRelease, atomically: true, encoding: .utf8)
+                stopProcess.waitUntilExit()
+            }
+            try? FileManager.default.removeItem(at: stopActive)
+            try? FileManager.default.removeItem(at: stopRelease)
+        }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: stopActive.path) }, timeout: 15), "The stop fixture should hold its first turn open.")
+        XCTAssertEqual((try runCLI(["task", "outcome", stopID, "in-progress"])["result"] as? [String: Any])?["outcome"] as? String, "in-progress")
+        try "Release the in-progress turn.\n".write(to: stopRelease, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: stopActive.path) }, timeout: 15), "The in-progress turn should finish before its continuation.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: stopActive.path) }, timeout: 15), "StationAI should send a continuation turn before the Stop.")
+        // Stop persists the paused state before the provider answers, and the
+        // held fixture turn only replies once released, so the Stop has to run
+        // alongside the release rather than before it.
+        let stopper = try startCLIProcess(["conversation", "stop", stopID])
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: stopID)?["status"] as? String) == "Waiting Response" }, timeout: 20),
+                      "Stop should persist the paused state before the provider acknowledges it.")
+        try "Release the stopped continuation.\n".write(to: stopRelease, atomically: true, encoding: .utf8)
+        _ = try finishCLIProcess(stopper)
+        stopProcess.waitUntilExit()
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: stopID)?["status"] as? String) == "Waiting Response" }, timeout: 30),
+                      "A Stop during a continuation keeps the user's paused state.")
+        XCTAssertNil(try taskRecord(id: stopID)?["statusMessage"] as? String,
+                     "A user-requested Stop must not be reported as a StationAI failure.")
+        assertTaskVisible("Stopped mid continuation", inColumn: "Waiting Response")
+        let stopHistory = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: stopExecutable.path + ".history"))) as? [String: Any]
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(stopHistory["turns"] as? [[String: Any]])
+                .filter { ($0["userMessage"] as? String)?.contains("You reported `in-progress`") == true }.count,
+            1,
+            "StationAI must stop driving the work once the user stops it."
+        )
+
+        // A queued follow-up is the other way the user takes over.
+        try createTaskFixture(title: "Queued over continuation", roots: [fixture.primary.path])
+        let queuedID = try self.taskID(named: "Queued over continuation")
+        let queuedExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-in-progress-queue-hold-release")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: queuedExecutable.path))
+        codexFixtureExecutable = queuedExecutable.path
+        let queuedActive = URL(fileURLWithPath: queuedExecutable.path + ".turn-active")
+        let queuedRelease = URL(fileURLWithPath: queuedExecutable.path + ".turn-release")
+        try? FileManager.default.removeItem(at: queuedActive)
+        try? FileManager.default.removeItem(at: queuedRelease)
+        environment["STATIONAI_E2E_CODEX_EXECUTABLE"] = queuedExecutable.path
+        let queuedProcess = Process()
+        queuedProcess.executableURL = cliURL
+        queuedProcess.arguments = ["conversation", "send", queuedID, "--message", "Work on this task."]
+        queuedProcess.environment = environment
+        queuedProcess.standardOutput = Pipe()
+        queuedProcess.standardError = Pipe()
+        try queuedProcess.run()
+        defer {
+            if queuedProcess.isRunning {
+                try? "Release the next turn.\n".write(to: queuedRelease, atomically: true, encoding: .utf8)
+                queuedProcess.waitUntilExit()
+            }
+            try? FileManager.default.removeItem(at: queuedActive)
+            try? FileManager.default.removeItem(at: queuedRelease)
+        }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: queuedActive.path) }, timeout: 15), "The queue fixture should hold its first turn open.")
+        XCTAssertEqual((try runCLI(["task", "outcome", queuedID, "in-progress"])["result"] as? [String: Any])?["outcome"] as? String, "in-progress")
+        _ = try runCLI(["conversation", "queue", queuedID, "--message", "Follow-up from the user."])
+        XCTAssertTrue(waitUntil({
+            try? "Release the next turn.\n".write(to: queuedRelease, atomically: true, encoding: .utf8)
+            return !queuedProcess.isRunning
+        }, timeout: 60), "The queued follow-up should run instead of further continuations.")
+        queuedProcess.waitUntilExit()
+        // The follow-up turn settles on its own terms; what matters here is that
+        // it ran next instead of queueing behind StationAI's continuations.
+        let queuedHistory = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: queuedExecutable.path + ".history"))) as? [String: Any]
+        )
+        let queuedTurns = try XCTUnwrap(queuedHistory["turns"] as? [[String: Any]])
+        XCTAssertEqual(
+            queuedTurns.filter { ($0["userMessage"] as? String)?.contains("You reported `in-progress`") == true }.count, 0,
+            "A queued follow-up must take precedence over StationAI's private continuation."
+        )
+        XCTAssertTrue(
+            queuedTurns.contains { ($0["userMessage"] as? String)?.contains("Follow-up from the user.") == true },
+            "The queued follow-up should be the next turn the provider receives."
+        )
+        openTask(named: "Queued over continuation")
+        XCTAssertTrue(transcriptMessage("Follow-up from the user.").waitForExistence(timeout: 15),
+                      "The queued follow-up should be visible in the conversation it ran in.")
+        XCTAssertEqual(
+            app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "You reported")).count, 0,
+            "No private continuation prompt should be visible ahead of the user's follow-up."
+        )
     }
 
     // case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; a staged completed outcome is discarded if its turn fails, leaving the task Blocked. The task card removes the report while lifecycle states remain Blocked or In Progress. A blocking structured question appears inline and moves the task to Waiting Response; its answer resumes the active turn in In Progress, and the answered turn finishes in Waiting Response. First-thread instructions distinguish source repository paths from active task worktree paths, allow read-only inspection without attaching a repo, and reserve repository add APIs for changes that need a worktree.
@@ -5604,7 +5863,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(transcriptContains("stationai-handoff-context"))
     }
 
-    // case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its StationAI progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn without an outcome ends in Waiting Response. The fixture records both private reminder attempts for each unreported turn; fresh history hides reminder prompts and replies completely. Switching to Codex hands off the whole Claude answer, excludes answered-turn commentary and private reminder prompts and replies including their redacted placeholders, and hands off only the last commentary from the turn that recorded no answer. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
+    // case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its StationAI progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn that leaves every status nudge unanswered ends in Blocked. The fixture records all five private nudge attempts for each unreported turn; fresh history hides nudge prompts and replies completely. Switching to Codex hands off the whole Claude answer, excludes answered-turn commentary and private nudge prompts and replies including their redacted placeholders, and hands off only the last commentary from the turn that recorded no answer. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
     func test_claude_answer_stays_final_around_outcome_report() throws {
         let claudeExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         let codexExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success")
@@ -5657,7 +5916,7 @@ final class StationAIUITests: XCTestCase {
 
         send("Please inspect the workspace.")
         XCTAssertTrue(visibleTexts(containing: "Inspection done: the workspace is ready.").firstMatch.waitForExistence(timeout: 20))
-        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" }, timeout: 10), "A turn without an outcome should wait for the user.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Blocked" }, timeout: 60), "A turn that leaves every status nudge unanswered should settle in Blocked.")
         waitForSettledTurn()
         XCTAssertEqual(visibleTexts(containing: "I'll inspect the workspace first.").count, 0, "Text before an ordinary tool stays collapsed commentary.")
 
@@ -5678,11 +5937,11 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ self.transcriptContains("Answers received: Blue / fixture-secret.") }, timeout: 20), "The Codex turn should complete.")
         let claudeHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: claudeExecutable.path + ".history"))) as? [String: Any])
         let claudeTurns = try XCTUnwrap(claudeHistory["turns"] as? [[String: Any]])
-        let reminderTurns = claudeTurns.filter { (($0["userText"] as? String) ?? "").localizedCaseInsensitiveContains("StationAI internal outcome reminder:") }
-        XCTAssertEqual(reminderTurns.count, 4, "Both no-outcome turns should receive two private outcome reminders.")
+        let nudgeTurns = claudeTurns.filter { (($0["userText"] as? String) ?? "").localizedCaseInsensitiveContains("StationAI internal outcome nudge:") }
+        XCTAssertEqual(nudgeTurns.count, 2 * Self.maxOutcomeContinuations, "Both no-outcome turns should receive every private status nudge.")
         let visibleHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
         let visibleMessages = try XCTUnwrap(visibleHistory["messages"] as? [[String: Any]])
-        XCTAssertFalse(visibleMessages.contains { (($0["text"] as? String) ?? "").localizedCaseInsensitiveContains("StationAI internal outcome reminder:") })
+        XCTAssertFalse(visibleMessages.contains { (($0["text"] as? String) ?? "").localizedCaseInsensitiveContains("StationAI internal outcome nudge:") })
         XCTAssertFalse(visibleMessages.contains { (($0["text"] as? String) ?? "").localizedCaseInsensitiveContains("private outcome reminder hidden") })
         XCTAssertFalse(visibleMessages.contains { (($0["text"] as? String) ?? "").localizedCaseInsensitiveContains("private outcome response hidden") })
         let codexHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: codexExecutable.path + ".history"))) as? [String: Any])
@@ -5694,7 +5953,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertFalse(handoff.contains("I'll inspect the workspace first."), "Commentary of an answered turn stays with the provider that produced it.")
         XCTAssertTrue(handoff.contains("Claude: Checks are running; results will follow."), "A turn without an answer hands off its last commentary.")
         XCTAssertFalse(handoff.contains("Starting the checks."), "Only the unanswered turn's last commentary is handed off.")
-        XCTAssertFalse(handoff.contains("StationAI internal outcome reminder:"), "Private outcome reminders must not cross provider boundaries.")
+        XCTAssertFalse(handoff.contains("StationAI internal outcome nudge:"), "Private status nudges must not cross provider boundaries.")
         XCTAssertFalse(handoff.contains("[StationAI private outcome reminder hidden]"), "Redacted reminder prompts must not cross provider boundaries.")
         XCTAssertFalse(handoff.contains("private outcome response hidden"), "Redacted reminder replies must not enter handoff context.")
         XCTAssertEqual(visibleTexts(containing: "stationai-handoff-context").count, 0, "The handoff block stays hidden in the transcript.")
@@ -5759,7 +6018,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(transcriptShows("OK.", timeout: 20), "Claude should complete after rebuilding its session from saved history.")
         fixtureHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureHistoryURL)) as? [String: Any])
         fixtureTurns = try XCTUnwrap(fixtureHistory["turns"] as? [[String: Any]])
-        let recoveredTurn = try XCTUnwrap(fixtureTurns.last { !(($0["userText"] as? String ?? "").localizedCaseInsensitiveContains("StationAI internal outcome reminder:")) })
+        let recoveredTurn = try XCTUnwrap(fixtureTurns.last { !(($0["userText"] as? String ?? "").localizedCaseInsensitiveContains("StationAI internal outcome nudge:")) })
         XCTAssertFalse(recoveredTurn["resumed"] as? Bool ?? true, "A missing native session should retry as a new Claude session.")
         let recoveryPrompt = try XCTUnwrap(recoveredTurn["userText"] as? String)
         XCTAssertTrue(recoveryPrompt.contains("<stationai-handoff-context>"))
@@ -6704,7 +6963,7 @@ final class StationAIUITests: XCTestCase {
         )
         // StationAI's private outcome reminders are separate turns, not user messages.
         let persistedPrompts = try XCTUnwrap(savedHistory["messages"] as? [[String: Any]]).compactMap { $0["userMessage"] as? String }
-            .filter { !$0.hasPrefix("StationAI internal outcome reminder:") }
+            .filter { !$0.hasPrefix("StationAI internal outcome nudge:") }
         XCTAssertEqual(persistedPrompts, [firstPrompt, secondPrompt], "Both messages should persist in the same local Codex thread history.")
         let threadID = try XCTUnwrap(savedHistory["threadID"] as? String)
         let protocolEvents = try XCTUnwrap(savedHistory["events"] as? [[String: Any]])
@@ -6715,7 +6974,7 @@ final class StationAIUITests: XCTestCase {
         let persistedTurns = try XCTUnwrap(savedHistory["messages"] as? [[String: Any]])
         XCTAssertTrue(persistedTurns.allSatisfy { $0["threadID"] as? String == threadID })
         let turnIDs = persistedTurns
-            .filter { ($0["userMessage"] as? String)?.hasPrefix("StationAI internal outcome reminder:") != true }
+            .filter { ($0["userMessage"] as? String)?.hasPrefix("StationAI internal outcome nudge:") != true }
             .compactMap { $0["turnID"] as? String }
         XCTAssertEqual(turnIDs.count, 2)
         XCTAssertEqual(Set(turnIDs).count, 2, "Each concurrent send should use a distinct Codex turn ID.")
@@ -9678,7 +9937,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
     }
 
-    // case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome reminders; after the user answers, the next successful turn receives two hidden CLI outcome requests. Questions raised during those reminders are rejected through Claude's control protocol with completed or waiting-response instructions; both the questions and private rejection instructions stay out of the transcript. The task moves to Waiting Response only after both reminders fail to report an outcome.
+    // case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome nudges; after the user answers, the next successful turn receives a hidden CLI status nudge. A question raised during that nudge is rejected through Claude's control protocol with completed, in-progress, and waiting-response instructions, which fails the private turn; both the question and the private rejection instructions stay out of the transcript. StationAI then stops driving the work and marks the task Blocked naming that reason, rather than spending the remaining nudges.
 
     func test_claude_outcome_reminder_rejects_user_questions() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-outcome-reminder-question")
@@ -9709,7 +9968,7 @@ final class StationAIUITests: XCTestCase {
         let pendingFixtureHistory = try Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
         let pendingTurns = try XCTUnwrap((try JSONSerialization.jsonObject(with: pendingFixtureHistory) as? [String: Any])?["turns"] as? [[String: Any]])
         XCTAssertEqual(pendingTurns.count, 1)
-        XCTAssertFalse(pendingTurns.contains { ($0["userText"] as? String)?.contains("StationAI internal outcome reminder:") == true }, "A successful turn with a pending question must not receive outcome reminders.")
+        XCTAssertFalse(pendingTurns.contains { ($0["userText"] as? String)?.contains("StationAI internal outcome nudge:") == true }, "A successful turn with a pending question must not receive outcome nudges.")
         element("ai-question-option-question-1-Blue").click()
         element("submit-ai-answers-button").click()
         // The answered turn already finished, so the answer may arrive as a recovery turn.
@@ -9720,27 +9979,31 @@ final class StationAIUITests: XCTestCase {
         element("message-composer").click()
         element("message-composer").typeText("Continue after answering.")
         element("send-message-button").click()
-        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" }, timeout: 20), "Two unanswered private reminders should reach the fallback status.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Blocked" }, timeout: 60), "A failed private nudge should stop StationAI driving and settle the task in Blocked.")
+        XCTAssertTrue(
+            (try taskRecord(id: taskID)?["statusMessage"] as? String)?.contains("couldn't run the private turn") == true,
+            "The Blocked reason must name why StationAI stopped driving the work."
+        )
 
         let fixtureTurnsData = try Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
         let fixtureHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: fixtureTurnsData) as? [String: Any])
         let turns = try XCTUnwrap(fixtureHistory["turns"] as? [[String: Any]])
-        let reminders = turns.filter { ($0["userText"] as? String)?.contains("StationAI internal outcome reminder:") == true }
-        XCTAssertEqual(reminders.count, 2, "Claude should receive both private reminder attempts.")
-        XCTAssertTrue(reminders.allSatisfy { ($0["userText"] as? String)?.contains("explicitly run the StationAI CLI task outcome command") == true })
+        let nudges = turns.filter { ($0["userText"] as? String)?.contains("StationAI internal outcome nudge:") == true }
+        XCTAssertEqual(nudges.count, 1, "Rejecting the question fails the private turn, so StationAI stops driving instead of spending every nudge.")
+        XCTAssertTrue(nudges.allSatisfy { ($0["userText"] as? String)?.contains("task outcome command") == true })
         let rejectionText = try String(contentsOfFile: executable.path + ".private-reminder-question-rejection", encoding: .utf8)
         let rejections = rejectionText.split(whereSeparator: \.isNewline)
-        XCTAssertEqual(rejections.count, 2)
-        XCTAssertTrue(rejections.allSatisfy { $0.contains("waiting-response") && $0.contains("completed") })
-        XCTAssertFalse(element("conversation-user-input-request").exists, "Reminder questions must not become visible answer cards.")
+        XCTAssertEqual(rejections.count, 1)
+        XCTAssertTrue(rejections.allSatisfy { $0.contains("completed") && $0.contains("in-progress") && $0.contains("waiting-response") })
+        XCTAssertFalse(element("conversation-user-input-request").exists, "Nudge questions must not become visible answer cards.")
         XCTAssertFalse(app.staticTexts["Which color should I use?"].exists)
         XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(
-            format: "label CONTAINS %@", "This is a private StationAI outcome reminder."
+            format: "label CONTAINS %@", "This is a private StationAI status nudge."
         )).firstMatch.exists, "Claude's private rejection instructions must not appear in the visible transcript.")
-        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "StationAI internal outcome reminder:")).firstMatch.exists)
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "StationAI internal outcome nudge:")).firstMatch.exists)
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
-        assertTaskVisible("Claude reminder question", inColumn: "Waiting Response")
+        assertTaskVisible("Claude reminder question", inColumn: "Blocked")
     }
 
     // case-contract: test_pending_question_repair_restores_thread_owner | A misplaced pending question can be repaired through CLI/XPC only into its owning conversation. Repair rejects a wrong owner and a conflicting destination without mutation, backs up both transcripts, preserves request identity and mode, clears only the misplaced source, and is retryable. Fresh history and the visible UI restore the question only on the original task; answering it clears pending state and the safe response survives reopening. Retrying an interrupted repair after the destination question was answered rejects the stale source without resurrecting the question.
@@ -9817,7 +10080,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertNil(afterRetry["pendingUserInputRequest"])
     }
 
-    // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode remain in the conversation and move the task to Waiting Response while unanswered; leaving and reopening the conversation preserves the pending question, keyed answers resume the provider turn in In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome. A parallel conversation retains its own question and thread; the original conversation receives and answers a second question in its original Plan mode, and completing either conversation preserves the other pending request.
+    // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode remain in the conversation and move the task to Waiting Response while unanswered; leaving and reopening the conversation preserves the pending question, keyed answers resume the provider turn in In Progress, and the answered turn reports no outcome, so StationAI drives a private status nudge; when that private turn cannot complete, the task settles in Blocked naming that reason instead of Waiting Response. A parallel conversation retains its own question and thread; the original conversation receives and answers a second question in its original Plan mode, and completing either conversation preserves the other pending request.
     func test_codex_questions_can_be_answered_over_cli_xpc() throws {
         let created = try runCLI(["task", "create", "--title", "Codex questions", "--root", fixture.primary.path])
         XCTAssertEqual(created["ok"] as? Bool, true)
@@ -9900,31 +10163,39 @@ final class StationAIUITests: XCTestCase {
         typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
 
-        let completionDeadline = Date().addingTimeInterval(10)
+        let completionDeadline = Date().addingTimeInterval(90)
         var completedStatus: String?
         while Date() < completionDeadline {
             completedStatus = try taskRecord(id: taskID)?["status"] as? String
-            if completedStatus == "Waiting Response" { break }
+            if completedStatus == "Blocked" { break }
             Thread.sleep(forTimeInterval: 0.05)
         }
-        XCTAssertEqual(completedStatus, "Waiting Response", "Without an explicit completed outcome, the submitted answer should leave the task in Waiting Response.")
+        XCTAssertEqual(completedStatus, "Blocked", "Without any reported outcome, the submitted answer settles the task in Blocked.")
+        XCTAssertTrue(
+            (try taskRecord(id: taskID)?["statusMessage"] as? String)?.contains("couldn't run the private turn") == true,
+            "The Blocked reason must name why StationAI stopped driving the work."
+        )
         XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10), "Wait for A's completed provider response before checking B still owns its question.")
         let originalTranscript = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: transcriptDirectory.appendingPathComponent("\(taskID.uppercased()).json"))) as? [String: Any])
         XCTAssertNil(originalTranscript["pendingUserInputRequest"])
         XCTAssertFalse(element("ai-question-form-title").exists)
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
-        assertTaskVisible("Codex questions", inColumn: "Waiting Response")
+        assertTaskVisible("Codex questions", inColumn: "Blocked")
         openTask(named: "Another conversation")
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 5), "Finishing the first task must preserve the parallel question.")
         element("ai-question-option-color-Blue").click()
         typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
-        let parallelDeadline = Date().addingTimeInterval(10)
-        while Date() < parallelDeadline, try taskRecord(id: parallelID)?["status"] as? String != "Waiting Response" {
+        let parallelDeadline = Date().addingTimeInterval(90)
+        while Date() < parallelDeadline, try taskRecord(id: parallelID)?["status"] as? String != "Blocked" {
             Thread.sleep(forTimeInterval: 0.05)
         }
-        XCTAssertEqual(try taskRecord(id: parallelID)?["status"] as? String, "Waiting Response")
+        XCTAssertEqual(try taskRecord(id: parallelID)?["status"] as? String, "Blocked")
+        XCTAssertTrue(
+            (try taskRecord(id: parallelID)?["statusMessage"] as? String)?.contains("couldn't run the private turn") == true,
+            "The parallel conversation records the same Blocked reason."
+        )
         XCTAssertTrue(waitUntil({ !self.element("ai-question-form-title").exists }, timeout: 10))
         let parallelTranscript = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: transcriptDirectory.appendingPathComponent("\(parallelID.uppercased()).json"))) as? [String: Any])
         XCTAssertNil(parallelTranscript["pendingUserInputRequest"])
@@ -9969,7 +10240,7 @@ final class StationAIUITests: XCTestCase {
         assertTaskVisible("Empty Codex questions", inColumn: "Waiting Response")
     }
 
-    // case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation, and keep the task In Progress through fresh CLI/XPC history reconciliation after provider exit until answered. Free-text questions expose a selectable Other choice, select it when text is entered, keep it exclusive of listed answers, and deliver the free-text answer through CLI/XPC and visible UI. Answering resumes the provider turn without outcome reminders while its own pending question is still being resolved; the resumed turn returns to Waiting Response once the pending question clears, and the recovered secret answer stays redacted everywhere.
+    // case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation, and keep the task In Progress through fresh CLI/XPC history reconciliation after provider exit until answered. Free-text questions expose a selectable Other choice, select it when text is entered, keep it exclusive of listed answers, and deliver the free-text answer through CLI/XPC and visible UI. Answering resumes the provider turn without status nudges while its own pending question is still being resolved; the resumed turn returns to Waiting Response once the pending question clears, and the recovered secret answer stays redacted everywhere.
     func test_codex_nonblocking_question_keeps_task_in_progress() throws {
         _ = try runCLI(["task", "create", "--title", "Non-blocking question", "--root", fixture.primary.path])
         _ = try runCLI(["task", "create", "--title", "Another non-blocking conversation", "--root", fixture.primary.path])
@@ -10031,9 +10302,9 @@ final class StationAIUITests: XCTestCase {
         let fixtureHistoryData = try Data(contentsOf: URL(fileURLWithPath: fixturePath + ".history"))
         let fixtureHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: fixtureHistoryData) as? [String: Any])
         let fixtureTurns = try XCTUnwrap(fixtureHistory["turns"] as? [[String: Any]])
-        let reminders = fixtureTurns.filter { ($0["userMessage"] as? String)?.contains("StationAI internal outcome reminder:") == true }
+        let reminders = fixtureTurns.filter { ($0["userMessage"] as? String)?.contains("StationAI internal outcome nudge:") == true }
         XCTAssertEqual(reminders.count, 0, "A pending question still being resolved during the recovered turn must suppress private outcome reminders.")
-        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "StationAI internal outcome reminder:")).firstMatch.exists)
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "StationAI internal outcome nudge:")).firstMatch.exists)
         XCTAssertFalse(element("conversation-user-input-request").exists)
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))

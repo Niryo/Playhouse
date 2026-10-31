@@ -1114,7 +1114,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 guard let item = entry["item"] as? [String: Any] else { continue }
                 let turnID = entry["turnId"] as? String
                 if item["type"] as? String == "userMessage",
-                   Self.chatMessage(from: entry)?.text.localizedCaseInsensitiveContains("StationAI internal outcome reminder:") == true,
+                   PrivateOutcomeNudgeMarker.matches(Self.chatMessage(from: entry)?.text ?? ""),
                    let turnID {
                     privateOutcomeReminderTurnIDs.insert(turnID)
                 }
@@ -1973,9 +1973,9 @@ enum TaskThreadDeveloperInstructions {
         \(quotedExecutable) workspace repos list
 
         At the very end of every turn, make exactly one definitive outcome call using this task ID:
-        \(quotedExecutable) task outcome \(id) <completed|waiting-response>
-        Use completed only when all work for this turn is finished and no user decision or response is needed. If you need the user to answer, choose between options, provide missing information, or take another action before you can continue, use waiting-response. The outcome call must be your final CLI action for the turn. StationAI moves the task to Review only for completed.
-        Reporting an outcome is required for every successful turn. If you finish without reporting one, StationAI will send up to two private follow-up messages explicitly asking you to report the outcome. Respond to those messages without repeating the completed work, and run the task outcome command for this task. StationAI uses Waiting Response only if neither reminder produces an outcome.
+        \(quotedExecutable) task outcome \(id) <\(TurnOutcome.commandChoices)>
+        Use completed only when all work for this turn is finished and no user decision or response is needed; StationAI moves the task to Review. Use waiting-response when you need the user to answer, choose between options, provide missing information, or take another action before you can continue. Use in-progress when this turn is ending but the work is not done and you need nothing from the user: StationAI keeps the task In Progress and immediately sends you a private continuation turn so you can carry on. Never end a turn mid-work without an outcome — report in-progress instead. The outcome call must be your final CLI action for the turn.
+        Reporting an outcome is required for every successful turn. If you end a turn without one, StationAI privately nudges you to report your current status, up to \(TurnOutcome.maxContinuations) times per request. Answer a nudge with an outcome call rather than by repeating finished work. If the nudges run out without the work settling, StationAI marks the task Blocked.
         """
     }
 

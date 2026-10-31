@@ -3,6 +3,40 @@ import SwiftData
 import Darwin
 import SQLite3
 
+/// Marker line StationAI puts at the top of the private turns it sends itself.
+/// Every provider's history reader matches on it, so these turns never surface
+/// as conversation content.
+enum PrivateOutcomeNudgeMarker {
+    static let current = "StationAI internal outcome nudge:"
+    /// Threads and transcripts written before the nudge rename.
+    static let legacy = "StationAI internal outcome reminder:"
+
+    static func matches(_ text: String) -> Bool {
+        text.localizedCaseInsensitiveContains(current) || text.localizedCaseInsensitiveContains(legacy)
+    }
+}
+
+/// The outcome a provider reports for its own turn. StationAI owns the mapping
+/// from an outcome to the board status, so both providers reach the same
+/// lifecycle through the same shared CLI vocabulary.
+enum TurnOutcome: String, CaseIterable {
+    /// All requested work is finished; nothing is waiting on the user.
+    case completed
+    /// The turn ended but work remains and no user decision is needed.
+    /// StationAI keeps the task In Progress and sends a continuation turn.
+    case inProgress = "in-progress"
+    /// Work cannot continue until the user answers or decides.
+    case waitingResponse = "waiting-response"
+
+    static var commandChoices: String {
+        allCases.map(\.rawValue).joined(separator: "|")
+    }
+
+    /// How many private continuation turns StationAI sends for one user request
+    /// before it stops driving the work and marks the task Blocked.
+    static let maxContinuations = 5
+}
+
 enum CodexGoalGenerationStore {
     static func generationIDKey(taskID: UUID) -> String {
         "stationai.codex.goal-generation.\(taskID.uuidString)"
@@ -2501,12 +2535,11 @@ final class BoardTaskManager {
     }
 
     func reportTurnOutcome(_ id: UUID, outcome: String) async throws -> String {
-        switch outcome {
-        case "completed", "waiting-response": break
-        default:
+        guard TurnOutcome(rawValue: outcome) != nil else {
             throw BridgeCommandError(
                 code: "invalid_argument",
-                message: "Unknown turn outcome '\(outcome)'. Valid outcomes: completed, waiting-response."
+                message: "Unknown turn outcome '\(outcome)'. Valid outcomes: "
+                    + TurnOutcome.allCases.map(\.rawValue).joined(separator: ", ") + "."
             )
         }
         let outcomeURL = try conversationTurnOutcomeURL(id)
@@ -4964,23 +4997,39 @@ final class ConversationManager {
                         onUpdate: onUpdate,
                         onUserInput: onUserInput
                     )
-                    let hasPendingUserInput = (try? self.transcripts.read(taskID).pendingUserInputRequest) != nil
-                    // A standalone chat is told never to report a task outcome, so this
-                    // condition could never be satisfied for it: reminding would spend two
-                    // extra provider turns per message and bury the user's next message in a
-                    // private reminder turn that answers nobody.
-                    let remindsAboutOutcome = !isStandaloneChat
-                    for reminderNumber in 1...2 where remindsAboutOutcome
-                        && self.lastReportedTurnOutcomeByTaskID[taskID] == nil && !hasPendingUserInput {
-                        let reminder = """
-                        \(Self.privateOutcomeReminderMarker)
-
-                        StationAI's previous request finished without reporting a task outcome. Do not repeat or change the completed work. If all requested work is finished and no user decision is needed, explicitly run the StationAI CLI task outcome command for this task with `completed`. If you need the user to answer or make a decision before work can continue, explicitly report `waiting-response`. This is reminder \(reminderNumber) of 2; report the outcome now.
-                        """
+                    // A turn that ends unsettled is driven forward privately rather
+                    // than dropped on the board: `in-progress` asks for a
+                    // continuation outright, and a turn that reported nothing is
+                    // nudged to say where it stands.
+                    var continuations = 0
+                    var stoppedForUser = false
+                    var continuationFailed = false
+                    // A standalone chat is told never to report a task outcome, so it can
+                    // never settle one: driving it would spend provider turns and bury the
+                    // user's next message under private turns that answer nobody.
+                    let drivesUnsettledTurns = !isStandaloneChat
+                    while drivesUnsettledTurns, continuations < TurnOutcome.maxContinuations {
+                        // A question the model raised settles the turn on the
+                        // user; nudging past it would talk over them.
+                        guard (try? self.transcripts.read(taskID).pendingUserInputRequest) == nil else { break }
+                        // The user taking over ends StationAI's private driving.
+                        // A continuation tells the model to resume working, so
+                        // without this it could undo a Stop or run ahead of a
+                        // queued follow-up up to the continuation limit.
+                        if self.userTookOverConversation(taskID: taskID, client: operationClient) {
+                            stoppedForUser = true
+                            break
+                        }
+                        let reported = self.lastReportedTurnOutcomeByTaskID[taskID].flatMap(TurnOutcome.init(rawValue:))
+                        guard reported == nil || reported == .inProgress else { break }
+                        continuations += 1
+                        let prompt = reported == .inProgress
+                            ? Self.outcomeContinuationPrompt(attempt: continuations)
+                            : Self.outcomeNudgePrompt(attempt: continuations)
                         do {
                             _ = try await self.sendReserved(
                                 taskID: taskID,
-                                text: reminder,
+                                text: prompt,
                                 imageDataURLs: [],
                                 mode: mode,
                                 requestedModelID: modelID,
@@ -4997,12 +5046,33 @@ final class ConversationManager {
                                 onUserInput: onUserInput
                             )
                         } catch {
-                            // A failed private reminder must not fail the original user turn;
-                            // the second explicit request still needs to be attempted.
+                            // A Stop lands as a thrown turn, so the throw alone
+                            // can't tell a user takeover from a provider failure.
+                            // Only the latter is StationAI's to report.
+                            if self.userTookOverConversation(taskID: taskID, client: operationClient) {
+                                stoppedForUser = true
+                            } else {
+                                continuationFailed = true
+                            }
+                            break
                         }
                     }
-                    if self.lastReportedTurnOutcomeByTaskID[taskID] == nil && !hasPendingUserInput {
-                        _ = try await self.tasks.setLifecycleStatus(taskID, to: .waitingResponse)
+                    let settled = self.lastReportedTurnOutcomeByTaskID[taskID].flatMap(TurnOutcome.init(rawValue:))
+                    let waitingOnUser = (try? self.transcripts.read(taskID).pendingUserInputRequest) != nil
+                    if drivesUnsettledTurns, !stoppedForUser, !waitingOnUser, settled == nil || settled == .inProgress {
+                        // The work is unsettled and the user was never asked
+                        // anything, so Waiting Response would misreport this.
+                        // Blocked says StationAI stopped driving, and the reason
+                        // says why.
+                        let reason: String
+                        if continuationFailed {
+                            reason = "StationAI couldn't run the private turn that would continue this work. Send a message to pick the work up again."
+                        } else if settled == .inProgress {
+                            reason = "Still working after \(TurnOutcome.maxContinuations) continuation turns. Send a message to pick the work up again."
+                        } else {
+                            reason = "The turn ended without reporting an outcome, and \(TurnOutcome.maxContinuations) status nudges went unanswered. Send a message to pick the work up again."
+                        }
+                        _ = try await self.tasks.setLifecycleStatus(taskID, to: .blocked, message: reason)
                     }
                     self.lastReportedTurnOutcomeByTaskID.removeValue(forKey: taskID)
                     try? await self.tasks.clearPendingSubmittedPrompt(taskID)
@@ -5034,6 +5104,18 @@ final class ConversationManager {
             await dispatchQueuedMessages(taskID: taskID, mode: mode, modelID: modelID, onUpdate: onUpdate, onUserInput: onUserInput)
         }
         return history
+    }
+
+    /// Whether the user has taken this conversation back from StationAI's private
+    /// continuation loop, either by stopping the turn or by queueing a follow-up.
+    /// Only messages still waiting to be sent count: a `needsAction` row the user
+    /// has to retry themselves must not suppress the loop forever.
+    private func userTookOverConversation(taskID: UUID, client: ConversationProviderClient) -> Bool {
+        if let threadID = try? tasks.taskModel(taskID).activeConversationID,
+           client.wasLastTurnInterrupted(threadID: threadID) {
+            return true
+        }
+        return ((try? tasks.queuedConversationMessages(taskID: taskID)) ?? []).contains { $0.state == .queued }
     }
 
     /// The page this turn belongs to, creating the first one when the chat is brand new so the
@@ -5976,7 +6058,7 @@ final class ConversationManager {
                         client.rejectUserInput(
                             requestID: request.id,
                             threadID: request.threadID,
-                            message: "This is a private StationAI outcome reminder. Do not ask the user here; report `waiting-response` if you need an answer, or `completed` if the work is finished."
+                            message: "This is a private StationAI status nudge. Do not ask the user here; report `waiting-response` if you need an answer, `in-progress` if work remains, or `completed` if the work is finished."
                         )
                         return
                     }
@@ -6098,8 +6180,13 @@ final class ConversationManager {
                         )
                     }
                 }
-            } else if reportedOutcome != nil || !deferMissingOutcomeStatus {
-                if reportedOutcome == "completed" {
+            } else if let outcome = reportedOutcome.flatMap(TurnOutcome.init(rawValue:)) {
+                switch outcome {
+                case .inProgress:
+                    // `in-progress` settles on no status: the task stays In
+                    // Progress while the caller drives the next continuation turn.
+                    break
+                case .completed:
                     // A reviewed task must hold no local-only pull request changes:
                     // sync them first, and block instead of resting partially pushed.
                     phase = "review-sync"
@@ -6122,9 +6209,11 @@ final class ConversationManager {
                     } else {
                         _ = try await tasks.setLifecycleStatus(taskID, to: .review)
                     }
-                } else {
+                case .waitingResponse:
                     _ = try await tasks.setLifecycleStatus(taskID, to: .waitingResponse)
                 }
+            } else if !deferMissingOutcomeStatus {
+                _ = try await tasks.setLifecycleStatus(taskID, to: .waitingResponse)
             }
         } catch {
             await titleGeneration?.value
@@ -6154,7 +6243,7 @@ final class ConversationManager {
             let shouldKeepWaiting = shouldKeepResumable || wasUserInterrupted
             let safeFailureMessage = hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder
                 ? (hideInternalOutcomeReminder
-                    ? "The private outcome reminder could not be completed."
+                    ? "The private status nudge could not be completed."
                     : "The private answer could not be applied. Please answer the question again.")
                 : Self.redactingSensitiveText(error.localizedDescription, values: sensitiveUserInputAnswerValues)
             let pendingQuestion = try? transcripts.read(taskID).pendingUserInputRequest
@@ -6309,12 +6398,31 @@ final class ConversationManager {
     }
 
     private static let privateRecoveryPromptMarker = "Continue this conversation by applying the user's answer to the pending question"
-    private static let privateOutcomeReminderMarker = "StationAI internal outcome reminder:"
+    private static let privateOutcomeReminderMarker = PrivateOutcomeNudgeMarker.current
     private static let privateOutcomeReminderPlaceholder = "[StationAI private outcome reminder hidden]"
     private static let privateOutcomeReminderResponsePlaceholder = "[StationAI private outcome response hidden]"
 
+    /// Sent when a turn ended without reporting any outcome: ask where the work
+    /// stands rather than assuming it is finished or blocked on the user.
+    static func outcomeNudgePrompt(attempt: Int) -> String {
+        """
+        \(privateOutcomeReminderMarker)
+
+        Your previous turn ended without reporting a task outcome, so StationAI doesn't know where this task stands. Don't repeat or redo finished work — just report the current status with the task outcome command: `in-progress` if work remains and you need nothing from the user (keep working right away in this turn), `waiting-response` if you need the user to answer or decide, `completed` if everything is done. This is nudge \(attempt) of \(TurnOutcome.maxContinuations); after that StationAI marks the task Blocked.
+        """
+    }
+
+    /// Sent after an explicit `in-progress`: the model asked to keep going.
+    static func outcomeContinuationPrompt(attempt: Int) -> String {
+        """
+        \(privateOutcomeReminderMarker)
+
+        You reported `in-progress`, so continue the work from where your last turn left off. Don't repeat or redo finished work, and don't ask the user anything here. End this turn with a task outcome call: `in-progress` again if more work remains, `waiting-response` if you now need the user, `completed` when everything is done. This is continuation \(attempt) of \(TurnOutcome.maxContinuations); after that StationAI marks the task Blocked.
+        """
+    }
+
     private static func isPrivateTaskPrompt(_ text: String) -> Bool {
-        text.contains(privateRecoveryPromptMarker) || text.contains(privateOutcomeReminderMarker)
+        text.contains(privateRecoveryPromptMarker) || isPrivateOutcomeReminderPrompt(text)
     }
 
     private static func privatePromptPlaceholder(for text: String) -> String {
@@ -6324,7 +6432,7 @@ final class ConversationManager {
     }
 
     private static func isPrivateOutcomeReminderPrompt(_ text: String) -> Bool {
-        text.contains(privateOutcomeReminderMarker) || text.contains(privateOutcomeReminderPlaceholder)
+        PrivateOutcomeNudgeMarker.matches(text) || text.contains(privateOutcomeReminderPlaceholder)
     }
 
     private static func redactingSensitiveText(_ text: String, values: [String]) -> String {

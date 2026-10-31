@@ -82,7 +82,8 @@ struct CodexQuestionOwnershipProbe {
         _ = try await parallelSend.value
         for id in [originalID, parallelID] {
             try check(try store.read(id).pendingUserInputRequest == nil, "Answered request remained pending.")
-            try check(try tasks.get(id).status == TaskStatus.waitingResponse.rawValue, "Answered task did not settle in Waiting Response.")
+            // The answered turns report no outcome, so their status nudges run out into Blocked.
+            try check(try tasks.get(id).status == TaskStatus.blocked.rawValue, "Answered task did not settle in Blocked.")
         }
         print("{\"sharedClientQuestionOwnership\":true,\"originalQuestions\":2,\"parallelQuestions\":1}")
     }
