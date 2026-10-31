@@ -760,15 +760,47 @@ enum StationAIWorktreeManager {
     }
 
     static func publishBranch(_ record: RepositoryWorktreeRecord) throws {
+        guard let remote = try resolvedRemote(record) else {
+            throw BridgeCommandError(code: "operation_failed", message: "The task branch has no Git remote configured for publishing.")
+        }
+        _ = try git(record.worktreePath, ["push", "--set-upstream", remote, record.branch])
+    }
+
+    /// The remote the task branch publishes to: its configured remote, else origin.
+    static func resolvedRemote(_ record: RepositoryWorktreeRecord) throws -> String? {
         let configuredRemote = try git(record.worktreePath, ["config", "--get", "branch.\(record.branch).remote"], allowFailure: true)
         let remotes = Set(try git(record.worktreePath, ["remote"]).output
             .split(whereSeparator: \.isNewline).map(String.init))
         let configuredName = configuredRemote.output.trimmingCharacters(in: .whitespacesAndNewlines)
-        let remote = remotes.contains(configuredName) ? configuredName : (remotes.contains("origin") ? "origin" : nil)
-        guard let remote else {
-            throw BridgeCommandError(code: "operation_failed", message: "The task branch has no Git remote configured for publishing.")
+        return remotes.contains(configuredName) ? configuredName : (remotes.contains("origin") ? "origin" : nil)
+    }
+
+    /// Fetches the task branch from its remote and reports how the local branch
+    /// relates to it. FETCH_HEAD is left pointing at the remote branch so a
+    /// following merge uses exactly the fetched commit.
+    static func fetchRemoteBranchState(_ record: RepositoryWorktreeRecord) throws -> RemoteBranchSyncState {
+        guard let remote = try resolvedRemote(record) else {
+            return RemoteBranchSyncState(remote: nil, remoteBranchExists: false, aheadCount: 0, behindCount: 0)
         }
-        _ = try git(record.worktreePath, ["push", "--set-upstream", remote, record.branch])
+        let fetch = try git(record.worktreePath, ["fetch", "--quiet", remote, record.branch], allowFailure: true)
+        guard fetch.status == 0 else {
+            if fetch.output.localizedCaseInsensitiveContains("couldn't find remote ref") {
+                return RemoteBranchSyncState(remote: remote, remoteBranchExists: false, aheadCount: 0, behindCount: 0)
+            }
+            throw BridgeCommandError(code: "operation_failed", message: fetch.output.isEmpty ? "Git couldn't fetch the task branch from \(remote)." : fetch.output)
+        }
+        let ahead = Int(try git(record.worktreePath, ["rev-list", "--count", "FETCH_HEAD..HEAD"]).output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        let behind = Int(try git(record.worktreePath, ["rev-list", "--count", "HEAD..FETCH_HEAD"]).output.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        return RemoteBranchSyncState(remote: remote, remoteBranchExists: true, aheadCount: ahead, behindCount: behind)
+    }
+
+    /// Merges the branch commit the last fetch produced, leaving conflicts in the
+    /// working tree for resolution. Status 1 means the merge stopped on conflicts.
+    static func mergeFetchedRemoteBranch(_ record: RepositoryWorktreeRecord) throws {
+        let result = try git(record.worktreePath, ["merge", "--no-commit", "--no-ff", "FETCH_HEAD"], allowFailure: true)
+        guard result.status == 0 || result.status == 1 else {
+            throw BridgeCommandError(code: "operation_failed", message: result.output.isEmpty ? "Git couldn't merge the remote task branch." : result.output)
+        }
     }
 
     static func hasChanges(_ record: RepositoryWorktreeRecord) throws -> Bool {
@@ -1192,6 +1224,30 @@ struct StationAIWorktreeService {
             }
         }
     }
+
+    func fetchRemoteBranchState(_ record: RepositoryWorktreeRecord) async throws -> RemoteBranchSyncState {
+        try await perform("git.fetch_branch_state", record: record) {
+            try await StationAIBackgroundOperation.run {
+                try StationAIWorktreeManager.fetchRemoteBranchState(record)
+            }
+        }
+    }
+
+    func mergeFetchedRemoteBranch(_ record: RepositoryWorktreeRecord) async throws {
+        try await perform("git.merge_remote_branch", record: record) {
+            try await StationAIBackgroundOperation.run {
+                try StationAIWorktreeManager.mergeFetchedRemoteBranch(record)
+            }
+        }
+    }
+}
+
+/// How a task branch relates to the same branch on its publishing remote.
+struct RemoteBranchSyncState: Sendable {
+    let remote: String?
+    let remoteBranchExists: Bool
+    let aheadCount: Int
+    let behindCount: Int
 }
 
 struct WorkspaceRootSelector: View {
