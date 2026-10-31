@@ -1478,8 +1478,10 @@ private struct TaskCardView: View {
                         Button(action: onResolveConflicts) {
                             Image("ConflictIndicator")
                                 .resizable()
+                                .renderingMode(.template)
                                 .scaledToFit()
-                                .frame(width: 30, height: 12)
+                                .foregroundStyle(.orange)
+                                .frame(width: 16, height: 16)
                                 .accessibilityIdentifier("task-resolve-pr-conflicts-icon-\(task.id.uuidString)")
                         }
                         .actionButtonHoverEmphasis(padding: 10)
