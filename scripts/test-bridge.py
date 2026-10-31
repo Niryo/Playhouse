@@ -32,6 +32,8 @@ parser.add_argument("--legacy-store-seeder", required=True, type=Path)
 parser.add_argument("--case", action="append", default=[], dest="selected_cases")
 arguments = parser.parse_args()
 CONTRACT_PATH = Path(__file__).resolve().parent.parent / "StationAI/BridgeTests/BridgeTestContracts.json"
+# Mirrors TurnOutcome.maxContinuations: private continuation/nudge turns per request.
+MAX_OUTCOME_CONTINUATIONS = 5
 
 
 class GitConfigReadBarrier:
@@ -774,6 +776,12 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assertIn(f"Seeded linked PR #{number}", result.stdout)
         return seeded_url
+
+    def wait_for_marker(self, marker, present, message, timeout=10):
+        deadline = time.monotonic() + timeout
+        while marker.exists() != present and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(marker.exists(), present, message)
 
     def start_progress_fixture_turn(self, task_id, fixture_name, answers=()):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -1641,14 +1649,21 @@ class StationAIBridgeTests(unittest.TestCase):
         gh_state = gh_directory / "state"
         gh_calls = gh_directory / "calls"
         gh_state.write_text("123=merged\n456=unmerged\n", encoding="utf-8")
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh_directory / "gh-fixture.sh")
+        (gh_directory / "gh-fixture.sh").chmod(0o755)
+        # The bridge forwards only BridgeContract.sessionEnvironmentNames to the
+        # daemon, so the fixture's paths have to travel in the staged script
+        # itself rather than in the caller's environment.
         gh = gh_directory / "gh"
-        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
+        gh.write_text(
+            "#!/bin/sh\n"
+            f"export STATIONAI_E2E_GH_STATE_PATH={shlex.quote(str(gh_state))}\n"
+            f"export STATIONAI_E2E_GH_CALL_LOG={shlex.quote(str(gh_calls))}\n"
+            f"exec {shlex.quote(str(gh_directory / 'gh-fixture.sh'))} \"$@\"\n",
+            encoding="utf-8",
+        )
         gh.chmod(0o755)
-        gh_environment = {
-            "PATH": f"{gh_directory}:{os.environ.get('PATH', '')}",
-            "STATIONAI_E2E_GH_STATE_PATH": str(gh_state),
-            "STATIONAI_E2E_GH_CALL_LOG": str(gh_calls),
-        }
+        gh_environment = {"PATH": f"{gh_directory}:{os.environ.get('PATH', '')}"}
         linked = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(linked["repositoryWorktrees"][0]["pullRequestURL"], pr_url)
         self.assertEqual(linked["repositoryWorktrees"][1]["pullRequestURL"], second_pr_url)
@@ -2038,7 +2053,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(waiting["status"], "Waiting Response")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", blocked_id)[0])["status"], "Blocked")
 
-    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to two private follow-up requests to report one; a completed report during either reminder moves the task to Review, a waiting-response report during a reminder stops retries and leaves the task in Waiting Response, and no report after both reminders falls back to Waiting Response. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. Private reminder prompts, replies, and turn-scoped activities remain absent from Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those reminders also retains the latest ordinary-turn diff while keeping reminder-only replies hidden.
+    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. Private nudge prompts, replies, and turn-scoped activities remain absent from Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while keeping nudge-only replies hidden.
     def test_task_progress_reports_publish_persist_and_clear(self):
         task_id = self.create_task("Progress reports", roots=[self.primary])["id"]
         response, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "building", expected_status=1)
@@ -2149,10 +2164,10 @@ class StationAIBridgeTests(unittest.TestCase):
                 while not active_marker.exists() and time.monotonic() < deadline:
                     time.sleep(0.02)
                 self.assertTrue(active_marker.exists(), "The no-outcome fixture turn should become active.")
-                for reminder_index in range(3):
-                    self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress", "The fallback status should be deferred until both reminders finish.")
-                    release_marker.write_text(f"Release turn {reminder_index + 1}.\n", encoding="utf-8")
-                    if reminder_index < 2:
+                for nudge_index in range(MAX_OUTCOME_CONTINUATIONS + 1):
+                    self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress", "The fallback status should be deferred until every nudge finishes.")
+                    release_marker.write_text(f"Release turn {nudge_index + 1}.\n", encoding="utf-8")
+                    if nudge_index < MAX_OUTCOME_CONTINUATIONS:
                         deadline = time.monotonic() + 10
                         while active_marker.exists() and time.monotonic() < deadline:
                             time.sleep(0.02)
@@ -2160,18 +2175,19 @@ class StationAIBridgeTests(unittest.TestCase):
                         deadline = time.monotonic() + 10
                         while not active_marker.exists() and time.monotonic() < deadline:
                             time.sleep(0.02)
-                        self.assertTrue(active_marker.exists(), "StationAI should send the next private outcome reminder.")
-                omitted_stdout, omitted_stderr = omitted_follow_up.communicate(timeout=20)
+                        self.assertTrue(active_marker.exists(), "StationAI should send the next private status nudge.")
+                omitted_stdout, omitted_stderr = omitted_follow_up.communicate(timeout=30)
                 self.assertEqual(omitted_follow_up.returncode, 0, f"No-outcome fixture conversation failed: {omitted_stdout}; {omitted_stderr}")
-                omitted_record, _ = self.call_cli("task", "get", task_id)
-                self.assertEqual(self.assert_success(omitted_record)["status"], "Waiting Response")
+                omitted_record = self.assert_success(self.call_cli("task", "get", task_id)[0])
+                self.assertEqual(omitted_record["status"], "Blocked", "Unanswered nudges never asked the user anything, so the task is Blocked rather than Waiting Response.")
+                self.assertIn("nudges went unanswered", omitted_record.get("statusMessage") or "")
                 visible_history, _ = self.call_cli(
                     "conversation", "history", task_id,
                     extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
                 )
                 visible_history_record = self.assert_success(visible_history)
                 visible_messages = visible_history_record["messages"]
-                self.assertFalse(any("previous request finished" in item.get("text", "") for item in visible_messages), "Private reminder text must not appear in conversation history.")
+                self.assertFalse(any("ended without reporting a task outcome" in item.get("text", "") for item in visible_messages), "Private reminder text must not appear in conversation history.")
                 self.assertFalse(any("Fixture internal reminder reply." in item.get("text", "") for item in visible_messages), "Private reminder replies must not appear in conversation history.")
                 self.assertIn("ordinary-turn-diff-after-reminders", visible_history_record["diff"]["unifiedDiff"], "Private reminders must not replace the latest ordinary-turn diff.")
             finally:
@@ -2238,7 +2254,7 @@ class StationAIBridgeTests(unittest.TestCase):
                     waiting_follow_up.communicate(timeout=20)
             # A model can write its outcome command as answer text instead of running
             # it. The echo is hidden, and it counts only when it names this task.
-            for echoed_task_id, expected_status in [(str(uuid.uuid4()).upper(), "Waiting Response"), (task_id, "Review")]:
+            for echoed_task_id, expected_status in [(str(uuid.uuid4()).upper(), "Blocked"), (task_id, "Review")]:
                 echoed_turn = subprocess.Popen(
                     [str(self.cli), "conversation", "send", task_id, "--message", f"Echo the outcome command for {echoed_task_id}."],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment,
@@ -2248,7 +2264,7 @@ class StationAIBridgeTests(unittest.TestCase):
                     while not active_marker.exists() and time.monotonic() < deadline:
                         time.sleep(0.02)
                     self.assertTrue(active_marker.exists(), "The echoed-outcome fixture turn should become active.")
-                    held_turns = 3 if expected_status == "Waiting Response" else 1
+                    held_turns = MAX_OUTCOME_CONTINUATIONS + 1 if expected_status == "Blocked" else 1
                     for held_turn_index in range(held_turns):
                         release_marker.write_text(f"Release echoed turn {held_turn_index + 1}.\n", encoding="utf-8")
                         if held_turn_index < held_turns - 1:
@@ -2272,7 +2288,7 @@ class StationAIBridgeTests(unittest.TestCase):
                     self.assertFalse(any("task outcome" in message["text"] for message in echoed_history["messages"]), "A fresh history read must hide the echoed outcome command.")
                     self.assertFalse(any(item.get("text") == "[StationAI private outcome reminder hidden]" for item in echoed_history["messages"]), "A later Codex history refresh must omit earlier private reminders.")
                     self.assertFalse(any(item.get("text") == "[StationAI private outcome response hidden]" for item in echoed_history["messages"]), "A later Codex history refresh must omit earlier private reminder replies.")
-                    self.assertFalse(any("previous request finished without reporting" in item.get("text", "") or "Fixture internal reminder reply." in item.get("text", "") for item in echoed_history["messages"]), "Later history refreshes must not reveal prior reminder prompts or replies.")
+                    self.assertFalse(any("ended without reporting a task outcome" in item.get("text", "") or "Fixture internal reminder reply." in item.get("text", "") for item in echoed_history["messages"]), "Later history refreshes must not reveal prior reminder prompts or replies.")
                     self.assertFalse(any(item.get("id", "").startswith("item_private_reminder_activity_") for item in echoed_history.get("activities", [])), "Later ordinary Codex history must omit activities owned by private reminders.")
                 finally:
                     if echoed_turn.poll() is None:
@@ -2281,10 +2297,11 @@ class StationAIBridgeTests(unittest.TestCase):
             turn_data = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
             self.assertEqual(turn_data["threadStartCount"], 1)
             self.assertGreaterEqual(turn_data["threadResumeCount"], 1)
-            self.assertEqual(len(turn_data["turns"]), 13)
-            reminder_turns = [turn for turn in turn_data["turns"] if "previous request finished without reporting" in turn.get("userMessage", "")]
-            self.assertEqual(len(reminder_turns), 6, "Only the missing-outcome sends should receive private reminders.")
-            self.assertTrue(all("task outcome" in turn["userMessage"] and ("reminder 1 of 2" in turn["userMessage"] or "reminder 2 of 2" in turn["userMessage"]) for turn in reminder_turns), "Each hidden request should explicitly direct the agent to report an outcome.")
+            self.assertEqual(len(turn_data["turns"]), 19)
+            nudge_turns = [turn for turn in turn_data["turns"] if "ended without reporting a task outcome" in turn.get("userMessage", "")]
+            self.assertEqual(len(nudge_turns), 2 * MAX_OUTCOME_CONTINUATIONS + 2, "Only the missing-outcome sends should receive private status nudges.")
+            self.assertTrue(all("task outcome" in turn["userMessage"] and f"of {MAX_OUTCOME_CONTINUATIONS}" in turn["userMessage"] for turn in nudge_turns), "Each hidden request should explicitly direct the agent to report an outcome.")
+            self.assertTrue(all("`in-progress`" in turn["userMessage"] for turn in nudge_turns), "A nudge must offer in-progress alongside completed and waiting-response.")
             self.assertTrue(all(turn["developerInstructions"] is None for turn in turn_data["turns"]), "Thread-scoped task instructions should not be repeated in turn requests.")
             instructions = turn_data["threadStartDeveloperInstructions"]
             self.assertIn(str(self.cli), instructions)
@@ -2295,7 +2312,9 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assertIn("CLI/XPC 3/8", instructions)
             self.assertIn("under 80 characters", instructions)
             self.assertIn("task outcome", instructions)
-            self.assertIn("up to two private follow-up messages", instructions)
+            self.assertIn("<completed|in-progress|waiting-response>", instructions)
+            self.assertIn("Never end a turn mid-work without an outcome", instructions)
+            self.assertIn("privately nudges you to report your current status", instructions)
             self.assertIn("waiting-response", instructions)
             self.assertIn("final CLI action", instructions)
             self.assertIn("Active task worktrees for edits", instructions)
@@ -2313,6 +2332,151 @@ class StationAIBridgeTests(unittest.TestCase):
                 turn.communicate(timeout=20)
             active_marker.unlink(missing_ok=True)
             release_marker.unlink(missing_ok=True)
+
+    # case-contract: test_task_outcome_in_progress_drives_continuations_until_blocked | An in-progress outcome is accepted during an active turn, leaves the task In Progress, and makes StationAI send a private continuation turn that names the in-progress report; a completed report during that continuation stops the loop at Review. When every turn reports in-progress, StationAI sends exactly five continuation turns, keeps the task In Progress throughout, and then marks it Blocked with a continuation-limit reason instead of Waiting Response, since the user was never asked anything. Continuation prompts and replies stay out of the visible conversation history. The user taking the work back ends StationAI's private driving: stopping a continuation keeps the Stop's Waiting Response with no failure reason, and a queued follow-up runs next instead of being buried under further continuations.
+    def test_task_outcome_in_progress_drives_continuations_until_blocked(self):
+        task_id = self.create_task("Continue in progress", roots=[self.primary])["id"]
+        process, executable, active, release = self.start_progress_fixture_turn(
+            task_id, "codex-fixture-in-progress-continuation-hold-release"
+        )
+        try:
+            reported = self.assert_success(self.call_cli("task", "outcome", task_id, "in-progress")[0])
+            self.assertEqual(reported["outcome"], "in-progress")
+            self.assertEqual(reported["taskStatus"], "In Progress", "The outcome is staged until the turn completes.")
+            release.write_text("Release the in-progress turn.\n", encoding="utf-8")
+            self.wait_for_marker(active, False, "The in-progress turn should finish before its continuation.")
+            self.wait_for_marker(active, True, "StationAI should send a continuation turn after an in-progress report.")
+            self.assertEqual(
+                self.assert_success(self.call_cli("task", "get", task_id)[0])["status"],
+                "In Progress",
+                "The task stays In Progress while StationAI drives the continuation.",
+            )
+            self.assertEqual(self.assert_success(self.call_cli("task", "outcome", task_id, "completed")[0])["outcome"], "completed")
+            release.write_text("Release the continuation turn.\n", encoding="utf-8")
+            stdout, stderr = process.communicate(timeout=30)
+            self.assertEqual(process.returncode, 0, f"Continuation fixture conversation failed: {stdout}; {stderr}")
+            self.assertEqual(
+                self.assert_success(self.call_cli("task", "get", task_id)[0])["status"],
+                "Review",
+                "A completed report during a continuation stops the loop at Review.",
+            )
+        finally:
+            if process.poll() is None:
+                release.write_text("Release the continuation turn.\n", encoding="utf-8")
+                process.communicate(timeout=30)
+        continuations = [
+            turn for turn in json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
+            if "You reported `in-progress`" in (turn.get("userMessage") or "")
+        ]
+        self.assertEqual(len(continuations), 1, "One in-progress report earns exactly one continuation turn.")
+        self.assertIn(f"of {MAX_OUTCOME_CONTINUATIONS}", continuations[0]["userMessage"])
+
+        capped_id = self.create_task("Never settles", roots=[self.primary])["id"]
+        capped, capped_executable, capped_active, capped_release = self.start_progress_fixture_turn(
+            capped_id, "codex-fixture-in-progress-cap-hold-release"
+        )
+        try:
+            for index in range(MAX_OUTCOME_CONTINUATIONS + 1):
+                self.assertEqual(
+                    self.assert_success(self.call_cli("task", "get", capped_id)[0])["status"],
+                    "In Progress",
+                    "Every continuation keeps the task In Progress until the limit is reached.",
+                )
+                self.assertEqual(self.assert_success(self.call_cli("task", "outcome", capped_id, "in-progress")[0])["outcome"], "in-progress")
+                capped_release.write_text(f"Release turn {index + 1}.\n", encoding="utf-8")
+                if index < MAX_OUTCOME_CONTINUATIONS:
+                    self.wait_for_marker(capped_active, False, "The fixture should finish the current continuation turn.")
+                    self.wait_for_marker(capped_active, True, "StationAI should send the next continuation turn.")
+            capped_stdout, capped_stderr = capped.communicate(timeout=60)
+            self.assertEqual(capped.returncode, 0, f"Capped continuation conversation failed: {capped_stdout}; {capped_stderr}")
+            capped_record = self.assert_success(self.call_cli("task", "get", capped_id)[0])
+            self.assertEqual(capped_record["status"], "Blocked", "Running out of continuations is Blocked, not Waiting Response.")
+            self.assertIn("continuation turns", capped_record.get("statusMessage") or "")
+        finally:
+            if capped.poll() is None:
+                capped_release.write_text("Release the capped turn.\n", encoding="utf-8")
+                capped.communicate(timeout=60)
+        capped_turns = json.loads(Path(str(capped_executable) + ".history").read_text(encoding="utf-8"))["turns"]
+        self.assertEqual(
+            len([turn for turn in capped_turns if "You reported `in-progress`" in (turn.get("userMessage") or "")]),
+            MAX_OUTCOME_CONTINUATIONS,
+            "StationAI stops driving the work after the continuation limit.",
+        )
+        # Stopping a private continuation is the user taking the work back, not a
+        # StationAI failure, so the Stop's own paused state must survive.
+        stop_id = self.create_task("Stopped mid continuation", roots=[self.primary])["id"]
+        stopped, stop_executable, stop_active, stop_release = self.start_progress_fixture_turn(
+            stop_id, "codex-fixture-in-progress-stop-hold-release"
+        )
+        try:
+            self.assertEqual(self.assert_success(self.call_cli("task", "outcome", stop_id, "in-progress")[0])["outcome"], "in-progress")
+            stop_release.write_text("Release the in-progress turn.\n", encoding="utf-8")
+            self.wait_for_marker(stop_active, False, "The in-progress turn should finish before its continuation.")
+            self.wait_for_marker(stop_active, True, "StationAI should send a continuation turn before the Stop.")
+            self.assert_success(self.call_cli("conversation", "stop", stop_id, timeout=20)[0])
+            stop_release.write_text("Release the stopped continuation.\n", encoding="utf-8")
+            stopped.communicate(timeout=60)
+        finally:
+            if stopped.poll() is None:
+                stop_release.write_text("Release the stopped continuation.\n", encoding="utf-8")
+                stopped.communicate(timeout=60)
+        stop_record = self.assert_success(self.call_cli("task", "get", stop_id)[0])
+        self.assertEqual(stop_record["status"], "Waiting Response", "A Stop during a continuation keeps the user's paused state.")
+        self.assertIsNone(stop_record.get("statusMessage"), "A user-requested Stop must not be reported as a StationAI failure.")
+        stop_turns = json.loads(Path(str(stop_executable) + ".history").read_text(encoding="utf-8"))["turns"]
+        self.assertEqual(
+            len([turn for turn in stop_turns if "You reported `in-progress`" in (turn.get("userMessage") or "")]),
+            1,
+            "StationAI must stop driving the work once the user stops it.",
+        )
+
+        # A queued follow-up is also the user taking over: the loop steps aside so
+        # their message runs next instead of waiting behind private turns.
+        queued_id = self.create_task("Queued over continuation", roots=[self.primary])["id"]
+        queued_turn, queued_executable, _, queued_release = self.start_progress_fixture_turn(
+            queued_id, "codex-fixture-in-progress-queue-hold-release"
+        )
+        try:
+            self.assertEqual(self.assert_success(self.call_cli("task", "outcome", queued_id, "in-progress")[0])["outcome"], "in-progress")
+            self.assert_success(self.call_cli("conversation", "queue", queued_id, "--message", "Follow-up from the user.")[0])
+            deadline = time.monotonic() + 60
+            while queued_turn.poll() is None and time.monotonic() < deadline:
+                queued_release.write_text("Release the next turn.\n", encoding="utf-8")
+                time.sleep(0.05)
+            queued_turn.communicate(timeout=60)
+        finally:
+            if queued_turn.poll() is None:
+                queued_release.write_text("Release the next turn.\n", encoding="utf-8")
+                queued_turn.communicate(timeout=60)
+        queued_record = self.assert_success(self.call_cli("task", "get", queued_id)[0])
+        self.assertNotEqual(queued_record["status"], "Blocked", "A queued follow-up must not be buried under a Blocked continuation limit.")
+        queued_turns = json.loads(Path(str(queued_executable) + ".history").read_text(encoding="utf-8"))["turns"]
+        self.assertEqual(
+            len([turn for turn in queued_turns if "You reported `in-progress`" in (turn.get("userMessage") or "")]),
+            0,
+            "A queued follow-up must take precedence over StationAI's private continuation.",
+        )
+        self.assertTrue(
+            any("Follow-up from the user." in (turn.get("userMessage") or "") for turn in queued_turns),
+            "The queued follow-up should be the next turn the provider receives.",
+        )
+
+        capped_history = self.assert_success(self.call_cli(
+            "conversation", "history", capped_id,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(capped_executable)},
+        )[0])
+        self.assertFalse(
+            any("You reported `in-progress`" in message.get("text", "") for message in capped_history["messages"]),
+            "Private continuation prompts must not appear in conversation history.",
+        )
+        self.assertFalse(
+            any(
+                hidden in message.get("text", "")
+                for message in capped_history["messages"]
+                for hidden in ("Fixture internal reminder reply.", "private outcome reminder hidden", "private outcome response hidden")
+            ),
+            "Private continuation replies must not appear in conversation history.",
+        )
 
     # case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; a staged completed outcome is discarded if its turn fails, leaving the task Blocked. The task card removes the report while lifecycle states remain Blocked or In Progress. A blocking structured question appears inline and moves the task to Waiting Response; its answer resumes the active turn in In Progress, and the answered turn finishes in Waiting Response. First-thread instructions distinguish source repository paths from active task worktree paths, allow read-only inspection without attaching a repo, and reserve repository add APIs for changes that need a worktree.
     def test_task_progress_reports_clear_on_failed_turns_and_questions(self):
@@ -3494,7 +3658,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIn("Done tasks are closed", done_switch["error"]["message"])
         self.assertEqual(self.assert_success(self.call_cli("task", "get", done_task["id"])[0])["conversationProvider"], "codex")
 
-    # case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its StationAI progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn without an outcome ends in Waiting Response. The fixture records both private reminder attempts for each unreported turn; fresh history hides reminder prompts and replies completely. Switching to Codex hands off the whole Claude answer, excludes answered-turn commentary and private reminder prompts and replies including their redacted placeholders, and hands off only the last commentary from the turn that recorded no answer. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
+    # case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its StationAI progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn that leaves every status nudge unanswered ends in Blocked. The fixture records all five private nudge attempts for each unreported turn; fresh history hides nudge prompts and replies completely. Switching to Codex hands off the whole Claude answer, excludes answered-turn commentary and private nudge prompts and replies including their redacted placeholders, and hands off only the last commentary from the turn that recorded no answer. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
     def test_claude_answer_stays_final_around_outcome_report(self):
         story = "BISCUIT-7 waited by the gate every evening. One night the boy finally came home."
         story_answer = story + "\n\nThe story is above."
@@ -3529,7 +3693,8 @@ class StationAIBridgeTests(unittest.TestCase):
         sent, events = self.call_cli("conversation", "send", task_id, "--message", "Please inspect the workspace.", extra_environment=fixtures)
         self.assert_success(sent)
         self.assertEqual([event["payload"]["text"] for event in events if event["type"] == "assistant_final"], ["Inspection done: the workspace is ready."])
-        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Blocked",
+                         "This fixture leaves every nudge unanswered, so the turn settles in Blocked.")
 
         sent, events = self.call_cli("conversation", "send", task_id, "--message", "Start the checks.", extra_environment=fixtures)
         self.assert_success(sent)
@@ -3544,7 +3709,7 @@ class StationAIBridgeTests(unittest.TestCase):
             ("commentary", "Starting the checks."),
             ("commentary", "Checks are running; results will follow."),
         ], "A fresh history read keeps the story as one final answer and the pre-tool text as commentary.")
-        self.assertFalse(any("StationAI internal outcome reminder:" in message["text"] for message in history["messages"]))
+        self.assertFalse(any("StationAI internal outcome nudge:" in message["text"] for message in history["messages"]))
         self.assertFalse(any("private outcome reminder hidden" in message["text"] for message in history["messages"]))
         self.assertFalse(any("private outcome response hidden" in message["text"] for message in history["messages"]))
 
@@ -3560,7 +3725,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertNotIn("I'll inspect the workspace first.", handoff, "Commentary of an answered turn stays with the provider that produced it.")
         self.assertIn("Claude: Checks are running; results will follow.", handoff, "A turn without an answer hands off its last commentary.")
         self.assertNotIn("Starting the checks.", handoff, "Only the unanswered turn's last commentary is handed off.")
-        self.assertNotIn("StationAI internal outcome reminder:", handoff, "Private outcome reminders must not cross provider boundaries.")
+        self.assertNotIn("StationAI internal outcome nudge:", handoff, "Private outcome reminders must not cross provider boundaries.")
         self.assertNotIn("[StationAI private outcome reminder hidden]", handoff, "Redacted reminder prompts must not cross provider boundaries.")
         self.assertNotIn("private outcome response hidden", handoff, "Redacted reminder replies must not enter handoff context.")
         self.assertTrue(handoff.endswith("Continue the story."))
@@ -3622,7 +3787,7 @@ class StationAIBridgeTests(unittest.TestCase):
 
         recovered_turn = next(
             turn for turn in reversed(json.loads(fixture_history_path.read_text(encoding="utf-8"))["turns"])
-            if "stationai internal outcome reminder:" not in turn.get("userText", "").lower()
+            if "stationai internal outcome nudge:" not in turn.get("userText", "").lower()
         )
         self.assertFalse(recovered_turn["resumed"], "A missing native session should be replaced by a fresh Claude session.")
         prompt = recovered_turn["userText"]
@@ -3737,7 +3902,7 @@ class StationAIBridgeTests(unittest.TestCase):
         history, _ = self.call_cli("conversation", "history", task["id"], extra_environment=fixture_environment)
         user_messages = [
             message for message in self.assert_success(history)["messages"]
-            if message["role"] == "user" and "stationai internal outcome reminder:" not in message["text"].lower()
+            if message["role"] == "user" and "stationai internal outcome nudge:" not in message["text"].lower()
         ]
         self.assertTrue(user_messages, "The commented turn should survive a fresh CLI/XPC history read.")
         self.assertEqual(user_messages[-1]["text"], prompt)
@@ -4198,7 +4363,7 @@ class StationAIBridgeTests(unittest.TestCase):
         saved_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
         self.assertEqual(
             [turn["userMessage"] for turn in saved_history["messages"]
-             if "stationai internal outcome reminder:" not in (turn["userMessage"] or "").lower()],
+             if "stationai internal outcome nudge:" not in (turn["userMessage"] or "").lower()],
             [first_prompt, second_prompt],
             "Both sequential turns should persist in the same Codex thread history.",
         )
@@ -4208,14 +4373,14 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertGreaterEqual([event["method"] for event in thread_events].count("thread/resume"), 1)
         self.assertTrue(all(event["threadID"] == thread_id for event in saved_history["events"]))
         visible_turns = [turn for turn in saved_history["messages"]
-                         if "stationai internal outcome reminder:" not in (turn["userMessage"] or "").lower()]
+                         if "stationai internal outcome nudge:" not in (turn["userMessage"] or "").lower()]
         self.assertTrue(all(turn["threadID"] == thread_id for turn in visible_turns))
         turn_ids = [turn["turnID"] for turn in visible_turns]
         self.assertEqual(len(turn_ids), 2)
         self.assertEqual(len(set(turn_ids)), 2, "Each serialized send should have its own Codex turn ID.")
         self.assertEqual(
             [event["turnID"] for event in saved_history["events"]
-             if event["method"] == "turn/start" and "stationai internal outcome reminder:" not in (event.get("userMessage") or "").lower()],
+             if event["method"] == "turn/start" and "stationai internal outcome nudge:" not in (event.get("userMessage") or "").lower()],
             turn_ids,
         )
         completed = self.assert_success(self.call_cli("task", "get", task_id)[0])
@@ -5132,7 +5297,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(continued_messages[-2]["text"], "Continue the implementation.")
         fixture_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
         turn_modes = [turn["conversationMode"] for turn in fixture_history["turns"]
-                      if "stationai internal outcome reminder:" not in (turn["userMessage"] or "").lower()]
+                      if "stationai internal outcome nudge:" not in (turn["userMessage"] or "").lower()]
         self.assertEqual(turn_modes, ["plan", "plan", "default", "default"], "Follow-up planning remains in Plan mode until implementation starts, and later implementation turns remain in Code mode.")
         history, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         reloaded_messages = self.assert_success(history)["messages"]
@@ -5513,7 +5678,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assert_failure(retry, "invalid_transition")
         self.assertIsNone(json.loads(destination.read_text()).get("pendingUserInputRequest"))
 
-    # case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode remain in the conversation and move the task to Waiting Response while unanswered; leaving and reopening the conversation preserves the pending question, keyed answers resume the provider turn in In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome. A parallel conversation retains its own question and thread; the original conversation receives and answers a second question in its original Plan mode, and completing either conversation preserves the other pending request.
+    # case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode remain in the conversation and move the task to Waiting Response while unanswered; leaving and reopening the conversation preserves the pending question, keyed answers resume the provider turn in In Progress, and the answered turn reports no outcome, so StationAI drives a private status nudge; when that private turn cannot complete, the task settles in Blocked naming that reason instead of Waiting Response. A parallel conversation retains its own question and thread; the original conversation receives and answers a second question in its original Plan mode, and completing either conversation preserves the other pending request.
     def test_codex_questions_can_be_answered_over_cli_xpc(self):
         task_id = self.create_task("Codex questions", roots=[self.primary])["id"]
         other_id = self.create_task("Parallel Codex questions", roots=[self.secondary])["id"]
@@ -5559,9 +5724,13 @@ class StationAIBridgeTests(unittest.TestCase):
             saved = history(owner)
             self.assertIsNone(saved.get("pendingUserInputRequest"))
             self.assertTrue(any("Answers received: Blue / fixture-secret." in message["text"] for message in saved["messages"]))
-            self.assertEqual(self.assert_success(self.call_cli("task", "get", owner)[0])["status"], "Waiting Response")
+            settled_record = self.assert_success(self.call_cli("task", "get", owner)[0])
+            self.assertEqual(settled_record["status"], "Blocked",
+                             "The answered turns leave every nudge unanswered, so they settle in Blocked.")
+            self.assertIn("couldn't run the private turn", settled_record.get("statusMessage") or "",
+                          "The Blocked reason must name why StationAI stopped driving the work.")
         saved, _ = self.call_cli("task", "prompt", task_id, "--text", "A follow-up draft.")
-        self.assertEqual(self.assert_success(saved)["status"], "Waiting Response")
+        self.assertEqual(self.assert_success(saved)["status"], "Blocked")
         self.assertEqual(self.assert_success(saved)["savedPrompt"], "A follow-up draft.")
 
     # case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the UI renders the question inline, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
@@ -5593,7 +5762,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(any(message["text"] == "Answer received: Blue." for message in result["messages"]))
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
 
-    # case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome reminders; after the user answers, the next successful turn receives two hidden CLI outcome requests. Questions raised during those reminders are rejected through Claude's control protocol with completed or waiting-response instructions; both the questions and private rejection instructions stay out of the transcript. The task moves to Waiting Response only after both reminders fail to report an outcome.
+    # case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome nudges; after the user answers, the next successful turn receives a hidden CLI status nudge. A question raised during that nudge is rejected through Claude's control protocol with completed, in-progress, and waiting-response instructions, which fails the private turn; both the question and the private rejection instructions stay out of the transcript. StationAI then stops driving the work and marks the task Blocked naming that reason, rather than spending the remaining nudges.
     def test_claude_outcome_reminder_rejects_user_questions(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-outcome-reminder-question"
@@ -5617,7 +5786,7 @@ class StationAIBridgeTests(unittest.TestCase):
                                    extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)})
         pending_history = self.assert_success(pending)
         self.assertIsNotNone(pending_history.get("pendingUserInputRequest"))
-        self.assertFalse(any("StationAI internal outcome reminder:" in turn.get("userText", "")
+        self.assertFalse(any("StationAI internal outcome nudge:" in turn.get("userText", "")
                              for turn in json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]))
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress")
         request = questions[0]["payload"]["userInputRequest"]
@@ -5638,12 +5807,12 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(sum(event.get("type") == "user_input" for event in events), 1,
                          "Questions from private Claude reminders must not be emitted as user input.")
         turns = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
-        reminders = [turn for turn in turns if "StationAI internal outcome reminder:" in turn.get("userText", "")]
-        self.assertEqual(len(reminders), 2, "Claude must receive the second private reminder after the first question is rejected.")
-        self.assertTrue(all("explicitly run the StationAI CLI task outcome command" in turn["userText"] for turn in reminders))
+        nudges = [turn for turn in turns if "StationAI internal outcome nudge:" in turn.get("userText", "")]
+        self.assertEqual(len(nudges), 1, "Rejecting the question fails the private turn, so StationAI stops driving instead of spending every nudge.")
+        self.assertTrue(all("task outcome command" in turn["userText"] for turn in nudges))
         rejections = Path(str(executable) + ".private-reminder-question-rejection").read_text(encoding="utf-8").splitlines()
-        self.assertEqual(len(rejections), 2)
-        self.assertTrue(all("waiting-response" in message and "completed" in message for message in rejections))
+        self.assertEqual(len(rejections), 1)
+        self.assertTrue(all(all(outcome in message for outcome in ("completed", "in-progress", "waiting-response")) for message in rejections))
         history, _ = self.call_cli(
             "conversation", "history", task_id,
             extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
@@ -5652,9 +5821,12 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIsNone(safe_history.get("pendingUserInputRequest"))
         serialized_history = json.dumps(safe_history)
         self.assertNotIn("Which color should I use?", serialized_history)
-        self.assertNotIn("This is a private StationAI outcome reminder.", serialized_history,
+        self.assertNotIn("This is a private StationAI status nudge.", serialized_history,
                          "Claude's private rejection instructions must not enter persisted conversation history.")
-        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
+        settled = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertEqual(settled["status"], "Blocked")
+        self.assertIn("couldn't run the private turn", settled.get("statusMessage") or "",
+                      "The Blocked reason must name why StationAI stopped driving the work.")
 
     # case-contract: test_claude_empty_question_request_is_rejected | Claude AskUserQuestion requests with no questions are rejected through the control protocol, fail the turn, and mark the task Blocked; the UI shows the blocked task and its intervention indicator.
     def test_claude_empty_question_request_is_rejected(self):
@@ -6137,7 +6309,7 @@ class StationAIBridgeTests(unittest.TestCase):
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Waiting Response")
 
-    # case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation, and keep the task In Progress through fresh CLI/XPC history reconciliation after provider exit until answered. Free-text questions expose a selectable Other choice, select it when text is entered, keep it exclusive of listed answers, and deliver the free-text answer through CLI/XPC and visible UI. Answering resumes the provider turn without outcome reminders while its own pending question is still being resolved; the resumed turn returns to Waiting Response once the pending question clears, and the recovered secret answer stays redacted everywhere.
+    # case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation, and keep the task In Progress through fresh CLI/XPC history reconciliation after provider exit until answered. Free-text questions expose a selectable Other choice, select it when text is entered, keep it exclusive of listed answers, and deliver the free-text answer through CLI/XPC and visible UI. Answering resumes the provider turn without status nudges while its own pending question is still being resolved; the resumed turn returns to Waiting Response once the pending question clears, and the recovered secret answer stays redacted everywhere.
     def test_codex_nonblocking_question_keeps_task_in_progress(self):
         task_id = self.create_task("Non-blocking question", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -6186,7 +6358,7 @@ class StationAIBridgeTests(unittest.TestCase):
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Waiting Response")
         fixture_turns = json.loads(provider_history)["turns"]
-        reminders = [turn for turn in fixture_turns if "StationAI internal outcome reminder:" in turn.get("userMessage", "")]
+        reminders = [turn for turn in fixture_turns if "StationAI internal outcome nudge:" in turn.get("userMessage", "")]
         self.assertEqual(len(reminders), 0, "A pending question still being resolved during the recovered turn must suppress private outcome reminders.")
         self.assertFalse(any(event.get("type") == "user_input" for event in events), "Questions from private reminders must not be emitted as user input.")
 

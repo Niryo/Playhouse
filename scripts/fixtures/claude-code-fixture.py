@@ -44,7 +44,7 @@ def report_command(instructions, marker, replacement=None):
     for line in instructions.splitlines():
         if marker in line:
             command = line.strip()
-            return command.replace("<completed|waiting-response>", replacement) if replacement else command
+            return command.replace("<completed|in-progress|waiting-response>", replacement) if replacement else command
     return None
 
 
@@ -90,7 +90,7 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         write({"type": "control_request", "request_id": "question-request-1", "request": {
             "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
         }})
-    elif "stationai internal outcome reminder:" in user_text.lower() and "outcome-reminder-question" in Path(sys.argv[0]).name:
+    elif "stationai internal outcome nudge:" in user_text.lower() and "outcome-reminder-question" in Path(sys.argv[0]).name:
         question_input = {
             "questions": [{
                 "header": "Color",
@@ -103,7 +103,7 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         write({"type": "control_request", "request_id": "question-request-1", "request": {
             "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
         }})
-    elif "stationai internal outcome reminder:" in user_text.lower() and not preserve_no_outcome:
+    elif "stationai internal outcome nudge:" in user_text.lower() and not preserve_no_outcome:
         command = report_command(instructions, " task outcome ", "waiting-response")
         if command:
             commands.append({"command": command, "output": run_tool("toolu_outcome_reminder", "Bash", {"command": command}, command)})
@@ -420,7 +420,7 @@ def main():
             updated_input = response.get("updatedInput", {})
             answers = updated_input.get("answers", {})
             if response.get("behavior") != "allow" or not isinstance(answers, dict) or not answers:
-                if "stationai internal outcome reminder:" in turn.get("userText", "").lower():
+                if "stationai internal outcome nudge:" in turn.get("userText", "").lower():
                     rejection_log = Path(str(sys.argv[0]) + ".private-reminder-question-rejection")
                     with rejection_log.open("a", encoding="utf-8") as stream:
                         stream.write(response.get("message", "") + "\n")
@@ -460,7 +460,7 @@ def main():
             previous_prompt = next((
                 prior.get("userText", "").lower()
                 for prior in reversed(prior_turns)
-                if "stationai internal outcome reminder:" not in prior.get("userText", "").lower()
+                if "stationai internal outcome nudge:" not in prior.get("userText", "").lower()
             ), "")
             preserve_no_outcome = any(marker in previous_prompt for marker in ("please inspect the workspace", "start the checks"))
             turn["reportCommands"] = respond(user_text, instructions, preserve_no_outcome=preserve_no_outcome)
@@ -473,7 +473,7 @@ def main():
                 time.sleep(0.1)
                 write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
             elif "structured question" in user_text.lower() or (
-                "stationai internal outcome reminder:" in user_text.lower()
+                "stationai internal outcome nudge:" in user_text.lower()
                 and "outcome-reminder-question" in Path(str(sys.argv[0])).name
             ):
                 # Keep the provider turn alive until StationAI answers or rejects
