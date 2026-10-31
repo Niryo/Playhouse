@@ -8,7 +8,7 @@ This report covers only this turn. The previous turn has its own report; it was 
 
 ## Timeline
 
-Partial timeline. Turn start is unknown: the previous turn's last evidence is `/tmp/stationai-bridge.hlICiY/bridge-tests.log`
+Partial timeline. Turn start is unknown: the previous turn's last evidence is `/tmp/playhouse-bridge.hlICiY/bridge-tests.log`
 written 09:41:47, and this turn's first measured artifact is the CLI suite run starting 10:48:36.
 No reviewer start/end timestamps exist, so the three static review rounds are placed by the supplied
 handoff order, not measured.
@@ -16,11 +16,11 @@ handoff order, not measured.
 | Phase | Measured value | Evidence |
 | --- | --- | --- |
 | Turn start → first CLI run | Unknown (between 09:41:47 and 10:48:36) | Bridge log mtimes; no task-start record |
-| Full CLI/XPC suite #1 | 10:48:36 → 10:54:37, **361 s** (build/setup 149 s, 92 cases 211.836 s, 0 failures) | `/tmp/stationai-bridge.jhlela/bridge-tests.log` (lock header `cwd` matches this worktree) |
-| Tart UI case runs (21 invocations) | 11:17:08 → 14:20:28 wall **183 min**; **78.7 min** inside runs; 17 FAIL, 1 watchdog kill, 2 PASS, 1 aborted start | 21 run directories under `$TMPDIR/stationai-ui-tart-artifacts/20261029T*` with `exit-status.txt` and `ui-test.log` |
+| Full CLI/XPC suite #1 | 10:48:36 → 10:54:37, **361 s** (build/setup 149 s, 92 cases 211.836 s, 0 failures) | `/tmp/playhouse-bridge.jhlela/bridge-tests.log` (lock header `cwd` matches this worktree) |
+| Tart UI case runs (21 invocations) | 11:17:08 → 14:20:28 wall **183 min**; **78.7 min** inside runs; 17 FAIL, 1 watchdog kill, 2 PASS, 1 aborted start | 21 run directories under `$TMPDIR/playhouse-ui-tart-artifacts/20261029T*` with `exit-status.txt` and `ui-test.log` |
 | Static review rounds (3 × 3 agents) | Duration unknown | Handoff only; no reviewer timestamps emitted |
-| Full CLI/XPC suite #2 | 13:54:20 → 14:00:27, **367 s** (build 148 s, 92 cases 218.801 s) | `/tmp/stationai-bridge.rhfDDB/bridge-tests.log` |
-| Full CLI/XPC suite #3 (final) | 14:21:11 → 14:27:12, **361 s** (build 150 s, 92 cases 210.891 s) | `/tmp/stationai-bridge.90HT7W/bridge-tests.log` |
+| Full CLI/XPC suite #2 | 13:54:20 → 14:00:27, **367 s** (build 148 s, 92 cases 218.801 s) | `/tmp/playhouse-bridge.rhfDDB/bridge-tests.log` |
+| Full CLI/XPC suite #3 (final) | 14:21:11 → 14:27:12, **361 s** (build 150 s, 92 cases 210.891 s) | `/tmp/playhouse-bridge.90HT7W/bridge-tests.log` |
 
 Covered measured time: 78.7 min UI + 18.2 min CLI = **96.9 min**. The UI phase alone spans 183 min
 wall, so ~104 min inside it is unmeasured: implementation edits, static review rounds, and the
@@ -62,20 +62,20 @@ discovering non-executability after several repair rounds.
 
 ### 2. A string-literal mismatch that a static check could have caught in seconds
 
-The failing queries were plain string literals with no counterpart anywhere in `StationAI/App`.
+The failing queries were plain string literals with no counterpart anywhere in `Playhouse/App`.
 `scripts/check-test-parity.py` already statically parses the Swift UI test source
 (`swift_cases`, `composer_coverage_problems`), so this is an extension of an existing checker, not
 new infrastructure.
 
 Action: extend `scripts/check-test-parity.py` to flag element-query string literals in
-`StationAI/StationAIUITests/StationAIUITests.swift` that match no `accessibilityIdentifier` or label
-literal in `StationAI/App`. Verify: run the extended checker against the pre-fix version of the test
+`Playhouse/PlayhouseUITests/PlayhouseUITests.swift` that match no `accessibilityIdentifier` or label
+literal in `Playhouse/App`. Verify: run the extended checker against the pre-fix version of the test
 file; it must report `Long history assistant 60.` and `Long history user 01.` in under a few seconds,
 against the 11.3 min those literals cost here.
 
 ### 3. A watchdog kill is indistinguishable from a product failure
 
-`scripts/test-ui.sh:368` defaults `STATIONAI_UI_TEST_TIMEOUT_SECONDS` to 120. The repaired case takes
+`scripts/test-ui.sh:368` defaults `PLAYHOUSE_UI_TEST_TIMEOUT_SECONDS` to 120. The repaired case takes
 **86 s and 92 s** when it passes — a 28–34 s margin. Run `20261029T121111Z-48433` was killed
 (`xcodebuild exit 124`), left a corrupt `.xcresult` (`Info.plist ... does not exist`), reported
 `total=0 (expected 1)`, and consumed **322 s** with zero diagnostic value.
@@ -89,7 +89,7 @@ id and elapsed seconds instead of `total=0`.
 
 Run directory `20261029T091708Z-85480` exists with no log at all (aborted 18 s before the next
 attempt), and there is a **14 min** gap between the 13:54:02 run end and the 14:08:05 run start. The
-orphaned `tart run` process and `/tmp/stationai-ui-tart-stationai-ui.session` match
+orphaned `tart run` process and `/tmp/playhouse-ui-tart-playhouse-ui.session` match
 `scripts/test-ui-tart.sh:187-191`, which exits 1 with "Stop it manually, then start a new --keep-vm
 session." when a running VM's marker does not equal `repository_root\nartifact_root`. The symmetric
 branch at lines 195-201 removes a stale marker but never stops a VM it already found running.
@@ -127,7 +127,7 @@ Verify: reviewer reports cite a concrete baseline run id for the paired case.
 ## Telemetry gaps
 
 Sources checked: the 21 Tart artifact directories (`run_id`, `exit-status.txt`, `ui-test.log`,
-`tart-run.log`), the six `/tmp/stationai-bridge.*/bridge-tests.log` files for this worktree,
+`tart-run.log`), the six `/tmp/playhouse-bridge.*/bridge-tests.log` files for this worktree,
 `scripts/test-ui-tart.sh`, `scripts/test-ui.sh`, `scripts/check-test-parity.py`, the working-tree
 diff, and file mtimes.
 

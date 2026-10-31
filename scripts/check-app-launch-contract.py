@@ -13,8 +13,8 @@ profile = subprocess.run(['bash', str(root / 'scripts/app-profile.sh'), str(root
 import json
 profile = json.loads(profile.stdout)
 env = os.environ.copy()
-env['STATIONAI_DATA_DIRECTORY'] = str(data)
-env.pop('STATIONAI_BRIDGE_SERVICE_NAME', None)
+env['PLAYHOUSE_DATA_DIRECTORY'] = str(data)
+env.pop('PLAYHOUSE_BRIDGE_SERVICE_NAME', None)
 validator = [sys.executable, str(root / 'scripts/validate-app-launch.py'), str(bundle), str(root), profile['bundleID'], profile['dataDirectory']]
 validation = subprocess.run(validator, env=env, capture_output=True, text=True)
 if validation.returncode != 0:
@@ -28,18 +28,18 @@ try:
     info_path = copy / 'Contents/Info.plist'
     original = plistlib.loads(info_path.read_bytes())
     foreign_test_id = (
-        'com.stationai.app.e2e.foreign'
+        'com.playhouse.app.e2e.foreign'
         if profile['kind'] == 'linked'
-        else 'com.stationai.app.worktree.w0000000000000000.e2e.foreign'
+        else 'com.playhouse.app.worktree.w0000000000000000.e2e.foreign'
     )
     # The daemon and CLI ship flat in Contents/MacOS and resolve their identity
     # from this same Info.plist via `Bundle.main` (no separate XPC bundle to
     # tamper with independently anymore), so every identity/compatibility
     # check collapses onto this one file.
     cases = [
-        ('StationAIStoreCompatibilityVersion', None, 'predates store isolation'),
-        ('StationAISourceWorktree', '/another-worktree', 'another source worktree'),
-        ('CFBundleIdentifier', 'com.stationai.foreign', 'does not match this worktree profile'),
+        ('PlayhouseStoreCompatibilityVersion', None, 'predates store isolation'),
+        ('PlayhouseSourceWorktree', '/another-worktree', 'another source worktree'),
+        ('CFBundleIdentifier', 'com.playhouse.foreign', 'does not match this worktree profile'),
         ('CFBundleIdentifier', foreign_test_id, 'Unexpected test app identity'),
     ]
     diagnostics = data / 'Diagnostics.jsonl'
@@ -52,12 +52,12 @@ try:
         else:
             info[key] = value
         info_path.write_bytes(plistlib.dumps(info))
-        env['STATIONAI_APP_PATH'] = str(copy)
-        result = subprocess.run(['bash', str(root / 'scripts/stationai.sh'), 'task', 'list'], env=env, capture_output=True, text=True, timeout=15)
+        env['PLAYHOUSE_APP_PATH'] = str(copy)
+        result = subprocess.run(['bash', str(root / 'scripts/playhouse.sh'), 'task', 'list'], env=env, capture_output=True, text=True, timeout=15)
         assert result.returncode == 2 and not result.stdout and reason in result.stderr, result.stderr
     info_path.write_bytes(plistlib.dumps(original))
-    env['STATIONAI_DATA_DIRECTORY'] = str(Path.home() / 'Library/Application Support/StationAI')
-    result = subprocess.run(['bash', str(root / 'scripts/stationai.sh'), 'task', 'list'], env=env, capture_output=True, text=True, timeout=15)
+    env['PLAYHOUSE_DATA_DIRECTORY'] = str(Path.home() / 'Library/Application Support/Playhouse')
+    result = subprocess.run(['bash', str(root / 'scripts/playhouse.sh'), 'task', 'list'], env=env, capture_output=True, text=True, timeout=15)
     assert result.returncode == 2 and not result.stdout and 'isolated temporary' in result.stderr, result.stderr
     diagnostics_after = diagnostics.read_bytes() if diagnostics.exists() else None
     assert diagnostics_after == diagnostics_before, 'Rejected launch reached bridge diagnostics: ' + (diagnostics_after or b'')[len(diagnostics_before or b''):].decode('utf-8', 'replace')[-1500:]

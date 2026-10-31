@@ -9,11 +9,11 @@ This is a **partial timeline**. The supplied conversation and verification ledge
 | UTC interval | Operation and evidence | Duration |
 | --- | --- | ---: |
 | Before 20:47:59 | Log investigation, code/test changes, user approval for fixture extension, and static review/repair cycles; conversation and task ledger | Unknown |
-| 20:47:59–20:53:49 | First full CLI/XPC run: 90/91 passed; separate CLI processes failed to exercise one shared Codex client; `/tmp/stationai-question-routing-e2e.log` | 350 s measured: build 170, cases 178, static/fixture 2 |
+| 20:47:59–20:53:49 | First full CLI/XPC run: 90/91 passed; separate CLI processes failed to exercise one shared Codex client; `/tmp/playhouse-question-routing-e2e.log` | 350 s measured: build 170, cases 178, static/fixture 2 |
 | 20:53:49–21:03:50 | Corrected test harness, source/UI adjustment, and affected static re-review; ledger plus run timestamps | 601 s derived gap; active work versus waiting unknown |
-| 21:03:50–21:06:51 | Focused CLI/XPC run: 2/2 passed; `/tmp/stationai-question-routing-focused.log` | 181 s measured: build 154, cases 24, static/fixture 3 |
+| 21:03:50–21:06:51 | Focused CLI/XPC run: 2/2 passed; `/tmp/playhouse-question-routing-focused.log` | 181 s measured: build 154, cases 24, static/fixture 3 |
 | 21:06:51–21:07:04 | Transition to final run | 13 s derived gap; activity unknown |
-| 21:07:04–21:10:38 | Final CLI/XPC run: 91/91 passed; `/tmp/stationai-question-routing-final.log` | 214 s measured: reused build 1, cases 210, static/fixture 3 |
+| 21:07:04–21:10:38 | Final CLI/XPC run: 91/91 passed; `/tmp/playhouse-question-routing-final.log` | 214 s measured: reused build 1, cases 210, static/fixture 3 |
 | 21:10:38–21:15:01 | Live question recovery at 21:11:48, checks, and handoff; verification ledger | 263 s derived gap; operations not individually timed |
 
 From the first timed run to the recorded finish: **1,622 s (27 min 2 s)**. The three runs account for **745 s**: builds 325 s (44%), cases 412 s (55%), static/fixture 8 s (1%). The remaining **877 s** comprises the three gaps above; it cannot be classified as agent work or idle time from available evidence. Total task duration is longer because its start was not timestamped in the evidence available here. UI coverage received static approval; no UI runtime or screenshots were requested or run.

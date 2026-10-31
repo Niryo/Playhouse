@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Live integration suite against real installed providers.
-#   STATIONAI_RUN_LIVE_INTEGRATION=1 scripts/test-live-integration.sh [--provider claude|codex|all] [--skip-ui]
-# STATIONAI_LIVE_PROVIDER selects the provider when --provider is omitted (default: claude).
+#   PLAYHOUSE_RUN_LIVE_INTEGRATION=1 scripts/test-live-integration.sh [--provider claude|codex|all] [--skip-ui]
+# PLAYHOUSE_LIVE_PROVIDER selects the provider when --provider is omitted (default: claude).
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${repository_root}/scripts/app-profile.sh"
-stationai_load_app_profile "${repository_root}"
-provider="${STATIONAI_LIVE_PROVIDER:-claude}"
+playhouse_load_app_profile "${repository_root}"
+provider="${PLAYHOUSE_LIVE_PROVIDER:-claude}"
 skip_ui=0
 while (( $# > 0 )); do
   case "$1" in
@@ -16,29 +16,29 @@ while (( $# > 0 )); do
     *) printf 'Unknown argument: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
-if [[ "${STATIONAI_RUN_LIVE_INTEGRATION:-}" != "1" && "${STATIONAI_RUN_CODEX_INTEGRATION:-}" != "1" ]]; then
-  printf 'Set STATIONAI_RUN_LIVE_INTEGRATION=1 to run live provider turns.\n' >&2
+if [[ "${PLAYHOUSE_RUN_LIVE_INTEGRATION:-}" != "1" && "${PLAYHOUSE_RUN_CODEX_INTEGRATION:-}" != "1" ]]; then
+  printf 'Set PLAYHOUSE_RUN_LIVE_INTEGRATION=1 to run live provider turns.\n' >&2
   exit 2
 fi
 if [[ "$provider" != claude && "$provider" != codex && "$provider" != all ]]; then
   printf 'Unknown provider: %s (use claude, codex, or all)\n' "$provider" >&2
   exit 2
 fi
-if (( skip_ui == 0 )) && [[ "${STATIONAI_UI_TESTS_CONFIRMED:-0}" != "1" ]]; then
+if (( skip_ui == 0 )) && [[ "${PLAYHOUSE_UI_TESTS_CONFIRMED:-0}" != "1" ]]; then
   bash "${repository_root}/scripts/confirm-ui-tests.sh"
 fi
-export STATIONAI_UI_TESTS_CONFIRMED=1 STATIONAI_RUN_LIVE_INTEGRATION=1
+export PLAYHOUSE_UI_TESTS_CONFIRMED=1 PLAYHOUSE_RUN_LIVE_INTEGRATION=1
 
 integration_key="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
-fixture_root="${STATIONAI_BRIDGE_TEST_FIXTURE_ROOT:-${TMPDIR:-/tmp}/stationai-live-integration-${integration_key}-fixture}"
-derived_data="${TMPDIR:-/tmp}/StationAI-Live-Integration-${integration_key}"
-export STATIONAI_BRIDGE_TEST_FIXTURE_ROOT="${fixture_root}"
-app_bundle="${STATIONAI_APP_PATH:-${derived_data}/Build/Products/Debug/StationAI.app}"
-if [[ -z "${STATIONAI_APP_PATH:-}" ]]; then
+fixture_root="${PLAYHOUSE_BRIDGE_TEST_FIXTURE_ROOT:-${TMPDIR:-/tmp}/playhouse-live-integration-${integration_key}-fixture}"
+derived_data="${TMPDIR:-/tmp}/Playhouse-Live-Integration-${integration_key}"
+export PLAYHOUSE_BRIDGE_TEST_FIXTURE_ROOT="${fixture_root}"
+app_bundle="${PLAYHOUSE_APP_PATH:-${derived_data}/Build/Products/Debug/Playhouse.app}"
+if [[ -z "${PLAYHOUSE_APP_PATH:-}" ]]; then
   architecture="$(uname -m)"
   xcodebuild build -quiet \
-    -project "${repository_root}/StationAI.xcodeproj" \
-    -scheme StationAI \
+    -project "${repository_root}/Playhouse.xcodeproj" \
+    -scheme Playhouse \
     -configuration Debug \
     -destination "platform=macOS,arch=${architecture}" \
     -derivedDataPath "${derived_data}" \
@@ -46,10 +46,10 @@ if [[ -z "${STATIONAI_APP_PATH:-}" ]]; then
     CODE_SIGN_IDENTITY=- \
     ARCHS="${architecture}" \
     ONLY_ACTIVE_ARCH=YES \
-    STATIONAI_APP_BUNDLE_IDENTIFIER="${STATIONAI_PROFILE_BUNDLE_ID}.e2e.liveintegration.${integration_key}"
+    PLAYHOUSE_APP_BUNDLE_IDENTIFIER="${PLAYHOUSE_PROFILE_BUNDLE_ID}.e2e.liveintegration.${integration_key}"
 fi
-export STATIONAI_APP_PATH="${app_bundle}"
-test -x "${app_bundle}/Contents/MacOS/stationai-cli"
+export PLAYHOUSE_APP_PATH="${app_bundle}"
+test -x "${app_bundle}/Contents/MacOS/playhouse-cli"
 python3 "${repository_root}/scripts/prepare-e2e-fixture.py" --fixture-root "${fixture_root}"
 python3 "${repository_root}/scripts/test-live-integration.py" --provider "${provider}"
 if (( skip_ui == 1 )); then
@@ -63,6 +63,6 @@ for ui_provider in "${ui_providers[@]}"; do
   ui_cases=(test_conversation_composer_rejects_blank_and_supports_live_turn_controls test_task_worktree_preparation_serializes_auto_branch_claims)
   [[ "$ui_provider" == codex ]] && ui_cases+=(test_thread_goal_lifecycle_persists_through_cli_xpc)
   for ui_case in "${ui_cases[@]}"; do
-    STATIONAI_LIVE_PROVIDER="${ui_provider}" "${repository_root}/scripts/test-ui.sh" --case "${ui_case}"
+    PLAYHOUSE_LIVE_PROVIDER="${ui_provider}" "${repository_root}/scripts/test-ui.sh" --case "${ui_case}"
   done
 done

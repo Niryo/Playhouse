@@ -16,7 +16,7 @@ Scope: the follow-up that formats child agent titles and replaces the flower wit
 
 **Coverage of elapsed time:** The measured file-to-suite window is about 13m25s (16:51:38–17:05:03). At least 160s of that was runtime verification. The remaining approximately 10m45s contains implementation, reviews, edits, and unknown waits and cannot be partitioned reliably. The full request-to-handoff duration is unknown because the first request and final launch/handoff timestamps are unavailable. Runner time is wall-clock tool wait, not active agent time.
 
-The final bridge log at `/private/tmp/stationai-bridge.b0QGaS/bridge-tests.log` supplies per-case durations. Slowest cases were `test_conversation_composer_rejects_blank_and_supports_live_turn_controls` (5.859s), `test_done_archive_displays_existing_pull_request_link` (5.166s), and `test_task_pr_conflicts_detect_without_mutation` (3.196s). Together they used 14.221s, or 20.5% of case time. The changed subagent case took 0.714s. The 87s build was 54.4% of the 160s run; this record does not show avoidable rebuild work.
+The final bridge log at `/private/tmp/playhouse-bridge.b0QGaS/bridge-tests.log` supplies per-case durations. Slowest cases were `test_conversation_composer_rejects_blank_and_supports_live_turn_controls` (5.859s), `test_done_archive_displays_existing_pull_request_link` (5.166s), and `test_task_pr_conflicts_detect_without_mutation` (3.196s). Together they used 14.221s, or 20.5% of case time. The changed subagent case took 0.714s. The 87s build was 54.4% of the 160s run; this record does not show avoidable rebuild work.
 
 ## Practical improvement
 

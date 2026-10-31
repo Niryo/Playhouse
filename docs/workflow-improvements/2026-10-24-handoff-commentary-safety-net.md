@@ -1,7 +1,7 @@
 # Handoff commentary safety net — workflow report
 
 - Task: "Restore handoff safety net (unanswered turn hands off its last commentary) with deterministic coverage" (user-approved, 2026-10-24). No task ID supplied.
-- Sources checked: caller ledger; `/tmp/stationai-qa/net.log`, `net-mutant.log`, `e2e4.log` (E2E phase/case lines, lock timestamps, file mtimes). No conversation timestamps, task progress records, or reviewer telemetry were available.
+- Sources checked: caller ledger; `/tmp/playhouse-qa/net.log`, `net-mutant.log`, `e2e4.log` (E2E phase/case lines, lock timestamps, file mtimes). No conversation timestamps, task progress records, or reviewer telemetry were available.
 - Timeline is **partial**: task start, implementation duration, and reporting time are unknown.
 
 ## Timeline
@@ -22,7 +22,7 @@ Slowest operations: build in smoke (114 s) and mutant (112 s) runs = 226 s, ≈ 
 ## Findings
 
 1. **Mutation check costs a full rebuild (112 s) for a one-line source mutation.** The mutant build used a different content-hashed cache directory (`…-921bb2…`) than the real tree (`…-63ef4e…`), so it compiled from scratch; restoring byte-identical source let the full suite reuse the original cache (build 1 s). The mutation check was valuable (proved the new assertion detects removal of the fallback), so the cost is not avoidable by skipping it.
-   - Action: when a mutation check is used, run it in the same cache only if the build script supports incremental rebuilds within one DerivedData; otherwise accept the cost but record it in the ledger as "mutation rebuild". Smallest next step: check whether the content-hash key in the E2E build cache (`StationAI-E2E-BuildCache/<hash>/DerivedData`) could seed a new key from the nearest existing DerivedData so Xcode builds incrementally.
+   - Action: when a mutation check is used, run it in the same cache only if the build script supports incremental rebuilds within one DerivedData; otherwise accept the cost but record it in the ledger as "mutation rebuild". Smallest next step: check whether the content-hash key in the E2E build cache (`Playhouse-E2E-BuildCache/<hash>/DerivedData`) could seed a new key from the nearest existing DerivedData so Xcode builds incrementally.
    - Verify: mutant run `E2E phase=build elapsed_seconds` drops well below 112 s.
 
 2. **Smoke-then-full ordering paid off.** The full run reused the smoke build (1 s vs 114 s), so the smoke run added only ≈ 5 s of case/fixture time on top of a build that was required anyway. No change recommended.

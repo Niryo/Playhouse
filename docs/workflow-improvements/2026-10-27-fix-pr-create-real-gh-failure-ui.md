@@ -15,7 +15,7 @@
 | Unknown, after review | Helper repair | Unavailable | Changed comparison to `XCUIScreen` at 0.25s after hover versus 1.5s later |
 | 20:15:39 | Final focused Tart run passed | 44.543s case; 212.132s shell | Measured, run `20261027T201539Z-6345`; 167.589s shell overhead |
 | Unknown | Parity and final static reviews | Unavailable | 67 named cases passed parity; task/UI/architecture approved fingerprint `60f1b2499afee4aa1ad55ade19b53d56d8234376ab5a1ec2c9aefc5f43c8f321` |
-| Unknown | Full CLI/XPC suite attempt stopped before cases | 1.781s | Measured; unrelated pre-existing button-feedback lint failures in `KanbanBoardView.swift`, `StationAIApp.swift`, and `TaskConversationView.swift` |
+| Unknown | Full CLI/XPC suite attempt stopped before cases | 1.781s | Measured; unrelated pre-existing button-feedback lint failures in `KanbanBoardView.swift`, `PlayhouseApp.swift`, and `TaskConversationView.swift` |
 
 The three focused cases consumed 121.598s of measured case runtime. The two runs with complete shell timing consumed 323.997s, including 87.948s of case runtime and 236.049s of setup/build/teardown overhead. Total directly observed execution is at least 359.428s: the latter two shells, the initial case time as a lower bound, and the failed full-suite attempt. This is not the task wall-clock duration because implementation, review, parity, initial-run shell overhead, and intervals between events lack timestamps.
 
@@ -31,7 +31,7 @@ For the two fully measured focused runs, non-case shell time was 236.049s, 72.9%
 
 ### Pin shell operations to the intended worktree
 
-An earlier command accidentally targeted the main checkout because the persisted shell retained its prior current directory. This analysis reproduced the hazard: a shell request carrying the worktree as its working directory still reported the main checkout as its persistent cwd, while explicit `git -C /Users/niryo/.cursor/worktrees/StationAI/fx7v` returned the intended tree. Use explicit absolute `git -C` and either an explicit `cd` in each repository command or scripts that accept a worktree root; add a preflight that prints and validates the resolved repository root before task-scoped inspection or mutation. Verify that a shell persisted from another checkout fails the preflight rather than acting on that checkout.
+An earlier command accidentally targeted the main checkout because the persisted shell retained its prior current directory. This analysis reproduced the hazard: a shell request carrying the worktree as its working directory still reported the main checkout as its persistent cwd, while explicit `git -C /Users/niryo/.cursor/worktrees/Playhouse/fx7v` returned the intended tree. Use explicit absolute `git -C` and either an explicit `cd` in each repository command or scripts that accept a worktree root; add a preflight that prints and validates the resolved repository root before task-scoped inspection or mutation. Verify that a shell persisted from another checkout fails the preflight rather than acting on that checkout.
 
 ### Classify pre-existing lint blockers before the full runtime gate
 

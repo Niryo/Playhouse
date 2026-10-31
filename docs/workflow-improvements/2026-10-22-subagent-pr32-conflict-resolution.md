@@ -10,7 +10,7 @@ This is a partial timeline for the 2026-10-22 conflict-resolution turn. The task
 | Phase | Observed interval or duration | Evidence and precision |
 | --- | --- | --- |
 | Context and merge inspection | Start/end unknown | Conversation: clean branch and conflicting PR #32; read-only merge-tree preview indicated overlaps. No command duration recorded. |
-| Merge and repair | Start/end unknown | `git merge origin/master` produced one content conflict in `StationAI/StationAIUITests.swift`; both `assertSubagentIconArtwork` and `assertContainsGreenForeground` were retained. No repair retry recorded. |
+| Merge and repair | Start/end unknown | `git merge origin/master` produced one content conflict in `Playhouse/PlayhouseUITests.swift`; both `assertSubagentIconArtwork` and `assertContainsGreenForeground` were retained. No repair retry recorded. |
 | Static review and parity | Start/end unknown | Task, UI, and architecture reviews approved fingerprint `8f5ea6fd170bc8a377bc3346b3d28452234a8c5b8896a5d526c788d8ebb03bf4`; parity found 56 matching cases. Review/tool durations unavailable. |
 | Full CLI/XPC verification | 15:04:47–about 15:07:15 UTC; 148 s reported | Command output: static checks 1 s, build 77 s, fixture 2 s, 56 cases 68.534 s total; all passed with no skip or retry. Phase values use integer shell seconds and case total uses monotonic fractional seconds, so they should not be added as exact subsecond totals. |
 | Merge commit | 15:06:35 UTC | Git commit metadata for `085ff6018434eaf568d52a66af3abc3bff351f82`. This timestamp overlaps the reported verification interval; available evidence does not establish a stricter operation order. |

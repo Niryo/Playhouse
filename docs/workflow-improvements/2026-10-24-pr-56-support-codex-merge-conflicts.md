@@ -11,10 +11,10 @@ This is a partial timeline. The conversation and supplied verification ledger id
 | Initial full CLI/XPC run, 67 cases, five failures | Supplied runtime ledger | About 237 s, estimated from reported output |
 | Focused six-case retry, two failures | Supplied runtime ledger | About 160 s, estimated from reported output |
 | Focused two-case retry, passed | Supplied runtime ledger | About 128 s, estimated from reported output |
-| Full CLI/XPC run, 68 passed, no skips | `/tmp/stationai-bridge.lSK5wk/bridge-tests.log` and runtime ledger | 144 s reported; 140.664 s inside Python |
+| Full CLI/XPC run, 68 passed, no skips | `/tmp/playhouse-bridge.lSK5wk/bridge-tests.log` and runtime ledger | 144 s reported; 140.664 s inside Python |
 | Portability repair: replace Pillow logo check with `sips` and standard library; task reapproval | Verification ledger | Unknown |
 | Focused logo/bridge-version case, passed | Supplied runtime ledger | About 6 s, estimated from reported output |
-| Final full CLI/XPC run, 68 passed, no skips | `/tmp/stationai-bridge.wsGkea/bridge-tests.log` and runtime ledger | 150 s reported; 146.686 s inside Python |
+| Final full CLI/XPC run, 68 passed, no skips | `/tmp/playhouse-bridge.wsGkea/bridge-tests.log` and runtime ledger | 150 s reported; 146.686 s inside Python |
 
 The six reported suite durations sum to approximately **825 seconds (13 minutes 45 seconds)** of tool/runtime wait. Three full runs account for approximately **531 seconds (64%)** of that observed test time. This is only a lower bound on task elapsed time; editing, reviews, communication, and intervals between tool calls are unmeasured. The two final full-suite log files contain per-case timings; earlier run artifacts were not supplied in the ledger. No visible UI suite ran under the routine verification policy.
 

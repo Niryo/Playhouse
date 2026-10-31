@@ -1,12 +1,12 @@
 # Workflow report: Redesign Sidebar Changes as Viewed and Unviewed — viewed-state repair turn
 
-- Task: Redesign Sidebar Changes as Viewed and Unviewed (StationAI task `F543169F-AC84-4A27-A7C7-6FF0FE87E1DF`)
+- Task: Redesign Sidebar Changes as Viewed and Unviewed (Playhouse task `F543169F-AC84-4A27-A7C7-6FF0FE87E1DF`)
 - Date: 2026-10-29
 - Scope: this turn only (the untracked-file re-edit regression and its repair). Two earlier reports dated 2026-10-29 cover prior turns of the same task and are untouched.
 
 ## What this turn changed
 
-Working-tree delta at report time (`git diff --stat`, measured): 9 files, 541 insertions / 328 deletions, concentrated in `StationAI/App/WorkspaceChanges.swift` (306 lines changed), `StationAI/StationAIUITests/StationAIUITests.swift` (210), and `scripts/test-bridge.py` (183).
+Working-tree delta at report time (`git diff --stat`, measured): 9 files, 541 insertions / 328 deletions, concentrated in `Playhouse/App/WorkspaceChanges.swift` (306 lines changed), `Playhouse/PlayhouseUITests/PlayhouseUITests.swift` (210), and `scripts/test-bridge.py` (183).
 
 Behavior: `WorkspaceChangeScanner.inventorySynchronously` now compares each entry against its saved snapshot (bytes plus existence) and returns re-edited files to Unviewed; `WorkspaceChangeEntry.hasViewedSnapshot` drives the diff baseline label; `diffSynchronously` prefers the saved snapshot baseline; `captureViewedChange` stages via `git add --all` at the user's explicit request.
 
@@ -42,7 +42,7 @@ Observed: three static reviews (~440s of agent time before the first runtime run
 
 Action: when a change touches `git status --porcelain` parsing or any `Dictionary(uniqueKeysWithValues:)` / `Set` construction over path keys, run the directly affected workspace-changes cases with `scripts/test-e2e.sh --case <id>` before launching the static review batch. The repository already permits cheap checks during implementation ("The main agent may run cheap parity/static checks during source implementation"); a focused case on the file you just rewrote is the same class of check. Verify impact: the next workspace-changes task should show its first full-suite run green, with any trap-class failure appearing in a focused run that costs ~160s instead of ~390s.
 
-Secondary, in the same root cause: `uniqueKeysWithValues` over parsed Git output is a latent trap wherever it appears. A one-line grep gate (`grep -rn 'uniqueKeysWithValues' StationAI/App`) in the pre-review checklist would have flagged both sites in under a second. This is cheaper than asking a reviewer agent to notice it, and reviewers demonstrably did not.
+Secondary, in the same root cause: `uniqueKeysWithValues` over parsed Git output is a latent trap wherever it appears. A one-line grep gate (`grep -rn 'uniqueKeysWithValues' Playhouse/App`) in the pre-review checklist would have flagged both sites in under a second. This is cheaper than asking a reviewer agent to notice it, and reviewers demonstrably did not.
 
 ### 2. Build overhead dominates focused reruns
 
@@ -60,8 +60,8 @@ Action: record the review's input fingerprint and start time in the per-task ver
 
 Checked: `scripts/test-e2e.sh`, `scripts/test-bridge.py`, `/tmp` artifact directories, the working-tree diff, and the supplied verification ledger.
 
-- Per-case durations **are** emitted: `scripts/test-bridge.py:6293` prints `E2E case=<name> elapsed_seconds=<n>` and `scripts/test-e2e.sh` prints `E2E phase=` and `E2E total_seconds=`. The gap is retention, not production — both go to stderr, and the artifact directory is a fresh `mktemp -d /tmp/stationai-bridge.XXXXXX` per run with no stable index. Ranking the slowest cases across runs therefore requires scraping a live transcript, which is why this report can only give suite totals and not a per-case ranking for the 92-case runs.
-  - Smallest next step: have the `cleanup` trap in `scripts/test-e2e.sh` append one line per run (`timestamp, case count, total_seconds, case_seconds, exit_status`) and the collected `E2E case=` lines to a fixed path such as `/tmp/stationai-bridge-history.log`. Verify impact: the next workflow report can name the three slowest contract cases with measured numbers instead of declaring the data unavailable.
+- Per-case durations **are** emitted: `scripts/test-bridge.py:6293` prints `E2E case=<name> elapsed_seconds=<n>` and `scripts/test-e2e.sh` prints `E2E phase=` and `E2E total_seconds=`. The gap is retention, not production — both go to stderr, and the artifact directory is a fresh `mktemp -d /tmp/playhouse-bridge.XXXXXX` per run with no stable index. Ranking the slowest cases across runs therefore requires scraping a live transcript, which is why this report can only give suite totals and not a per-case ranking for the 92-case runs.
+  - Smallest next step: have the `cleanup` trap in `scripts/test-e2e.sh` append one line per run (`timestamp, case count, total_seconds, case_seconds, exit_status`) and the collected `E2E case=` lines to a fixed path such as `/tmp/playhouse-bridge-history.log`. Verify impact: the next workflow report can name the three slowest contract cases with measured numbers instead of declaring the data unavailable.
 - Implementation and diagnosis intervals have **no** source at all. Nothing timestamps the boundary between "user reported the bug" and "edit applied". This report labels those intervals unknown rather than estimating them. Resolving it would require the task card or conversation record to carry per-turn start/end timestamps; that producing component was not verified in this turn, so no file or owner is named.
 
 ### 5. Architecture CONCERN carried to completion, deliberately

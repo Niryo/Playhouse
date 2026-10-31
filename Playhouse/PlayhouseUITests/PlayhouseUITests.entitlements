@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.temporary-exception.sbpl</key>
+	<array>
+		<string>(allow network-outbound (subpath "/private/tmp/playhouse-bridge/"))</string>
+	</array>
+	<key>com.apple.security.temporary-exception.files.absolute-path.read-write</key>
+	<array>
+		<string>/tmp/playhouse-bridge-workspaces/</string>
+		<string>/private/tmp/playhouse-bridge-workspaces/</string>
+		<string>/tmp/playhouse-ui-test-fixtures/</string>
+		<string>/private/tmp/playhouse-ui-test-fixtures/</string>
+		<string>/tmp/playhouse-bridge/</string>
+		<string>/private/tmp/playhouse-bridge/</string>
+		<string>/tmp/playhouse-ui-test-data/</string>
+		<string>/private/tmp/playhouse-ui-test-data/</string>
+	</array>
+</dict>
+</plist>

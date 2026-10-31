@@ -11,7 +11,7 @@ Date: 2026-10-22 (Asia/Jerusalem)
 | Implementation | Duration unknown; changed files last modified at 22:27:54–22:29:55 local | Working-tree file metadata and diff; modification times do not measure active work |
 | First static review and repair | Duration unknown; UI coverage rejected because copied-text checks covered only the beginning and end, and the target used a test-only identifier. A middle-plan assertion and accessibility-label target were added. | Task handoff; no per-review start/end times retained |
 | Repeat static review | Duration unknown; task, UI, and architecture reviews approved | Task handoff; no per-review timing retained |
-| Final CLI/XPC run | 171 s measured; approximately 22:30:38–22:33:29 local from artifact timestamps and runner total | `scripts/test-e2e.sh` phase output supplied in task handoff; `/tmp/stationai-bridge.Nefazg/bridge-tests.log` |
+| Final CLI/XPC run | 171 s measured; approximately 22:30:38–22:33:29 local from artifact timestamps and runner total | `scripts/test-e2e.sh` phase output supplied in task handoff; `/tmp/playhouse-bridge.Nefazg/bridge-tests.log` |
 | Reporting/handoff | Duration unknown | Task handoff; no completion timestamp for the source task |
 
 The observed runner time divides into build 79 s (46.2%), cases 89 s (52.0%), and approximately 3 s (1.8%) for static checks and fixture/setup combined. The full task duration and active agent time cannot be reconciled because the task start, review spans, implementation span, and source-task completion time were not recorded in the available evidence. The final run passed 56 named cases with zero skips; parity checked 56 cases and the diff check was clean. No focused retry is reported for this task.

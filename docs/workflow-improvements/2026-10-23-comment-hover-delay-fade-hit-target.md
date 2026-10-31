@@ -10,7 +10,7 @@ This is a partial timeline. The conversation establishes the request, implementa
 | --- | --- | ---: | --- |
 | First focused Tart run, artifact creation to exported status | 19:34:06–19:37:00 | ≈174 s | Run ID timestamp and `exit-status.txt` modification time; approximate because neither is an explicit start/end event |
 | First guest lock to Xcode test completion | 19:34:47.722–19:36:49.846 | 122.1 s | `20261023T193406Z-56685/ui-test.log`; lock wait 0.000 s |
-| First case execution | 19:36:18.960–19:36:46.399 | 27.4 s | XCTest timestamps; hover delay, top alignment, prompt dismissal, and both edge probes reached before failure at `StationAIUITests.swift:3743` while waiting for `comment-input-field` |
+| First case execution | 19:36:18.960–19:36:46.399 | 27.4 s | XCTest timestamps; hover delay, top alignment, prompt dismissal, and both edge probes reached before failure at `PlayhouseUITests.swift:3743` while waiting for `comment-input-field` |
 | Between observed host artifact end and next run ID | ≈19:37:00–19:37:09 | ≈9 s | Artifact timestamps; activity unknown |
 | Second focused Tart run, artifact creation to exported status | 19:37:09–19:39:49 | ≈160 s | Run ID timestamp and `exit-status.txt` modification time; approximate |
 | Second guest lock to Xcode test completion | 19:37:48.525–19:39:40.060 | 111.5 s | `20261023T193709Z-57843/ui-test.log`; lock wait 0.000 s |

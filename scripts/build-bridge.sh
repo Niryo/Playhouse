@@ -3,11 +3,11 @@ set -euo pipefail
 
 repository_root="${SRCROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 source "${repository_root}/scripts/app-profile.sh"
-stationai_load_app_profile "${repository_root}"
-stationai_verify_build_identity "${PRODUCT_BUNDLE_IDENTIFIER:-com.stationai.app}"
+playhouse_load_app_profile "${repository_root}"
+playhouse_verify_build_identity "${PRODUCT_BUNDLE_IDENTIFIER:-com.playhouse.app}"
 app_contents="${TARGET_BUILD_DIR:?}/${CONTENTS_FOLDER_PATH:?}"
 app_macos="${app_contents}/MacOS"
-cli_executable="${app_macos}/stationai-cli"
+cli_executable="${app_macos}/playhouse-cli"
 app_executable="${app_macos}/${EXECUTABLE_NAME:?}"
 # The daemon ships flat in Contents/MacOS, a sibling of the CLI, not as its own
 # bundle: `Bundle.main` resolution for any executable under
@@ -16,7 +16,7 @@ app_executable="${app_macos}/${EXECUTABLE_NAME:?}"
 # without needing a separate bundle/Info.plist (unlike the XPC service this
 # replaced, which needed its own bundle specifically for XPC's service
 # discovery).
-daemon_executable="${app_macos}/stationai-daemon"
+daemon_executable="${app_macos}/playhouse-daemon"
 architecture="${CURRENT_ARCH:-}"
 if [[ -z "${architecture}" || "${architecture}" == "undefined_arch" ]]; then
   architecture="${ARCHS%% *}"
@@ -34,40 +34,40 @@ fi
 mkdir -p "${app_macos}"
 
 if [[ ! -x "${app_executable}" ]]; then
-  printf 'The StationAI app executable is missing before the bridge tools are embedded: %s\n' "${app_executable}" >&2
+  printf 'The Playhouse app executable is missing before the bridge tools are embedded: %s\n' "${app_executable}" >&2
   exit 1
 fi
 
 shared_sources=(
-  "${repository_root}/StationAI/App/BoardTask.swift"
-  "${repository_root}/StationAI/App/ConversationSubject.swift"
-  "${repository_root}/StationAI/App/WorkspaceSupport.swift"
-  "${repository_root}/StationAI/App/WorkspaceChanges.swift"
-  "${repository_root}/StationAI/App/CodexAppServerClient.swift"
-  "${repository_root}/StationAI/App/ConversationModel.swift"
-  "${repository_root}/StationAI/App/ClaudeCodeClient.swift"
-  "${repository_root}/StationAI/App/ConversationTranscriptStore.swift"
-  "${repository_root}/StationAI/App/StandaloneChatStore.swift"
-  "${repository_root}/StationAI/App/BridgeCore.swift"
-  "${repository_root}/StationAI/Bridge/BridgeContract.swift"
-  "${repository_root}/StationAI/Bridge/BridgeSocket.swift"
+  "${repository_root}/Playhouse/App/BoardTask.swift"
+  "${repository_root}/Playhouse/App/ConversationSubject.swift"
+  "${repository_root}/Playhouse/App/WorkspaceSupport.swift"
+  "${repository_root}/Playhouse/App/WorkspaceChanges.swift"
+  "${repository_root}/Playhouse/App/CodexAppServerClient.swift"
+  "${repository_root}/Playhouse/App/ConversationModel.swift"
+  "${repository_root}/Playhouse/App/ClaudeCodeClient.swift"
+  "${repository_root}/Playhouse/App/ConversationTranscriptStore.swift"
+  "${repository_root}/Playhouse/App/StandaloneChatStore.swift"
+  "${repository_root}/Playhouse/App/BridgeCore.swift"
+  "${repository_root}/Playhouse/Bridge/BridgeContract.swift"
+  "${repository_root}/Playhouse/Bridge/BridgeSocket.swift"
 )
 
-bridge_stamp="${TARGET_BUILD_DIR}/.stationai-bridge-build-stamp-${PRODUCT_BUNDLE_IDENTIFIER//./_}"
+bridge_stamp="${TARGET_BUILD_DIR}/.playhouse-bridge-build-stamp-${PRODUCT_BUNDLE_IDENTIFIER//./_}"
 bridge_inputs=(
   "${BASH_SOURCE[0]}"
   "${shared_sources[@]}"
-  "${repository_root}/StationAI/Bridge/DaemonMain.swift"
-  "${repository_root}/StationAI/CLI/BridgeClient.swift"
-  "${repository_root}/StationAI/CLI/StationAICLI.swift"
+  "${repository_root}/Playhouse/Bridge/DaemonMain.swift"
+  "${repository_root}/Playhouse/CLI/BridgeClient.swift"
+  "${repository_root}/Playhouse/CLI/PlayhouseCLI.swift"
   "${architecture}-apple-macosx${deployment_target}"
   "${sdk}"
   "$(xcrun --sdk macosx swiftc -version)"
   "${CONFIGURATION:-Debug}"
-  "${PRODUCT_BUNDLE_IDENTIFIER:-com.stationai.app}"
+  "${PRODUCT_BUNDLE_IDENTIFIER:-com.playhouse.app}"
   "${MARKETING_VERSION:-1.0}"
   "${CURRENT_PROJECT_VERSION:-1}"
-  "${STATIONAI_PROFILE_ROOT}"
+  "${PLAYHOUSE_PROFILE_ROOT}"
 )
 bridge_fingerprint="$(
   {
@@ -84,8 +84,8 @@ bridge_fingerprint="$(
 metadata_matches() {
   local app_info="${app_contents}/Info.plist"
   [[ -f "${app_info}" ]] || return 1
-  [[ "$(/usr/libexec/PlistBuddy -c 'Print :StationAIStoreCompatibilityVersion' "${app_info}" 2>/dev/null)" == "2" ]] &&
-    [[ "$(/usr/libexec/PlistBuddy -c 'Print :StationAISourceWorktree' "${app_info}" 2>/dev/null)" == "${STATIONAI_PROFILE_ROOT}" ]]
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :PlayhouseStoreCompatibilityVersion' "${app_info}" 2>/dev/null)" == "2" ]] &&
+    [[ "$(/usr/libexec/PlistBuddy -c 'Print :PlayhouseSourceWorktree' "${app_info}" 2>/dev/null)" == "${PLAYHOUSE_PROFILE_ROOT}" ]]
 }
 
 if [[ -x "${cli_executable}" && -x "${daemon_executable}" &&
@@ -107,7 +107,7 @@ xcrun --sdk macosx swiftc \
   -framework SwiftData \
   -framework Combine \
   "${shared_sources[@]}" \
-  "${repository_root}/StationAI/Bridge/DaemonMain.swift" \
+  "${repository_root}/Playhouse/Bridge/DaemonMain.swift" \
   -o "${daemon_executable}"
 
 xcrun --sdk macosx swiftc \
@@ -117,10 +117,10 @@ xcrun --sdk macosx swiftc \
   -O \
   "${debug_flags[@]}" \
   -framework Foundation \
-  "${repository_root}/StationAI/Bridge/BridgeContract.swift" \
-  "${repository_root}/StationAI/Bridge/BridgeSocket.swift" \
-  "${repository_root}/StationAI/CLI/BridgeClient.swift" \
-  "${repository_root}/StationAI/CLI/StationAICLI.swift" \
+  "${repository_root}/Playhouse/Bridge/BridgeContract.swift" \
+  "${repository_root}/Playhouse/Bridge/BridgeSocket.swift" \
+  "${repository_root}/Playhouse/CLI/BridgeClient.swift" \
+  "${repository_root}/Playhouse/CLI/PlayhouseCLI.swift" \
   -o "${cli_executable}"
 
 # Checked without launching the selected executable, including overrides. Only
@@ -128,25 +128,25 @@ xcrun --sdk macosx swiftc \
 # resolve their identity from it via `Bundle.main`, since both live flat under
 # this same bundle's Contents/MacOS, unlike the XPC service this replaced
 # (which needed its own bundle and its own stamped Info.plist).
-python3 - "${app_contents}/Info.plist" "${STATIONAI_PROFILE_ROOT}" <<'PYMETA'
+python3 - "${app_contents}/Info.plist" "${PLAYHOUSE_PROFILE_ROOT}" <<'PYMETA'
 import plistlib
 import sys
 path, worktree = sys.argv[1:3]
 with open(path, 'rb') as stream:
     info = plistlib.load(stream)
-info['StationAIStoreCompatibilityVersion'] = '2'
-info['StationAISourceWorktree'] = worktree
+info['PlayhouseStoreCompatibilityVersion'] = '2'
+info['PlayhouseSourceWorktree'] = worktree
 with open(path, 'wb') as stream:
     plistlib.dump(info, stream)
 PYMETA
 
 chmod 755 "${cli_executable}" "${daemon_executable}"
 if [[ "${app_executable}" -ef "${cli_executable}" || "${app_executable}" -ef "${daemon_executable}" ]]; then
-  printf 'The CLI/daemon must not replace the StationAI app executable: %s\n' "${app_executable}" >&2
+  printf 'The CLI/daemon must not replace the Playhouse app executable: %s\n' "${app_executable}" >&2
   exit 1
 fi
 
 codesign --force --sign - --timestamp=none "${cli_executable}"
 codesign --force --sign - --timestamp=none "${daemon_executable}"
 printf '%s\n' "${bridge_fingerprint}" > "${bridge_stamp}"
-printf 'Embedded stationai CLI and bridge daemon in %s\n' "${app_contents}"
+printf 'Embedded playhouse CLI and bridge daemon in %s\n' "${app_contents}"

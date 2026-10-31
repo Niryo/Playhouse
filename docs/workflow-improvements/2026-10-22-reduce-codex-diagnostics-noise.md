@@ -4,7 +4,7 @@ Task `88C5B1BB-6105-4992-AEC4-0BDE96ABE241` (Investigate Issue Using App Logs or
 
 ## Timeline
 
-Times below are UTC. Progress events are from the retained StationAI Diagnostics JSONL files; command durations and case timings are from the task's final `scripts/test-e2e.sh` output and `/tmp/stationai-bridge.8VRPzG/bridge-tests.log`. Progress timestamps mark phase announcements, not continuous agent work.
+Times below are UTC. Progress events are from the retained Playhouse Diagnostics JSONL files; command durations and case timings are from the task's final `scripts/test-e2e.sh` output and `/tmp/playhouse-bridge.8VRPzG/bridge-tests.log`. Progress timestamps mark phase announcements, not continuous agent work.
 
 | Interval | Activity | Duration and basis |
 | --- | --- | --- |

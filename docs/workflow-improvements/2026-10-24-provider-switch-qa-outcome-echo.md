@@ -1,8 +1,8 @@
 # Workflow report: provider switch QA and leaked outcome echo
 
 - Date: 2026-10-24
-- Task: "Switching Claude ⇄ Codex: live QA with haiku and gpt-6-luna, fix issues" (leaked `stationai-cli task outcome <id> completed` line at the end of a Codex final answer after a Claude→Codex switch). No task ID.
-- Evidence checked: main-agent ledger (supplied); `/tmp/stationai-qa/run1.log`, `e2e.log`, `e2e2.log`, `focus.log`; file mtimes in `/tmp/stationai-qa/`; Xcode `LogStoreManifest.plist` in `/tmp/stationai-qa/dd/Logs/Build`; `/tmp/stationai-bridge.*` run directories and their `bridge-tests.log`; E2E build cache directory mtimes; `scripts/test-live-integration.{sh,py}`; `scripts/fixtures/codex-app-server-fixture.py`. I did not have the task conversation.
+- Task: "Switching Claude ⇄ Codex: live QA with haiku and gpt-6-luna, fix issues" (leaked `playhouse-cli task outcome <id> completed` line at the end of a Codex final answer after a Claude→Codex switch). No task ID.
+- Evidence checked: main-agent ledger (supplied); `/tmp/playhouse-qa/run1.log`, `e2e.log`, `e2e2.log`, `focus.log`; file mtimes in `/tmp/playhouse-qa/`; Xcode `LogStoreManifest.plist` in `/tmp/playhouse-qa/dd/Logs/Build`; `/tmp/playhouse-bridge.*` run directories and their `bridge-tests.log`; E2E build cache directory mtimes; `scripts/test-live-integration.{sh,py}`; `scripts/fixtures/codex-app-server-fixture.py`. I did not have the task conversation.
 - Times are local (UTC+3). "Measured" means the time came from a log or tool output. "Derived" means it was worked out from file mtimes or log timestamps. "Estimated" means it came from the ledger with no timestamp behind it.
 
 ## Timeline (partial)
@@ -12,17 +12,17 @@ The task start is not visible. The first artifact is the QA build start at 13:41
 | # | Phase | Window / duration | Basis |
 |---|---|---|---|
 | 1 | Orientation, rollout inspection (root cause 1) | unknown, "a few minutes" | estimated (ledger) |
-| 2 | First QA bundle build (`/tmp/stationai-qa/dd`) | 13:41:07–13:42:26, 79.6s | measured (Xcode manifest) |
+| 2 | First QA bundle build (`/tmp/playhouse-qa/dd`) | 13:41:07–13:42:26, 79.6s | measured (Xcode manifest) |
 | 2 | QA fixture prepared | 13:42:27 | derived (mtime) |
 | 3 | Live QA round 1, 12 provider turns | ends 13:45:42; turns sum to 150s (10–20s each) | measured per turn (run1.log, 1s resolution) |
 | 4–7 | Replays ×6, Codex baseline ×6, isolation ×6, two reverted prompt experiments, implementation, 4 QA rebuilds, live QA round 2 | ~13:45:42–14:09:22 (~23.7 min) overall, no per-step breakdown | derived window; contents from ledger |
 | 2 | Last retained QA rebuild | 14:04:47–14:05:58, 70.8s | measured (Xcode manifest) |
 | 8–10 | Static reviews: round 1 (max 106s), round 2 (max 65s), narrow task re-review (91s) | about 262s of reviewer wall time. The rounds ran one after another; reviewers within a round ran in parallel | measured per reviewer (ledger) |
 | 11 | Full E2E #1 | 14:09:22–14:13:15, 233s: build cache miss 106s, fixture 2s, cases 125s; 63/64 | measured (e2e.log) |
-| 11 | Focused retry 1 (same failure: empty final) | 14:14:16, case 2.37s | measured (`stationai-bridge.vkwYRv`) |
-| 11 | Focused retry 2 (same failure) | 14:15:27, case 2.21s | measured (`stationai-bridge.xHOQu9`) |
+| 11 | Focused retry 1 (same failure: empty final) | 14:14:16, case 2.37s | measured (`playhouse-bridge.vkwYRv`) |
+| 11 | Focused retry 2 (same failure) | 14:15:27, case 2.21s | measured (`playhouse-bridge.xHOQu9`) |
 | 11 | Inspection, manual fixture drive (hung until 120s tool timeout), fixture fix, E2E rebuild `594e1da6` | 14:15:29–14:20:15, ~4.8 min | derived window; 120s hang from ledger |
-| 11 | Focused retry 3: new failure, `conversation history` missing `STATIONAI_E2E_CODEX_EXECUTABLE` | 14:20:17, case 3.25s | measured (`stationai-bridge.MFdTUW`) |
+| 11 | Focused retry 3: new failure, `conversation history` missing `PLAYHOUSE_E2E_CODEX_EXECUTABLE` | 14:20:17, case 3.25s | measured (`playhouse-bridge.MFdTUW`) |
 | 11 | Focused retry 4: pass | 14:20:37, total 5s | measured (focus.log) |
 | 12 | Static re-review (task 18s, UI 41s, in parallel) | ~14:20:40–14:21:39 | measured per reviewer; window derived |
 | 13 | Final full E2E: 64/64, 0 skipped | 14:21:39–14:23:46, 127s (cases 124s, build reused) | measured (e2e2.log) |
@@ -69,14 +69,14 @@ Together these are about 36% of the case phase. They are not related to this tas
 - **Verify:** count task-verifier coverage rejections per source task. The target is zero.
 
 ### 4. Measure live-integration build cost before deciding whether to cache it
-- **Evidence:** `scripts/test-live-integration.sh` builds into `StationAI-Live-Integration-<uuid>`, a fresh DerivedData directory on every run, unless `STATIONAI_APP_PATH` is set. It does not print a build duration. Separately, this task built the QA bundle (`/tmp/stationai-qa/dd`) and the E2E cache (cache miss, 106s), and these builds did not share output. I could not tell whether the step-9 live scenarios rebuilt or reused `STATIONAI_APP_PATH`.
+- **Evidence:** `scripts/test-live-integration.sh` builds into `Playhouse-Live-Integration-<uuid>`, a fresh DerivedData directory on every run, unless `PLAYHOUSE_APP_PATH` is set. It does not print a build duration. Separately, this task built the QA bundle (`/tmp/playhouse-qa/dd`) and the E2E cache (cache miss, 106s), and these builds did not share output. I could not tell whether the step-9 live scenarios rebuilt or reused `PLAYHOUSE_APP_PATH`.
 - **Action:** print `live phase=build elapsed_seconds=…` in `test-live-integration.sh`, matching the E2E phase lines. Once it is measured, decide whether a content-keyed DerivedData path is compatible with the per-run bundle identifier the script sets.
 - **Verify:** live runs report their build time, and repeated runs on unchanged sources show whether they paid for a cold build.
 
 ## Telemetry gaps
 - **Task start, orientation and step boundaries:** missing. The ledger did not capture wall-clock times, and I had no conversation timeline.
 - **Replay, baseline, isolation and prompt-experiment outputs:** not retained. Only `run1.log` exists, so I cannot measure the counts or durations of the 13:45–14:09 work.
-- **QA rebuilds:** the ledger records 5, but `/tmp/stationai-qa/dd` retains logs for only 2 (79.6s and 70.8s). The other 3 either used another path or were not retained.
+- **QA rebuilds:** the ledger records 5, but `/tmp/playhouse-qa/dd` retains logs for only 2 (79.6s and 70.8s). The other 3 either used another path or were not retained.
 - **Live QA round 2 and step-9 live scenarios:** the console output was not saved. Only the cross-provider handoff time (40.0s) is in the ledger.
 - **Static reviewer durations:** come only from the ledger. Repair time between review rounds is unknown.
 - **Active agent time vs tool wait:** cannot be separated from the available evidence.

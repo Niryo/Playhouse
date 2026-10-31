@@ -3,7 +3,7 @@ set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tool_directory="${repository_root}/scripts/monaco-diff"
-resource_directory="${repository_root}/StationAI/Resources/Monaco"
+resource_directory="${repository_root}/Playhouse/Resources/Monaco"
 
 npm ci --prefix "${tool_directory}"
 npm run --prefix "${tool_directory}" build

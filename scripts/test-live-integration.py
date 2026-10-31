@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Live integration suite for StationAI's real conversation providers.
+"""Live integration suite for Playhouse's real conversation providers.
 
 Shared scenarios run against the provider chosen with --provider or
-STATIONAI_LIVE_PROVIDER (claude by default, codex, or all). Scenarios that
+PLAYHOUSE_LIVE_PROVIDER (claude by default, codex, or all). Scenarios that
 exercise one runtime's unique behavior run only for that provider, and the
 cross-provider handoff runs only with `all`. Every scenario uses the real
 installed CLI and its existing sign-in; nothing is mocked.
@@ -23,10 +23,10 @@ import uuid
 from pathlib import Path
 
 
-MARKER_NAME = ".stationai-live-integration-owner"
-MARKER_VALUE = "StationAI live integration suite owns this disposable workspace (v1).\n"
-BRIDGE_FIXTURE_MARKER_VALUE = "StationAI bridge tests own this deterministic fixture (v1).\n"
-WORKTREE_MARKER_VALUE = "StationAI live integration suite owns this worktree root.\n"
+MARKER_NAME = ".playhouse-live-integration-owner"
+MARKER_VALUE = "Playhouse live integration suite owns this disposable workspace (v1).\n"
+BRIDGE_FIXTURE_MARKER_VALUE = "Playhouse bridge tests own this deterministic fixture (v1).\n"
+WORKTREE_MARKER_VALUE = "Playhouse live integration suite owns this worktree root.\n"
 PROVIDERS = ("claude", "codex")
 MINIMUM_CLAUDE_VERSION = "2.1.296"
 
@@ -110,22 +110,22 @@ class LiveWorkspace:
     def __init__(self, provider, fixture, cli, service_name):
         self.provider = provider
         self.cli = cli
-        self.root = Path(tempfile.mkdtemp(prefix=f"stationai-live-{provider}-"))
+        self.root = Path(tempfile.mkdtemp(prefix=f"playhouse-live-{provider}-"))
         (self.root / MARKER_NAME).write_text(MARKER_VALUE, encoding="utf-8")
         self.first = self.root / "primary"
         self.second = self.root / "secondary"
         shutil.copytree(fixture / "suggested-parent/primary", self.first)
         shutil.copytree(fixture / "suggested-parent/group/secondary", self.second)
-        self.data_directory = self.root / "stationai-data"
+        self.data_directory = self.root / "playhouse-data"
         self.data_directory.mkdir()
         self.worktree_directory = self.data_directory / "worktrees"
         self.worktree_directory.mkdir()
-        (self.worktree_directory / ".stationai-test-owner").write_text(WORKTREE_MARKER_VALUE, encoding="utf-8")
+        (self.worktree_directory / ".playhouse-test-owner").write_text(WORKTREE_MARKER_VALUE, encoding="utf-8")
         self.environment = os.environ.copy()
-        self.environment["STATIONAI_DATA_DIRECTORY"] = str(self.data_directory)
-        self.environment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = str(self.worktree_directory)
-        self.environment["STATIONAI_E2E_DEFAULTS_SUITE"] = f"com.stationai.live-integration.{uuid.uuid4()}"
-        self.environment["STATIONAI_BRIDGE_SERVICE_NAME"] = service_name
+        self.environment["PLAYHOUSE_DATA_DIRECTORY"] = str(self.data_directory)
+        self.environment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"] = str(self.worktree_directory)
+        self.environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = f"com.playhouse.live-integration.{uuid.uuid4()}"
+        self.environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = service_name
 
     def run_cli(self, *command):
         result = subprocess.run(
@@ -222,13 +222,13 @@ class LiveWorkspace:
         ).stdout
         managed_worktrees = sorted(
             path.name for path in self.worktree_directory.iterdir()
-            if path.name != ".stationai-test-owner"
+            if path.name != ".playhouse-test-owner"
         )
         return {"branches": branches, "worktrees": worktrees, "managedWorktrees": managed_worktrees}
 
     def remove(self):
         marker = self.root / MARKER_NAME
-        worktree_marker = self.worktree_directory / ".stationai-test-owner"
+        worktree_marker = self.worktree_directory / ".playhouse-test-owner"
         if (
             marker.is_file() and marker.read_text(encoding="utf-8") == MARKER_VALUE
             and worktree_marker.is_file() and worktree_marker.read_text(encoding="utf-8") == WORKTREE_MARKER_VALUE
@@ -251,15 +251,15 @@ def scenario_plan_edit_resume_and_reload(ws):
     created = ws.create_task(f"Two-root {provider} integration", first, second)
     task_id = created["id"]
     require(created["conversationProvider"] == provider, f"The task should use {provider}: {created}")
-    primary_marker = "StationAI primary integration marker 7F34C2"
-    secondary_marker = "StationAI secondary integration marker A19D06"
-    primary_file = first / "stationai-primary.txt"
-    secondary_file = second / "stationai-secondary.txt"
+    primary_marker = "Playhouse primary integration marker 7F34C2"
+    secondary_marker = "Playhouse secondary integration marker A19D06"
+    primary_file = first / "playhouse-primary.txt"
+    secondary_file = second / "playhouse-secondary.txt"
     primary_baseline = primary_file.read_text(encoding="utf-8")
     secondary_baseline = secondary_file.read_text(encoding="utf-8")
     plan_history, plan_events = ws.stream_turn(
         task_id,
-        f"Plan how you would append exactly the line '{primary_marker}' to stationai-primary.txt. Inspect the repository as needed, but do not edit any files. Reply with a concise plan.",
+        f"Plan how you would append exactly the line '{primary_marker}' to playhouse-primary.txt. Inspect the repository as needed, but do not edit any files. Reply with a concise plan.",
         mode="plan",
     )
     require(primary_file.read_text(encoding="utf-8") == primary_baseline, "Plan mode changed the primary repository file.")
@@ -272,11 +272,11 @@ def scenario_plan_edit_resume_and_reload(ws):
 
     first_history, first_events = ws.stream_turn(
         task_id,
-        f"Edit the committed baseline files in both selected repositories. In {first.name}, append exactly the line '{primary_marker}' to stationai-primary.txt. In {second.name}, append exactly the line '{secondary_marker}' to stationai-secondary.txt. Then run a shell command that prints STATIONAI_FIRST_TURN_COMMAND_OK. Do not edit other files. Reply with a short summary.",
+        f"Edit the committed baseline files in both selected repositories. In {first.name}, append exactly the line '{primary_marker}' to playhouse-primary.txt. In {second.name}, append exactly the line '{secondary_marker}' to playhouse-secondary.txt. Then run a shell command that prints PLAYHOUSE_FIRST_TURN_COMMAND_OK. Do not edit other files. Reply with a short summary.",
     )
     require(primary_marker in primary_file.read_text(encoding="utf-8"), "First turn did not change the primary repository file.")
     require(secondary_marker in secondary_file.read_text(encoding="utf-8"), "First turn did not change the secondary repository file.")
-    require(any(event.get("type") == "activity" and "STATIONAI_FIRST_TURN_COMMAND_OK" in json.dumps(event) for event in first_events), "First turn did not stream the shell command output.")
+    require(any(event.get("type") == "activity" and "PLAYHOUSE_FIRST_TURN_COMMAND_OK" in json.dumps(event) for event in first_events), "First turn did not stream the shell command output.")
     require(first_history.get("messages"), "First turn did not return conversation messages.")
     first_activities = first_history.get("activities", [])
     require(first_activities, "First turn history omitted its activity rows.")
@@ -294,17 +294,17 @@ def scenario_plan_edit_resume_and_reload(ws):
     changed_rows = [
         event for event in first_events
         if event.get("type") == "activity"
-        and ("editing" in json.dumps(event).lower() or "stationai-primary.txt" in json.dumps(event) or "stationai-secondary.txt" in json.dumps(event))
+        and ("editing" in json.dumps(event).lower() or "playhouse-primary.txt" in json.dumps(event) or "playhouse-secondary.txt" in json.dumps(event))
     ]
     require(changed_rows, "First turn did not report a file-change activity row.")
 
-    followup_marker = "StationAI resumed integration marker 38BC11"
+    followup_marker = "Playhouse resumed integration marker 38BC11"
     second_history, second_events = ws.stream_turn(
         task_id,
-        f"Continue from the instruction and changes in the previous turn. Append exactly the line '{followup_marker}' to stationai-secondary.txt only, then run a shell command that prints STATIONAI_RESUMED_COMMAND_OK. Reply with a short summary.",
+        f"Continue from the instruction and changes in the previous turn. Append exactly the line '{followup_marker}' to playhouse-secondary.txt only, then run a shell command that prints PLAYHOUSE_RESUMED_COMMAND_OK. Reply with a short summary.",
     )
     require(followup_marker in secondary_file.read_text(encoding="utf-8"), "Resumed turn did not update the secondary repository file.")
-    require(any(event.get("type") == "activity" and "STATIONAI_RESUMED_COMMAND_OK" in json.dumps(event) for event in second_events), "Resumed turn did not stream its command output.")
+    require(any(event.get("type") == "activity" and "PLAYHOUSE_RESUMED_COMMAND_OK" in json.dumps(event) for event in second_events), "Resumed turn did not stream its command output.")
     require(len(second_history.get("messages", [])) >= len(first_history.get("messages", [])) + 2, "Resumed history did not retain both turns.")
     require(second_history.get("activities"), "Resumed turn history omitted its activity rows.")
     require(followup_marker in ws.fixture_diff(second, secondary_file.name), "Resumed turn diff omitted its changed line.")
@@ -319,7 +319,7 @@ def scenario_plan_edit_resume_and_reload(ws):
 def scenario_steer_active_turn(ws):
     task_id = ws.create_task(f"{ws.provider} steer integration")["id"]
     token = f"STEER_TOKEN_{uuid.uuid4().hex[:6].upper()}"
-    prompt = "Run exactly one shell command: `sleep 25 && echo STATIONAI_STEER_WAIT_DONE`. When it finishes, reply with one short sentence."
+    prompt = "Run exactly one shell command: `sleep 25 && echo PLAYHOUSE_STEER_WAIT_DONE`. When it finishes, reply with one short sentence."
     turn = ws.start_turn(task_id, prompt)
     try:
         turn.wait_for(lambda event: activity_is_running(event, "sleep 25"), 180, "the long command to start")
@@ -578,7 +578,7 @@ def scenario_claude_question_round_trip(ws):
         answers=("question-1=Blue",),
     )
     request = next((event for event in events if event.get("type") == "user_input"), None)
-    require(request is not None, "Claude did not ask its question through StationAI.")
+    require(request is not None, "Claude did not ask its question through Playhouse.")
     questions = request["payload"]["userInputRequest"]["questions"]
     require([q["id"] for q in questions] == ["question-1"], f"Unexpected question IDs: {questions}")
     require({"Red", "Blue"} <= {o["label"] for o in questions[0]["options"]}, f"The question omitted its options: {questions}")
@@ -642,7 +642,7 @@ def scenario_cross_provider_handoff(ws):
             f"The mixed transcript is out of provider order: {providers}")
     orders = [message["timelineOrder"] for message in final["messages"]]
     require(orders == sorted(orders), "The mixed transcript timeline is not ordered.")
-    require(not any("<stationai-handoff-context>" in message["text"] for message in final["messages"]), "Handoff context leaked into the visible transcript.")
+    require(not any("<playhouse-handoff-context>" in message["text"] for message in final["messages"]), "Handoff context leaked into the visible transcript.")
     reopened = ws.run_cli("conversation", "history", task_id)
     require([m["id"] for m in reopened["messages"]] == [m["id"] for m in final["messages"]], "A fresh connection reloaded a different mixed transcript.")
     return "Claude ⇄ Codex handoff"
@@ -671,26 +671,26 @@ def preflight(provider):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--provider", choices=[*PROVIDERS, "all"], default=os.environ.get("STATIONAI_LIVE_PROVIDER", "claude"))
+    parser.add_argument("--provider", choices=[*PROVIDERS, "all"], default=os.environ.get("PLAYHOUSE_LIVE_PROVIDER", "claude"))
     parser.add_argument("--scenario", action="append", default=[], help="Run only the named scenario function (repeatable).")
     arguments = parser.parse_args()
-    if os.environ.get("STATIONAI_RUN_LIVE_INTEGRATION") != "1" and os.environ.get("STATIONAI_RUN_CODEX_INTEGRATION") != "1":
-        raise SystemExit("This suite makes live provider turns. Set STATIONAI_RUN_LIVE_INTEGRATION=1 after confirming the provider sign-in works.")
+    if os.environ.get("PLAYHOUSE_RUN_LIVE_INTEGRATION") != "1" and os.environ.get("PLAYHOUSE_RUN_CODEX_INTEGRATION") != "1":
+        raise SystemExit("This suite makes live provider turns. Set PLAYHOUSE_RUN_LIVE_INTEGRATION=1 after confirming the provider sign-in works.")
     providers = list(PROVIDERS) if arguments.provider == "all" else [arguments.provider]
 
     app_bundle = Path(os.environ.get(
-        "STATIONAI_APP_PATH",
-        str(Path(tempfile.gettempdir()) / "StationAI-DerivedData/Build/Products/Debug/StationAI.app"),
+        "PLAYHOUSE_APP_PATH",
+        str(Path(tempfile.gettempdir()) / "Playhouse-DerivedData/Build/Products/Debug/Playhouse.app"),
     ))
-    cli = app_bundle / "Contents/MacOS/stationai-cli"
+    cli = app_bundle / "Contents/MacOS/playhouse-cli"
     # The daemon and CLI resolve their identity from the app's own Info.plist
     # via `Bundle.main` (no separate XPC bundle anymore), so the service name
     # is just that identifier plus ".bridge", matching
     # `BridgeContract.serviceName(forApplication:)`.
     service_info = app_bundle / "Contents/Info.plist"
-    fixture = Path(os.environ.get("STATIONAI_BRIDGE_TEST_FIXTURE_ROOT", "/tmp/stationai-bridge-workspaces"))
+    fixture = Path(os.environ.get("PLAYHOUSE_BRIDGE_TEST_FIXTURE_ROOT", "/tmp/playhouse-bridge-workspaces"))
     require(cli.is_file(), f"Bundled CLI is missing: {cli}; run scripts/run.sh first.")
-    marker = fixture / ".stationai-bridge-fixture"
+    marker = fixture / ".playhouse-bridge-fixture"
     require(
         marker.is_file() and marker.read_text(encoding="utf-8") == BRIDGE_FIXTURE_MARKER_VALUE,
         "Run scripts/prepare-e2e-fixture.py and verify its ownership marker before this suite.",
@@ -720,7 +720,7 @@ def main():
             passed.append(f"{provider}: {summary}")
             print(f"Live {provider}: {scenario.__name__} passed in {time.monotonic() - started:.1f}s", flush=True)
         finally:
-            if os.environ.get("STATIONAI_LIVE_KEEP_WORKSPACE") == "1":
+            if os.environ.get("PLAYHOUSE_LIVE_KEEP_WORKSPACE") == "1":
                 print(f"Kept workspace for diagnosis: {ws.root}", flush=True)
             else:
                 ws.remove()

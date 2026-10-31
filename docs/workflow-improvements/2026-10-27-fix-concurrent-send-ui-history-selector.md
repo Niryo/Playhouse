@@ -12,7 +12,7 @@
 | --- | ---: | --- |
 | Task request/start | 21:26 local | Supplied timestamp; minute precision |
 | Baseline Tart run `20261027T192702Z-64150` | 58.919s elapsed | Measured |
-| Failing case within baseline run | 31.646s | Measured; failure at `StationAIUITests.swift:4888` |
+| Failing case within baseline run | 31.646s | Measured; failure at `PlayhouseUITests.swift:4888` |
 | Diagnosis and selector repair | Unknown | Occurred between runs; no edit/checkpoint timestamps supplied |
 | Passing Tart run `20261027T192823Z-65072` | 99.291s elapsed | Measured |
 | Passing case within rerun | 24.263s | Measured |

@@ -19,18 +19,18 @@ struct CodexQuestionOwnershipProbe {
         let arguments = CommandLine.arguments
         try check(arguments.count == 5, "Expected data directory, owned peer executable, and two task IDs.")
         let directory = URL(fileURLWithPath: arguments[1], isDirectory: true)
-        let marker = directory.appendingPathComponent(".stationai-codex-fixture-owner")
-        try check(try String(contentsOf: marker, encoding: .utf8) == "StationAI test owns this Codex protocol fixture (v1).\n", "Refusing unowned test data.")
+        let marker = directory.appendingPathComponent(".playhouse-codex-fixture-owner")
+        try check(try String(contentsOf: marker, encoding: .utf8) == "Playhouse test owns this Codex protocol fixture (v1).\n", "Refusing unowned test data.")
         guard let originalID = UUID(uuidString: arguments[3]), let parallelID = UUID(uuidString: arguments[4]) else {
             throw NSError(domain: "CodexQuestionOwnershipProbe", code: 2)
         }
         let schema = Schema([BoardTask.self, StandaloneChat.self])
-        let configuration = ModelConfiguration(schema: schema, url: directory.appendingPathComponent("StationAI-v2.store"))
+        let configuration = ModelConfiguration(schema: schema, url: directory.appendingPathComponent("Playhouse-v2.store"))
         let container = try ModelContainer(for: schema, configurations: [configuration])
         let tasks = BoardTaskManager(modelContext: container.mainContext)
         let codex = CodexAppServerClient(codexExecutableOverride: arguments[2], goalRuntimeEnabled: true)
         defer { codex.shutdown() }
-        let suite = ProcessInfo.processInfo.environment["STATIONAI_E2E_DEFAULTS_SUITE"]!
+        let suite = ProcessInfo.processInfo.environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"]!
         let preferences = UserDefaults(suiteName: suite)!
         let manager = ConversationManager(tasks: tasks, clients: ConversationClients(codex: codex, claude: ClaudeCodeClient()), preferences: preferences)
         var requests: [UUID: [ConversationUserInputRequest]] = [:]

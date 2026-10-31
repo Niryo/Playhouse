@@ -1,6 +1,6 @@
 ---
 name: nightly-tests-improver
-description: Unattended nightly round over StationAI's visible UI suite in the Tart VM - run everything, root-cause and fix failures and flakiness, find and remove slow spots without dropping checks, raise test quality, review the changes, confirm green, then commit and push.
+description: Unattended nightly round over Playhouse's visible UI suite in the Tart VM - run everything, root-cause and fix failures and flakiness, find and remove slow spots without dropping checks, raise test quality, review the changes, confirm green, then commit and push.
 ---
 
 # Nightly tests improver
@@ -32,17 +32,17 @@ Principles that made the previous rounds work:
 ## Round structure
 
 1. **Baseline.** Read `AGENTS.md`, this file, `scripts/test-ui.sh`,
-   `scripts/test-ui-tart.sh`, and `StationAI/BridgeTests/BridgeTestContracts.json`.
+   `scripts/test-ui-tart.sh`, and `Playhouse/BridgeTests/BridgeTestContracts.json`.
    Record `git status --short` and `git diff --stat`; note any pre-existing staged
    or unstaged paths so they are never swept into the final commit. Confirm the
-   Tart VM `stationai-ui` is available (`export PATH=/opt/homebrew/bin:$PATH; tart list`).
+   Tart VM `playhouse-ui` is available (`export PATH=/opt/homebrew/bin:$PATH; tart list`).
 
 2. **Full run with instrumentation.** Start the daemon memory sampler in the VM,
    then run the full suite:
 
    ```bash
    export PATH=/opt/homebrew/bin:$PATH
-   tart exec stationai-ui /bin/bash -c 'rm -f /tmp/daemon-mem.log; nohup bash -c "while true; do p=\$(pgrep -x stationai-daemon | tail -1); [ -n \"\$p\" ] && echo \"\$(date +%H:%M:%S) pid=\$p rss_mb=\$(( \$(ps -o rss= -p \$p) / 1024 ))\"; sleep 20; done" > /tmp/daemon-mem.log 2>&1 &'
+   tart exec playhouse-ui /bin/bash -c 'rm -f /tmp/daemon-mem.log; nohup bash -c "while true; do p=\$(pgrep -x playhouse-daemon | tail -1); [ -n \"\$p\" ] && echo \"\$(date +%H:%M:%S) pid=\$p rss_mb=\$(( \$(ps -o rss= -p \$p) / 1024 ))\"; sleep 20; done" > /tmp/daemon-mem.log 2>&1 &'
    scripts/test-ui-tart.sh > "$SCRATCH/full1.log" 2>&1
    ```
 
@@ -52,10 +52,10 @@ Principles that made the previous rounds work:
    the xcodebuild invocation (confirms `-test-timeouts-enabled YES` and the
    allowances), and from the VM: `/tmp/daemon-mem.log` (peak RSS; it should stay
    under about 100 MB for the whole run), the daemon log
-   `/private/tmp/stationai-bridge/501/<hash>.sock.log` (every `listening` line is
+   `/private/tmp/playhouse-bridge/501/<hash>.sock.log` (every `listening` line is
    a daemon start; one without an `idle, exiting` before it is a death), and the
    artifacts directory on the host under
-   `$TMPDIR/stationai-ui-tart-artifacts/<run>/stationai-ui.*/` (`bridge-watcher.log`
+   `$TMPDIR/playhouse-ui-tart-artifacts/<run>/playhouse-ui.*/` (`bridge-watcher.log`
    lists daemon deaths as `watcher exited rc=69`, plus the single `.xcresult`).
 
 3. **Triage every failure to a root cause.** For each failed case gather, in this
@@ -68,7 +68,7 @@ Principles that made the previous rounds work:
      tells whether the app was on the board or inside a task, and what the form
      actually contained.
    - The case's preserved app data: failed cases keep
-     `/tmp/stationai-ui-test-data/StationAIUITests-<uuid>/` in the VM.
+     `/tmp/playhouse-ui-test-data/PlayhouseUITests-<uuid>/` in the VM.
      `data/Diagnostics.jsonl` has every bridge request (`command`, `argument.*`,
      `dataDirectory`), provider events (`codex.app_server.started/exited` with
      `codexPID` and `executable`, `codex.rpc.request.started` by `method`,
@@ -116,9 +116,9 @@ Principles that made the previous rounds work:
    anything over about 90 seconds and the sum of everything under 10 seconds that
    is dominated by setup. Look for idle time (sleeps, product cooldowns, polling
    intervals, repeated app launches that verify nothing new) and runner overhead.
-   Knobs that already exist: `STATIONAI_E2E_PR_CHECK_COOLDOWN_SECONDS` (board PR
-   check cooldown, tests use 3 s), `STATIONAI_UI_TEST_TIMEOUT_SECONDS` (XCTest
-   per-case allowance, default 180 s), `STATIONAI_UI_BATCH_SIZE` (cases per
+   Knobs that already exist: `PLAYHOUSE_E2E_PR_CHECK_COOLDOWN_SECONDS` (board PR
+   check cooldown, tests use 3 s), `PLAYHOUSE_UI_TEST_TIMEOUT_SECONDS` (XCTest
+   per-case allowance, default 180 s), `PLAYHOUSE_UI_BATCH_SIZE` (cases per
    xcodebuild session; default is all in one). Shorten only waits that are idle
    by construction. A case whose time is real UI actions and real recovery paths
    stays as it is; say so in the report instead of trimming checks.

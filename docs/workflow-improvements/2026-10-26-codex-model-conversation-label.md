@@ -9,13 +9,13 @@ This is a partial timeline. The handoff conversation records discovery, implemen
 | Phase | Time or duration | Basis |
 | --- | ---: | --- |
 | Initial trace, implementation, paired CLI/UI coverage, and first build compile repair | Unknown | Conversation handoff; no retained phase timestamps supplied |
-| First full CLI/XPC suite: 72 cases, one error and one failure | 188.379 s of cases; end about 19:28:47 UTC | `/tmp/stationai-bridge.3dPkwg/bridge-tests.log`; log mtime for end |
-| Focused async-question retry: one error | 2.036 s of cases; end about 19:38:29 UTC | `/tmp/stationai-bridge.pBJDvX/bridge-tests.log`; log mtime for end |
+| First full CLI/XPC suite: 72 cases, one error and one failure | 188.379 s of cases; end about 19:28:47 UTC | `/tmp/playhouse-bridge.3dPkwg/bridge-tests.log`; log mtime for end |
+| Focused async-question retry: one error | 2.036 s of cases; end about 19:38:29 UTC | `/tmp/playhouse-bridge.pBJDvX/bridge-tests.log`; log mtime for end |
 | Repair of active history and fixture behavior, static review cycles | Unknown | Conversation and verification handoff; no phase timestamps supplied |
-| Next full CLI/XPC run: 72 cases, one model-label fixture error | 331 s command: 156 s build, 172.185 s cases, about 3 s other work; end about 20:02:51 UTC | Task verification ledger and `/tmp/stationai-bridge.I5c0Ck/bridge-tests.log` |
+| Next full CLI/XPC run: 72 cases, one model-label fixture error | 331 s command: 156 s build, 172.185 s cases, about 3 s other work; end about 20:02:51 UTC | Task verification ledger and `/tmp/playhouse-bridge.I5c0Ck/bridge-tests.log` |
 | Fixture repair and renewed static approvals | Unknown | Verification ledger; final task/UI/architecture approvals on fingerprint `f445c948372d38fb0a4138c726b2037f7d1cae28d0be7f9d6fbe4e7046524e9` |
-| Focused model-label retry: one pass | 153 s command: 147 s build, 2.995 s case, about 3 s other work; end about 20:08:04 UTC | Verification ledger and `/tmp/stationai-bridge.5WXMPy/bridge-tests.log` |
-| Final full CLI/XPC run: 72/72 pass | 190 s command: cached build, 185.519 s cases, about 4 s other work; end about 20:11:20 UTC | Verification ledger and `/tmp/stationai-bridge.i3fpML/bridge-tests.log` |
+| Focused model-label retry: one pass | 153 s command: 147 s build, 2.995 s case, about 3 s other work; end about 20:08:04 UTC | Verification ledger and `/tmp/playhouse-bridge.5WXMPy/bridge-tests.log` |
+| Final full CLI/XPC run: 72/72 pass | 190 s command: cached build, 185.519 s cases, about 4 s other work; end about 20:11:20 UTC | Verification ledger and `/tmp/playhouse-bridge.i3fpML/bridge-tests.log` |
 
 The last three commands total **674 s (11 min 14 s)** of observed wall time: 303 s building (45%), 360 s running cases (54%), and about 11 s in command overhead (rounded). The earlier full run and focused retry add **190.415 s of measured case time**, with command setup/build time unavailable. Thus at least **864 s (14 min 24 s)** of task runtime is accounted for. The interval from the approximate first suite end to final suite end is **42 min 34 s**; its gaps include repair, review, build/setup, and idle time that cannot be reliably apportioned. Planning and implementation before that interval make the complete task duration unknown. UI tests and screenshots were omitted at the user's request; UI coverage was statically approved.
 

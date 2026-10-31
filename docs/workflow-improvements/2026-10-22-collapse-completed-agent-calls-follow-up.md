@@ -20,7 +20,7 @@ The known runtime portions total **at least about 317 s (5 min 17 s)**: 133 s bu
 
 ## Practical improvement
 
-**Make the migration lock diagnostic assertion deterministic.** One unrelated case failure caused a focused retry and the required **90 s** final full run. The case waits for `persistence.store.schema_migration.waiting_for_write_lock` and then checks `write_lock_acquired` with positive `waitMilliseconds` in `scripts/test-bridge.py`; the producer emits these events in `StationAI/App/BridgeCore.swift`. Inspect the failing run's diagnostic artifact and event ordering, then align the test's synchronization with the producer's completed diagnostic flush or repair the producer if the event was genuinely missing. Verify the fix through repeated isolated runs of this case and one required full suite, recording whether the missing-event failure recurs. The cause remains unproven from the supplied output.
+**Make the migration lock diagnostic assertion deterministic.** One unrelated case failure caused a focused retry and the required **90 s** final full run. The case waits for `persistence.store.schema_migration.waiting_for_write_lock` and then checks `write_lock_acquired` with positive `waitMilliseconds` in `scripts/test-bridge.py`; the producer emits these events in `Playhouse/App/BridgeCore.swift`. Inspect the failing run's diagnostic artifact and event ordering, then align the test's synchronization with the producer's completed diagnostic flush or repair the producer if the event was genuinely missing. Verify the fix through repeated isolated runs of this case and one required full suite, recording whether the missing-event failure recurs. The cause remains unproven from the supplied output.
 
 ## Evidence limits
 

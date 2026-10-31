@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Deterministic app-server peer for StationAI's protocol integration tests."""
+"""Deterministic app-server peer for Playhouse's protocol integration tests."""
 
 import json
 import os
@@ -13,22 +13,22 @@ import time
 import uuid
 from pathlib import Path
 
-# Record the bridge environment StationAI handed this provider process, so tests
-# can run in-turn `stationai` calls with exactly what a real provider inherits.
+# Record the bridge environment Playhouse handed this provider process, so tests
+# can run in-turn `playhouse` calls with exactly what a real provider inherits.
 Path(str(sys.argv[0]) + ".bridge-environment").write_text(
     json.dumps({
         name: os.environ.get(name)
-        for name in ("STATIONAI_BRIDGE_SERVICE_NAME", "STATIONAI_DATA_DIRECTORY")
+        for name in ("PLAYHOUSE_BRIDGE_SERVICE_NAME", "PLAYHOUSE_DATA_DIRECTORY")
     }),
     encoding="utf-8",
 )
 
 if "-title-" in Path(sys.argv[0]).name:
-    THREAD_ID = f"stationai-fixture-{os.getpid()}"
-    TURN_ID = f"turn-stationai-fixture-{os.getpid()}"
+    THREAD_ID = f"playhouse-fixture-{os.getpid()}"
+    TURN_ID = f"turn-playhouse-fixture-{os.getpid()}"
 else:
     THREAD_ID = "00000000-0000-0000-0000-000000000001"
-    TURN_ID = "turn_stationai_fixture"
+    TURN_ID = "turn_playhouse_fixture"
 
 # The turn id a freshly started provider process uses for ordinary turns, and the
 # private reminder turns that replaced it. A long-lived process must not let a
@@ -48,18 +48,18 @@ def echoed_outcome_answer(user_message):
     if not user_message or not user_message.startswith(ECHOED_OUTCOME_PREFIX):
         return None
     task_id = user_message[len(ECHOED_OUTCOME_PREFIX):].strip().rstrip(".")
-    return f"{ECHOED_OUTCOME_ANSWER}\U0001F6E0\uFE0F\nstationai-cli task outcome {task_id} completed"
+    return f"{ECHOED_OUTCOME_ANSWER}\U0001F6E0\uFE0F\nplayhouse-cli task outcome {task_id} completed"
 
 
 def own_user_text(message):
-    """The user's own words, without StationAI's hidden context envelope.
+    """The user's own words, without Playhouse's hidden context envelope.
 
     Standalone chat seeds a page's first turn with that page's transcript, so a sentinel
     repeated by an earlier assistant answer must not re-trigger a scenario branch here.
     """
     text = message or ""
-    close = "</stationai-handoff-context>"
-    if text.startswith("<stationai-handoff-context>") and close in text:
+    close = "</playhouse-handoff-context>"
+    if text.startswith("<playhouse-handoff-context>") and close in text:
         return text.split(close, 1)[1].strip()
     return text
 
@@ -72,7 +72,7 @@ def write(value):
 def answer_text(user_message):
     mode = os.path.basename(sys.argv[0])
     if isinstance(user_message, str) and user_message.startswith(
-        "Classify the latest user message for StationAI's continuous chat page index."
+        "Classify the latest user message for Playhouse's continuous chat page index."
     ):
         hold = Path(str(sys.argv[0]) + ".hold-classifier")
         neptune_hold = Path(str(sys.argv[0]) + ".hold-neptune-classifier")
@@ -100,7 +100,7 @@ def answer_text(user_message):
             return '{"continues":"sometimes","title":null}'
         classifier_attempts = sum(
             1 for turn in history.get("turns", [])
-            if (turn.get("userMessage") or "").startswith("Classify the latest user message for StationAI's continuous chat page index.")
+            if (turn.get("userMessage") or "").startswith("Classify the latest user message for Playhouse's continuous chat page index.")
         )
         if classifier_attempts == 1:
             return '{"continues":false,"title":"Ignored extra field","unexpected":true}'
@@ -115,7 +115,7 @@ def answer_text(user_message):
         if "Saturn's rings" in user_message:
             return '{"continues":false,"title":"Saturn Rings"}'
         return '{"continues":true,"title":null}'
-    if "stationai internal outcome nudge:" in (user_message or "").lower():
+    if "playhouse internal outcome nudge:" in (user_message or "").lower():
         return "Fixture internal reminder reply."
     if user_message == "Follow up after private recovery.":
         return "Follow-up after private recovery complete."
@@ -148,7 +148,7 @@ def answer_text(user_message):
             annotations = json.loads(payload)
             if isinstance(annotations, list) and annotations:
                 return "\n".join(
-                    (f":stationai-annotation{{index=\"{index}\"}} For ‘{item['text']}’: "
+                    (f":playhouse-annotation{{index=\"{index}\"}} For ‘{item['text']}’: "
                      f"{item.get('comment', item.get('annotation', ''))}"
                      if tag == "response-comments" else
                      f"For ‘{item['text']}’: {item.get('comment', item.get('annotation', ''))} "
@@ -244,7 +244,7 @@ def question_request(request_id, followup=False):
         "params": {
             "threadId": THREAD_ID,
             "turnId": TURN_ID,
-            "itemId": "item_stationai_question",
+            "itemId": "item_playhouse_question",
             "questions": questions,
             "isBlocking": "-nonblocking" not in mode and "-plan" not in mode,
         },
@@ -253,7 +253,7 @@ def question_request(request_id, followup=False):
 
 def subagent_item(status):
     return {
-        "id": "item_stationai_subagent",
+        "id": "item_playhouse_subagent",
         "type": "collabAgentToolCall",
         "tool": "spawnAgent",
         "senderThreadId": THREAD_ID,
@@ -286,16 +286,16 @@ def subagent_activity(kind, child_thread_id, agent_path, *, model=None, reasonin
 
 
 CHILD_THREAD_ID = "00000000-0000-0000-0000-000000000002"
-CHILD_TURN_ID = "turn_stationai_child_fixture"
+CHILD_TURN_ID = "turn_playhouse_child_fixture"
 CHILD_MESSAGES = [
-    {"id": "item_child_user", "type": "userMessage", "content": [{"type": "text", "text": "Inspect StationAI entitlements."}]},
-    {"id": "item_child_assistant", "type": "agentMessage", "text": "Sandbox review read StationAIEntitlements.entitlements and found the required profile."},
+    {"id": "item_child_user", "type": "userMessage", "content": [{"type": "text", "text": "Inspect Playhouse entitlements."}]},
+    {"id": "item_child_assistant", "type": "agentMessage", "text": "Sandbox review read PlayhouseEntitlements.entitlements and found the required profile."},
 ]
 
 
 def async_question_item():
     return {
-        "id": "item_stationai_async_question",
+        "id": "item_playhouse_async_question",
         "type": "agentMessage",
         "phase": "final_answer",
         "delivery": "async",
@@ -315,7 +315,7 @@ def async_question_item():
 
 def later_async_question_item():
     return {
-        "id": "item_stationai_async_later_question",
+        "id": "item_playhouse_async_later_question",
         "type": "agentMessage", "phase": "final_answer", "delivery": "async",
         "text": "One more check", "questions": [{"title": "One more check", "options": None}],
     }
@@ -324,7 +324,7 @@ def later_async_question_item():
 def diagnostic_action_items(cwd):
     return [
         {
-            "id": "item_stationai_command",
+            "id": "item_playhouse_command",
             "type": "commandExecution",
             "command": "git status --short",
             "cwd": cwd,
@@ -333,7 +333,7 @@ def diagnostic_action_items(cwd):
             "status": "completed",
         },
         {
-            "id": "item_stationai_file_change",
+            "id": "item_playhouse_file_change",
             "type": "fileChange",
             "changes": [{"path": "README.md", "kind": "update", "diff": "CODEX_DIFF_NOT_LOGGED"}],
             "status": "completed",
@@ -460,7 +460,7 @@ def main():
     saw_turn = False
     turn_message = None
     history_path = Path(str(sys.argv[0]) + ".history")
-    fixture_state_directory = Path(os.environ.get("STATIONAI_E2E_FIXTURE_STATE_DIRECTORY", str(Path(sys.argv[0]).parent)))
+    fixture_state_directory = Path(os.environ.get("PLAYHOUSE_E2E_FIXTURE_STATE_DIRECTORY", str(Path(sys.argv[0]).parent)))
     if "-goal" in mode:
         (fixture_state_directory / f"{Path(sys.argv[0]).name}.launch-args").write_text(json.dumps(sys.argv[1:]), encoding="utf-8")
     goal_path = fixture_state_directory / f"{Path(sys.argv[0]).name}.goal"
@@ -519,7 +519,7 @@ def main():
         if "method" in message and "id" not in message:
             return
         if message.get("method") == "initialize":
-            write({"jsonrpc": "2.0", "id": message["id"], "result": {"serverInfo": {"name": "stationai-fixture", "version": "1"}}})
+            write({"jsonrpc": "2.0", "id": message["id"], "result": {"serverInfo": {"name": "playhouse-fixture", "version": "1"}}})
         elif message.get("method") == "model/list":
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"data": [
                 {"id": "gpt-6-luna", "displayName": "GPT-6 Luna", "isDefault": True,
@@ -616,7 +616,7 @@ def main():
                 TURN_ID = f"turn-{uuid.uuid4()}"
             turn_input = message.get("params", {}).get("input", [])
             turn_message = next((item.get("text") for item in turn_input if item.get("type") == "text"), None)
-            is_outcome_reminder = "stationai internal outcome nudge:" in (turn_message or "").lower()
+            is_outcome_reminder = "playhouse internal outcome nudge:" in (turn_message or "").lower()
             if is_outcome_reminder:
                 TURN_ID = f"turn-{uuid.uuid4()}"
                 REMINDER_TURN_IDS.add(TURN_ID)
@@ -668,7 +668,7 @@ def main():
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID,
                     "item": {
-                        "id": "item_stationai_title",
+                        "id": "item_playhouse_title",
                         "type": "agentMessage",
                         "phase": "final_answer",
                         "text": "Generated fixture title",
@@ -714,7 +714,7 @@ def main():
             if is_outcome_reminder and not preserve_no_outcome:
                 # A fixture that only ever resumed an existing thread has no
                 # thread-start instructions of its own; its outcome command
-                # lives in the resume instructions StationAI sent instead.
+                # lives in the resume instructions Playhouse sent instead.
                 saved = serial_history()
                 instructions = (
                     turn_history.get("developerInstructions")
@@ -740,7 +740,7 @@ def main():
                 return
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": TURN_ID, "status": "inProgress"}}})
             if (turn_message or "").startswith(
-                "Classify the latest user message for StationAI's continuous chat page index."
+                "Classify the latest user message for Playhouse's continuous chat page index."
             ):
                 # One-shot Codex helper clients consume the streamed completion
                 # directly; provide the same fixture answer the transcript path
@@ -749,7 +749,7 @@ def main():
                     "threadId": THREAD_ID,
                     "turnId": TURN_ID,
                     "item": {
-                        "id": "item_stationai_chat_classifier",
+                        "id": "item_playhouse_chat_classifier",
                         "type": "agentMessage",
                         "text": answer_text(turn_message),
                     },
@@ -820,7 +820,7 @@ def main():
                         interrupt_release.unlink(missing_ok=True)
                         write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                             "threadId": THREAD_ID,
-                            "item": {"id": "item_stationai_message", "type": "agentMessage", "text": "The turn completed after Stop was rejected."},
+                            "item": {"id": "item_playhouse_message", "type": "agentMessage", "text": "The turn completed after Stop was rejected."},
                         }})
                         write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
                             "threadId": THREAD_ID,
@@ -866,13 +866,13 @@ def main():
                 first_turn = len(serial_history().get("messages", [])) == 1
                 if first_turn:
                     items = [async_question_item(), {
-                        "id": "item_stationai_async_followup",
+                        "id": "item_playhouse_async_followup",
                         "type": "agentMessage", "phase": "final_answer",
                         "text": "I can continue while you decide.",
                     }]
                 else:
                     items = [{
-                        "id": "item_stationai_async_answer",
+                        "id": "item_playhouse_async_answer",
                         "type": "agentMessage", "phase": "final_answer",
                         "text": f"Answers received: {turn_message}",
                     }]
@@ -895,14 +895,14 @@ def main():
                             for index, saved_turn in enumerate(serial_history().get("messages", []), start=1):
                                 turn_id = saved_turn["turnID"]
                                 entries.append({"turnId": turn_id, "item": {
-                                    "id": f"item_stationai_async_user_{index}", "type": "userMessage",
+                                    "id": f"item_playhouse_async_user_{index}", "type": "userMessage",
                                     "content": [{"type": "text", "text": saved_turn["userMessage"]}],
                                 }})
                                 if index == 1:
                                     entries.extend([
                                         {"turnId": turn_id, "item": async_question_item()},
                                         {"turnId": turn_id, "item": {
-                                            "id": "item_stationai_async_followup", "type": "agentMessage",
+                                            "id": "item_playhouse_async_followup", "type": "agentMessage",
                                             "phase": "final_answer", "text": "I can continue while you decide.",
                                         }},
                                     ])
@@ -925,7 +925,7 @@ def main():
                     history_path.write_text(json.dumps(saved_history), encoding="utf-8")
                     write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                         "threadId": THREAD_ID, "turnId": TURN_ID, "item": {
-                            "id": "item_stationai_async_answer_steered", "type": "agentMessage", "phase": "final_answer",
+                            "id": "item_playhouse_async_answer_steered", "type": "agentMessage", "phase": "final_answer",
                             "text": f"Answers received: {steered_answer}",
                         },
                     }})
@@ -1057,7 +1057,7 @@ def main():
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
             elif mode.endswith("-context-compaction"):
-                compaction_item = {"id": "item_stationai_compaction", "type": "contextCompaction", "payload": {"opaque": "COMPACTION_OPAQUE_SENTINEL"}}
+                compaction_item = {"id": "item_playhouse_compaction", "type": "contextCompaction", "payload": {"opaque": "COMPACTION_OPAQUE_SENTINEL"}}
                 write({"jsonrpc": "2.0", "method": "item/started", "params": {
                     "threadId": THREAD_ID, "turnId": TURN_ID, "item": compaction_item,
                 }})
@@ -1077,7 +1077,7 @@ def main():
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                     "threadId": THREAD_ID, "turnId": TURN_ID, "item": compaction_item,
                 }})
-                item = {"id": "item_stationai_final", "type": "agentMessage", "phase": "final_answer", "text": "Context compaction completed."}
+                item = {"id": "item_playhouse_final", "type": "agentMessage", "phase": "final_answer", "text": "Context compaction completed."}
                 write({"jsonrpc": "2.0", "method": "item/started", "params": {"threadId": THREAD_ID, "turnId": TURN_ID, "item": item}})
                 write({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {"threadId": THREAD_ID, "turnId": TURN_ID, "itemId": item["id"], "delta": item["text"]}})
                 write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "turnId": TURN_ID, "item": item}})
@@ -1164,7 +1164,7 @@ def main():
                     active_command_item = {
                         "id": "item_fixture_active_long_command", "type": "commandExecution",
                         "command": "long-command-name " + "argument-" * 40,
-                        "cwd": "/tmp/stationai-fixture", "status": "inProgress",
+                        "cwd": "/tmp/playhouse-fixture", "status": "inProgress",
                     }
                     for tool_item in [mcp_item, dynamic_item, legacy_dynamic_item, active_command_item]:
                         write({"jsonrpc": "2.0", "method": "item/started", "params": {"threadId": THREAD_ID, "item": tool_item}})
@@ -1202,7 +1202,7 @@ def main():
                     write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
                         **dynamic_item, "status": "failed", "success": False, "durationMs": 37,
                     }}})
-                for action_item in diagnostic_action_items(os.environ.get("STATIONAI_FIXTURE_WORKSPACE", os.getcwd())):
+                for action_item in diagnostic_action_items(os.environ.get("PLAYHOUSE_FIXTURE_WORKSPACE", os.getcwd())):
                     write({"jsonrpc": "2.0", "method": "item/started", "params": {
                         "threadId": THREAD_ID, "item": {**action_item, "status": "inProgress"},
                     }})
@@ -1216,7 +1216,7 @@ def main():
                         "threadId": THREAD_ID, "item": action_item,
                     }})
                 progress_text = "I inspected the project structure and am preparing the summary."
-                for phase, item_id, text in [("commentary", "item_stationai_commentary", progress_text)]:
+                for phase, item_id, text in [("commentary", "item_playhouse_commentary", progress_text)]:
                     item = {"id": item_id, "type": "agentMessage", "text": "", "phase": phase}
                     write({"jsonrpc": "2.0", "method": "item/started", "params": {
                         "threadId": THREAD_ID, "turnId": TURN_ID, "item": item,
@@ -1244,7 +1244,7 @@ def main():
                     release.unlink(missing_ok=True)
                     if not was_released:
                         os._exit(3)
-                phase, item_id, text = ("final_answer", "item_stationai_final", "The subagent inspected the project structure.")
+                phase, item_id, text = ("final_answer", "item_playhouse_final", "The subagent inspected the project structure.")
                 item = {"id": item_id, "type": "agentMessage", "text": "", "phase": phase}
                 write({"jsonrpc": "2.0", "method": "item/started", "params": {
                     "threadId": THREAD_ID, "turnId": TURN_ID, "item": item,
@@ -1278,7 +1278,7 @@ def main():
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
             elif mode.endswith("-markdown"):
-                plan_item_id = "item_stationai_plan"
+                plan_item_id = "item_playhouse_plan"
                 is_plan_turn = message.get("params", {}).get("collaborationMode", {}).get("mode") == "plan"
                 write({"jsonrpc": "2.0", "method": "item/started", "params": {
                     "threadId": THREAD_ID, "turnId": TURN_ID,
@@ -1431,7 +1431,7 @@ def main():
                 if echoed and turn_status == "completed":
                     write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                         "threadId": THREAD_ID, "turnId": TURN_ID,
-                        "item": {"id": "item_stationai_echoed_outcome", "type": "agentMessage", "phase": "final_answer", "text": echoed},
+                        "item": {"id": "item_playhouse_echoed_outcome", "type": "agentMessage", "phase": "final_answer", "text": echoed},
                     }})
                 turn_error = {"error": {"message": "Codex interrupted this turn." if turn_status == "interrupted" else "Codex failed this turn."}} if turn_status != "completed" else {}
                 write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
@@ -1446,7 +1446,7 @@ def main():
             if "error" in message:
                 answers = None
                 rejection_message = message.get("error", {}).get("message", "")
-                if "private StationAI status nudge" in rejection_message:
+                if "private Playhouse status nudge" in rejection_message:
                     with Path(str(sys.argv[0]) + ".private-reminder-question-rejection").open("a", encoding="utf-8") as stream:
                         stream.write(rejection_message + "\n")
             else:
@@ -1502,7 +1502,7 @@ def main():
                     write({"jsonrpc": "2.0", "method": "item/completed", "params": {
                         "threadId": THREAD_ID, "turnId": TURN_ID,
                         "item": {
-                            "id": "item_stationai_echoed_outcome",
+                            "id": "item_playhouse_echoed_outcome",
                             "type": "agentMessage",
                             "phase": "final_answer",
                             "text": echoed,
@@ -1559,7 +1559,7 @@ def main():
                 for index, saved_turn in enumerate(saved_history.get("messages", []), start=1):
                     turn_id = saved_turn["turnID"]
                     entries.append({"turnId": turn_id, "item": {
-                        "id": f"item_stationai_async_user_{index}",
+                        "id": f"item_playhouse_async_user_{index}",
                         "type": "userMessage",
                         "content": [{"type": "text", "text": saved_turn["userMessage"]}],
                     }})
@@ -1567,7 +1567,7 @@ def main():
                         entries.extend([
                             {"turnId": turn_id, "item": async_question_item()},
                             {"turnId": turn_id, "item": {
-                                "id": "item_stationai_async_followup",
+                                "id": "item_playhouse_async_followup",
                                 "type": "agentMessage", "phase": "final_answer",
                                 "text": "I can continue while you decide.",
                             }},
@@ -1575,18 +1575,18 @@ def main():
                         if saved_turn.get("steeredAnswer"):
                             entries.extend([
                                 {"turnId": turn_id, "item": {
-                                    "id": "item_stationai_async_steered_user", "type": "userMessage",
+                                    "id": "item_playhouse_async_steered_user", "type": "userMessage",
                                     "content": [{"type": "text", "text": saved_turn["steeredAnswer"]}],
                                 }},
                                 {"turnId": turn_id, "item": {
-                                    "id": "item_stationai_async_answer_steered", "type": "agentMessage", "phase": "final_answer",
+                                    "id": "item_playhouse_async_answer_steered", "type": "agentMessage", "phase": "final_answer",
                                     "text": f"Answers received: {saved_turn['steeredAnswer']}",
                                 }},
                                 {"turnId": turn_id, "item": later_async_question_item()},
                             ])
                     else:
                         entries.append({"turnId": turn_id, "item": {
-                            "id": f"item_stationai_async_answer_{index}",
+                            "id": f"item_playhouse_async_answer_{index}",
                             "type": "agentMessage", "phase": "final_answer",
                             "text": f"Answers received: {saved_turn['userMessage']}",
                         }})
@@ -1624,7 +1624,7 @@ def main():
                             {"id": f"item_user_fixture_{index}", "type": "userMessage", "content": user_content},
                             assistant if echoed else {"id": f"item_assistant_fixture_{index}", "type": "agentMessage", "phase": "final_answer", "text": answer_text(user_message)},
                         ])
-                        if mode.endswith("-hold-release") and "stationai internal outcome nudge:" not in (user_message or "").lower():
+                        if mode.endswith("-hold-release") and "playhouse internal outcome nudge:" not in (user_message or "").lower():
                             contents.append({
                                 "id": f"item_hold_release_file_change_{index}",
                                 "type": "fileChange",
@@ -1680,19 +1680,19 @@ def main():
             if mode.endswith("-subagent") or mode.endswith("-subagent-wait"):
                 contents = [
                     {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": "Delegate this task."}]},
-                    {"id": "item_stationai_commentary", "type": "agentMessage", "phase": "commentary", "text": "I inspected the project structure and am preparing the summary."},
-                    {"id": "item_stationai_final", "type": "agentMessage", "phase": "final_answer", "text": "The subagent inspected the project structure."},
+                    {"id": "item_playhouse_commentary", "type": "agentMessage", "phase": "commentary", "text": "I inspected the project structure and am preparing the summary."},
+                    {"id": "item_playhouse_final", "type": "agentMessage", "phase": "final_answer", "text": "The subagent inspected the project structure."},
                     subagent_item("completed"),
                     subagent_activity("completed", CHILD_THREAD_ID, "/agents/Sandbox review", model="gpt-6-sol", reasoning_effort="high"),
                     subagent_activity("interrupted", "00000000-0000-0000-0000-000000000003", "/agents/some_agent"),
                     subagent_activity("futureKind", "00000000-0000-0000-0000-000000000004", "/agents/Future review"),
-                    *diagnostic_action_items(os.environ.get("STATIONAI_FIXTURE_WORKSPACE", os.getcwd())),
+                    *diagnostic_action_items(os.environ.get("PLAYHOUSE_FIXTURE_WORKSPACE", os.getcwd())),
                 ]
             if mode.endswith("-context-compaction"):
                 contents = [
                     {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": "Compact the context."}]},
-                    {"id": "item_stationai_compaction", "type": "contextCompaction", "payload": {"opaque": "COMPACTION_OPAQUE_SENTINEL"}},
-                    {"id": "item_stationai_final", "type": "agentMessage", "phase": "final_answer", "text": "Context compaction completed."},
+                    {"id": "item_playhouse_compaction", "type": "contextCompaction", "payload": {"opaque": "COMPACTION_OPAQUE_SENTINEL"}},
+                    {"id": "item_playhouse_final", "type": "agentMessage", "phase": "final_answer", "text": "Context compaction completed."},
                 ]
             if "-long-history-" in mode:
                 contents = []
@@ -1713,18 +1713,18 @@ def main():
                 saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
                 contents = [
                     {"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": saved_history.get("userMessage", "Plan the task.")} ]},
-                    {"id": "item_stationai_plan", "type": "plan", "text": MARKDOWN_PLAN},
+                    {"id": "item_playhouse_plan", "type": "plan", "text": MARKDOWN_PLAN},
                 ]
             entries = []
             saved_turns = saved_history.get("messages") or saved_history.get("turns") or []
             ordinary_turn_indexes = [
                 index for index, saved_turn in enumerate(saved_turns)
-                if "stationai internal outcome nudge:" not in (saved_turn.get("userMessage") or "").lower()
+                if "playhouse internal outcome nudge:" not in (saved_turn.get("userMessage") or "").lower()
             ]
             for turn_index, saved_turn in enumerate(saved_turns, start=1):
                 if (
                     "hold-release" in os.path.basename(sys.argv[0])
-                    and "stationai internal outcome nudge:" in (saved_turn.get("userMessage") or "").lower()
+                    and "playhouse internal outcome nudge:" in (saved_turn.get("userMessage") or "").lower()
                 ):
                     contents.append({
                         "id": f"item_private_reminder_activity_{turn_index}",

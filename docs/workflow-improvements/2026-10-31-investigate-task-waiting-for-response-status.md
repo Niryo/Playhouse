@@ -2,19 +2,19 @@
 
 - Task ID: `DAF27323-13B5-4D88-85BE-4919F253EA91`
 - Date: 2026-10-31
-- Branch/worktree: `investigate-task-waiting-for-response-status` (`…/StationAI-fecfdf7df3d92662/696e…7573`)
+- Branch/worktree: `investigate-task-waiting-for-response-status` (`…/Playhouse-fecfdf7df3d92662/696e…7573`)
 
 ## Evidence sources checked
 
 | Source | What it gave | Status |
 | --- | --- | --- |
-| `/tmp/stationai-bridge.*/bridge-tests.log` (21 runs whose lock holder `cwd` is this worktree) | Run start (`queued_at`), per-case `E2E case=… elapsed_seconds=`, `Ran N tests in Xs`, pass/fail, selected case set | Measured |
-| `StationAI-E2E-BuildCache/1138fffe0937a538-*` (14 dirs) | Build start = dir birth time, build end = `source-fingerprint` mtime | Measured (derived from timestamps) |
+| `/tmp/playhouse-bridge.*/bridge-tests.log` (21 runs whose lock holder `cwd` is this worktree) | Run start (`queued_at`), per-case `E2E case=… elapsed_seconds=`, `Ran N tests in Xs`, pass/fail, selected case set | Measured |
+| `Playhouse-E2E-BuildCache/1138fffe0937a538-*` (14 dirs) | Build start = dir birth time, build end = `source-fingerprint` mtime | Measured (derived from timestamps) |
 | `git log`, `git show --stat 5741a08`, `git diff` | Mid-task commit time and split of the change set | Measured |
 | Worktree file mtimes (`AGENTS.md` 09:47:25, `BridgeCore.swift` 12:20:54, `test-bridge.py` 12:47:42) | Task start proxy and last edit times | Derived |
 | Supplied verification ledger | Review rounds, root cause, rework narrative | Reported, no timestamps |
-| Live re-check of `scripts/stationai.sh` from inside an agent session | Reproduced the environment blocker and its remedy | Measured today |
-| StationAI task record for this task (`task show` / `task list`) | **Not obtainable** — see telemetry gaps | Gap |
+| Live re-check of `scripts/playhouse.sh` from inside an agent session | Reproduced the environment blocker and its remedy | Measured today |
+| Playhouse task record for this task (`task show` / `task list`) | **Not obtainable** — see telemetry gaps | Gap |
 
 All clock times below are local (`queued_at` in the logs is UTC; local = UTC+02:00).
 
@@ -78,9 +78,9 @@ Correction to the supplied ledger: it records 6 full-suite runs; the bridge logs
 
 ## Recommendations
 
-### 1. Strip inherited StationAI bridge environment in the test entry points
+### 1. Strip inherited Playhouse bridge environment in the test entry points
 
-Evidence: `scripts/test-bridge.py` injects `STATIONAI_DATA_DIRECTORY` and `STATIONAI_BRIDGE_SERVICE_NAME` into child environments (lines 223/254/796/2073/3323/5728) but never clears an inherited `STATIONAI_BRIDGE_SOCKET_PATH`; `StationAI/CLI/BridgeClient.swift:13` and `StationAI/App/DaemonClient.swift:31` prefer that inherited socket, and `scripts/validate-app-launch.py:28` then rejects the launch. Reproduced live today from this session: a plain `scripts/stationai.sh task list` fails with "The bridge service override does not match the selected app." and succeeds only when prefixed with `env -u STATIONAI_BRIDGE_SERVICE_NAME -u STATIONAI_BRIDGE_SOCKET_PATH -u STATIONAI_DATA_DIRECTORY`. Measured cost this task: two build-cache directories (10:33:53, 11:03:26) were created and never produced a `source-fingerprint`, i.e. two runs died before executing a case; at the measured build mean that is ~5 min of machine time plus the diagnosis interval. The memory note claiming this is "fixed in test-bridge.py" does not hold in this worktree — `SOCKET_PATH` does not appear anywhere in `scripts/`.
+Evidence: `scripts/test-bridge.py` injects `PLAYHOUSE_DATA_DIRECTORY` and `PLAYHOUSE_BRIDGE_SERVICE_NAME` into child environments (lines 223/254/796/2073/3323/5728) but never clears an inherited `PLAYHOUSE_BRIDGE_SOCKET_PATH`; `Playhouse/CLI/BridgeClient.swift:13` and `Playhouse/App/DaemonClient.swift:31` prefer that inherited socket, and `scripts/validate-app-launch.py:28` then rejects the launch. Reproduced live today from this session: a plain `scripts/playhouse.sh task list` fails with "The bridge service override does not match the selected app." and succeeds only when prefixed with `env -u PLAYHOUSE_BRIDGE_SERVICE_NAME -u PLAYHOUSE_BRIDGE_SOCKET_PATH -u PLAYHOUSE_DATA_DIRECTORY`. Measured cost this task: two build-cache directories (10:33:53, 11:03:26) were created and never produced a `source-fingerprint`, i.e. two runs died before executing a case; at the measured build mean that is ~5 min of machine time plus the diagnosis interval. The memory note claiming this is "fixed in test-bridge.py" does not hold in this worktree — `SOCKET_PATH` does not appear anywhere in `scripts/`.
 
 Action: at the top of `scripts/test-e2e.sh` (and in the child-environment builder in `scripts/test-bridge.py`), unset the three variables for the suite process and its children, except where a case sets them deliberately. Verify by exporting all three and running `scripts/test-e2e.sh --case test_app_override_rejects_incompatible_bundles`; `setUp` must pass without an `env -u` prefix.
 
@@ -104,9 +104,9 @@ Action: have the main agent append one line per reviewer launch and completion (
 
 ### 5. Make a mid-task complete-task commit an explicit review input
 
-Evidence: commit `5741a08` (11 files, +799/−234) was created at 12:25:48, 58 s into the 12:24:50 full-suite run, under the user's git identity and with no agent git write command; the round-4 repairs (`StationAIUITests.swift`, `test-bridge.py`, 12:47) then stayed unstaged. AGENTS.md scopes the task verifier to "the current task's unstaged working-tree changes", so the committed 11-file half of this change fell outside the defined review scope while reviewers were still running.
+Evidence: commit `5741a08` (11 files, +799/−234) was created at 12:25:48, 58 s into the 12:24:50 full-suite run, under the user's git identity and with no agent git write command; the round-4 repairs (`PlayhouseUITests.swift`, `test-bridge.py`, 12:47) then stayed unstaged. AGENTS.md scopes the task verifier to "the current task's unstaged working-tree changes", so the committed 11-file half of this change fell outside the defined review scope while reviewers were still running.
 
-Action: when a complete-task commit lands mid-task, record its SHA in the ledger and hand reviewers an explicit combined scope (`git diff <parent>` plus the unstaged diff) in the change fingerprint. Verify by checking that the next round's reviewer reports name both the commit SHA and the unstaged files. The underlying behaviour — StationAI committing while a turn is in progress — is a separate product question and is stated here as an observation, not a diagnosed defect.
+Action: when a complete-task commit lands mid-task, record its SHA in the ledger and hand reviewers an explicit combined scope (`git diff <parent>` plus the unstaged diff) in the change fingerprint. Verify by checking that the next round's reviewer reports name both the commit SHA and the unstaged files. The underlying behaviour — Playhouse committing while a turn is in progress — is a separate product question and is stated here as an observation, not a diagnosed defect.
 
 ### 6. Investigate the three cases that own a third of the suite
 
@@ -114,15 +114,15 @@ Evidence: in the final green run, `test_codex_questions_can_be_answered_over_cli
 
 Action: read the waits in those three cases (`scripts/test-bridge.py`) and replace any fixed sleeps with marker/poll waits of the kind already used elsewhere in the file. Verify by comparing the `E2E case=… elapsed_seconds=` values for those three IDs before and after; the rest of the suite's per-case numbers should be unchanged.
 
-### 7. Cheap note: `scripts/stationai.sh` pays a full build pass per invocation
+### 7. Cheap note: `scripts/playhouse.sh` pays a full build pass per invocation
 
-Evidence: measured today, a no-op `scripts/stationai.sh task list` with an already-current build took **62 s** (xcodebuild pass, re-codesign, re-embed of CLI and daemon) and emitted the Swift warning wall into the caller's output. Any investigation phase that reads app state through the bridge pays this per call.
+Evidence: measured today, a no-op `scripts/playhouse.sh task list` with an already-current build took **62 s** (xcodebuild pass, re-codesign, re-embed of CLI and daemon) and emitted the Swift warning wall into the caller's output. Any investigation phase that reads app state through the bridge pays this per call.
 
 Action: add a fast path that skips rebuild/codesign when the build fingerprint already matches, or a `--quiet` flag that suppresses compiler diagnostics on a cache hit. Verify by timing two consecutive `task list` calls — the second should be dominated by the daemon round trip, not the build.
 
 ## Telemetry gaps
 
 - **Static reviewer durations**: no producer. Nothing in the repository, the bridge logs, or the task store records subagent start/end. Recommendation 4 is the smallest step that closes it.
-- **Task record timestamps**: the StationAI task record for `DAF27323-…` is unreadable from inside an agent session. With the inherited bridge variables present the CLI is rejected by `scripts/validate-app-launch.py:28`; with them stripped, the CLI targets the per-worktree profile and returns `{"tasks":[]}`. So the created/updated/status-transition times that would have fixed the exact task start and end were unavailable, and the 09:47:25 start is a worktree-creation proxy. Closing recommendation 1 would also make this read possible.
+- **Task record timestamps**: the Playhouse task record for `DAF27323-…` is unreadable from inside an agent session. With the inherited bridge variables present the CLI is rejected by `scripts/validate-app-launch.py:28`; with them stripped, the CLI targets the per-worktree profile and returns `{"tasks":[]}`. So the created/updated/status-transition times that would have fixed the exact task start and end were unavailable, and the 09:47:25 start is a worktree-creation proxy. Closing recommendation 1 would also make this read possible.
 - **Abandoned builds**: build-cache directories record a start (dir birth) but write `source-fingerprint` only on success, so the two aborted runs (10:33:53, 11:03:26) have no measurable duration; their cost is reported as an estimate from the 152 s build mean.
 - **Agent-side reasoning/editing**: only inferable as the residue between measured runs. File mtimes bound the edit bursts (12:20:54, 12:21:29, 12:47:29, 12:47:42) but do not separate thinking from waiting.

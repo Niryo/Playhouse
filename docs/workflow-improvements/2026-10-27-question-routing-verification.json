@@ -4,13 +4,13 @@
   "recordedAt": "2026-10-27T20:44:14.533111+00:00",
   "fingerprint": "16e0b3ce84dac5ade59d55929fa9aedc69182cea249a0ebc8e70ee6163150e3d",
   "files": [
-    "StationAI/App/BridgeCore.swift",
-    "StationAI/App/CodexAppServerClient.swift",
-    "StationAI/App/ConversationTranscriptStore.swift",
-    "StationAI/App/TaskConversationView.swift",
-    "StationAI/BridgeTests/BridgeTestContracts.json",
-    "StationAI/CLI/StationAICLI.swift",
-    "StationAI/StationAIUITests/StationAIUITests.swift",
+    "Playhouse/App/BridgeCore.swift",
+    "Playhouse/App/CodexAppServerClient.swift",
+    "Playhouse/App/ConversationTranscriptStore.swift",
+    "Playhouse/App/TaskConversationView.swift",
+    "Playhouse/BridgeTests/BridgeTestContracts.json",
+    "Playhouse/CLI/PlayhouseCLI.swift",
+    "Playhouse/PlayhouseUITests/PlayhouseUITests.swift",
     "scripts/fixtures/codex-app-server-fixture.py",
     "scripts/test-bridge.py",
     "scripts/test-codex-question-ownership.swift",
@@ -58,7 +58,7 @@
       "start": "2026-10-27T20:47:59.543556+00:00",
       "result": "91 executed: 90 passed, 1 failed (shared-client harness used separate XPC processes)",
       "durationSeconds": 350,
-      "log": "/tmp/stationai-question-routing-e2e.log"
+      "log": "/tmp/playhouse-question-routing-e2e.log"
     },
     {
       "command": "scripts/test-e2e.sh --case test_codex_questions_can_be_answered_over_cli_xpc --case test_pending_question_repair_restores_thread_owner",
@@ -66,7 +66,7 @@
       "result": "2/2 passed; no skips; shared-client probe plus realCLI/XPC persistence",
       "durationSeconds": 181,
       "caseSeconds": 24,
-      "log": "/tmp/stationai-question-routing-focused.log"
+      "log": "/tmp/playhouse-question-routing-focused.log"
     },
     {
       "command": "scripts/test-e2e.sh",
@@ -75,8 +75,8 @@
       "result": "91/91 passed, no skipped/incomplete cases; final confirmation",
       "durationSeconds": 214,
       "caseSeconds": 210.148,
-      "log": "/tmp/stationai-question-routing-final.log",
-      "artifactDirectory": "/tmp/stationai-bridge.Wr7F9z"
+      "log": "/tmp/playhouse-question-routing-final.log",
+      "artifactDirectory": "/tmp/playhouse-bridge.Wr7F9z"
     }
   ],
   "fixturePermission": "User explicitly approved: Allow extending the existing test fixture",
@@ -88,7 +88,7 @@
     "threadID": "01a17e41-e13c-7650-b2e9-ed66fef3cb90",
     "requestID": "1",
     "result": "Restored exact question; source pending cleared; all other transcript fields preserved; no answer sent",
-    "backupDirectory": "/Users/niryo/Library/Application Support/StationAI/conversation-transcripts/question-repair-backups/174767EB-3B5D-46CB-80D1-D9CCCEF251D3",
+    "backupDirectory": "/Users/niryo/Library/Application Support/Playhouse/conversation-transcripts/question-repair-backups/174767EB-3B5D-46CB-80D1-D9CCCEF251D3",
     "timestamp": "2026-10-27T21:11:48.535750+00:00",
     "method": "One-off recovery compiled against unchanged reviewed production core, using ConversationTranscriptStore.reassignPendingUserInput; old running bridge lacks new repair command. No app profile safeguards bypassed and no SwiftData opened.",
     "freshHistoryXPC": "{'code': 'operation_failed', 'message': 'History for a private recovery conversation could not be loaded.'}",

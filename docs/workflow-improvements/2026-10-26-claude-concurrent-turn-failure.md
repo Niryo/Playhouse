@@ -9,7 +9,7 @@ The available timeline is partial. The first retained test artifact starts at 18
 | Phase / evidence | Observed time or duration | Result |
 | --- | ---: | --- |
 | Initial investigation, client/bridge tracing, first implementation, static reviews | Before 18:57; elapsed unavailable | Found per-client and then per-process serialization did not cover separate XPC service processes. Diagnostics identified distinct Bridge PIDs. |
-| Initial full CLI/XPC run (`/tmp/stationai-bridge.YtUAVp`) | 74 cases in 205.876s; command ~373s from task output | Two new concurrency cases failed. |
+| Initial full CLI/XPC run (`/tmp/playhouse-bridge.YtUAVp`) | 74 cases in 205.876s; command ~373s from task output | Two new concurrency cases failed. |
 | First focused retry (`2lfZwA`) | 2 cases in 13.477s; command ~174s | Same two cases failed; Bridge process boundary became clear. |
 | Cross-process lock and paired CLI/UI case implementation; static review/repair | Duration unavailable | File lock added; auxiliary client and UI/CLI process coverage were revised. A build attempt exposed Swift test compilation errors; its elapsed time is unavailable. |
 | Three focused diagnostic-wait retries (`Gzvp5i`, `ysVQjj`, `LcpUMl`) | Failed case: 12.122s, 22.202s, 47.135s; command totals approximately 134s, 192s, 203–225s from task output | Test waited for `claude.turn.queued` before releasing the first turn, while that event was emitted after acquiring the lock. Increasing the wait could not satisfy the condition. |

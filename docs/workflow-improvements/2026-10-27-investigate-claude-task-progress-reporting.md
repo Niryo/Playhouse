@@ -5,7 +5,7 @@
 - Date: 2026-10-27
 - Timeline status: **partial**. No conversation transcript was available to this analysis. Phase boundaries come from the supplied verification ledger plus repository evidence; exploration, design, code authoring, and inter-round repair editing carry no timestamps at all.
 
-Evidence sources checked: working-tree `git status --short` / `git diff` (7 files, +940/−606; `ClaudeCodeClient.swift` alone 980 changed lines), `StationAI/BridgeTests/BridgeTestContracts.json` (87 cases; two renamed from serialization to parallelism, one added), `scripts/test-bridge.py` (renamed/added case functions, `TimedTestResult`), `StationAI/StationAIUITests/StationAIUITests.swift` (same three paired case names), `scripts/test-e2e.sh`, `scripts/prepare-e2e-build.py`, `scripts/` inventory, `.codex/agents/workflow-optimizer.toml`, `docs/workflow-improvements/` filenames only.
+Evidence sources checked: working-tree `git status --short` / `git diff` (7 files, +940/−606; `ClaudeCodeClient.swift` alone 980 changed lines), `Playhouse/BridgeTests/BridgeTestContracts.json` (87 cases; two renamed from serialization to parallelism, one added), `scripts/test-bridge.py` (renamed/added case functions, `TimedTestResult`), `Playhouse/PlayhouseUITests/PlayhouseUITests.swift` (same three paired case names), `scripts/test-e2e.sh`, `scripts/prepare-e2e-build.py`, `scripts/` inventory, `.codex/agents/workflow-optimizer.toml`, `docs/workflow-improvements/` filenames only.
 
 ## Work
 
@@ -17,7 +17,7 @@ Investigation found every Claude turn serialized through one shared `ClaudeCodeC
 |---|---|---|
 | Exploration / design | unknown | not timed; no evidence source |
 | Implementation (6 `xcodebuild build -quiet` runs, private derivedData) | ~6–24 min (est., midpoint ~15 min) | ledger: "roughly 1–4 minutes" each, not individually timed |
-| Test authoring (contract + `test-bridge.py` + `StationAIUITests.swift`) | unknown | not timed |
+| Test authoring (contract + `test-bridge.py` + `PlayhouseUITests.swift`) | unknown | not timed |
 | Focused CLI run #1 — failed | ~121 s+ | measured `E2E phase=build elapsed_seconds=121`; build failed on two Swift compile errors in the UI test file (`diagnosticEvents()` is throwing); **zero cases executed** |
 | Focused CLI run #1 — 2 cases | 160 s total | measured `E2E total_seconds=160`; `E2E phase=build elapsed_seconds=153`; cases 2.725 s + 1.168 s |
 | Focused CLI run #2 — 3 cases | 164 s total | measured `E2E total_seconds=164`; `Ran 3 tests in 5.081s`; build ≈155 s |
@@ -50,7 +50,7 @@ Slowest individual cases: only `test_conversation_runs_concurrent_claude_sends_i
 
 ### 1. Make the E2E build cache incremental instead of clean-per-fingerprint
 
-Observed: `scripts/prepare-e2e-build.py` sets `cache_path = cache_root / f"{root_key}-{fingerprint}"` and `derived_data = cache_path / "DerivedData"`. Any change to a fingerprinted file therefore produces a brand-new, empty DerivedData directory and a full clean `xcodebuild build-for-testing`. Measured cost this task: 121 s + 153 s + ~155 s + ~156 s ≈ **585 s, 75 % of all CLI verification wall clock**, while the two focused runs it gated executed 3.893 s and 5.081 s of tests. `StationAIUITests.swift` is not in the fingerprint exclusion list (unlike `test-bridge.py` and `BridgeTestContracts.json`), so each UI-test edit during review repairs also forced a clean rebuild.
+Observed: `scripts/prepare-e2e-build.py` sets `cache_path = cache_root / f"{root_key}-{fingerprint}"` and `derived_data = cache_path / "DerivedData"`. Any change to a fingerprinted file therefore produces a brand-new, empty DerivedData directory and a full clean `xcodebuild build-for-testing`. Measured cost this task: 121 s + 153 s + ~155 s + ~156 s ≈ **585 s, 75 % of all CLI verification wall clock**, while the two focused runs it gated executed 3.893 s and 5.081 s of tests. `PlayhouseUITests.swift` is not in the fingerprint exclusion list (unlike `test-bridge.py` and `BridgeTestContracts.json`), so each UI-test edit during review repairs also forced a clean rebuild.
 
 Action: keep the fingerprint as the cache *validity* key (manifest + `cache_bundle_is_valid()` + the existing post-build re-check and `flock`), but point `derived_data` at a single per-worktree path such as `cache_root / root_key / "DerivedData"` so xcodebuild recompiles only changed files.
 
@@ -60,13 +60,13 @@ Verify: run `scripts/test-e2e.sh --case <id>` twice with one Swift file edited b
 
 Observed: the 6 implementation `xcodebuild build -quiet` runs used a **private** derivedData path, separate from the E2E build cache. None of them warmed the cache that the subsequent test runs then rebuilt from scratch, so an estimated 6–24 min of compile work was discarded before 585 s of measured rebuild.
 
-Action: run implementation compile checks through `scripts/prepare-e2e-build.py` (or against the same derivedData path it uses), so the first `scripts/test-e2e.sh` invocation hits a warm cache. This compounds with recommendation 1 and does not change what is built — `build-for-testing` with `-only-testing:StationAIUITests/StationAIUITests` already compiles both the app and the paired UI test target, which is also what caught the `diagnosticEvents()` throwing errors.
+Action: run implementation compile checks through `scripts/prepare-e2e-build.py` (or against the same derivedData path it uses), so the first `scripts/test-e2e.sh` invocation hits a warm cache. This compounds with recommendation 1 and does not change what is built — `build-for-testing` with `-only-testing:PlayhouseUITests/PlayhouseUITests` already compiles both the app and the paired UI test target, which is also what caught the `diagnosticEvents()` throwing errors.
 
 Verify: after an implementation compile check, the next `scripts/test-e2e.sh` prints "Reusing matching E2E build" or a build phase far below 150 s.
 
 ### 3. Surface the per-case timings the suite already emits
 
-Observed: `TimedTestResult.stopTest` in `scripts/test-bridge.py` writes `E2E case=<name> elapsed_seconds=<n>` for every case, and `scripts/test-e2e.sh` tees the whole stream to `${test_output_dir}/bridge-tests.log` inside a `mktemp -d /tmp/stationai-bridge.XXXXXX`. Nothing ranks or summarizes it, so the 180.398 s of full-suite case time this task could not be attributed to any case; only the aggregate line survived into the ledger. This is unretained data, not missing instrumentation.
+Observed: `TimedTestResult.stopTest` in `scripts/test-bridge.py` writes `E2E case=<name> elapsed_seconds=<n>` for every case, and `scripts/test-e2e.sh` tees the whole stream to `${test_output_dir}/bridge-tests.log` inside a `mktemp -d /tmp/playhouse-bridge.XXXXXX`. Nothing ranks or summarizes it, so the 180.398 s of full-suite case time this task could not be attributed to any case; only the aggregate line survived into the ledger. This is unretained data, not missing instrumentation.
 
 Action: in `scripts/test-e2e.sh`'s `cleanup`, parse `${bridge_log}` for `E2E case=` lines and print the slowest N alongside the existing `E2E total_seconds=` line. No new instrumentation required.
 

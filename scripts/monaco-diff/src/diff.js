@@ -8,7 +8,7 @@ let fileWorkerFactoryConfigured = false;
 function configureFileWorkerFactory() {
   if (fileWorkerFactoryConfigured || window.location.protocol !== "file:") return;
   const environment = globalThis.MonacoEnvironment;
-  const workerSources = window.stationAIMonacoWorkerSources;
+  const workerSources = window.playhouseMonacoWorkerSources;
   if (!environment || !workerSources) return;
 
   // WebKit rejects module workers loaded directly from the app's local file URL.
@@ -26,7 +26,7 @@ function configureFileWorkerFactory() {
 
 function defineDiffTheme(theme) {
   const isDark = theme === "vs-dark";
-  const themeName = isDark ? "stationai-vs-dark" : "stationai-vs";
+  const themeName = isDark ? "playhouse-vs-dark" : "playhouse-vs";
   monaco.editor.defineTheme(themeName, {
     base: isDark ? "vs-dark" : "vs",
     inherit: true,
@@ -60,7 +60,7 @@ function clearModels() {
   modifiedModel = null;
 }
 
-window.stationAIDiff = {
+window.playhouseDiff = {
   getLineChangeCount() {
     const lineChanges = diffEditor?.getLineChanges();
     return lineChanges === null || lineChanges === undefined ? null : lineChanges.length;
@@ -102,7 +102,7 @@ window.stationAIDiff = {
 
     clearModels();
     const language = languageFor(payload.path);
-    const baseUri = monaco.Uri.parse("inmemory://stationai/" + encodeURIComponent(payload.path));
+    const baseUri = monaco.Uri.parse("inmemory://playhouse/" + encodeURIComponent(payload.path));
     originalModel = monaco.editor.createModel(
       payload.original,
       language,
@@ -118,4 +118,4 @@ window.stationAIDiff = {
   }
 };
 
-window.stationAIDiffReady = true;
+window.playhouseDiffReady = true;

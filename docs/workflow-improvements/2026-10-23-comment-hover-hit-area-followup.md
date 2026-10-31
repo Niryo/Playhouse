@@ -1,6 +1,6 @@
 # Comment hover hit area follow-up
 
-Task: `4955B4B9-2A17-48E8-800D-88912CB4DA71` (StationAI conversation text comments). Client date: 2026-10-23 (Asia/Jerusalem).
+Task: `4955B4B9-2A17-48E8-800D-88912CB4DA71` (Playhouse conversation text comments). Client date: 2026-10-23 (Asia/Jerusalem).
 
 ## Observed timeline
 
@@ -11,7 +11,7 @@ Task: `4955B4B9-2A17-48E8-800D-88912CB4DA71` (StationAI conversation text commen
 | Review and repair | 16:05:44–16:10:14 UTC, 4m30s elapsed gap containing review and code edits; active time cannot be separated. | Task reviewer found a hard-coded horizontal hover coordinate; test now calculates the marker's position from the response text. |
 | Focused Tart run after marker-derived coordinate | 16:10:14–16:13:11 UTC, 2m57s outer elapsed, derived from artifact timestamps. | `20261023T161014Z-45625`; case still reached later composer failure. |
 | Review and tighter assertion | 16:13:11–16:13:26 UTC, 15s elapsed gap; activity timing unavailable. | Alignment tolerance changed from 48 to 16 points after review. |
-| Final focused Tart run and screenshot inspection | 16:13:26–16:16:20 UTC, 2m54s outer elapsed. The Xcode test session was 109.4s, while the named case was 25.493s. | `20261023T161326Z-49963` summary and log; screenshot showed a solid popover above and aligned with the Comment link. The case failed later at `StationAIUITests.swift:3689`, waiting for `comment-input-field`. |
+| Final focused Tart run and screenshot inspection | 16:13:26–16:16:20 UTC, 2m54s outer elapsed. The Xcode test session was 109.4s, while the named case was 25.493s. | `20261023T161326Z-49963` summary and log; screenshot showed a solid popover above and aligned with the Comment link. The case failed later at `PlayhouseUITests.swift:3689`, waiting for `comment-input-field`. |
 
 The directly observed 16:03:01–16:16:20 UTC window spans 13m19s. Three focused VM runs account for about 8m34s of outer elapsed time (64% of that window); the remaining 4m45s includes inspection, review, repair, and possible idle time. Earlier task work and the final handoff lack comparable timestamps, so this is a partial timeline, not a total task duration. The last run's 25.493s test case was about 23% of its 109.4s Xcode session and about 15% of its 174s outer run. Those are measured or timestamp-derived values; the exact setup stages are not separated in the available summaries.
 

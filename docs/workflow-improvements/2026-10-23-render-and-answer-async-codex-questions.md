@@ -1,6 +1,6 @@
 # Render and answer async Codex questions — workflow review
 
-Task: render `request_user_input_async` as inline answer cards and route replies through StationAI's shared conversation manager. Date: 2026-10-23 (client local date). This is a **partial timeline**: the task's first exploration/implementation timestamp and final handoff timestamp were not retained in the available record.
+Task: render `request_user_input_async` as inline answer cards and route replies through Playhouse's shared conversation manager. Date: 2026-10-23 (client local date). This is a **partial timeline**: the task's first exploration/implementation timestamp and final handoff timestamp were not retained in the available record.
 
 ## Observed timeline
 
@@ -9,10 +9,10 @@ Task: render `request_user_input_async` as inline answer cards and route replies
 | Explore Codex session/schema, implement parser, manager, bridge, CLI, UI, fixture, and paired tests | Unknown | Task conversation and changed-file list; no start/end timestamps or active-work timer. |
 | Static checks and three-agent review; repair active-turn coverage and shared-manager routing | Unknown | Task conversation; approvals and architecture concern were reported, but review durations were not captured. |
 | First `test-e2e.sh` static prerequisite failure (`.help` hints), then repair | Unknown | Task conversation; this invocation stopped before build/cases and has no retained command timing. |
-| First full CLI/XPC suite | 19:09:00–19:12:37, **217 s** | `/tmp/stationai-bridge.eCAQpv` filesystem times and command summary. About 99 s before case log creation, including the reported ~95 s build; 62 cases took 118.440 s. One new case failed because the test expected CLI exit 1 instead of 2. |
-| First focused retry | 19:13:11–19:13:16, about **5 s** | `/tmp/stationai-bridge.3r7NAV`; case took 1.125 s and failed on expecting `options: null` where JSON omitted `options`. |
-| Second focused retry | 19:13:52–19:13:58, about **6 s** | `/tmp/stationai-bridge.EfyrZ8`; case passed in 1.601 s. |
-| Final full CLI/XPC suite | 19:14:03–19:16:07, **124 s** | `/tmp/stationai-bridge.1bgwdv` and command summary; cached build, 62/62 cases passed in 119.143 s. |
+| First full CLI/XPC suite | 19:09:00–19:12:37, **217 s** | `/tmp/playhouse-bridge.eCAQpv` filesystem times and command summary. About 99 s before case log creation, including the reported ~95 s build; 62 cases took 118.440 s. One new case failed because the test expected CLI exit 1 instead of 2. |
+| First focused retry | 19:13:11–19:13:16, about **5 s** | `/tmp/playhouse-bridge.3r7NAV`; case took 1.125 s and failed on expecting `options: null` where JSON omitted `options`. |
+| Second focused retry | 19:13:52–19:13:58, about **6 s** | `/tmp/playhouse-bridge.EfyrZ8`; case passed in 1.601 s. |
+| Final full CLI/XPC suite | 19:14:03–19:16:07, **124 s** | `/tmp/playhouse-bridge.1bgwdv` and command summary; cached build, 62/62 cases passed in 119.143 s. |
 
 The observed interval from the first full run to the final full log is **427 s**. Four measured invocations account for about **352 s**; the remaining **75 s** comprises three gaps between runs (34 s, 36 s, 5 s), including repair and preparation whose active-work portions are unknown. The overall task duration and phase totals before 19:09 are unknown. No UI runtime or screenshots were part of routine verification.
 

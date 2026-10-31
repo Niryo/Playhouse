@@ -6,9 +6,9 @@ import argparse
 from pathlib import Path
 
 
-FIXTURE_ROOT = Path("/tmp/stationai-bridge-workspaces")
-OWNER_MARKER = ".stationai-bridge-fixture"
-OWNER_CONTENTS = "StationAI bridge tests own this deterministic fixture (v1).\n"
+FIXTURE_ROOT = Path("/tmp/playhouse-bridge-workspaces")
+OWNER_MARKER = ".playhouse-bridge-fixture"
+OWNER_CONTENTS = "Playhouse bridge tests own this deterministic fixture (v1).\n"
 
 
 def run_git(repository: Path, *arguments: str) -> str:
@@ -31,10 +31,10 @@ def create_repository(repository: Path, files: dict[str, str]) -> None:
     for name, contents in files.items():
         (repository / name).write_text(contents, encoding="utf-8")
     run_git(repository, "init", "--initial-branch=main")
-    run_git(repository, "config", "user.name", "StationAI Bridge Test")
-    run_git(repository, "config", "user.email", "stationai-bridge-test@example.invalid")
+    run_git(repository, "config", "user.name", "Playhouse Bridge Test")
+    run_git(repository, "config", "user.email", "playhouse-bridge-test@example.invalid")
     run_git(repository, "add", ".")
-    run_git(repository, "commit", "-m", "Create clean StationAI bridge test fixture")
+    run_git(repository, "commit", "-m", "Create clean Playhouse bridge test fixture")
     branch_source = run_git(
         repository,
         "commit-tree",
@@ -73,7 +73,7 @@ def prepare(workspace_changes: bool = False) -> None:
         marker = FIXTURE_ROOT / OWNER_MARKER
         if not marker.is_file() or marker.read_text(encoding="utf-8") != OWNER_CONTENTS:
             raise RuntimeError(
-                f"Refusing to remove {FIXTURE_ROOT}: its StationAI bridge test ownership marker is missing or invalid."
+                f"Refusing to remove {FIXTURE_ROOT}: its Playhouse bridge test ownership marker is missing or invalid."
             )
         shutil.rmtree(FIXTURE_ROOT)
 
@@ -95,13 +95,13 @@ def prepare(workspace_changes: bool = False) -> None:
         primary,
         {
             ".gitignore": "nested/\n",
-            "stationai-primary.txt": "Primary baseline.\n",
+            "playhouse-primary.txt": "Primary baseline.\n",
         },
     )
     existing_worktree = FIXTURE_ROOT / "existing-worktree"
     run_git(primary, "worktree", "add", "-b", "ui-existing-worktree", str(existing_worktree), "main")
     create_repository(nested, {"nested-note.txt": "Nested baseline.\n"})
-    create_repository(secondary, {"stationai-secondary.txt": "Secondary baseline.\n"})
+    create_repository(secondary, {"playhouse-secondary.txt": "Secondary baseline.\n"})
     create_repository(external, {"external-note.txt": "Outside baseline.\n"})
     create_repository(alternate, {"alternate-note.txt": "Alternate baseline.\n"})
     create_repository(
@@ -121,7 +121,7 @@ def prepare(workspace_changes: bool = False) -> None:
     if workspace_changes:
         prepare_workspace_changes(changes)
     custom.mkdir(parents=True)
-    (custom / "stationai-custom.txt").write_text("Custom folder baseline.\n", encoding="utf-8")
+    (custom / "playhouse-custom.txt").write_text("Custom folder baseline.\n", encoding="utf-8")
     unavailable.mkdir(parents=True)
     (unavailable / "availability-note.txt").write_text("Temporarily unavailable folder baseline.\n", encoding="utf-8")
     (suggested_parent / "linked-outside").symlink_to(external, target_is_directory=True)
