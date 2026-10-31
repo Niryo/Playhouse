@@ -13,7 +13,7 @@ report_phase() {
   phase="$1"
 }
 source "${repository_root}/scripts/app-profile.sh"
-stationai_load_app_profile "${repository_root}"
+playhouse_load_app_profile "${repository_root}"
 
 selected_cases=()
 while (( $# > 0 )); do
@@ -33,7 +33,7 @@ while (( $# > 0 )); do
   esac
 done
 
-test_output_dir="$(mktemp -d /tmp/stationai-bridge.XXXXXX)"
+test_output_dir="$(mktemp -d /tmp/playhouse-bridge.XXXXXX)"
 cleanup() {
   local status=$?
   report_phase finished
@@ -47,13 +47,13 @@ python3 "${repository_root}/scripts/check-e2e-locking.py"
 report_phase build
 build_info="$(python3 "${repository_root}/scripts/prepare-e2e-build.py" \
   --root "${repository_root}" \
-  --profile-bundle-id "${STATIONAI_PROFILE_BUNDLE_ID}" \
+  --profile-bundle-id "${PLAYHOUSE_PROFILE_BUNDLE_ID}" \
   --architecture "${architecture}")"
 report_phase fixture
 derived_data_dir="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["derivedData"])' "${build_info}")"
 e2e_bundle_identifier="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["bundleID"])' "${build_info}")"
-app_bundle="${derived_data_dir}/Build/Products/Debug/StationAI.app"
-cli_path="${app_bundle}/Contents/MacOS/stationai-cli"
+app_bundle="${derived_data_dir}/Build/Products/Debug/Playhouse.app"
+cli_path="${app_bundle}/Contents/MacOS/playhouse-cli"
 data_root="${test_output_dir}/data"
 fixture_root="${test_output_dir}/fixtures"
 bridge_log="${test_output_dir}/bridge-tests.log"
@@ -103,4 +103,4 @@ if (( bridge_status != 0 )); then
   exit "${bridge_status}"
 fi
 
-printf 'StationAI CLI/XPC bridge verification passed without launching the UI.\n'
+printf 'Playhouse CLI/XPC bridge verification passed without launching the UI.\n'

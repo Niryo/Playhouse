@@ -9,10 +9,10 @@ Times below are UTC on 2026-10-24. This is a partial timeline through verificati
 | Phase | Observed interval or duration | Evidence |
 | --- | --- | --- |
 | Fetch, merge, two conflict resolutions, Goal/comment routing repair, static reviews | Began around 06:34 (estimate from conversation); exact end and active duration unavailable | Task conversation and review summaries |
-| First full CLI/XPC suite | 307 s measured; build 104 s, fixture 2 s, cases 200 s; 62/63 passed | `/tmp/stationai-pr-conflicts-cli.log`; lock acquired 06:51:18 |
-| Focused CLI retry after fixture name repair | 102 s measured; build 97 s, fixture 2 s, case 2.044 s; passed | `/tmp/stationai-pr-conflicts-focused-cli.log` |
-| Final full CLI/XPC suite | 116 s measured; cached build 0 s, fixture 2 s, cases 113 s; 63/63 passed | `/tmp/stationai-pr-conflicts-final-cli.log`; lock acquired 06:59:39 |
-| Ten focused Tart UI attempts, same paired comment case | 07:01:48–08:00:41 approximately, based on first artifact timestamp and final exit-status mtime; 2,343 s aggregate runner wall time, nine failures then one pass | `stationai-ui-tart-artifacts/20261024T07*` exit statuses and `ui-test.log` |
+| First full CLI/XPC suite | 307 s measured; build 104 s, fixture 2 s, cases 200 s; 62/63 passed | `/tmp/playhouse-pr-conflicts-cli.log`; lock acquired 06:51:18 |
+| Focused CLI retry after fixture name repair | 102 s measured; build 97 s, fixture 2 s, case 2.044 s; passed | `/tmp/playhouse-pr-conflicts-focused-cli.log` |
+| Final full CLI/XPC suite | 116 s measured; cached build 0 s, fixture 2 s, cases 113 s; 63/63 passed | `/tmp/playhouse-pr-conflicts-final-cli.log`; lock acquired 06:59:39 |
+| Ten focused Tart UI attempts, same paired comment case | 07:01:48–08:00:41 approximately, based on first artifact timestamp and final exit-status mtime; 2,343 s aggregate runner wall time, nine failures then one pass | `playhouse-ui-tart-artifacts/20261024T07*` exit statuses and `ui-test.log` |
 | Final staging, merge commit, push, PR recheck | Not visible at report cutoff | No completed command output available |
 
 The 525 s across three CLI invocations and 2,343 s across ten UI invocations are measured tool/runtime time, not agent active time. Together they account for 2,868 s (47.8 min) of observed verification runtime. The UI wall interval was about 58.9 min, leaving about 19.8 min between UI runs for edits, reviews, command handoff, or idle time; the available records do not divide that gap. The earlier merge/review period and later commit/push period cannot be reconciled to a precise total task duration. Tart XCTest reported 657.240 s of selected-case time across the ten attempts; about 1,686 s of Tart runner wall time was outside the selected case, including VM preparation, build, transfer, and cleanup, without per-step timing in the available artifact logs.

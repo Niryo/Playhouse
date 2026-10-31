@@ -7,7 +7,7 @@ Task `16B9117F-8308-4B7A-B1C8-ECE45ED805F6` · Client date 2026-10-23 (Asia/Jeru
 | Sequence | Operation | Duration | Evidence |
 | --- | --- | ---: | --- |
 | 1 | Completion-banner implementation and paired case changes, context review, static task/UI approvals; prior architecture approval retained | Unknown | Task conversation and final reviewed fingerprint `a8ed6242ec65877887f8ad8e97eb38d265f06ce68fc2d4e2a92c206cca465219`; no start/end times supplied. |
-| 2 | Full CLI/XPC suite, 57/57 passed without skips | **176 s runner**, **94.506 s cases** | Task verification output and `/tmp/stationai-bridge.6Khs7W/bridge-tests.log`; about **81.5 s** outside cases. |
+| 2 | Full CLI/XPC suite, 57/57 passed without skips | **176 s runner**, **94.506 s cases** | Task verification output and `/tmp/playhouse-bridge.6Khs7W/bridge-tests.log`; about **81.5 s** outside cases. |
 | 3 | Focused Tart Goal UI case, 1/1 passed | **173 s** from run marker to result artifact; **22.975 s** XCTest case | `20261023T084452Z-11804` Tart run ID and `exit-status.txt` mtime (derived, excludes later cleanup); `ui-test.log` case duration. At least **150 s** was outside the case. |
 | 4 | Live Codex completion branch | Not run | Tart guest lacked `~/.codex/auth.json`; no live-completion pass is supported. |
 | 5 | App rebuild/launch and process check from this worktree; handoff | Unknown | Task progress handoff; no command timing or completion timestamp supplied. |

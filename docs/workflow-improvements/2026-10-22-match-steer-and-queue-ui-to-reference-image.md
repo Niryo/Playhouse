@@ -1,6 +1,6 @@
 # Match Steer and Queue UI to Reference Image
 
-Task: StationAI card `6B832407-EB0F-49B0-9AE1-85B616F2B66D`  
+Task: Playhouse card `6B832407-EB0F-49B0-9AE1-85B616F2B66D`  
 Date: 2026-10-22 (Asia/Jerusalem)
 
 ## Timeline and measured cost

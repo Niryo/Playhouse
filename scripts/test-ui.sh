@@ -2,21 +2,21 @@
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export STATIONAI_REPOSITORY_ROOT="${repository_root}"
+export PLAYHOUSE_REPOSITORY_ROOT="${repository_root}"
 script_path="${repository_root}/scripts/test-ui.sh"
 
 # Visible UI automation must run in the isolated Tart guest. The VM runner
 # supplies this marker only inside its source snapshot on virtual Mac hardware.
 vm_model="$(sysctl -n hw.model 2>/dev/null || true)"
-if [[ "${STATIONAI_UI_TART_GUEST:-}" != "1" || "$vm_model" != VirtualMac* ]]; then
+if [[ "${PLAYHOUSE_UI_TART_GUEST:-}" != "1" || "$vm_model" != VirtualMac* ]]; then
 	if [[ "${1:-}" == "--locked" ]]; then
 		shift
-		export STATIONAI_UI_TART_HOST_LOCKED=1
+		export PLAYHOUSE_UI_TART_HOST_LOCKED=1
 	fi
-	if [[ "${STATIONAI_RUN_LIVE_INTEGRATION:-0}" == "1" ]]; then
-		exec "${repository_root}/scripts/test-ui-tart.sh" --live-provider "${STATIONAI_LIVE_PROVIDER:-claude}" "$@"
+	if [[ "${PLAYHOUSE_RUN_LIVE_INTEGRATION:-0}" == "1" ]]; then
+		exec "${repository_root}/scripts/test-ui-tart.sh" --live-provider "${PLAYHOUSE_LIVE_PROVIDER:-claude}" "$@"
 	fi
-	if [[ "${STATIONAI_RUN_CODEX_INTEGRATION:-0}" == "1" ]]; then
+	if [[ "${PLAYHOUSE_RUN_CODEX_INTEGRATION:-0}" == "1" ]]; then
 		exec "${repository_root}/scripts/test-ui-tart.sh" --live-provider codex "$@"
 	fi
 	exec "${repository_root}/scripts/test-ui-tart.sh" "$@"
@@ -45,11 +45,11 @@ while (( $# > 0 )); do
   esac
 done
 
-if [[ "${STATIONAI_UI_TESTS_CONFIRMED:-0}" != "1" ]]; then
+if [[ "${PLAYHOUSE_UI_TESTS_CONFIRMED:-0}" != "1" ]]; then
   bash "${repository_root}/scripts/confirm-ui-tests.sh"
 fi
 
-test_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/stationai-ui.XXXXXX")"
+test_output_dir="$(mktemp -d "${TMPDIR:-/tmp}/playhouse-ui.XXXXXX")"
 prepare_workspace_changes=0
 if (( ${#ui_cases[@]} == 0 )); then
   prepare_workspace_changes=1
@@ -62,14 +62,14 @@ else
   done
 fi
 
-fixture_root="/tmp/stationai-ui-test-fixtures"
+fixture_root="/tmp/playhouse-ui-test-fixtures"
 if (( prepare_workspace_changes == 1 )); then
   python3 "${repository_root}/scripts/prepare-e2e-fixture.py" --fixture-root "${fixture_root}" --workspace-changes
 else
   python3 "${repository_root}/scripts/prepare-e2e-fixture.py" --fixture-root "${fixture_root}"
 fi
-fixture_owner="StationAI bridge tests own this deterministic fixture (v1)."
-if [[ "$(cat "${fixture_root}/.stationai-bridge-fixture" 2>/dev/null || true)" != "${fixture_owner}" ]]; then
+fixture_owner="Playhouse bridge tests own this deterministic fixture (v1)."
+if [[ "$(cat "${fixture_root}/.playhouse-bridge-fixture" 2>/dev/null || true)" != "${fixture_owner}" ]]; then
   printf 'Refusing to prepare UI Codex fixtures without the owned fixture root marker.\n' >&2
   exit 1
 fi
@@ -106,7 +106,7 @@ for fixture in subagent context-compaction tool-activity long-history-success ma
 done
 python3 "${repository_root}/scripts/check-test-parity.py"
 
-contract_path="${repository_root}/StationAI/BridgeTests/BridgeTestContracts.json"
+contract_path="${repository_root}/Playhouse/BridgeTests/BridgeTestContracts.json"
 contract_arguments=("${contract_path}")
 if (( ${#ui_cases[@]} > 0 )); then
   contract_arguments+=("${ui_cases[@]}")
@@ -157,25 +157,25 @@ python3 "${dashboard_script}" "${dashboard_arguments[@]}" >/dev/null
 
 architecture="$(uname -m)"
 xcode_version="$(xcodebuild -version | awk '/^Xcode / {print $2}')"
-if [[ "${STATIONAI_UI_TART_GUEST:-0}" == "1" ]]; then
+if [[ "${PLAYHOUSE_UI_TART_GUEST:-0}" == "1" ]]; then
   repository_cache_key="tart-vm-$(printf '%s' "${repository_root}" | shasum -a 256 | cut -c 1-12)"
-  derived_data_root="${HOME}/StationAIUITestRuns/DerivedData"
+  derived_data_root="${HOME}/PlayhouseUITestRuns/DerivedData"
 else
   repository_cache_key="$(printf '%s' "${repository_root}" | shasum -a 256 | cut -c 1-12)"
   derived_data_root="${TMPDIR:-/tmp}"
 fi
-derived_data_dir="${derived_data_root}/stationai-ui-derived-data-${xcode_version}-${architecture}-${repository_cache_key}"
-if [[ "${STATIONAI_UI_TART_GUEST:-0}" == "1" ]]; then
+derived_data_dir="${derived_data_root}/playhouse-ui-derived-data-${xcode_version}-${architecture}-${repository_cache_key}"
+if [[ "${PLAYHOUSE_UI_TART_GUEST:-0}" == "1" ]]; then
   # Disk pressure in the guest makes macOS purge app-container caches, and that
   # purge terminates the sandboxed XCTest runner mid-case (RunningBoard
   # CacheDeleteAppContainerCaches). Drop builds for other source trees that
   # nothing has used for a day, and per-case data left behind by failed cases.
-  find "${derived_data_root}" -mindepth 1 -maxdepth 1 -type d -name 'stationai-ui-derived-data-*' \
+  find "${derived_data_root}" -mindepth 1 -maxdepth 1 -type d -name 'playhouse-ui-derived-data-*' \
     ! -path "${derived_data_dir}" -mtime +1 -exec rm -rf -- {} + 2>/dev/null || true
   # The ownership marker is often gone here: the daemon recreates `data/` under
   # a removed case directory when it writes diagnostics after teardown, so the
   # test-owned name prefix and age are the criteria.
-  for stale_case_data in /tmp/stationai-ui-test-data/StationAIUITests-*; do
+  for stale_case_data in /tmp/playhouse-ui-test-data/PlayhouseUITests-*; do
     [[ -d "${stale_case_data}" ]] || continue
     [[ -z "$(find "${stale_case_data}" -maxdepth 0 -mmin -120)" ]] || continue
     rm -rf -- "${stale_case_data}"
@@ -183,8 +183,8 @@ if [[ "${STATIONAI_UI_TART_GUEST:-0}" == "1" ]]; then
 fi
 source_bundle_identifier="$("${repository_root}/scripts/app-profile.sh" "${repository_root}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["bundleID"])')"
 task_pr_seeder="${fixture_root}/seed-task-pr-link"
-xcrun swiftc -module-name StationAI \
-  "${repository_root}/StationAI/App/BoardTask.swift" \
+xcrun swiftc -module-name Playhouse \
+  "${repository_root}/Playhouse/App/BoardTask.swift" \
   "${repository_root}/scripts/seed-task-pr-link.swift" \
   -o "${task_pr_seeder}"
 legacy_store_seeder="${fixture_root}/seed-legacy-task-store"
@@ -192,12 +192,12 @@ xcrun swiftc -parse-as-library -swift-version 5 -O \
   "${repository_root}/scripts/seed-legacy-task-store.swift" \
   -o "${legacy_store_seeder}"
 # Live UI cases read the selected provider from this marker; the guest
-# runner exports STATIONAI_LIVE_PROVIDER alongside STATIONAI_RUN_LIVE_INTEGRATION.
-live_ui_marker="/tmp/stationai-live-ui-integration"
+# runner exports PLAYHOUSE_LIVE_PROVIDER alongside PLAYHOUSE_RUN_LIVE_INTEGRATION.
+live_ui_marker="/tmp/playhouse-live-ui-integration"
 live_ui_provider=""
-if [[ "${STATIONAI_RUN_LIVE_INTEGRATION:-0}" == "1" ]]; then
-  live_ui_provider="${STATIONAI_LIVE_PROVIDER:-claude}"
-elif [[ "${STATIONAI_RUN_CODEX_INTEGRATION:-0}" == "1" ]]; then
+if [[ "${PLAYHOUSE_RUN_LIVE_INTEGRATION:-0}" == "1" ]]; then
+  live_ui_provider="${PLAYHOUSE_LIVE_PROVIDER:-claude}"
+elif [[ "${PLAYHOUSE_RUN_CODEX_INTEGRATION:-0}" == "1" ]]; then
   live_ui_provider="codex"
 fi
 rm -f "${live_ui_marker}"
@@ -213,7 +213,7 @@ cleanup() {
 trap cleanup EXIT
 
 dashboard_inline=0
-if [[ "${STATIONAI_UI_DASHBOARD:-1}" != "0" ]]; then
+if [[ "${PLAYHOUSE_UI_DASHBOARD:-1}" != "0" ]]; then
   if command -v osascript >/dev/null 2>&1 && osascript - "${dashboard_script}" "${dashboard_state}" <<'APPLESCRIPT' >/dev/null 2>&1
 on run argv
   set dashboardScript to item 1 of argv
@@ -236,8 +236,8 @@ else
 fi
 
 base_test_arguments=(
-  -project "${repository_root}/StationAI.xcodeproj"
-  -scheme StationAI
+  -project "${repository_root}/Playhouse.xcodeproj"
+  -scheme Playhouse
   -destination "platform=macOS,arch=${architecture}"
   -derivedDataPath "${derived_data_dir}"
   -parallel-testing-enabled NO
@@ -249,7 +249,7 @@ base_test_arguments+=(
   ONLY_ACTIVE_ARCH=YES
 )
 app_bundle_identifier="${source_bundle_identifier}.e2e.ui"
-ui_build_timeout_seconds="${STATIONAI_UI_BUILD_TIMEOUT_SECONDS:-600}"
+ui_build_timeout_seconds="${PLAYHOUSE_UI_BUILD_TIMEOUT_SECONDS:-600}"
 watchdog_command=(
   perl -e '
     use POSIX ":sys_wait_h";
@@ -297,8 +297,8 @@ import sys
 
 root = pathlib.Path(sys.argv[1])
 inputs = [
-    root / "StationAI",
-    root / "StationAI.xcodeproj" / "project.pbxproj",
+    root / "Playhouse",
+    root / "Playhouse.xcodeproj" / "project.pbxproj",
     root / "scripts" / "app-profile.sh",
     root / "scripts" / "build-bridge.sh",
 ]
@@ -316,9 +316,9 @@ for path in sorted(files):
 print(digest.hexdigest())
 PY
 )"
-build_stamp="${derived_data_dir}/stationai-ui-build-input.sha256"
-test_runner_product="${derived_data_dir}/Build/Products/Debug/StationAIUITests-Runner.app"
-compiled_app="${derived_data_dir}/Build/Products/Debug/StationAI.app"
+build_stamp="${derived_data_dir}/playhouse-ui-build-input.sha256"
+test_runner_product="${derived_data_dir}/Build/Products/Debug/PlayhouseUITests-Runner.app"
+compiled_app="${derived_data_dir}/Build/Products/Debug/Playhouse.app"
 compiled_bundle_is_compatible=0
 # The bridge daemon and CLI ship flat in Contents/MacOS and read their identity
 # from this same Info.plist via `Bundle.main` (no separate XPC bundle anymore),
@@ -335,7 +335,7 @@ try:
     app_info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
 except (OSError, plistlib.InvalidFileException):
     raise SystemExit(0)
-if app_info.get("StationAIStoreCompatibilityVersion") == "2":
+if app_info.get("PlayhouseStoreCompatibilityVersion") == "2":
     raise SystemExit(1)
 raise SystemExit(0)
 PY
@@ -360,7 +360,7 @@ else
   caffeinate -d "${watchdog_command[@]}" "${ui_build_timeout_seconds}" \
     "${test_output_dir}/build-timeout.png" \
     xcodebuild build-for-testing "${base_test_arguments[@]}" \
-    "STATIONAI_APP_BUNDLE_IDENTIFIER=${app_bundle_identifier}" 2>&1 | tee "${build_log}"
+    "PLAYHOUSE_APP_BUNDLE_IDENTIFIER=${app_bundle_identifier}" 2>&1 | tee "${build_log}"
   build_status="${PIPESTATUS[0]}"
   set -e
   if (( build_status != 0 )); then
@@ -386,10 +386,10 @@ fi
 # runner costs about ten seconds per session, a quarter of a full run when each case
 # had its own. XCTest's execution time allowance ends a stalled case by itself (it
 # kills and relaunches the runner, and the remaining cases still run), so the outer
-# watchdog only guards the whole session. STATIONAI_UI_BATCH_SIZE splits the session
+# watchdog only guards the whole session. PLAYHOUSE_UI_BATCH_SIZE splits the session
 # when a smaller blast radius is wanted.
-ui_test_timeout_seconds="${STATIONAI_UI_TEST_TIMEOUT_SECONDS:-180}"
-batch_size="${STATIONAI_UI_BATCH_SIZE:-${#selected_cases[@]}}"
+ui_test_timeout_seconds="${PLAYHOUSE_UI_TEST_TIMEOUT_SECONDS:-180}"
+batch_size="${PLAYHOUSE_UI_BATCH_SIZE:-${#selected_cases[@]}}"
 if (( batch_size < 1 )); then batch_size=1; fi
 batch_count=$(( (${#selected_cases[@]} + batch_size - 1) / batch_size ))
 overall_failed=0
@@ -399,16 +399,16 @@ overall_failed=0
 # holding one watcher connection (the daemon exits when its last one closes).
 bridge_watcher_pid=""
 # A daemon left from an earlier build would silently serve this run's requests.
-pkill -f "${compiled_app}/Contents/MacOS/stationai-daemon" 2>/dev/null || true
-if [[ -x "${compiled_app}/Contents/MacOS/stationai-cli" ]]; then
+pkill -f "${compiled_app}/Contents/MacOS/playhouse-daemon" 2>/dev/null || true
+if [[ -x "${compiled_app}/Contents/MacOS/playhouse-cli" ]]; then
   # Reconnect whenever the watcher ends (a case that kills the daemon ends it too);
   # reconnecting also starts a fresh daemon.
   (
     # The watcher exits non-zero when its daemon dies; under `set -e` that must not end this loop.
     while true; do
       watcher_status=0
-      STATIONAI_BRIDGE_SERVICE_NAME="${app_bundle_identifier}.bridge" \
-        "${compiled_app}/Contents/MacOS/stationai-cli" conversation runtime --watch >/dev/null 2>"${test_output_dir}/bridge-watcher.err" || watcher_status=$?
+      PLAYHOUSE_BRIDGE_SERVICE_NAME="${app_bundle_identifier}.bridge" \
+        "${compiled_app}/Contents/MacOS/playhouse-cli" conversation runtime --watch >/dev/null 2>"${test_output_dir}/bridge-watcher.err" || watcher_status=$?
       printf '%s watcher exited rc=%s: %s\n' "$(date +%H:%M:%S)" "${watcher_status}" "$(tail -c 300 "${test_output_dir}/bridge-watcher.err" | tr '\n' ' ')" >> "${test_output_dir}/bridge-watcher.log"
       sleep 1
     done
@@ -421,7 +421,7 @@ for (( batch_index=0; batch_index<batch_count; batch_index++ )); do
   batch_cases=("${selected_cases[@]:first_case:batch_size}")
   batch_number=$(( batch_index + 1 ))
   batch_tag="$(printf '%02d' "${batch_number}")"
-  result_bundle="${test_output_dir}/StationAI-UI-batch-${batch_tag}.xcresult"
+  result_bundle="${test_output_dir}/Playhouse-UI-batch-${batch_tag}.xcresult"
   summary_path="${test_output_dir}/test-summary-batch-${batch_tag}.json"
   dashboard_log="${test_output_dir}/xcodebuild-batch-${batch_tag}.log"
   test_arguments=(
@@ -431,9 +431,9 @@ for (( batch_index=0; batch_index<batch_count; batch_index++ )); do
     -maximum-test-execution-time-allowance $(( ui_test_timeout_seconds * 2 ))
   )
   for ui_case in "${batch_cases[@]}"; do
-    test_arguments+=("-only-testing:StationAIUITests/StationAIUITests/${ui_case}")
+    test_arguments+=("-only-testing:PlayhouseUITests/PlayhouseUITests/${ui_case}")
   done
-  test_arguments+=("STATIONAI_APP_BUNDLE_IDENTIFIER=${app_bundle_identifier}")
+  test_arguments+=("PLAYHOUSE_APP_BUNDLE_IDENTIFIER=${app_bundle_identifier}")
 
   printf '\nVisible UI batch %s/%s (%s cases): %s\n' \
     "${batch_number}" "${batch_count}" "${#batch_cases[@]}" "${batch_cases[*]}"
@@ -459,31 +459,31 @@ for (( batch_index=0; batch_index<batch_count; batch_index++ )); do
   # XCTest teardown is skipped when the watchdog terminates xcodebuild. The
   # VM is dedicated to this run, so clean up the app and runner after every
   # case to prevent a timed-out case from contaminating the next one.
-  pkill -x StationAI >/dev/null 2>&1 || true
-  pkill -x StationAIUITests-Runner >/dev/null 2>&1 || true
+  pkill -x Playhouse >/dev/null 2>&1 || true
+  pkill -x PlayhouseUITests-Runner >/dev/null 2>&1 || true
   pkill -x "Diagnostics Reporter" >/dev/null 2>&1 || true
   for _ in $(seq 1 20); do
-    if ! pgrep -x StationAI >/dev/null 2>&1 &&
-      ! pgrep -x StationAIUITests-Runner >/dev/null 2>&1; then
+    if ! pgrep -x Playhouse >/dev/null 2>&1 &&
+      ! pgrep -x PlayhouseUITests-Runner >/dev/null 2>&1; then
       break
     fi
     sleep 0.25
   done
-  if pgrep -x StationAI >/dev/null 2>&1; then
-    pkill -KILL -x StationAI >/dev/null 2>&1 || true
+  if pgrep -x Playhouse >/dev/null 2>&1; then
+    pkill -KILL -x Playhouse >/dev/null 2>&1 || true
   fi
-  if pgrep -x StationAIUITests-Runner >/dev/null 2>&1; then
-    pkill -KILL -x StationAIUITests-Runner >/dev/null 2>&1 || true
+  if pgrep -x PlayhouseUITests-Runner >/dev/null 2>&1; then
+    pkill -KILL -x PlayhouseUITests-Runner >/dev/null 2>&1 || true
   fi
   for _ in $(seq 1 8); do
-    if ! pgrep -x StationAI >/dev/null 2>&1 &&
-      ! pgrep -x StationAIUITests-Runner >/dev/null 2>&1; then
+    if ! pgrep -x Playhouse >/dev/null 2>&1 &&
+      ! pgrep -x PlayhouseUITests-Runner >/dev/null 2>&1; then
       break
     fi
     sleep 0.25
   done
-  if pgrep -x StationAI >/dev/null 2>&1 ||
-    pgrep -x StationAIUITests-Runner >/dev/null 2>&1; then
+  if pgrep -x Playhouse >/dev/null 2>&1 ||
+    pgrep -x PlayhouseUITests-Runner >/dev/null 2>&1; then
     printf 'Could not clean up the prior UI case processes before continuing.\n' >&2
     overall_failed=1
   fi
@@ -540,7 +540,7 @@ automation_startup_failure = (
     and skipped == 0
     and failed == 1
     and any(
-        "StationAIUITests-Runner" in failure.get("testName", "")
+        "PlayhouseUITests-Runner" in failure.get("testName", "")
         and "failed to initialize for ui testing" in failure.get("failureText", "").lower()
         for failure in failures
     )
@@ -640,7 +640,7 @@ if (( overall_failed != 0 )); then
   exit 1
 fi
 if (( ${#ui_cases[@]} == 0 )); then
-  printf 'StationAI full visible UI suite passed across %s fresh serial Xcode sessions.\n' "${batch_count}"
+  printf 'Playhouse full visible UI suite passed across %s fresh serial Xcode sessions.\n' "${batch_count}"
 else
-  printf 'StationAI focused UI cases passed across %s Xcode session(s): %s\n' "${batch_count}" "${ui_cases[*]}"
+  printf 'Playhouse focused UI cases passed across %s Xcode session(s): %s\n' "${batch_count}" "${ui_cases[*]}"
 fi

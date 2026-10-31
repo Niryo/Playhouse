@@ -14,7 +14,7 @@ Task: resolve four conflicts in the interactive rebase, verify the merged `tests
 
 The reflog bounds **17m04s** from rebase start to push. That is observed wall-clock span, not measured active agent time. The conversation does not expose a timestamp for the user's request or the first inspection, so the full request-to-completion duration may differ. The approximate 14m09s before runtime includes code work, review/tool waits, and gaps that cannot be separated. No UI suite, direct app interaction, or screenshots were part of routine verification.
 
-The build was the slowest measured operation: **75s, about 52%** of the 143s suite. The case phase was **65.339s, about 46%**. The slowest named cases in the retained `/tmp/stationai-bridge.5104At/bridge-tests.log` were `test_conversation_composer_rejects_blank_and_supports_live_turn_controls` (6.512s), `test_task_pr_conflicts_detect_without_mutation` (3.196s), and `test_codex_questions_can_be_answered_over_cli_xpc` (2.700s). The first two together took 9.708s, about 15% of case time. Case durations sum exactly to 65.339s.
+The build was the slowest measured operation: **75s, about 52%** of the 143s suite. The case phase was **65.339s, about 46%**. The slowest named cases in the retained `/tmp/playhouse-bridge.5104At/bridge-tests.log` were `test_conversation_composer_rejects_blank_and_supports_live_turn_controls` (6.512s), `test_task_pr_conflicts_detect_without_mutation` (3.196s), and `test_codex_questions_can_be_answered_over_cli_xpc` (2.700s). The first two together took 9.708s, about 15% of case time. Case durations sum exactly to 65.339s.
 
 ## Improvements
 

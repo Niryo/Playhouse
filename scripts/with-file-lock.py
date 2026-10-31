@@ -15,7 +15,7 @@ descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
 started = time.monotonic()
 queued_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
 next_wait_report = started
-timeout_value = os.environ.get("STATIONAI_UI_LOCK_TIMEOUT_SECONDS")
+timeout_value = os.environ.get("PLAYHOUSE_UI_LOCK_TIMEOUT_SECONDS")
 wait_timeout = float(timeout_value) if timeout_value else None
 while True:
     try:

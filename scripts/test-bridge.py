@@ -31,7 +31,7 @@ parser.add_argument("--service-name", required=True)
 parser.add_argument("--legacy-store-seeder", required=True, type=Path)
 parser.add_argument("--case", action="append", default=[], dest="selected_cases")
 arguments = parser.parse_args()
-CONTRACT_PATH = Path(__file__).resolve().parent.parent / "StationAI/BridgeTests/BridgeTestContracts.json"
+CONTRACT_PATH = Path(__file__).resolve().parent.parent / "Playhouse/BridgeTests/BridgeTestContracts.json"
 
 
 class GitConfigReadBarrier:
@@ -39,7 +39,7 @@ class GitConfigReadBarrier:
 
     def __init__(self, repository):
         self.config = Path(repository) / ".git" / "config"
-        self.backup = self.config.with_name(f"config.stationai-test-{uuid.uuid4()}")
+        self.backup = self.config.with_name(f"config.playhouse-test-{uuid.uuid4()}")
         self.contents = self.config.read_bytes()
         self.writer = None
         os.replace(self.config, self.backup)
@@ -174,13 +174,13 @@ class RepositoryAllocationLockBarrier:
         self.descriptor = None
 
 
-class StationAIBridgeTests(unittest.TestCase):
+class PlayhouseBridgeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.cli = arguments.cli.absolute()
         cls.fixture = arguments.fixture_root.absolute()
-        marker = cls.fixture / ".stationai-bridge-fixture"
-        if not marker.is_file() or marker.read_text(encoding="utf-8") != "StationAI bridge tests own this deterministic fixture (v1).\n":
+        marker = cls.fixture / ".playhouse-bridge-fixture"
+        if not marker.is_file() or marker.read_text(encoding="utf-8") != "Playhouse bridge tests own this deterministic fixture (v1).\n":
             raise RuntimeError(f"Refusing to use fixture without a valid ownership marker: {cls.fixture}")
         cls.primary = cls.fixture / "suggested-parent" / "primary"
         cls.secondary = cls.fixture / "suggested-parent" / "group" / "secondary"
@@ -202,14 +202,14 @@ class StationAIBridgeTests(unittest.TestCase):
         self.data_directory.mkdir(parents=True)
         self.worktree_directory = self.data_directory / "worktrees"
         self.worktree_directory.mkdir()
-        (self.worktree_directory / ".stationai-test-owner").write_text("StationAI bridge test owns this worktree root.\n", encoding="utf-8")
-        self.defaults_suite = f"com.stationai.bridge-tests.{uuid.uuid4()}"
+        (self.worktree_directory / ".playhouse-test-owner").write_text("Playhouse bridge test owns this worktree root.\n", encoding="utf-8")
+        self.defaults_suite = f"com.playhouse.bridge-tests.{uuid.uuid4()}"
         if self._testMethodName != "test_task_store_repairs_missing_pending_prompt_column":
             self.assert_success(self.call_cli("settings", "set-parent", self.fixture / "suggested-parent")[0])
 
     def tearDown(self):
-        marker = self.worktree_directory / ".stationai-test-owner"
-        if marker.is_file() and marker.read_text(encoding="utf-8") == "StationAI bridge test owns this worktree root.\n":
+        marker = self.worktree_directory / ".playhouse-test-owner"
+        if marker.is_file() and marker.read_text(encoding="utf-8") == "Playhouse bridge test owns this worktree root.\n":
             shutil.rmtree(self.worktree_directory)
             for repository in [self.primary, self.secondary, self.alternate, self.changes]:
                 subprocess.run(["git", "-C", str(repository), "worktree", "prune"], check=False, capture_output=True)
@@ -218,10 +218,10 @@ class StationAIBridgeTests(unittest.TestCase):
 
     def call_cli(self, *command, expected_status=0, timeout=90, extra_environment=None):
         environment = os.environ.copy()
-        environment["STATIONAI_DATA_DIRECTORY"] = str(self.data_directory)
-        environment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = str(self.worktree_directory)
-        environment["STATIONAI_E2E_DEFAULTS_SUITE"] = self.defaults_suite
-        environment["STATIONAI_BRIDGE_SERVICE_NAME"] = arguments.service_name
+        environment["PLAYHOUSE_DATA_DIRECTORY"] = str(self.data_directory)
+        environment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"] = str(self.worktree_directory)
+        environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = self.defaults_suite
+        environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = arguments.service_name
         environment["CODEX_HOME"] = str(self.data_directory / "codex-home")
         environment.update(extra_environment or {})
         completed = subprocess.run(
@@ -249,10 +249,10 @@ class StationAIBridgeTests(unittest.TestCase):
 
     def start_cli(self, *command, extra_environment=None, binary_output=False):
         environment = os.environ.copy()
-        environment["STATIONAI_DATA_DIRECTORY"] = str(self.data_directory)
-        environment["STATIONAI_E2E_WORKTREE_DIRECTORY"] = str(self.worktree_directory)
-        environment["STATIONAI_E2E_DEFAULTS_SUITE"] = self.defaults_suite
-        environment["STATIONAI_BRIDGE_SERVICE_NAME"] = arguments.service_name
+        environment["PLAYHOUSE_DATA_DIRECTORY"] = str(self.data_directory)
+        environment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"] = str(self.worktree_directory)
+        environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = self.defaults_suite
+        environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = arguments.service_name
         environment["CODEX_HOME"] = str(self.data_directory / "codex-home")
         environment.update(extra_environment or {})
         return subprocess.Popen(
@@ -323,9 +323,9 @@ class StationAIBridgeTests(unittest.TestCase):
         shutil.copyfile(fixture_source, executable)
         executable.chmod(0o755)
         marker_name, marker_value = (
-            (".stationai-codex-fixture-owner", "StationAI test owns this Codex protocol fixture (v1).\n")
+            (".playhouse-codex-fixture-owner", "Playhouse test owns this Codex protocol fixture (v1).\n")
             if provider == "codex" else
-            (".stationai-claude-fixture-owner", "StationAI test owns this Claude Code protocol fixture (v1).\n")
+            (".playhouse-claude-fixture-owner", "Playhouse test owns this Claude Code protocol fixture (v1).\n")
         )
         (self.data_directory / marker_name).write_text(marker_value, encoding="utf-8")
         environment = {environment_name: str(executable)}
@@ -407,13 +407,13 @@ class StationAIBridgeTests(unittest.TestCase):
     # case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles.
     def test_codex_stop_interrupts_thinking_turn_and_waits_for_response(self):
         self.assert_user_stop_pauses_provider_turn(
-            "Codex stop while thinking", "codex", "STATIONAI_E2E_CODEX_EXECUTABLE", "codex-app-server-fixture.py"
+            "Codex stop while thinking", "codex", "PLAYHOUSE_E2E_CODEX_EXECUTABLE", "codex-app-server-fixture.py"
         )
 
     # case-contract: test_claude_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Claude reasoning immediately moves the task to Waiting Response and sends Claude's session-scoped control interrupt. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles.
     def test_claude_stop_interrupts_thinking_turn_and_waits_for_response(self):
         self.assert_user_stop_pauses_provider_turn(
-            "Claude stop while thinking", "claude", "STATIONAI_E2E_CLAUDE_EXECUTABLE", "claude-code-fixture.py"
+            "Claude stop while thinking", "claude", "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE", "claude-code-fixture.py"
         )
 
     def read_watcher_snapshot(self, watcher, predicate, timeout=15):
@@ -458,13 +458,13 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-hold-interrupt"
         shutil.copyfile(fixture_source, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         environment = {
-            "STATIONAI_BRIDGE_SERVICE_NAME": service,
-            "STATIONAI_BRIDGE_IDLE_GRACE_SECONDS": "3",
-            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
+            "PLAYHOUSE_BRIDGE_SERVICE_NAME": service,
+            "PLAYHOUSE_BRIDGE_IDLE_GRACE_SECONDS": "3",
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable),
         }
         task = self.create_task("Daemon watcher", provider="codex")
 
@@ -537,12 +537,12 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-hold-interrupt"
         shutil.copyfile(fixture_source, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         environment = {
-            "STATIONAI_BRIDGE_SERVICE_NAME": service,
-            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
+            "PLAYHOUSE_BRIDGE_SERVICE_NAME": service,
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable),
         }
         task = self.create_task("Daemon death", provider="codex")
         first_pid = self.assert_success(self.call_cli("status", extra_environment=environment)[0])["processID"]
@@ -610,9 +610,9 @@ class StationAIBridgeTests(unittest.TestCase):
         shutil.copyfile(fixture_source, executable)
         executable.chmod(0o755)
         marker_name, marker_value = (
-            (".stationai-codex-fixture-owner", "StationAI test owns this Codex protocol fixture (v1).\n")
+            (".playhouse-codex-fixture-owner", "Playhouse test owns this Codex protocol fixture (v1).\n")
             if provider == "codex" else
-            (".stationai-claude-fixture-owner", "StationAI test owns this Claude Code protocol fixture (v1).\n")
+            (".playhouse-claude-fixture-owner", "Playhouse test owns this Claude Code protocol fixture (v1).\n")
         )
         (self.data_directory / marker_name).write_text(marker_value, encoding="utf-8")
         environment = {environment_name: str(executable)}
@@ -675,11 +675,11 @@ class StationAIBridgeTests(unittest.TestCase):
 
     # case-contract: test_codex_stop_rejection_restores_active_task | If Codex rejects turn/interrupt while its turn is still active, Stop reports the provider failure and the task returns to In Progress; releasing the fixture lets the original turn complete normally into Waiting Response.
     def test_codex_stop_rejection_restores_active_task(self):
-        self.assert_rejected_stop_restores_active_status("codex", "STATIONAI_E2E_CODEX_EXECUTABLE", "codex-app-server-fixture.py")
+        self.assert_rejected_stop_restores_active_status("codex", "PLAYHOUSE_E2E_CODEX_EXECUTABLE", "codex-app-server-fixture.py")
 
     # case-contract: test_claude_stop_rejection_restores_active_task | If Claude rejects its session control interrupt while its turn is still active, Stop reports the provider failure and the task returns to In Progress; releasing the fixture lets the original turn complete normally into Waiting Response.
     def test_claude_stop_rejection_restores_active_task(self):
-        self.assert_rejected_stop_restores_active_status("claude", "STATIONAI_E2E_CLAUDE_EXECUTABLE", "claude-code-fixture.py")
+        self.assert_rejected_stop_restores_active_status("claude", "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE", "claude-code-fixture.py")
 
     def create_repo_task(self, title, repositories, branches=None, branch_from=None, roots=None, merge_targets=None, materialize=False):
         command = ["task", "create", "--title", title]
@@ -705,13 +705,13 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / executable_name
         hold_marker = Path(str(executable) + ".hold-release")
         hold_marker.touch()
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
         environment = {
-            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable),
         }
         command = [
             "conversation", "send", task_id, "--message", message,
@@ -753,8 +753,8 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "seed-task-pr-link"
         subprocess.run(
             [
-                "xcrun", "swiftc", "-module-name", "StationAI",
-                str(repository_root / "StationAI" / "App" / "BoardTask.swift"),
+                "xcrun", "swiftc", "-module-name", "Playhouse",
+                str(repository_root / "Playhouse" / "App" / "BoardTask.swift"),
                 str(repository_root / "scripts" / "seed-task-pr-link.swift"),
                 "-o", str(executable),
             ],
@@ -762,7 +762,7 @@ class StationAIBridgeTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        seeded_url = f"https://github.com/stationai-test/fixture/pull/{number}"
+        seeded_url = f"https://github.com/playhouse-test/fixture/pull/{number}"
         command = [str(executable), str(self.data_directory), task_id, str(number), seeded_url]
         if repository_index:
             command.append(str(repository_index))
@@ -778,18 +778,18 @@ class StationAIBridgeTests(unittest.TestCase):
     def start_progress_fixture_turn(self, task_id, fixture_name, answers=()):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / fixture_name
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
         environment = os.environ.copy()
         environment.update({
-            "STATIONAI_DATA_DIRECTORY": str(self.data_directory),
-            "STATIONAI_E2E_WORKTREE_DIRECTORY": str(self.worktree_directory),
-            "STATIONAI_E2E_DEFAULTS_SUITE": self.defaults_suite,
-            "STATIONAI_BRIDGE_SERVICE_NAME": arguments.service_name,
-            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
+            "PLAYHOUSE_DATA_DIRECTORY": str(self.data_directory),
+            "PLAYHOUSE_E2E_WORKTREE_DIRECTORY": str(self.worktree_directory),
+            "PLAYHOUSE_E2E_DEFAULTS_SUITE": self.defaults_suite,
+            "PLAYHOUSE_BRIDGE_SERVICE_NAME": arguments.service_name,
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable),
         })
         command = [str(self.cli), "conversation", "send", task_id, "--message", "Work on this task."]
         for answer in answers:
@@ -807,8 +807,8 @@ class StationAIBridgeTests(unittest.TestCase):
         return process, executable, active, release
 
     def prepare_workspace_changes(self):
-        marker = self.fixture / ".stationai-bridge-fixture"
-        if not marker.is_file() or marker.read_text(encoding="utf-8") != "StationAI bridge tests own this deterministic fixture (v1).\n":
+        marker = self.fixture / ".playhouse-bridge-fixture"
+        if not marker.is_file() or marker.read_text(encoding="utf-8") != "Playhouse bridge tests own this deterministic fixture (v1).\n":
             raise RuntimeError(f"Refusing to modify the Git fixture without its ownership marker: {self.fixture}")
 
         self.run_git(self.changes, "reset", "--mixed", "HEAD")
@@ -853,12 +853,12 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         return response
 
-    # case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, uses the same foreground artwork for the Dock AppIcon on a solid #2C2F36 background, and the bridge reports API version 1.
+    # case-contract: test_service_reports_bridge_version | Playhouse opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, uses the same foreground artwork for the Dock AppIcon on a solid #2C2F36 background, and the bridge reports API version 1.
     def test_service_reports_bridge_version(self):
         response, _ = self.call_cli("status")
         status = self.assert_success(response)
         process_id = status.pop("processID")
-        self.assertEqual(status, {"bridgeVersion": 1, "service": "StationAI"})
+        self.assertEqual(status, {"bridgeVersion": 1, "service": "Playhouse"})
         self.assertGreater(process_id, 0, "The bridge should report the daemon process that answered.")
         self.assertTrue(self.process_is_running(process_id))
         app_bundle = self.cli.parent.parent.parent
@@ -873,12 +873,12 @@ class StationAIBridgeTests(unittest.TestCase):
         assets = json.loads(catalog.stdout)
         bundled_assets = {asset.get("Name") for asset in assets}
         self.assertTrue(
-            {"StationAILogo", "AppIcon"}.issubset(bundled_assets),
-            f"The app bundle should contain StationAILogo and AppIcon assets; found {bundled_assets}.",
+            {"PlayhouseLogo", "AppIcon"}.issubset(bundled_assets),
+            f"The app bundle should contain PlayhouseLogo and AppIcon assets; found {bundled_assets}.",
         )
         repository_root = Path(__file__).resolve().parent.parent
-        app_icon = repository_root / "StationAI/Assets.xcassets/AppIcon.appiconset/AppIcon.png"
-        header_logo = repository_root / "StationAI/Assets.xcassets/StationAILogo.imageset/StationAILogo.png"
+        app_icon = repository_root / "Playhouse/Assets.xcassets/AppIcon.appiconset/AppIcon.png"
+        header_logo = repository_root / "Playhouse/Assets.xcassets/PlayhouseLogo.imageset/PlayhouseLogo.png"
         def bitmap(path, output):
             converted = subprocess.run(
                 ["/usr/bin/sips", "-s", "format", "bmp", str(path), "--out", str(output)],
@@ -966,8 +966,8 @@ class StationAIBridgeTests(unittest.TestCase):
         primary_profile = profile(self.primary)
         linked_profile = profile(linked)
         self.assertEqual(primary_profile["kind"], "primary")
-        self.assertEqual(primary_profile["bundleID"], "com.stationai.app")
-        self.assertEqual(primary_profile["dataDirectory"], str(Path.home() / "Library/Application Support/StationAI"))
+        self.assertEqual(primary_profile["bundleID"], "com.playhouse.app")
+        self.assertEqual(primary_profile["dataDirectory"], str(Path.home() / "Library/Application Support/Playhouse"))
         self.assertEqual(linked_profile, profile(linked))
         self.assertEqual(linked_profile["kind"], "linked")
         self.assertNotEqual(primary_profile["bundleID"], linked_profile["bundleID"])
@@ -980,9 +980,9 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(linked_profile["bridgeID"], linked_profile["bundleID"] + ".bridge")
         self.assertEqual(
             linked_profile["dataDirectory"],
-            str(Path.home() / "Library/Application Support/StationAI/Worktrees" / linked_profile["key"]),
+            str(Path.home() / "Library/Application Support/Playhouse/Worktrees" / linked_profile["key"]),
         )
-        verify_build = 'source "$1"; stationai_load_app_profile "$2"; stationai_verify_build_identity "$3"'
+        verify_build = 'source "$1"; playhouse_load_app_profile "$2"; playhouse_verify_build_identity "$3"'
         self.assertEqual(subprocess.run(
             ["bash", "-c", verify_build, "profile-check", str(script), str(linked), linked_profile["bundleID"]],
             capture_output=True, text=True,
@@ -1008,7 +1008,7 @@ class StationAIBridgeTests(unittest.TestCase):
             "task", "prompt", task["id"], "--text", "Keep this draft after restart.", "--status", "Backlog",
         )[0])
         self.assertEqual(saved["savedPrompt"], "Keep this draft after restart.")
-        self.assertTrue((self.data_directory / "StationAI-v2.store").is_file())
+        self.assertTrue((self.data_directory / "Playhouse-v2.store").is_file())
         reopened = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(reopened["title"], "Profile restart")
         self.assertEqual(reopened["savedPrompt"], "Keep this draft after restart.")
@@ -1163,7 +1163,7 @@ class StationAIBridgeTests(unittest.TestCase):
         task = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertFalse(task["repositoryWorktrees"][0]["isPending"])
         self.assertEqual(task["repositoryWorktrees"][0]["worktreePath"], str(existing))
-        self.assertFalse(task["repositoryWorktrees"][0]["createdByStationAI"])
+        self.assertFalse(task["repositoryWorktrees"][0]["createdByPlayhouse"])
 
     # case-contract: test_task_creation_creates_worktrees_in_multiple_repositories | The conversation picker can add multiple repositories; unset branch settings display defaults and persist pending auto records resolved to local main without creating branches or worktrees before the first send.
     def test_task_creation_creates_worktrees_in_multiple_repositories(self):
@@ -1263,15 +1263,15 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertFalse(fixture_path.exists(), "A new, unique per-case fixture path must not replace an existing file.")
         shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py", fixture_path)
         fixture_path.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         ready = Path(str(fixture_path) + ".resolve-ready")
         continuation = Path(str(fixture_path) + ".resolve-continue")
         command = ["conversation", "send", task["id"], "--message", "Persist this completed turn."]
         process = self.start_cli(
             *command,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(fixture_path)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(fixture_path)},
         )
         barrier = None
         try:
@@ -1325,7 +1325,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIsNone(current.get("pendingSubmittedPrompt"))
         history, _ = self.call_cli(
             "conversation", "history", task["id"],
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(fixture_path)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(fixture_path)},
         )
         messages = self.assert_success(history)["messages"]
         self.assertTrue(any(item["role"] == "user" and item["text"] == "Persist this completed turn." for item in messages))
@@ -1345,7 +1345,7 @@ class StationAIBridgeTests(unittest.TestCase):
         ]
         self.assertTrue(store_write_events, "The final task save should log when its shared store lock is acquired.")
         waited_write = next(event for event in store_write_events if int(event.get("lockWaitMilliseconds", "0")) > 0)
-        self.assertEqual(waited_write["storePath"], str(self.data_directory / "StationAI-v2.store"))
+        self.assertEqual(waited_write["storePath"], str(self.data_directory / "Playhouse-v2.store"))
         matching_success = next(
             json.loads(line) for line in (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8").splitlines()
             if (event := json.loads(line)).get("taskID") == task["id"]
@@ -1367,7 +1367,7 @@ class StationAIBridgeTests(unittest.TestCase):
             event for event in read_events
             if event["event"] == "persistence.read.started" and event.get("readID") == read_id
         )
-        expected_store_path = str(self.data_directory / "StationAI-v2.store")
+        expected_store_path = str(self.data_directory / "Playhouse-v2.store")
         snapshot_prefixes = ("storeDirectory", "storeFile", "storeWAL", "storeSHM")
         for read_event in (matching_read_start, successful_read):
             self.assertEqual(read_event["storePath"], expected_store_path)
@@ -1377,16 +1377,16 @@ class StationAIBridgeTests(unittest.TestCase):
             )
         self.assertIn("durationMilliseconds", successful_read)
 
-    # case-contract: test_persistence_store_open_failure_records_detailed_error | A real ModelContainer open failure against an isolated invalid store path returns an error and durably logs the phase, exact underlying NSError domain/code/userInfo, resolved store path, file/sidecar snapshot, and read-only schema probe failure; the paired visible UI case keeps StationAI open on its normal board while the same isolated CLI/XPC request fails and verifies the persisted diagnostic.
+    # case-contract: test_persistence_store_open_failure_records_detailed_error | A real ModelContainer open failure against an isolated invalid store path returns an error and durably logs the phase, exact underlying NSError domain/code/userInfo, resolved store path, file/sidecar snapshot, and read-only schema probe failure; the paired visible UI case keeps Playhouse open on its normal board while the same isolated CLI/XPC request fails and verifies the persisted diagnostic.
     def test_persistence_store_open_failure_records_detailed_error(self):
         failure_directory = self.data_directory / "invalid-store-open"
         failure_directory.mkdir()
-        store = failure_directory / "StationAI-v2.store"
+        store = failure_directory / "Playhouse-v2.store"
         store.mkdir()
 
         response, _ = self.call_cli(
             "task", "list", expected_status=1,
-            extra_environment={"STATIONAI_DATA_DIRECTORY": str(failure_directory)},
+            extra_environment={"PLAYHOUSE_DATA_DIRECTORY": str(failure_directory)},
         )
         self.assertFalse(response["ok"], response)
         diagnostic_path = failure_directory / "Diagnostics.jsonl"
@@ -1412,7 +1412,7 @@ class StationAIBridgeTests(unittest.TestCase):
     # case-contract: test_persistence_read_failure_records_detailed_error | A real SwiftData fetch failure against an isolated store with a missing task column returns an error and logs a correlated read ID, NSError domain/code/userInfo, store path, file/sidecar snapshot, and the exact missing-column message from a read-only schema probe before the CLI/XPC request completes; the paired visible UI case keeps the normal task board open and verifies the same isolated failure record.
     def test_persistence_read_failure_records_detailed_error(self):
         self.create_task("Missing column read failure")
-        store = self.data_directory / "StationAI-v2.store"
+        store = self.data_directory / "Playhouse-v2.store"
         with sqlite3.connect(store) as database:
             database.execute("ALTER TABLE ZBOARDTASK DROP COLUMN ZPROGRESSLABEL")
 
@@ -1450,13 +1450,13 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assert_success(self.call_cli("task", "create", "--title", "Healthy board", "--root", self.primary)[0])
         failure = self.data_directory / "invalid-legacy"
         failure.mkdir()
-        source = failure / "StationAI.store"
+        source = failure / "Playhouse.store"
         contents = b"Not a SQLite database"
         source.write_bytes(contents)
-        response, _ = self.call_cli("task", "list", expected_status=1, extra_environment={"STATIONAI_DATA_DIRECTORY": str(failure)})
+        response, _ = self.call_cli("task", "list", expected_status=1, extra_environment={"PLAYHOUSE_DATA_DIRECTORY": str(failure)})
         self.assertFalse(response["ok"])
         self.assertEqual(source.read_bytes(), contents)
-        self.assertFalse((failure / "StationAI-v2.store").exists())
+        self.assertFalse((failure / "Playhouse-v2.store").exists())
         self.assertFalse(list(failure.glob(".store-import-*")))
         self.assertEqual(self.assert_success(self.call_cli("task", "list")[0])["tasks"][0]["title"], "Healthy board")
 
@@ -1468,8 +1468,8 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         task_id = seeded.stdout.strip()
         draft = "Keep this draft through the store repair."
-        store = self.data_directory / "StationAI-v2.store"
-        legacy_store = self.data_directory / "StationAI.store"
+        store = self.data_directory / "Playhouse-v2.store"
+        legacy_store = self.data_directory / "Playhouse.store"
         with sqlite3.connect(legacy_store) as database:
             columns = {row[1] for row in database.execute("PRAGMA table_info(ZBOARDTASK)")}
             self.assertNotIn("ZPENDINGSUBMITTEDPROMPT", columns)
@@ -1502,7 +1502,7 @@ class StationAIBridgeTests(unittest.TestCase):
                 for event in self.diagnostic_events()
             ), "The legacy-store open should wait for the real store-write lock.")
             self.assertIsNone(waiting.poll(), "The XPC read must not bypass the held migration lock.")
-            self.assertFalse(list(self.data_directory.glob("StationAI.store.before-pending-prompt-*.backup")))
+            self.assertFalse(list(self.data_directory.glob("Playhouse.store.before-pending-prompt-*.backup")))
         finally:
             barrier.release()
         reopened, _ = self.finish_cli(waiting, ("task", "get", task_id))
@@ -1513,7 +1513,7 @@ class StationAIBridgeTests(unittest.TestCase):
             and int(event.get("waitMilliseconds", "0")) > 0
             for event in self.diagnostic_events()
         ))
-        backups = list(self.data_directory.glob("StationAI.store.before-pending-prompt-*.backup"))
+        backups = list(self.data_directory.glob("Playhouse.store.before-pending-prompt-*.backup"))
         self.assertEqual(len(backups), 1)
         self.assertEqual(stat.S_IMODE(backups[0].stat().st_mode), 0o600)
         with sqlite3.connect(backups[0]) as backup:
@@ -1524,7 +1524,7 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assertTrue({"ZINPROGRESSSTARTEDAT", "ZTOTALINPROGRESSSECONDS"} <= backup_columns)
         listed, _ = self.call_cli("board", "list")
         self.assertEqual([item["id"] for item in self.assert_success(listed)["tasks"]], [task_id])
-        self.assertEqual(len(list(self.data_directory.glob("StationAI.store.before-pending-prompt-*.backup"))), 1)
+        self.assertEqual(len(list(self.data_directory.glob("Playhouse.store.before-pending-prompt-*.backup"))), 1)
         self.assertEqual(legacy_store.read_bytes(), legacy_bytes)
         with sqlite3.connect(store) as database:
             migrated_columns = {row[1] for row in database.execute("PRAGMA table_info(ZBOARDTASK)")}
@@ -1545,35 +1545,35 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["savedPrompt"], "Edited after import")
         self.assertEqual(len([e for e in self.diagnostic_events() if e.get("event") == "persistence.store.legacy_imported"]), 1)
 
-    # case-contract: test_test_bundle_rejects_unisolated_data_directory | A test-built StationAI service rejects a data directory outside the temporary test area and a linked store inside it before creating or opening either store; the visible app remains on its isolated board and can still read its tasks.
+    # case-contract: test_test_bundle_rejects_unisolated_data_directory | A test-built Playhouse service rejects a data directory outside the temporary test area and a linked store inside it before creating or opening either store; the visible app remains on its isolated board and can still read its tasks.
     def test_test_bundle_rejects_unisolated_data_directory(self):
-        unsafe = Path.home() / "Library" / "Caches" / f"StationAI-bridge-guard-{uuid.uuid4()}"
+        unsafe = Path.home() / "Library" / "Caches" / f"Playhouse-bridge-guard-{uuid.uuid4()}"
         self.assertFalse(unsafe.exists())
         unsafe.mkdir(parents=True)
-        marker = unsafe / ".stationai-test-owner"
-        marker.write_text("StationAI bridge guard test (v1).\n", encoding="utf-8")
+        marker = unsafe / ".playhouse-test-owner"
+        marker.write_text("Playhouse bridge guard test (v1).\n", encoding="utf-8")
         try:
             response, _ = self.call_cli(
                 "board", "list", expected_status=1,
-                extra_environment={"STATIONAI_DATA_DIRECTORY": str(unsafe)},
+                extra_environment={"PLAYHOUSE_DATA_DIRECTORY": str(unsafe)},
             )
             self.assert_failure(response, "operation_failed")
             self.assertIn("isolated temporary data directory", response["error"]["message"])
-            self.assertFalse((unsafe / "StationAI-v2.store").exists())
+            self.assertFalse((unsafe / "Playhouse-v2.store").exists())
             linked = self.data_directory / "linked-store"
             linked.mkdir()
-            (linked / "StationAI-v2.store").symlink_to(unsafe / "StationAI-v2.store")
+            (linked / "Playhouse-v2.store").symlink_to(unsafe / "Playhouse-v2.store")
             response, _ = self.call_cli(
                 "board", "list", expected_status=1,
-                extra_environment={"STATIONAI_DATA_DIRECTORY": str(linked)},
+                extra_environment={"PLAYHOUSE_DATA_DIRECTORY": str(linked)},
             )
             self.assert_failure(response, "operation_failed")
             self.assertIn("linked task store", response["error"]["message"])
-            self.assertFalse((unsafe / "StationAI-v2.store").exists())
+            self.assertFalse((unsafe / "Playhouse-v2.store").exists())
             good, _ = self.call_cli("board", "list")
             self.assertEqual(self.assert_success(good)["tasks"], [])
         finally:
-            self.assertEqual(marker.read_text(encoding="utf-8"), "StationAI bridge guard test (v1).\n")
+            self.assertEqual(marker.read_text(encoding="utf-8"), "Playhouse bridge guard test (v1).\n")
             shutil.rmtree(unsafe)
 
     # case-contract: test_task_worktree_preparation_serializes_auto_branch_claims | Tasks with the same automatic branch choice remain pending without creating a worktree before conversation start. When one task has claimed the generated branch, a send from the other (through the CLI, or through the composer, which shows the error and returns the prompt to it) is rejected without creating a worktree and restores the task to Backlog with its prompt saved as a draft and no pending submitted prompt; the opt-in live provider integration sends both turns concurrently and confirms only one task claims the generated branch.
@@ -1600,7 +1600,7 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli(
             "conversation", "send", loser["id"], "--message", loser_prompt,
             expected_status=2,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture")},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture")},
         )
         self.assert_failure(response, "invalid_argument")
         rejected = self.assert_success(self.call_cli("task", "get", loser["id"])[0])
@@ -1641,14 +1641,24 @@ class StationAIBridgeTests(unittest.TestCase):
         gh_state = gh_directory / "state"
         gh_calls = gh_directory / "calls"
         gh_state.write_text("123=merged\n456=unmerged\n", encoding="utf-8")
+        gh_fixture = gh_directory / "gh-fixture.sh"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh_fixture)
+        gh_fixture.chmod(0o755)
+        # The daemon keeps only session variables (BridgeContract.sessionEnvironmentNames)
+        # from its caller, so this fixture's state travels baked into the executable the
+        # bridge finds on PATH, the same way test_review_pr_conflicts_probe_and_verify
+        # does. The UI suite still passes these as environment to the app process itself.
         gh = gh_directory / "gh"
-        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
+        gh.write_text(
+            "#!/bin/sh\n"
+            f"PLAYHOUSE_E2E_GH_STATE_PATH={shlex.quote(str(gh_state))}\n"
+            f"PLAYHOUSE_E2E_GH_CALL_LOG={shlex.quote(str(gh_calls))}\n"
+            "export PLAYHOUSE_E2E_GH_STATE_PATH PLAYHOUSE_E2E_GH_CALL_LOG\n"
+            f"exec {shlex.quote(str(gh_fixture))} \"$@\"\n",
+            encoding="utf-8",
+        )
         gh.chmod(0o755)
-        gh_environment = {
-            "PATH": f"{gh_directory}:{os.environ.get('PATH', '')}",
-            "STATIONAI_E2E_GH_STATE_PATH": str(gh_state),
-            "STATIONAI_E2E_GH_CALL_LOG": str(gh_calls),
-        }
+        gh_environment = {"PATH": f"{gh_directory}:{os.environ.get('PATH', '')}"}
         linked = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(linked["repositoryWorktrees"][0]["pullRequestURL"], pr_url)
         self.assertEqual(linked["repositoryWorktrees"][1]["pullRequestURL"], second_pr_url)
@@ -1686,7 +1696,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(archived["status"], "Done")
         history, _ = self.call_cli(
             "conversation", "history", task["id"],
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture")},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture")},
         )
         messages = self.assert_success(history)["messages"]
         self.assertTrue(any(message["role"] == "assistant" and "Answers received: Blue / fixture-secret." in message["text"] for message in messages))
@@ -1726,7 +1736,7 @@ class StationAIBridgeTests(unittest.TestCase):
         task = self.create_repo_task("Dirty cleanup", [self.primary], materialize=True)
         worktree = Path(task["repositoryWorktrees"][0]["worktreePath"])
         self.complete_fixture_turn(task["id"])
-        tracked = worktree / "stationai-primary.txt"
+        tracked = worktree / "playhouse-primary.txt"
         tracked.write_text("Edited after review\n", encoding="utf-8")
         untracked = worktree / "unsaved.txt"
         untracked.write_text("keep me\n", encoding="utf-8")
@@ -1854,7 +1864,7 @@ class StationAIBridgeTests(unittest.TestCase):
         task = self.create_repo_task("PR conflict detection", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
         record = task["repositoryWorktrees"][0]
         worktree = Path(record["worktreePath"])
-        conflict_path = "stationai-pr-conflict-fixture.txt"
+        conflict_path = "playhouse-pr-conflict-fixture.txt"
         remote = self.data_directory / "pr-conflict-origin.git"
         subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
         self.run_git(self.primary, "remote", "add", "origin", str(remote))
@@ -1968,7 +1978,7 @@ class StationAIBridgeTests(unittest.TestCase):
         dirty_record = dirty["repositoryWorktrees"][0]
         clean_path = Path(clean_record["worktreePath"])
         dirty_path = Path(dirty_record["worktreePath"])
-        retained_file = dirty_path / "stationai-secondary.txt"
+        retained_file = dirty_path / "playhouse-secondary.txt"
         retained_file.write_text("Secondary baseline.\nKeep this worktree.\n", encoding="utf-8")
         (self.data_directory / "task-lifecycle-v2-reset").unlink()
 
@@ -2001,13 +2011,13 @@ class StationAIBridgeTests(unittest.TestCase):
         empty_fixture = self.data_directory / "codex-fixture-status-empty"
         shutil.copyfile(fixture, empty_fixture)
         empty_fixture.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         blocked_response, _ = self.call_cli(
             "conversation", "send", blocked_id, "--message", "Please ask your questions.",
             expected_status=1,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(empty_fixture)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(empty_fixture)},
         )
         self.assert_failure(blocked_response, "operation_failed")
         blocked = self.assert_success(self.call_cli("task", "get", blocked_id)[0])
@@ -2021,7 +2031,7 @@ class StationAIBridgeTests(unittest.TestCase):
         question_response, question_events = self.call_cli(
             "conversation", "send", waiting_id, "--message", "Please ask your questions.",
             "--mode", "plan", "--answer", "color=Blue", "--answer", "token=fixture-secret",
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(question_fixture)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(question_fixture)},
         )
         self.assert_success(question_response)
         self.assertTrue(any(
@@ -2050,16 +2060,16 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-unique-turns-hold-release"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         environment = os.environ.copy()
         environment.update({
-            "STATIONAI_DATA_DIRECTORY": str(self.data_directory),
-            "STATIONAI_E2E_WORKTREE_DIRECTORY": str(self.worktree_directory),
-            "STATIONAI_E2E_DEFAULTS_SUITE": self.defaults_suite,
-            "STATIONAI_BRIDGE_SERVICE_NAME": arguments.service_name,
-            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
+            "PLAYHOUSE_DATA_DIRECTORY": str(self.data_directory),
+            "PLAYHOUSE_E2E_WORKTREE_DIRECTORY": str(self.worktree_directory),
+            "PLAYHOUSE_E2E_DEFAULTS_SUITE": self.defaults_suite,
+            "PLAYHOUSE_BRIDGE_SERVICE_NAME": arguments.service_name,
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable),
         })
         turn = subprocess.Popen(
             [str(self.cli), "conversation", "send", task_id, "--message", "Work on this task."],
@@ -2103,8 +2113,8 @@ class StationAIBridgeTests(unittest.TestCase):
             # The provider process must inherit this service's name and store, so
             # its in-turn outcome call reaches this task rather than the defaults.
             bridge_environment = json.loads(Path(str(executable) + ".bridge-environment").read_text(encoding="utf-8"))
-            self.assertEqual(bridge_environment["STATIONAI_BRIDGE_SERVICE_NAME"], arguments.service_name)
-            self.assertEqual(Path(bridge_environment["STATIONAI_DATA_DIRECTORY"]).resolve(), self.data_directory.resolve())
+            self.assertEqual(bridge_environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"], arguments.service_name)
+            self.assertEqual(Path(bridge_environment["PLAYHOUSE_DATA_DIRECTORY"]).resolve(), self.data_directory.resolve())
             completed, _ = self.call_cli("task", "outcome", task_id, "completed", extra_environment=bridge_environment)
             completed_record = self.assert_success(completed)
             self.assertEqual(completed_record["outcome"], "completed")
@@ -2160,14 +2170,14 @@ class StationAIBridgeTests(unittest.TestCase):
                         deadline = time.monotonic() + 10
                         while not active_marker.exists() and time.monotonic() < deadline:
                             time.sleep(0.02)
-                        self.assertTrue(active_marker.exists(), "StationAI should send the next private outcome reminder.")
+                        self.assertTrue(active_marker.exists(), "Playhouse should send the next private outcome reminder.")
                 omitted_stdout, omitted_stderr = omitted_follow_up.communicate(timeout=20)
                 self.assertEqual(omitted_follow_up.returncode, 0, f"No-outcome fixture conversation failed: {omitted_stdout}; {omitted_stderr}")
                 omitted_record, _ = self.call_cli("task", "get", task_id)
                 self.assertEqual(self.assert_success(omitted_record)["status"], "Waiting Response")
                 visible_history, _ = self.call_cli(
                     "conversation", "history", task_id,
-                    extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+                    extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
                 )
                 visible_history_record = self.assert_success(visible_history)
                 visible_messages = visible_history_record["messages"]
@@ -2195,7 +2205,7 @@ class StationAIBridgeTests(unittest.TestCase):
                 deadline = time.monotonic() + 10
                 while not active_marker.exists() and time.monotonic() < deadline:
                     time.sleep(0.02)
-                self.assertTrue(active_marker.exists(), "StationAI should send a private reminder after the omitted outcome.")
+                self.assertTrue(active_marker.exists(), "Playhouse should send a private reminder after the omitted outcome.")
                 completed_reminder, _ = self.call_cli("task", "outcome", task_id, "completed", extra_environment=bridge_environment)
                 self.assertEqual(self.assert_success(completed_reminder)["outcome"], "completed")
                 release_marker.write_text("Release the reminder after its outcome is reported.\n", encoding="utf-8")
@@ -2224,7 +2234,7 @@ class StationAIBridgeTests(unittest.TestCase):
                 deadline = time.monotonic() + 10
                 while not active_marker.exists() and time.monotonic() < deadline:
                     time.sleep(0.02)
-                self.assertTrue(active_marker.exists(), "StationAI should send a reminder before reporting a waiting outcome.")
+                self.assertTrue(active_marker.exists(), "Playhouse should send a reminder before reporting a waiting outcome.")
                 waiting_reminder, _ = self.call_cli("task", "outcome", task_id, "waiting-response", extra_environment=bridge_environment)
                 self.assertEqual(self.assert_success(waiting_reminder)["outcome"], "waiting-response")
                 release_marker.write_text("Release the reminder after its outcome is reported.\n", encoding="utf-8")
@@ -2259,7 +2269,7 @@ class StationAIBridgeTests(unittest.TestCase):
                             deadline = time.monotonic() + 10
                             while not active_marker.exists() and time.monotonic() < deadline:
                                 time.sleep(0.02)
-                            self.assertTrue(active_marker.exists(), "StationAI should send a private reminder for an unreported echoed outcome.")
+                            self.assertTrue(active_marker.exists(), "Playhouse should send a private reminder for an unreported echoed outcome.")
                     echoed_stdout, echoed_stderr = echoed_turn.communicate(timeout=20)
                     self.assertEqual(echoed_turn.returncode, 0, f"Echoed-outcome fixture conversation failed: {echoed_stdout}; {echoed_stderr}")
                     echoed_events = [json.loads(line) for line in echoed_stdout.splitlines() if line.strip()]
@@ -2267,11 +2277,11 @@ class StationAIBridgeTests(unittest.TestCase):
                     self.assertEqual(finals, ["Fixture answer with an echoed outcome."], "The streamed final answer must hide the echoed outcome command.")
                     echoed_record, _ = self.call_cli("task", "get", task_id)
                     self.assertEqual(self.assert_success(echoed_record)["status"], expected_status)
-                    echoed_history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)})[0])
+                    echoed_history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)})[0])
                     self.assertTrue(any(item["text"] == "Fixture answer with an echoed outcome." for item in echoed_history["messages"]))
                     self.assertFalse(any("task outcome" in message["text"] for message in echoed_history["messages"]), "A fresh history read must hide the echoed outcome command.")
-                    self.assertFalse(any(item.get("text") == "[StationAI private outcome reminder hidden]" for item in echoed_history["messages"]), "A later Codex history refresh must omit earlier private reminders.")
-                    self.assertFalse(any(item.get("text") == "[StationAI private outcome response hidden]" for item in echoed_history["messages"]), "A later Codex history refresh must omit earlier private reminder replies.")
+                    self.assertFalse(any(item.get("text") == "[Playhouse private outcome reminder hidden]" for item in echoed_history["messages"]), "A later Codex history refresh must omit earlier private reminders.")
+                    self.assertFalse(any(item.get("text") == "[Playhouse private outcome response hidden]" for item in echoed_history["messages"]), "A later Codex history refresh must omit earlier private reminder replies.")
                     self.assertFalse(any("previous request finished without reporting" in item.get("text", "") or "Fixture internal reminder reply." in item.get("text", "") for item in echoed_history["messages"]), "Later history refreshes must not reveal prior reminder prompts or replies.")
                     self.assertFalse(any(item.get("id", "").startswith("item_private_reminder_activity_") for item in echoed_history.get("activities", [])), "Later ordinary Codex history must omit activities owned by private reminders.")
                 finally:
@@ -2491,7 +2501,7 @@ class StationAIBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "roots", "get", task_id)
         self.assertEqual(self.assert_success(response)["roots"], expected_roots)
 
-    # case-contract: test_conversation_repository_picker_adds_repository_worktree | Repository suggestions can be filtered and navigated with Up/Down, and Enter selects the highlighted repository; UI selection waits for an active turn and persists a pending auto branch. While the conversation is empty, a prominent theme-colored heading names all selected repositories and updates as repository APIs add or replace context; compact repository labels remain in the header without a duplicate repository summary. Dark and light themes use distinct prominent title colors, the supporting model prompt sits below with generous spacing, and the generic Start a conversation heading is absent. Additional context folders remain identifiable. The task repository API remains available during an active turn, prepares a managed worktree, updates saved repository selection, replaces repository context safely, and the paired UI shows API additions/removals. The main assistant is instructed to list repositories through StationAI, inspect listed source paths read-only without attaching them, and add repositories only when it needs a task worktree for changes or commits.
+    # case-contract: test_conversation_repository_picker_adds_repository_worktree | Repository suggestions can be filtered and navigated with Up/Down, and Enter selects the highlighted repository; UI selection waits for an active turn and persists a pending auto branch. While the conversation is empty, a prominent theme-colored heading names all selected repositories and updates as repository APIs add or replace context; compact repository labels remain in the header without a duplicate repository summary. Dark and light themes use distinct prominent title colors, the supporting model prompt sits below with generous spacing, and the generic Start a conversation heading is absent. Additional context folders remain identifiable. The task repository API remains available during an active turn, prepares a managed worktree, updates saved repository selection, replaces repository context safely, and the paired UI shows API additions/removals. The main assistant is instructed to list repositories through Playhouse, inspect listed source paths read-only without attaching them, and add repositories only when it needs a task worktree for changes or commits.
     def test_conversation_repository_picker_adds_repository_worktree(self):
         task = self.create_task("Add repository in conversation", [self.primary])
         task_id = task["id"]
@@ -2723,7 +2733,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.complete_fixture_turn(active_id)
         active, _ = self.call_cli("task", "get", active_id)
         record = self.assert_success(active)["repositoryWorktrees"][0]
-        self.assertTrue(record["createdByStationAI"], "Started task worktrees should be eligible for cleanup after the turn reservation releases.")
+        self.assertTrue(record["createdByPlayhouse"], "Started task worktrees should be eligible for cleanup after the turn reservation releases.")
         worktree = Path(record["worktreePath"])
         dirty_file = worktree / "repository-removal-dirty.txt"
         dirty_file.write_text("keep this worktree intact\n", encoding="utf-8")
@@ -2856,8 +2866,8 @@ class StationAIBridgeTests(unittest.TestCase):
         broken_repository = self.data_directory / "delete-failure-repository"
         broken_repository.mkdir()
         self.run_git(broken_repository, "init", "--initial-branch=main")
-        self.run_git(broken_repository, "config", "user.name", "StationAI Test")
-        self.run_git(broken_repository, "config", "user.email", "stationai-test@example.invalid")
+        self.run_git(broken_repository, "config", "user.name", "Playhouse Test")
+        self.run_git(broken_repository, "config", "user.email", "playhouse-test@example.invalid")
         (broken_repository / "README.md").write_text("owned diagnostic fixture\n", encoding="utf-8")
         self.run_git(broken_repository, "add", "README.md")
         self.run_git(broken_repository, "commit", "-m", "Baseline")
@@ -3131,17 +3141,17 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-title-success-wait"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        fixture_owner = self.data_directory / ".stationai-codex-fixture-owner"
-        fixture_owner.write_text("StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8")
+        fixture_owner = self.data_directory / ".playhouse-codex-fixture-owner"
+        fixture_owner.write_text("Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8")
         ready = Path(str(executable) + ".resolve-ready")
         resume = Path(str(executable) + ".resolve-continue")
         environment = os.environ.copy()
         environment.update({
-            "STATIONAI_DATA_DIRECTORY": str(self.data_directory),
-            "STATIONAI_E2E_WORKTREE_DIRECTORY": str(self.worktree_directory),
-            "STATIONAI_E2E_DEFAULTS_SUITE": self.defaults_suite,
-            "STATIONAI_BRIDGE_SERVICE_NAME": arguments.service_name,
-            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
+            "PLAYHOUSE_DATA_DIRECTORY": str(self.data_directory),
+            "PLAYHOUSE_E2E_WORKTREE_DIRECTORY": str(self.worktree_directory),
+            "PLAYHOUSE_E2E_DEFAULTS_SUITE": self.defaults_suite,
+            "PLAYHOUSE_BRIDGE_SERVICE_NAME": arguments.service_name,
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable),
         })
         process = subprocess.Popen(
             [
@@ -3240,7 +3250,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.complete_fixture_turn(task_id, executable_name="codex-fixture-success", message="Start the turn that releases the saved follow-up.")
         reloaded_history, _ = self.call_cli(
             "conversation", "history", task_id,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture-success")},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture-success")},
         )
         self.assertEqual([message["text"] for message in self.assert_success(reloaded_history)["messages"] if message["role"] == "user"].count(queued_text), 1)
         queue_read, _ = self.call_cli("conversation", "queue-list", task_id)
@@ -3255,7 +3265,7 @@ class StationAIBridgeTests(unittest.TestCase):
         interrupted, _ = self.call_cli(
             "conversation", "send", task_id, "--message", "Interrupt the active turn.",
             "--answer", "color=Blue", "--answer", "token=fixture-secret", expected_status=1,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(interrupted_fixture)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(interrupted_fixture)},
         )
         self.assert_failure(interrupted, "operation_failed")
         queue_read, _ = self.call_cli("conversation", "queue-list", task_id)
@@ -3268,7 +3278,7 @@ class StationAIBridgeTests(unittest.TestCase):
         shutil.copyfile(Path(str(interrupted_fixture) + ".history"), Path(str(retry_fixture) + ".history"))
         retried, _ = self.call_cli(
             "conversation", "queue-retry", task_id, queued_record["id"],
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(retry_fixture)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(retry_fixture)},
         )
         self.assertTrue(self.assert_success(retried)["retried"])
         queue_read, _ = self.call_cli("conversation", "queue-list", task_id)
@@ -3284,7 +3294,7 @@ class StationAIBridgeTests(unittest.TestCase):
         title_prompt = "Transcript entry " + ("Readable chat content for scrolling. " * 120).rstrip()
         sent, _ = self.call_cli(
             "conversation", "send", title_task["id"], "--message", title_prompt,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         self.assert_success(sent)
         titled, _ = self.call_cli("task", "get", title_task["id"])
@@ -3318,7 +3328,7 @@ class StationAIBridgeTests(unittest.TestCase):
         failed_title_task = self.create_repo_task("Untitled task", [self.primary])
         sent, _ = self.call_cli(
             "conversation", "send", failed_title_task["id"], "--message", failure_prompt,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(failure_executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(failure_executable)},
         )
         self.assert_success(sent)
         failed_title, _ = self.call_cli("task", "get", failed_title_task["id"])
@@ -3361,7 +3371,7 @@ class StationAIBridgeTests(unittest.TestCase):
         pending_executable.chmod(0o755)
         pending_send = self.start_cli(
             "conversation", "send", pending_task["id"], "--message", pending_prompt,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(pending_executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(pending_executable)},
         )
         pending_ready = Path(str(pending_executable) + ".resolve-ready")
         pending_release = Path(str(pending_executable) + ".resolve-continue")
@@ -3390,7 +3400,7 @@ class StationAIBridgeTests(unittest.TestCase):
         renamed_auto_executable.chmod(0o755)
         renamed_auto_send = self.start_cli(
             "conversation", "send", renamed_auto_task["id"], "--message", renamed_auto_prompt,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(renamed_auto_executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(renamed_auto_executable)},
         )
         renamed_title_ready = Path(str(renamed_auto_executable) + ".resolve-ready")
         renamed_title_release = Path(str(renamed_auto_executable) + ".resolve-continue")
@@ -3494,7 +3504,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIn("Done tasks are closed", done_switch["error"]["message"])
         self.assertEqual(self.assert_success(self.call_cli("task", "get", done_task["id"])[0])["conversationProvider"], "codex")
 
-    # case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its StationAI progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn without an outcome ends in Waiting Response. The fixture records both private reminder attempts for each unreported turn; fresh history hides reminder prompts and replies completely. Switching to Codex hands off the whole Claude answer, excludes answered-turn commentary and private reminder prompts and replies including their redacted placeholders, and hands off only the last commentary from the turn that recorded no answer. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
+    # case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its Playhouse progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn without an outcome ends in Waiting Response. The fixture records both private reminder attempts for each unreported turn; fresh history hides reminder prompts and replies completely. Switching to Codex hands off the whole Claude answer, excludes answered-turn commentary and private reminder prompts and replies including their redacted placeholders, and hands off only the last commentary from the turn that recorded no answer. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
     def test_claude_answer_stays_final_around_outcome_report(self):
         story = "BISCUIT-7 waited by the gate every evening. One night the boy finally came home."
         story_answer = story + "\n\nThe story is above."
@@ -3503,13 +3513,13 @@ class StationAIBridgeTests(unittest.TestCase):
         for source, executable in [("claude-code-fixture.py", claude), ("codex-app-server-fixture.py", codex)]:
             shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / source, executable)
             executable.chmod(0o755)
-        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
-            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
-        fixtures = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(claude), "STATIONAI_E2E_CODEX_EXECUTABLE": str(codex)}
+        fixtures = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(claude), "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(codex)}
         created, _ = self.call_cli("task", "create", "--title", "Claude answer", "--root", self.primary, "--provider", "claude")
         task_id = self.assert_success(created)["id"]
 
@@ -3521,8 +3531,8 @@ class StationAIBridgeTests(unittest.TestCase):
         recorded = json.loads(Path(str(claude) + ".history").read_text(encoding="utf-8"))["turns"][-1]
         self.assertIn("--model", recorded["arguments"], "Claude Code should receive an explicit model even when the user hasn't chosen one.")
         model_argument_index = recorded["arguments"].index("--model")
-        self.assertEqual(recorded["arguments"][model_argument_index + 1], "sonnet", "StationAI should default new Claude turns to Sonnet.")
-        self.assertEqual(len(recorded["reportCommands"]), 2, "The fixture should run StationAI's progress-clear and outcome commands.")
+        self.assertEqual(recorded["arguments"][model_argument_index + 1], "sonnet", "Playhouse should default new Claude turns to Sonnet.")
+        self.assertEqual(len(recorded["reportCommands"]), 2, "The fixture should run Playhouse's progress-clear and outcome commands.")
         self.assertTrue(all('"ok":true' in command["output"] for command in recorded["reportCommands"]), recorded["reportCommands"])
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Review")
 
@@ -3544,7 +3554,7 @@ class StationAIBridgeTests(unittest.TestCase):
             ("commentary", "Starting the checks."),
             ("commentary", "Checks are running; results will follow."),
         ], "A fresh history read keeps the story as one final answer and the pre-tool text as commentary.")
-        self.assertFalse(any("StationAI internal outcome reminder:" in message["text"] for message in history["messages"]))
+        self.assertFalse(any("Playhouse internal outcome reminder:" in message["text"] for message in history["messages"]))
         self.assertFalse(any("private outcome reminder hidden" in message["text"] for message in history["messages"]))
         self.assertFalse(any("private outcome response hidden" in message["text"] for message in history["messages"]))
 
@@ -3554,26 +3564,26 @@ class StationAIBridgeTests(unittest.TestCase):
         codex_turns = json.loads(Path(str(codex) + ".history").read_text(encoding="utf-8"))["turns"]
         handoff_turn = next(turn for turn in reversed(codex_turns) if turn.get("userMessage", "").endswith("Continue the story."))
         handoff = handoff_turn["userMessage"]
-        self.assertIn("<stationai-handoff-context>", handoff)
+        self.assertIn("<playhouse-handoff-context>", handoff)
         self.assertIn(f"Claude: {story_answer}", handoff, "Codex must receive the whole Claude answer.")
         self.assertIn("Claude: Inspection done: the workspace is ready.", handoff)
         self.assertNotIn("I'll inspect the workspace first.", handoff, "Commentary of an answered turn stays with the provider that produced it.")
         self.assertIn("Claude: Checks are running; results will follow.", handoff, "A turn without an answer hands off its last commentary.")
         self.assertNotIn("Starting the checks.", handoff, "Only the unanswered turn's last commentary is handed off.")
-        self.assertNotIn("StationAI internal outcome reminder:", handoff, "Private outcome reminders must not cross provider boundaries.")
-        self.assertNotIn("[StationAI private outcome reminder hidden]", handoff, "Redacted reminder prompts must not cross provider boundaries.")
+        self.assertNotIn("Playhouse internal outcome reminder:", handoff, "Private outcome reminders must not cross provider boundaries.")
+        self.assertNotIn("[Playhouse private outcome reminder hidden]", handoff, "Redacted reminder prompts must not cross provider boundaries.")
         self.assertNotIn("private outcome response hidden", handoff, "Redacted reminder replies must not enter handoff context.")
         self.assertTrue(handoff.endswith("Continue the story."))
 
-    # case-contract: test_claude_resume_recovers_visible_history | After a Claude turn and StationAI restart, if Claude cannot find its native resumed session, the retried fresh session receives the prior visible conversation from StationAI's persisted transcript together with the new prompt. Claude completes the turn, and fresh CLI/XPC history and the visible UI retain both turns. A normal Claude resume continues using the native session without receiving duplicate handoff context.
+    # case-contract: test_claude_resume_recovers_visible_history | After a Claude turn and Playhouse restart, if Claude cannot find its native resumed session, the retried fresh session receives the prior visible conversation from Playhouse's persisted transcript together with the new prompt. Claude completes the turn, and fresh CLI/XPC history and the visible UI retain both turns. A normal Claude resume continues using the native session without receiving duplicate handoff context.
     def test_claude_resume_recovers_visible_history(self):
         claude = self.data_directory / "claude-fixture-resume-recovery"
         shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", claude)
         claude.chmod(0o755)
-        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
-            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
-        fixtures = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(claude)}
+        fixtures = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(claude)}
         task = self.create_task("Claude session recovery", roots=[self.primary])
         self.assert_success(self.call_cli("conversation", "provider", task["id"], "set", "claude")[0])
         first, _ = self.call_cli("conversation", "send", task["id"], "--message", "Tell me a very short dog story.", extra_environment=fixtures)
@@ -3587,7 +3597,7 @@ class StationAIBridgeTests(unittest.TestCase):
             if turn.get("userText") == "Please inspect the workspace."
         )
         self.assertTrue(normal_resume["resumed"], normal_resume)
-        self.assertNotIn("<stationai-handoff-context>", normal_resume["userText"], "A working native resume must not receive duplicate transcript context.")
+        self.assertNotIn("<playhouse-handoff-context>", normal_resume["userText"], "A working native resume must not receive duplicate transcript context.")
 
         send_started = [
             event for event in self.diagnostic_events()
@@ -3611,9 +3621,9 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(restarted_task)["conversationProvider"], "claude")
 
         # The test owns this fixture executable and its sidecar before arming the failure.
-        owner = self.data_directory / ".stationai-claude-fixture-owner"
-        self.assertEqual(owner.read_text(encoding="utf-8"), "StationAI test owns this Claude Code protocol fixture (v1).\n")
-        Path(str(claude) + ".missing-resume").write_text("StationAI test owns this missing-session trigger.\n", encoding="utf-8")
+        owner = self.data_directory / ".playhouse-claude-fixture-owner"
+        self.assertEqual(owner.read_text(encoding="utf-8"), "Playhouse test owns this Claude Code protocol fixture (v1).\n")
+        Path(str(claude) + ".missing-resume").write_text("Playhouse test owns this missing-session trigger.\n", encoding="utf-8")
         recovered, events = self.call_cli(
             "conversation", "send", task["id"], "--message", "What happened earlier?", extra_environment=fixtures
         )
@@ -3622,11 +3632,11 @@ class StationAIBridgeTests(unittest.TestCase):
 
         recovered_turn = next(
             turn for turn in reversed(json.loads(fixture_history_path.read_text(encoding="utf-8"))["turns"])
-            if "stationai internal outcome reminder:" not in turn.get("userText", "").lower()
+            if "playhouse internal outcome reminder:" not in turn.get("userText", "").lower()
         )
         self.assertFalse(recovered_turn["resumed"], "A missing native session should be replaced by a fresh Claude session.")
         prompt = recovered_turn["userText"]
-        self.assertIn("<stationai-handoff-context>", prompt)
+        self.assertIn("<playhouse-handoff-context>", prompt)
         self.assertIn("User: Tell me a very short dog story.", prompt)
         self.assertIn("Claude: BISCUIT-7 waited by the gate every evening.", prompt)
         self.assertIn("User: Please inspect the workspace.", prompt)
@@ -3644,7 +3654,7 @@ class StationAIBridgeTests(unittest.TestCase):
     def test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary(self):
         task = self.create_task("Provider switch task")
         self.complete_fixture_turn(task["id"], message="Start with Codex.")
-        fixture_environment = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture")}
+        fixture_environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture")}
         before = self.assert_success(self.call_cli("conversation", "history", task["id"], extra_environment=fixture_environment)[0])
         codex_thread = self.assert_success(self.call_cli("task", "get", task["id"])[0])["codexThreadID"]
         self.assertTrue(codex_thread)
@@ -3695,7 +3705,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(final_history["providerBoundaries"], [])
         self.assertIn("Continue with Codex.", [message["text"] for message in final_history["messages"] if message["role"] == "user"])
         self.assertFalse(
-            any("<stationai-handoff-context>" in message["text"] for message in final_history["messages"]),
+            any("<playhouse-handoff-context>" in message["text"] for message in final_history["messages"]),
             "Handoff context never appears in the visible transcript.",
         )
     # case-contract: test_conversation_adds_ordered_text_annotations | Selecting text in assistant and user messages shows a floating Add comment hint above and horizontally centered on the selected lines, including wrapped multiline selections; clicking it opens a compact inline comment field positioned beside the hint, with a clearly visible dark arrow on its light submit control. Added ranges render orange and persist after reopening. The composer shows the pending comment count. Structurally recognized comment context is hidden while similar ordinary text remains visible; comments are sent in insertion order with source ranges alongside ordinary composer text. Multiple comments can be added before one send, comment-only sends are enabled, and cancelling the compact field leaves none to submit. Pending comments take precedence over Goal-entry mode: submission sends them to the conversation, exits Goal-entry mode, and does not store the comment payload as a Goal objective. The agent is instructed to start each comment response line with the provider-neutral indexed protocol marker; the transcript renders that marker as a numbered prefix (1., 2.) whose hover opens a medium-sized hint with highlighted text and the user's comment, truncating long values while keeping them identifiable. The serialized payload and ordered response survive CLI/XPC history reload. Legacy Codex markers, response-annotations payloads, and annotation fields still restore their reply details.
@@ -3705,10 +3715,10 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-comment-response-goal-success"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
-        fixture_environment = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        fixture_environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
         comments = [
             {"text": "first phrase", "comment": "Explain this", "source": {
                 "messageId": "assistant-message", "blockID": 0, "startOffset": 3, "endOffset": 15}},
@@ -3720,7 +3730,7 @@ class StationAIBridgeTests(unittest.TestCase):
         prompt = (
             ordinary_text + "\n\n# Response comments:\n"
             "The following JSON contains comments on selected conversation text, in array order. "
-            "For each comment, start a separate response line with :stationai-annotation{index=\"N\"}, "
+            "For each comment, start a separate response line with :playhouse-annotation{index=\"N\"}, "
             "replacing N with the comment's zero-based array index, then a space and the answer. "
             "The marker is displayed to the user as the numbered prefix, so do not add another number. "
             "Address the comment in the context of its highlighted text. Do not combine comment responses on one line, "
@@ -3737,7 +3747,7 @@ class StationAIBridgeTests(unittest.TestCase):
         history, _ = self.call_cli("conversation", "history", task["id"], extra_environment=fixture_environment)
         user_messages = [
             message for message in self.assert_success(history)["messages"]
-            if message["role"] == "user" and "stationai internal outcome reminder:" not in message["text"].lower()
+            if message["role"] == "user" and "playhouse internal outcome reminder:" not in message["text"].lower()
         ]
         self.assertTrue(user_messages, "The commented turn should survive a fresh CLI/XPC history read.")
         self.assertEqual(user_messages[-1]["text"], prompt)
@@ -3758,8 +3768,8 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(assistant_messages, "The fixture should return a response for each comment.")
         response_lines = assistant_messages[-1]["text"].splitlines()
         self.assertEqual(len(response_lines), 2)
-        self.assertTrue(response_lines[0].startswith(':stationai-annotation{index="0"} '))
-        self.assertTrue(response_lines[1].startswith(':stationai-annotation{index="1"} '))
+        self.assertTrue(response_lines[0].startswith(':playhouse-annotation{index="0"} '))
+        self.assertTrue(response_lines[1].startswith(':playhouse-annotation{index="1"} '))
         self.assertIn("For ‘first phrase’: Explain this", response_lines[0])
         self.assertIn("Please clarify this response", response_lines[1])
 
@@ -3786,10 +3796,10 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIn(':codex-annotation{index="0"}', legacy_assistant["text"])
 
         comment_only_prompt = (
-            "<stationai-comment-context>\n# Response comments:\n"
-            "For each comment, start a separate response line with :stationai-annotation{index=\"N\"}.\n"
+            "<playhouse-comment-context>\n# Response comments:\n"
+            "For each comment, start a separate response line with :playhouse-annotation{index=\"N\"}.\n"
             "<response-comments>" + json.dumps(comments[:1]) + "</response-comments>\n"
-            "</stationai-comment-context>"
+            "</playhouse-comment-context>"
         )
         self.assert_success(self.call_cli(
             "conversation", "send", task["id"], "--message", comment_only_prompt,
@@ -3803,7 +3813,7 @@ class StationAIBridgeTests(unittest.TestCase):
             comment_only_prompt,
         )
         self.assertIn(
-            ':stationai-annotation{index="0"}',
+            ':playhouse-annotation{index="0"}',
             [item for item in comment_only_history["messages"] if item["role"] == "assistant"][-1]["text"],
         )
 
@@ -3817,10 +3827,10 @@ class StationAIBridgeTests(unittest.TestCase):
             executable = self.data_directory / f"claude-fixture-{suffix}"
             shutil.copyfile(source, executable)
             executable.chmod(0o755)
-            (self.data_directory / ".stationai-claude-fixture-owner").write_text(
-                "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+            (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+                "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
             )
-            environment = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)}
+            environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
             task = self.assert_success(self.call_cli(
                 "task", "create", "--title", "Untitled task", "--repo", self.primary, "--provider", "claude"
             )[0])
@@ -3863,10 +3873,10 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "claude-fixture-parallel-sends"
         shutil.copyfile(source, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
-            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
-        environment = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
         first = self.assert_success(self.call_cli(
             "task", "create", "--title", "Held Claude conversation", "--root", self.primary, "--provider", "claude"
         )[0])
@@ -3949,10 +3959,10 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "claude-fixture-parallel-failure"
         shutil.copyfile(source, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
-            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
-        environment = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
         first = self.assert_success(self.call_cli(
             "task", "create", "--title", "Failing Claude conversation", "--root", self.primary, "--provider", "claude"
         )[0])
@@ -4025,10 +4035,10 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "claude-fixture-parallel-stop"
         shutil.copyfile(source, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
-            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
-        environment = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
         stopped = self.assert_success(self.call_cli(
             "task", "create", "--title", "Stopped Claude conversation", "--root", self.primary, "--provider", "claude"
         )[0])
@@ -4122,8 +4132,8 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-concurrent-serial-success-wait"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
 
         first_prompt = "First serialized message."
@@ -4132,7 +4142,7 @@ class StationAIBridgeTests(unittest.TestCase):
         second_command = ["conversation", "send", task_id, "--message", second_prompt]
         first_process = self.start_cli(
             *first_command,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         second_process = None
         release_marker = Path(str(executable) + ".resolve-continue")
@@ -4158,13 +4168,13 @@ class StationAIBridgeTests(unittest.TestCase):
             steer_message = "Keep the current approach and prioritize the smaller change."
             steered, _ = self.call_cli(
                 "conversation", "steer", task_id, "--message", steer_message,
-                extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+                extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
             )
             self.assertTrue(self.assert_success(steered)["accepted"], "Steering should use the active XPC client and turn ID.")
 
             second_process = self.start_cli(
                 *second_command,
-                extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+                extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
             )
             time.sleep(0.25)
             self.assertIsNone(second_process.poll(), "The second send should wait for the conversation-turn reservation held by the first send.")
@@ -4198,7 +4208,7 @@ class StationAIBridgeTests(unittest.TestCase):
         saved_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
         self.assertEqual(
             [turn["userMessage"] for turn in saved_history["messages"]
-             if "stationai internal outcome reminder:" not in (turn["userMessage"] or "").lower()],
+             if "playhouse internal outcome reminder:" not in (turn["userMessage"] or "").lower()],
             [first_prompt, second_prompt],
             "Both sequential turns should persist in the same Codex thread history.",
         )
@@ -4208,14 +4218,14 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertGreaterEqual([event["method"] for event in thread_events].count("thread/resume"), 1)
         self.assertTrue(all(event["threadID"] == thread_id for event in saved_history["events"]))
         visible_turns = [turn for turn in saved_history["messages"]
-                         if "stationai internal outcome reminder:" not in (turn["userMessage"] or "").lower()]
+                         if "playhouse internal outcome reminder:" not in (turn["userMessage"] or "").lower()]
         self.assertTrue(all(turn["threadID"] == thread_id for turn in visible_turns))
         turn_ids = [turn["turnID"] for turn in visible_turns]
         self.assertEqual(len(turn_ids), 2)
         self.assertEqual(len(set(turn_ids)), 2, "Each serialized send should have its own Codex turn ID.")
         self.assertEqual(
             [event["turnID"] for event in saved_history["events"]
-             if event["method"] == "turn/start" and "stationai internal outcome reminder:" not in (event.get("userMessage") or "").lower()],
+             if event["method"] == "turn/start" and "playhouse internal outcome reminder:" not in (event.get("userMessage") or "").lower()],
             turn_ids,
         )
         completed = self.assert_success(self.call_cli("task", "get", task_id)[0])
@@ -4235,8 +4245,8 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-steer-queue-serial-success-wait"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         Path(str(executable) + ".reject-next-steer").write_text("The expected turn ID is stale.\n", encoding="utf-8")
         first_prompt = "Start the active turn before steering and queueing."
@@ -4245,7 +4255,7 @@ class StationAIBridgeTests(unittest.TestCase):
         send_command = ["conversation", "send", task_id, "--message", first_prompt]
         process = self.start_cli(
             *send_command,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         ready = Path(str(executable) + ".resolve-ready")
         release = Path(str(executable) + ".resolve-continue")
@@ -4260,14 +4270,14 @@ class StationAIBridgeTests(unittest.TestCase):
             invalid_steer, _ = self.call_cli(
                 "conversation", "steer", task_id, "--message", steering_text, "--image", str(invalid_image),
                 expected_status=2,
-                extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+                extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
             )
             self.assertEqual(invalid_steer["error"]["code"], "invalid_argument")
             steer_image = self.data_directory / "steer.png"
             steer_image.write_bytes(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"))
             missed_steer, _ = self.call_cli(
                 "conversation", "steer", task_id, "--message", steering_text, "--image", str(steer_image),
-                extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+                extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
             )
             missed_result = self.assert_success(missed_steer)
             self.assertTrue(missed_result["accepted"])
@@ -4278,7 +4288,7 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assertTrue(missed_item["imageDataURLs"][0].startswith("data:image/png;base64,"), "A queued CLI steer should retain its image.")
             steered, _ = self.call_cli(
                 "conversation", "steer", task_id, "--message", steering_text, "--image", str(steer_image),
-                extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+                extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
             )
             self.assertTrue(self.assert_success(steered)["accepted"])
             queued, _ = self.call_cli("conversation", "queue", task_id, "--message", queued_text)
@@ -4325,7 +4335,7 @@ class StationAIBridgeTests(unittest.TestCase):
 
         history_response, _ = self.call_cli(
             "conversation", "history", task_id,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         history = self.assert_success(history_response)
         self.assertEqual([message["text"] for message in history["messages"] if message["role"] == "user"].count(queued_text), 1)
@@ -4353,7 +4363,7 @@ class StationAIBridgeTests(unittest.TestCase):
         targeted_command = ["conversation", "queue-steer", task_id, targeted_record["id"]]
         targeted_process = self.start_cli(
             *targeted_command,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         targeted_ready = Path(str(executable) + ".queued-turn-ready")
         targeted_release = Path(str(executable) + ".queued-turn-release")
@@ -4365,7 +4375,7 @@ class StationAIBridgeTests(unittest.TestCase):
         Path(str(executable) + ".reject-next-steer").write_text("no active turn to steer\n", encoding="utf-8")
         overlap_steer, _ = self.call_cli(
             "conversation", "steer", task_id, "--message", overlap_text,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         self.assertTrue(self.assert_success(overlap_steer)["queued"], "A second missed steer should queue while targeted delivery is active.")
         overlap_queue, _ = self.call_cli("conversation", "queue-list", task_id)
@@ -4383,7 +4393,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(current_queue), [], "A pending full drain should deliver the overlapping steer after targeted dispatch.")
         overlap_history, _ = self.call_cli(
             "conversation", "history", task_id,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         delivered_texts = [message["text"] for message in self.assert_success(overlap_history)["messages"] if message["role"] == "user"]
         self.assertEqual(delivered_texts.count(targeted_text), 1)
@@ -4396,7 +4406,7 @@ class StationAIBridgeTests(unittest.TestCase):
         targeted_row_command = ["conversation", "queue-steer", task_id, targeted_row_record["id"]]
         targeted_row_process = self.start_cli(
             *targeted_row_command,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline and not targeted_ready.exists():
@@ -4421,7 +4431,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(current_queue), [], "A missed queued-row steer should drain after the targeted row turn.")
         final_history, _ = self.call_cli(
             "conversation", "history", task_id,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         final_delivered = [message["text"] for message in self.assert_success(final_history)["messages"] if message["role"] == "user"]
         self.assertEqual(final_delivered.count(targeted_row_text), 1)
@@ -4432,7 +4442,7 @@ class StationAIBridgeTests(unittest.TestCase):
         immediate_record = self.assert_success(immediate_row)
         immediate_steer, _ = self.call_cli(
             "conversation", "queue-steer", task_id, immediate_record["id"],
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         immediate_result = self.assert_success(immediate_steer)
         self.assertTrue(immediate_result["accepted"])
@@ -4441,7 +4451,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(immediate_queue), [], "The synchronous own-turn drain should finish before the request returns.")
         immediate_history, _ = self.call_cli(
             "conversation", "history", task_id,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         immediate_messages = [message["text"] for message in self.assert_success(immediate_history)["messages"] if message["role"] == "user"]
         self.assertEqual(immediate_messages.count(immediate_text), 1)
@@ -4469,8 +4479,8 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-image-serial-success"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         image = self.data_directory / "tiny.png"
         image.write_bytes(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"))
@@ -4491,7 +4501,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(unchanged_draft)["draftImageDataURLs"], saved_draft["draftImageDataURLs"])
         result, _ = self.call_cli(
             "conversation", "send", task_id, "--image", str(image),
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         initial_history = self.assert_success(result)
         sent = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
@@ -4504,7 +4514,7 @@ class StationAIBridgeTests(unittest.TestCase):
         subprocess.run(["sips", "-s", "format", "jpeg", str(image), "--out", str(jpeg)], check=True, capture_output=True)
         jpeg_result, _ = self.call_cli(
             "conversation", "send", task_id, "--image", str(jpeg),
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         self.assert_success(jpeg_result)
         sent = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
@@ -4513,7 +4523,7 @@ class StationAIBridgeTests(unittest.TestCase):
         text_prompt = "Describe this screenshot."
         mixed, _ = self.call_cli(
             "conversation", "send", task_id, "--message", text_prompt, "--image", str(image),
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         self.assert_success(mixed)
         sent = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
@@ -4522,7 +4532,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(sent["imageInputs"], [{"type": "image", "url": sent["images"][0]}])
         followup, _ = self.call_cli(
             "conversation", "send", task_id, "--message", "Continue using the earlier image as context.",
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         followed_history = self.assert_success(followup)
         restored_messages = [message for message in followed_history["messages"] if message["role"] == "user"]
@@ -4547,7 +4557,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertNotIn(sent["images"][0], serialized_diagnostics)
         published, _ = self.call_cli(
             "conversation", "present-image", task_id, "--image", str(image), "--caption", "Agent screenshot",
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         published_message = self.assert_success(published)
         self.assertEqual(published_message["role"], "assistant")
@@ -4555,7 +4565,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(published_message["imageDataURLs"][0].startswith("data:image/png;base64,"))
         fresh_history, _ = self.call_cli(
             "conversation", "history", task_id,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         saved_agent_image = next(
             message for message in reversed(self.assert_success(fresh_history)["messages"])
@@ -4569,13 +4579,13 @@ class StationAIBridgeTests(unittest.TestCase):
         subprocess.run(["sips", "-s", "format", "jpeg", str(image), "--out", str(jpeg)], check=True, capture_output=True)
         published_jpeg, _ = self.call_cli(
             "conversation", "present-image", task_id, "--image", str(jpeg), "--caption", "Agent JPEG screenshot",
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         jpeg_message = self.assert_success(published_jpeg)
         self.assertTrue(jpeg_message["imageDataURLs"][0].startswith("data:image/jpeg;base64,"))
         fresh_jpeg_history, _ = self.call_cli(
             "conversation", "history", task_id,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         saved_jpeg = next(
             message for message in reversed(self.assert_success(fresh_jpeg_history)["messages"])
@@ -4586,7 +4596,7 @@ class StationAIBridgeTests(unittest.TestCase):
         invalid_image.write_bytes(b"not an image")
         invalid_publish, _ = self.call_cli(
             "conversation", "present-image", task_id, "--image", str(invalid_image),
-            expected_status=2, extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            expected_status=2, extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         self.assertEqual(invalid_publish.get("error", {}).get("code"), "invalid_argument")
 
@@ -4596,14 +4606,14 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "claude-fixture-active-image"
         shutil.copyfile(source, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
-            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
         created, _ = self.call_cli("task", "create", "--title", "Claude active image", "--root", self.primary, "--provider", "claude")
         task_id = self.assert_success(created)["id"]
         image = self.data_directory / "active-agent-image.png"
         image.write_bytes(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"))
-        environment = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
         prompt = "Please publish-image-during-active-turn."
         send = self.start_cli("conversation", "send", task_id, "--message", prompt, extra_environment=environment)
         ready = Path(str(executable) + ".image-turn-ready")
@@ -4633,12 +4643,12 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-image-serial-success-wait"
         shutil.copyfile(source, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         created, _ = self.call_cli("task", "create", "--title", "Codex active image", "--root", self.primary)
         task_id = self.assert_success(created)["id"]
-        environment = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
         prompt = "Please publish-image-during-active-turn."
         send = self.start_cli("conversation", "send", task_id, "--message", prompt, extra_environment=environment)
         ready = Path(str(executable) + ".resolve-ready")
@@ -4703,12 +4713,12 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-tool-activity"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         env = {
-            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
-            "STATIONAI_FIXTURE_WORKSPACE": str(self.primary),
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable),
+            "PLAYHOUSE_FIXTURE_WORKSPACE": str(self.primary),
         }
         send_command = ("conversation", "send", task_id, "--message", "Show tool activity.")
         process = self.start_cli(*send_command, extra_environment=env, binary_output=True)
@@ -4832,10 +4842,10 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-context-compaction"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
-        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable), "STATIONAI_FIXTURE_WORKSPACE": str(self.primary)}
+        env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable), "PLAYHOUSE_FIXTURE_WORKSPACE": str(self.primary)}
         command = ("conversation", "send", task_id, "--message", "Compact the context.")
         process = self.start_cli(*command, extra_environment=env, binary_output=True)
         ready = Path(str(executable) + ".compaction-ready")
@@ -4872,7 +4882,7 @@ class StationAIBridgeTests(unittest.TestCase):
         result = self.assert_success(sent)
         rows = [item for item in result["activities"] if item.get("isContextCompaction")]
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["id"], "item_stationai_compaction")
+        self.assertEqual(rows[0]["id"], "item_playhouse_compaction")
         self.assertEqual(rows[0]["status"], "completed")
         self.assertEqual(rows[0]["detail"], "")
         reloaded_response, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
@@ -4893,10 +4903,10 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-long-history-success"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
-        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable), "STATIONAI_FIXTURE_WORKSPACE": str(self.primary)}
+        env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable), "PLAYHOUSE_FIXTURE_WORKSPACE": str(self.primary)}
         sent, _ = self.call_cli("conversation", "send", task_id, "--message", "Create a long history.", extra_environment=env)
         self.assert_success(sent)
         history_response, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
@@ -4927,12 +4937,12 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-subagent"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         env = {
-            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
-            "STATIONAI_FIXTURE_WORKSPACE": str(self.primary),
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable),
+            "PLAYHOUSE_FIXTURE_WORKSPACE": str(self.primary),
         }
         send_command = ("conversation", "send", task_id, "--message", "Delegate this task.")
         process = self.start_cli(*send_command, extra_environment=env, binary_output=True)
@@ -5090,10 +5100,10 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-markdown"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
-        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
         markdown_reply = "## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening\n\n1. First numbered step: capture the baseline state before changes.\n\n2. Second numbered step: apply the fix and confirm there are no regressions.\n\n```javascript\nconsole.log(\"Hello, world!\");\n```"
         sent, events = self.call_cli(
             "conversation", "send", task_id, "--message", "Plan the task.", "--mode", "plan",
@@ -5132,7 +5142,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(continued_messages[-2]["text"], "Continue the implementation.")
         fixture_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
         turn_modes = [turn["conversationMode"] for turn in fixture_history["turns"]
-                      if "stationai internal outcome reminder:" not in (turn["userMessage"] or "").lower()]
+                      if "playhouse internal outcome reminder:" not in (turn["userMessage"] or "").lower()]
         self.assertEqual(turn_modes, ["plan", "plan", "default", "default"], "Follow-up planning remains in Plan mode until implementation starts, and later implementation turns remain in Code mode.")
         history, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         reloaded_messages = self.assert_success(history)["messages"]
@@ -5160,7 +5170,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(all(model.get("id") and model.get("name") for model in models))
         selected_model_id = models[0]["id"]
         legacy_data = json.dumps({"codex": selected_model_id}).encode("utf-8")
-        with sqlite3.connect(self.data_directory / "StationAI-v2.store") as database:
+        with sqlite3.connect(self.data_directory / "Playhouse-v2.store") as database:
             seeded = database.execute(
                 "UPDATE ZBOARDTASK SET ZCONVERSATIONMODELIDSDATA = ? WHERE ZTITLE = ?",
                 (legacy_data, title),
@@ -5211,10 +5221,10 @@ class StationAIBridgeTests(unittest.TestCase):
         codex_executable = self.data_directory / "codex-fixture-model-cache"
         shutil.copyfile(codex_fixture, codex_executable)
         codex_executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
-        codex_environment = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(codex_executable)}
+        codex_environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(codex_executable)}
         task_id = self.create_task(title="Codex model cache")["id"]
         response, _ = self.call_cli("conversation", "models", task_id, extra_environment=codex_environment)
         models = self.assert_success(response)["models"]
@@ -5224,10 +5234,10 @@ class StationAIBridgeTests(unittest.TestCase):
         claude = self.data_directory / "claude-fixture-model-list"
         shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", claude)
         claude.chmod(0o755)
-        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
-            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
-        claude_environment = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(claude)}
+        claude_environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(claude)}
         claude_task, _ = self.call_cli("task", "create", "--title", "Claude model cache", "--root", self.primary, "--provider", "claude")
         claude_task_id = self.assert_success(claude_task)["id"]
         first_claude_models, _ = self.call_cli("conversation", "models", claude_task_id, extra_environment=claude_environment)
@@ -5244,8 +5254,8 @@ class StationAIBridgeTests(unittest.TestCase):
 
         unavailable_root = self.data_directory / "claude-model-cache-unavailable-root"
         unavailable_root.mkdir()
-        root_owner_marker = unavailable_root / ".stationai-test-owner"
-        root_owner_value = "StationAI model cache test owns this workspace root.\n"
+        root_owner_marker = unavailable_root / ".playhouse-test-owner"
+        root_owner_value = "Playhouse model cache test owns this workspace root.\n"
         root_owner_marker.write_text(root_owner_value, encoding="utf-8")
         unavailable_task, _ = self.call_cli(
             "task", "create", "--title", "Unavailable Claude model root", "--root", unavailable_root, "--provider", "claude"
@@ -5267,10 +5277,10 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-model-versions"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
-        environment = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
         task_id = self.create_task(title="Model versions")["id"]
         models = self.assert_success(self.call_cli("conversation", "models", task_id, extra_environment=environment)[0])["models"]
         self.assertEqual([model["id"] for model in models], ["gpt-6-luna", "gpt-6-sol", "gpt-6-mini"])
@@ -5281,10 +5291,10 @@ class StationAIBridgeTests(unittest.TestCase):
         claude_executable = self.data_directory / "claude-fixture-model-versions"
         shutil.copyfile(claude_fixture, claude_executable)
         claude_executable.chmod(0o755)
-        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
-            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
-        claude_environment = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(claude_executable)}
+        claude_environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(claude_executable)}
         created, _ = self.call_cli("task", "create", "--title", "Claude model versions", "--root", self.primary, "--provider", "claude")
         claude_task_id = self.assert_success(created)["id"]
         claude_models = self.assert_success(
@@ -5299,7 +5309,7 @@ class StationAIBridgeTests(unittest.TestCase):
         aliases_fixture.chmod(0o755)
         aliases_only = self.assert_success(self.call_cli(
             "conversation", "models", claude_task_id,
-            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(aliases_fixture)},
+            extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(aliases_fixture)},
         )[0])["models"]
         self.assertEqual(aliases_only, [], "Claude aliases should not be exposed without a concrete versioned choice.")
 
@@ -5309,10 +5319,10 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-effort-unique-turns-success"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
-        environment = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
         task_id = self.create_task(title="Codex effort dispatch")["id"]
         models = self.assert_success(self.call_cli("conversation", "models", task_id, extra_environment=environment)[0])["models"]
         limited_model = next(model for model in models if model["id"] == "gpt-6-mini")
@@ -5360,10 +5370,10 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "claude-fixture-effort"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
-            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
-        environment = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
         created, _ = self.call_cli("task", "create", "--title", "Claude effort dispatch", "--root", self.primary, "--provider", "claude")
         task_id = self.assert_success(created)["id"]
         self.assert_success(self.call_cli("conversation", "model", task_id, "set", "claude-opus-5-5")[0])
@@ -5389,12 +5399,12 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-goal"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         env = {
             "CODEX_HOME": str(self.data_directory / "codex-home"),
-            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable),
         }
         (self.data_directory / "codex-home").mkdir()
         goal_text = "Migrate the project and keep the full test suite green."
@@ -5409,7 +5419,7 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assertEqual(self.assert_success(response)["status"], expected)
             reread, _ = self.call_cli("conversation", "goal", task_id, "get", extra_environment=env)
             self.assertEqual(self.assert_success(reread)["objective"], goal_text)
-        generation_key = f"stationai.codex.goal-generation.{task_id.upper()}"
+        generation_key = f"playhouse.codex.goal-generation.{task_id.upper()}"
         generation_before, _ = self.read_default(generation_key)
         same_goal, _ = self.call_cli("conversation", "goal", task_id, "set", "--text", goal_text, extra_environment=env)
         self.assertEqual(self.assert_success(same_goal)["objective"], goal_text)
@@ -5434,7 +5444,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(replacement_goal["objective"], replacement_text)
         replacement_generation, _ = self.read_default(generation_key)
         self.assertNotEqual(replacement_generation, cleared_generation, "A Goal set after clear must receive a fresh timer generation.")
-        baseline_key = f"stationai.codex.goal-generation-time-baseline.{task_id.upper()}"
+        baseline_key = f"playhouse.codex.goal-generation-time-baseline.{task_id.upper()}"
         replacement_baseline, _ = self.read_default(baseline_key)
         replacement_reported_seconds = float(replacement_goal.get("timeUsedSeconds") or 0)
         expected_baseline = prior_reported_seconds if replacement_reported_seconds >= prior_reported_seconds else 0
@@ -5458,14 +5468,14 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-restart-question"
         shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py", executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text("StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8")
-        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text("Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8")
+        env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
         failed, _ = self.call_cli("conversation", "send", target, "--message", "Ask a restart-safe question.", "--mode", "plan", expected_status=1, extra_environment=env)
         self.assertFalse(failed["ok"])
         stranger_executable = self.data_directory / "codex-fixture-title-success"
         shutil.copyfile(executable, stranger_executable)
         stranger_executable.chmod(0o755)
-        self.assert_success(self.call_cli("conversation", "send", stranger, "--message", "Start another real conversation.", extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(stranger_executable)})[0])
+        self.assert_success(self.call_cli("conversation", "send", stranger, "--message", "Start another real conversation.", extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(stranger_executable)})[0])
         directory = self.data_directory / "conversation-transcripts"
         destination = directory / f"{target.upper()}.json"
         misplaced = directory / f"{source.upper()}.json"
@@ -5520,8 +5530,8 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-question-isolation-plan-slow"
         shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py", executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text("StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8")
-        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text("Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8")
+        env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
         invalid, _ = self.call_cli("conversation", "send", task_id, "--message", "Ask questions.", "--answer", "color= ", expected_status=2)
         self.assert_failure(invalid, "invalid_argument")
 
@@ -5535,16 +5545,16 @@ class StationAIBridgeTests(unittest.TestCase):
         command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone"]
         for framework in ("Foundation", "AppKit", "SwiftUI", "SwiftData", "Combine"):
             command.extend(["-framework", framework])
-        command.extend(str(root / "StationAI" / "App" / f"{name}.swift") for name in core)
-        command.extend([str(root / "StationAI/Bridge/BridgeContract.swift"),
+        command.extend(str(root / "Playhouse" / "App" / f"{name}.swift") for name in core)
+        command.extend([str(root / "Playhouse/Bridge/BridgeContract.swift"),
                         str(root / "scripts/test-codex-question-ownership.swift"), "-o", str(probe)])
         compiled = subprocess.run(command, capture_output=True, text=True, timeout=180)
         self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
         environment = os.environ.copy()
-        environment.update({"STATIONAI_DATA_DIRECTORY": str(self.data_directory),
-                            "STATIONAI_E2E_WORKTREE_DIRECTORY": str(self.worktree_directory),
-                            "STATIONAI_E2E_DEFAULTS_SUITE": self.defaults_suite,
-                            "STATIONAI_BRIDGE_SERVICE_NAME": arguments.service_name,
+        environment.update({"PLAYHOUSE_DATA_DIRECTORY": str(self.data_directory),
+                            "PLAYHOUSE_E2E_WORKTREE_DIRECTORY": str(self.worktree_directory),
+                            "PLAYHOUSE_E2E_DEFAULTS_SUITE": self.defaults_suite,
+                            "PLAYHOUSE_BRIDGE_SERVICE_NAME": arguments.service_name,
                             "CODEX_HOME": str(self.data_directory / "codex-home"), **env})
         checked = subprocess.run([str(probe), str(self.data_directory), str(executable), task_id, other_id],
                                  capture_output=True, text=True, env=environment, timeout=120)
@@ -5570,8 +5580,8 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "claude-fixture-question"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
-            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
         task, _ = self.call_cli(
             "task", "create", "--title", "Claude question", "--root", self.primary, "--provider", "claude"
@@ -5579,7 +5589,7 @@ class StationAIBridgeTests(unittest.TestCase):
         task_id = self.assert_success(task)["id"]
         response, events = self.call_cli(
             "conversation", "send", task_id, "--message", "Ask a structured question.", "--answer", "question-1=Blue",
-            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)},
         )
         result = self.assert_success(response)
         user_input = next(event for event in events if event.get("type") == "user_input")
@@ -5599,8 +5609,8 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "claude-fixture-outcome-reminder-question"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
-            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
         task, _ = self.call_cli(
             "task", "create", "--title", "Claude reminder question", "--root", self.primary, "--provider", "claude"
@@ -5608,51 +5618,51 @@ class StationAIBridgeTests(unittest.TestCase):
         task_id = self.assert_success(task)["id"]
         initial, initial_events = self.call_cli(
             "conversation", "send", task_id, "--message", "Finish while a structured question remains pending.",
-            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)},
         )
         self.assert_success(initial)
         questions = [event for event in initial_events if event.get("type") == "user_input"]
         self.assertEqual(len(questions), 1, "The successful turn should leave its structured question pending.")
         pending, _ = self.call_cli("conversation", "history", task_id,
-                                   extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)})
+                                   extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)})
         pending_history = self.assert_success(pending)
         self.assertIsNotNone(pending_history.get("pendingUserInputRequest"))
-        self.assertFalse(any("StationAI internal outcome reminder:" in turn.get("userText", "")
+        self.assertFalse(any("Playhouse internal outcome reminder:" in turn.get("userText", "")
                              for turn in json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]))
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress")
         request = questions[0]["payload"]["userInputRequest"]
         answered, _ = self.call_cli(
             "conversation", "answer-user-input", task_id, request["id"], "--answer", "question-1=Blue",
-            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)},
         )
         self.assert_success(answered)
         answered_history, _ = self.call_cli("conversation", "history", task_id,
-                                            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)})
+                                            extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)})
         self.assertIsNone(self.assert_success(answered_history).get("pendingUserInputRequest"))
         followup, followup_events = self.call_cli(
             "conversation", "send", task_id, "--message", "Continue after answering.",
-            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)},
         )
         self.assertTrue(self.assert_success(followup)["messages"])
         events = initial_events + followup_events
         self.assertEqual(sum(event.get("type") == "user_input" for event in events), 1,
                          "Questions from private Claude reminders must not be emitted as user input.")
         turns = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
-        reminders = [turn for turn in turns if "StationAI internal outcome reminder:" in turn.get("userText", "")]
+        reminders = [turn for turn in turns if "Playhouse internal outcome reminder:" in turn.get("userText", "")]
         self.assertEqual(len(reminders), 2, "Claude must receive the second private reminder after the first question is rejected.")
-        self.assertTrue(all("explicitly run the StationAI CLI task outcome command" in turn["userText"] for turn in reminders))
+        self.assertTrue(all("explicitly run the Playhouse CLI task outcome command" in turn["userText"] for turn in reminders))
         rejections = Path(str(executable) + ".private-reminder-question-rejection").read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(rejections), 2)
         self.assertTrue(all("waiting-response" in message and "completed" in message for message in rejections))
         history, _ = self.call_cli(
             "conversation", "history", task_id,
-            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)},
         )
         safe_history = self.assert_success(history)
         self.assertIsNone(safe_history.get("pendingUserInputRequest"))
         serialized_history = json.dumps(safe_history)
         self.assertNotIn("Which color should I use?", serialized_history)
-        self.assertNotIn("This is a private StationAI outcome reminder.", serialized_history,
+        self.assertNotIn("This is a private Playhouse outcome reminder.", serialized_history,
                          "Claude's private rejection instructions must not enter persisted conversation history.")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
 
@@ -5662,8 +5672,8 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "claude-fixture-empty-question"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
-            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
         task, _ = self.call_cli(
             "task", "create", "--title", "Empty Claude question", "--root", self.primary, "--provider", "claude"
@@ -5672,20 +5682,20 @@ class StationAIBridgeTests(unittest.TestCase):
         failed, _ = self.call_cli(
             "conversation", "send", task_id, "--message", "Ask an empty structured question.",
             expected_status=1,
-            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)},
         )
         self.assertFalse(failed.get("ok", True), failed)
         self.assertIn("question", failed.get("error", {}).get("message", "").lower())
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Blocked")
 
-    # case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from StationAI history, clears pending state, and returns to Waiting Response.
+    # case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from Playhouse history, clears pending state, and returns to Waiting Response.
     def test_claude_pending_question_recovers_after_provider_process_restarts(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-restart-question"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
-            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
         task, _ = self.call_cli(
             "task", "create", "--title", "Restart-safe Claude question", "--root", self.primary, "--provider", "claude"
@@ -5694,7 +5704,7 @@ class StationAIBridgeTests(unittest.TestCase):
         failed, _ = self.call_cli(
             "conversation", "send", task_id, "--message", "Ask a restart-safe structured question.",
             expected_status=1,
-            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)},
         )
         self.assertFalse(failed.get("ok", True), failed)
         restored, _ = self.call_cli("conversation", "history", task_id)
@@ -5705,14 +5715,14 @@ class StationAIBridgeTests(unittest.TestCase):
         rejected, _ = self.call_cli(
             "conversation", "answer-user-input", task_id, pending["id"], "--answer", "question-1=",
             expected_status=2,
-            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)},
         )
         self.assertFalse(rejected.get("ok", True), rejected)
         still_pending, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(still_pending).get("pendingUserInputRequest"), pending)
         accepted, _ = self.call_cli(
             "conversation", "answer-user-input", task_id, pending["id"], "--answer", "question-1=Green",
-            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)},
         )
         self.assertTrue(self.assert_success(accepted)["accepted"])
         resumed, _ = self.call_cli("conversation", "history", task_id)
@@ -5729,8 +5739,8 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "claude-fixture-restart-plan-question"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
-            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
         task, _ = self.call_cli(
             "task", "create", "--title", "Restart-safe Claude plan question", "--root", self.primary, "--provider", "claude"
@@ -5739,7 +5749,7 @@ class StationAIBridgeTests(unittest.TestCase):
         failed, _ = self.call_cli(
             "conversation", "send", task_id, "--mode", "plan", "--message", "Ask a restart-safe structured question.",
             expected_status=1,
-            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)},
         )
         self.assertFalse(failed.get("ok", True), failed)
         restored, _ = self.call_cli("conversation", "history", task_id)
@@ -5747,7 +5757,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(pending["mode"], "plan")
         accepted, _ = self.call_cli(
             "conversation", "answer-user-input", task_id, pending["id"], "--answer", "question-1=Green",
-            extra_environment={"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)},
         )
         self.assertTrue(self.assert_success(accepted)["accepted"])
         recovery_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
@@ -5767,14 +5777,14 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "claude-fixture-background-agent"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
-            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
         task, _ = self.call_cli(
             "task", "create", "--title", "Claude background agent", "--root", self.primary, "--provider", "claude"
         )
         task_id = self.assert_success(task)["id"]
-        env = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        env = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
         command = ("conversation", "send", task_id, "--message", "Launch a background agent for this turn.")
         pause = Path(str(executable) + ".background-summary-pause")
         ready = Path(str(executable) + ".background-summary-ready")
@@ -5921,16 +5931,16 @@ class StationAIBridgeTests(unittest.TestCase):
             "Tool work the woken parent ran should be recorded in the turn.",
         )
 
-    # case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, StationAI returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics.
+    # case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, Playhouse returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics.
     def test_claude_private_recovery_failure_fails_closed(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-recovery-failure"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
-            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
         )
-        env = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        env = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
         task = self.assert_success(self.call_cli(
             "task", "create", "--title", "Claude private recovery failure", "--root", self.primary, "--provider", "claude"
         )[0])
@@ -5941,7 +5951,7 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assertFalse(failed.get("ok", True), failed)
         pending = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])["pendingUserInputRequest"]
-        Path(str(executable) + ".recovery-error").write_text("StationAI owns this Claude fixture marker.\n", encoding="utf-8")
+        Path(str(executable) + ".recovery-error").write_text("Playhouse owns this Claude fixture marker.\n", encoding="utf-8")
         recovery_failure, _ = self.call_cli(
             "conversation", "answer-user-input", task_id, pending["id"], "--answer", "question-1=Green",
             expected_status=1, extra_environment=env,
@@ -5959,17 +5969,17 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertNotIn("Answer: Green", diagnostics)
         self.assertNotIn("private recovery prompt", diagnostics.lower())
 
-    # case-contract: test_codex_pending_question_recovers_after_provider_process_restarts | Codex's pending structured question persists after its provider process exits and leaves the task in Waiting Response while unanswered; StationAI restores it from fresh CLI/XPC history, keeps provider switching blocked, requires the user to re-enter the secret once, and applies the answers in one recovery turn. The live recovery stream retains safe assistant text while redacting secret echoes; persisted history hides secret recovery responses, provider activities, and file-change diffs. A later non-sensitive Codex turn keeps its own diff and safe response visible in refreshed CLI/UI history while the earlier secret stays absent. In one task, a no-secret recovery response remains visible after a later secret recovery while the secret response is hidden. Secret answers with surrounding whitespace are still redacted when Codex normalizes its echo; the visible UI shows the safe response immediately and after app restart.
+    # case-contract: test_codex_pending_question_recovers_after_provider_process_restarts | Codex's pending structured question persists after its provider process exits and leaves the task in Waiting Response while unanswered; Playhouse restores it from fresh CLI/XPC history, keeps provider switching blocked, requires the user to re-enter the secret once, and applies the answers in one recovery turn. The live recovery stream retains safe assistant text while redacting secret echoes; persisted history hides secret recovery responses, provider activities, and file-change diffs. A later non-sensitive Codex turn keeps its own diff and safe response visible in refreshed CLI/UI history while the earlier secret stays absent. In one task, a no-secret recovery response remains visible after a later secret recovery while the secret response is hidden. Secret answers with surrounding whitespace are still redacted when Codex normalizes its echo; the visible UI shows the safe response immediately and after app restart.
     def test_codex_pending_question_recovers_after_provider_process_restarts(self):
         task_id = self.create_task("Restart-safe Codex question", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-restart-question"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
-        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
         failed, _ = self.call_cli(
             "conversation", "send", task_id, "--message", "Ask a restart-safe structured question.", expected_status=1,
             extra_environment=env,
@@ -6022,17 +6032,17 @@ class StationAIBridgeTests(unittest.TestCase):
             "A later non-sensitive Codex turn must retain its own file-change diff.")
         self.assertNotIn("fixture-secret", json.dumps(follow_up_history))
 
-    # case-contract: test_codex_secret_recovery_redaction_fails_closed | When Codex recovery and a later thread-resume/history read error echo the full recovery prompt and answers, StationAI preserves the pending question while the task stays in Waiting Response, uses a generic visible error, and redacts private content from returned history, saved task state, diagnostics, and error text across fresh CLI/XPC reads and app restarts.
+    # case-contract: test_codex_secret_recovery_redaction_fails_closed | When Codex recovery and a later thread-resume/history read error echo the full recovery prompt and answers, Playhouse preserves the pending question while the task stays in Waiting Response, uses a generic visible error, and redacts private content from returned history, saved task state, diagnostics, and error text across fresh CLI/XPC reads and app restarts.
     def test_codex_secret_recovery_redaction_fails_closed(self):
         task_id = self.create_task("Fail-closed secret recovery", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-unassociated-restart-question"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
-        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
         failed, _ = self.call_cli(
             "conversation", "send", task_id, "--message", "Ask a restart-safe structured question.",
             expected_status=1, extra_environment=env,
@@ -6042,7 +6052,7 @@ class StationAIBridgeTests(unittest.TestCase):
         request = self.assert_success(pending).get("pendingUserInputRequest")
         self.assertIsNotNone(request)
         Path(str(executable) + ".provider-error-async").write_text(
-            "StationAI owns this Codex fixture failure marker.\n", encoding="utf-8"
+            "Playhouse owns this Codex fixture failure marker.\n", encoding="utf-8"
         )
         recovery_failure, _ = self.call_cli(
             "conversation", "answer-user-input", task_id, request["id"],
@@ -6069,7 +6079,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertNotIn("fixture-secret", diagnostics)
         self.assertNotIn("Answer: Green", diagnostics)
         Path(str(executable) + ".history-error").write_text(
-            "StationAI owns this Codex fixture history failure marker.\n", encoding="utf-8"
+            "Playhouse owns this Codex fixture history failure marker.\n", encoding="utf-8"
         )
         history_failure, _ = self.call_cli(
             "conversation", "history", task_id, expected_status=1, extra_environment=env
@@ -6082,7 +6092,7 @@ class StationAIBridgeTests(unittest.TestCase):
         # A resume failure needs a provider that has to load the thread again.
         self.restart_provider(executable)
         Path(str(executable) + ".resume-error").write_text(
-            "StationAI owns this Codex fixture resume failure marker.\n", encoding="utf-8"
+            "Playhouse owns this Codex fixture resume failure marker.\n", encoding="utf-8"
         )
         resume_failure, _ = self.call_cli(
             "conversation", "history", task_id, expected_status=1, extra_environment=env
@@ -6102,16 +6112,16 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-empty"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         env = os.environ.copy()
         env.update({
-            "STATIONAI_DATA_DIRECTORY": str(self.data_directory),
-            "STATIONAI_E2E_WORKTREE_DIRECTORY": str(self.worktree_directory),
-            "STATIONAI_E2E_DEFAULTS_SUITE": self.defaults_suite,
-            "STATIONAI_BRIDGE_SERVICE_NAME": arguments.service_name,
-            "STATIONAI_E2E_CODEX_EXECUTABLE": str(executable),
+            "PLAYHOUSE_DATA_DIRECTORY": str(self.data_directory),
+            "PLAYHOUSE_E2E_WORKTREE_DIRECTORY": str(self.worktree_directory),
+            "PLAYHOUSE_E2E_DEFAULTS_SUITE": self.defaults_suite,
+            "PLAYHOUSE_BRIDGE_SERVICE_NAME": arguments.service_name,
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable),
         })
         completed = subprocess.run(
             [str(arguments.cli), "conversation", "send", task_id, "--message", "Please ask your questions."],
@@ -6131,7 +6141,7 @@ class StationAIBridgeTests(unittest.TestCase):
         retry, _ = self.call_cli(
             "conversation", "send", task_id, "--message", "Retry this task.",
             "--answer", "color=Blue", "--answer", "token=fixture-secret",
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(retry_executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(retry_executable)},
         )
         self.assertTrue(self.assert_success(retry)["messages"])
         task, _ = self.call_cli("task", "get", task_id)
@@ -6142,12 +6152,12 @@ class StationAIBridgeTests(unittest.TestCase):
         task_id = self.create_task("Non-blocking question", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-nonblocking-restart-question"
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
         failed, _ = self.call_cli(
             "conversation", "send", task_id, "--message", "Ask non-blocking questions.",
             expected_status=1, extra_environment=env,
@@ -6186,7 +6196,7 @@ class StationAIBridgeTests(unittest.TestCase):
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Waiting Response")
         fixture_turns = json.loads(provider_history)["turns"]
-        reminders = [turn for turn in fixture_turns if "StationAI internal outcome reminder:" in turn.get("userMessage", "")]
+        reminders = [turn for turn in fixture_turns if "Playhouse internal outcome reminder:" in turn.get("userMessage", "")]
         self.assertEqual(len(reminders), 0, "A pending question still being resolved during the recovered turn must suppress private outcome reminders.")
         self.assertFalse(any(event.get("type") == "user_input" for event in events), "Questions from private reminders must not be emitted as user input.")
 
@@ -6197,10 +6207,10 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-async-question"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
-        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
         process = self.start_cli("conversation", "send", task_id, "--message", "Ask an async question.", extra_environment=env)
         ready = Path(str(executable) + ".question-ready")
         deadline = time.monotonic() + 20
@@ -6209,7 +6219,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(ready.exists(), "The fixture must hold the first turn open for a real steer.")
         reloaded, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         live_history = self.assert_success(reloaded)
-        question = next(message for message in live_history["messages"] if message["id"] == "item_stationai_async_question")
+        question = next(message for message in live_history["messages"] if message["id"] == "item_playhouse_async_question")
         self.assertEqual(question.get("modelID"), "gpt-6-luna", "Fresh history must read the accepted active turn and its model attribution.")
         invalid, _ = self.call_cli("conversation", "answer-async", task_id, question["id"], "--answer", "Yes, update paired tests and run required verification", expected_status=2, extra_environment=env)
         self.assertEqual(invalid["error"]["code"], "invalid_argument")
@@ -6227,7 +6237,7 @@ class StationAIBridgeTests(unittest.TestCase):
             {"title": "Additional detail"},
         ])
         self.assertEqual(question["phase"], "final_answer")
-        self.assertEqual(next(message for message in history["messages"] if message["id"] == "item_stationai_async_followup")["text"],
+        self.assertEqual(next(message for message in history["messages"] if message["id"] == "item_playhouse_async_followup")["text"],
                          "I can continue while you decide.")
         live_questions = [event.get("payload", {}).get("asyncQuestions") for event in events
                           if event.get("type") == "assistant_progress" and event.get("payload", {}).get("itemID") == question["id"]]
@@ -6247,13 +6257,13 @@ class StationAIBridgeTests(unittest.TestCase):
                                      "--answer", "No, leave tests and verification for later",
                                      "--answer", "Try to answer again.", expected_status=1, extra_environment=env)
         self.assert_failure(duplicate, "invalid_transition")
-        later, _ = self.call_cli("conversation", "answer-async", task_id, "item_stationai_async_later_question",
+        later, _ = self.call_cli("conversation", "answer-async", task_id, "item_playhouse_async_later_question",
                                  "--answer", "Finish after the turn.", extra_environment=env)
         self.assertEqual(self.assert_success(later)["text"], "One more check: Finish after the turn.")
         completed, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         completed_history = self.assert_success(completed)
         self.assertEqual(set(completed_history["answeredAsyncQuestionIDs"]),
-                         {question["id"], "item_stationai_async_later_question"})
+                         {question["id"], "item_playhouse_async_later_question"})
         self.assertTrue(any("Answers received: One more check: Finish after the turn." in message["text"]
                             for message in completed_history["messages"]))
 
@@ -6264,12 +6274,12 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-async-question-queued"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
-        env = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
         first, _ = self.call_cli("conversation", "send", task_id, "--message", "Ask a queued async question.", extra_environment=env)
-        question = next(message for message in self.assert_success(first)["messages"] if message["id"] == "item_stationai_async_question")
+        question = next(message for message in self.assert_success(first)["messages"] if message["id"] == "item_playhouse_async_question")
         Path(str(executable) + ".fail-next-turn-start").touch()
         answer, _ = self.call_cli("conversation", "answer-async", task_id, question["id"],
                                   "--answer", "Yes, update paired tests and run required verification",
@@ -6307,14 +6317,14 @@ class StationAIBridgeTests(unittest.TestCase):
         executable = self.data_directory / "codex-fixture-interrupted"
         shutil.copyfile(fixture, executable)
         executable.chmod(0o755)
-        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
-            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         interrupted, events = self.call_cli(
             "conversation", "send", task_id, "--message", "Start work that will be interrupted.",
             "--answer", "color=Blue", "--answer", "token=fixture-secret",
             expected_status=1,
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
         )
         self.assert_failure(interrupted, "operation_failed")
         started = next(event for event in events if event.get("type") == "started")
@@ -6332,7 +6342,7 @@ class StationAIBridgeTests(unittest.TestCase):
             if event.get("event") == "conversation.send.failed" and event.get("taskID") == task_id
         )
         self.assertEqual(send_failure["phase"], "codex-turn")
-        self.assertEqual(send_failure["storePath"], str(self.data_directory / "StationAI-v2.store"))
+        self.assertEqual(send_failure["storePath"], str(self.data_directory / "Playhouse-v2.store"))
         self.complete_fixture_turn(task_id, executable_name="codex-fixture-retry")
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Review")
@@ -6343,7 +6353,7 @@ class StationAIBridgeTests(unittest.TestCase):
         retry_executable.chmod(0o755)
         retried, _ = self.call_cli(
             "conversation", "queue-retry", task_id, queued["id"],
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(retry_executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(retry_executable)},
         )
         self.assertTrue(self.assert_success(retried)["retried"])
         self.assertEqual(self.assert_success(self.call_cli("conversation", "queue-list", task_id)[0]), [])
@@ -6393,7 +6403,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(saved_thread_prompt)["pendingSubmittedPrompt"], threaded_prompt)
         recovered_thread_history, _ = self.call_cli(
             "conversation", "history", threaded_restart["id"],
-            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(self.data_directory / thread_executable)},
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(self.data_directory / thread_executable)},
         )
         recovered_messages = self.assert_success(recovered_thread_history)["messages"]
         self.assertTrue(any(
@@ -6554,8 +6564,8 @@ class StationAIBridgeTests(unittest.TestCase):
         repository.mkdir()
         (repository / "tracked.txt").write_text("Baseline.\n", encoding="utf-8")
         self.run_git(repository, "init", "--initial-branch=main")
-        self.run_git(repository, "config", "user.name", "StationAI Bridge Test")
-        self.run_git(repository, "config", "user.email", "stationai-bridge-test@example.invalid")
+        self.run_git(repository, "config", "user.name", "Playhouse Bridge Test")
+        self.run_git(repository, "config", "user.email", "playhouse-bridge-test@example.invalid")
         self.run_git(repository, "add", "tracked.txt")
         self.run_git(repository, "commit", "-m", "Baseline")
         task_id = self.create_task(title="External Git", roots=[])["id"]
@@ -6618,7 +6628,7 @@ class TimedTestResult(unittest.TextTestResult):
 
 
 if __name__ == "__main__":
-    suite = unittest.defaultTestLoader.loadTestsFromTestCase(StationAIBridgeTests)
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(PlayhouseBridgeTests)
     discovered_cases = [test._testMethodName for test in suite]
     contract_cases = [
         contract["id"] for contract in json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))

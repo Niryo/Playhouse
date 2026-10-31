@@ -1,6 +1,6 @@
 # Handoff: Claude Code as a second conversation provider
 
-Status as of 2026-10-24. This work is uncommitted on branch `support-codex`: nothing is staged, committed, or pushed. It implements `~/Downloads/PLAN.md` ("Add Claude Code to StationAI conversations"), with the deviations listed below.
+Status as of 2026-10-24. This work is uncommitted on branch `support-codex`: nothing is staged, committed, or pushed. It implements `~/Downloads/PLAN.md` ("Add Claude Code to Playhouse conversations"), with the deviations listed below.
 
 ## 1. Where things stand
 
@@ -24,13 +24,13 @@ Status as of 2026-10-24. This work is uncommitted on branch `support-codex`: not
 2. **Steer uses `priority: "next"`, not `"now"`.** Probed live:
    - `"now"` cancels the in-flight command (`command_lifecycle: cancelled`, an extra `result` with `stop_reason: tool_use`) and starts a new one.
    - `"next"` injects the message at the next tool boundary inside the same turn, with a single `result`. That matches Codex's `turn/steer`.
-   - Queue stays StationAI's own persisted queue for both providers. `"later"` is not used.
+   - Queue stays Playhouse's own persisted queue for both providers. `"later"` is not used.
 3. **Version floor is 2.1.296, not "upgrade from 2.1.119".** The plan was stale. 2.1.296 is the CLI version bundled with the SDK release whose types document `priority`. Only 2.1.308 was actually tested. Older CLIs get a clear "update Claude Code" error from `ClaudeCodeClient.verifyVersion`.
-4. **Transcript persistence is hybrid, not a full StationAI-owned copy of every provider's history.**
+4. **Transcript persistence is hybrid, not a full Playhouse-owned copy of every provider's history.**
    - Codex history is still read live from the Codex app-server, exactly as before.
-   - Claude turns, plus the ordered provider segment ledger, are stored by StationAI.
+   - Claude turns, plus the ordered provider segment ledger, are stored by Playhouse.
    - Tasks that never use Claude have no transcript file and run the old code path unchanged. That's why the 62 pre-existing cases were unaffected.
-   - Deferred: importing existing Codex histories into StationAI with stable IDs. This means archive search and reopening Codex turns still need the Codex runtime, as before.
+   - Deferred: importing existing Codex histories into Playhouse with stable IDs. This means archive search and reopening Codex turns still need the Codex runtime, as before.
 5. **New tasks default to Codex.** This matches the plan, but is now a setting (`settings set-default-provider`). The live test suite defaults to Claude, per the user's instruction.
 
 ## 3. Architecture notes (read before changing anything)
@@ -39,28 +39,28 @@ Status as of 2026-10-24. This work is uncommitted on branch `support-codex`: not
 
 | File | Role |
 | --- | --- |
-| `StationAI/App/ConversationModel.swift` (new) | Shared types: `ConversationMessage` (now carries `provider`), questions, `ConversationMode`, `ConversationModelOption`, `ConversationProviderBoundary`. Also the **`ConversationProviderClient` protocol**, `ConversationClients` (one client per provider, plus `helperClients(preferring:)`), and `ConversationSteerMailbox`, extracted from the Codex client. The mailbox is the cross-process steer *and interrupt* channel, keyed by native thread/session ID. |
-| `StationAI/App/BoardTask.swift` | The base `enum ConversationProvider` lives here on purpose: `scripts/seed-task-pr-link.swift` compiles `BoardTask.swift` standalone, so it must not depend on other files. Provider extensions (`defaultModelID`, `titleModelID`, `supportsGoals`, `parse`) are in `ConversationModel.swift`. New `@Model` fields: `claudeSessionID` and `conversationProviderRawValue` (nil means Codex), plus helpers `activeConversationID`, `conversationID(for:)`, `hasConversation`. |
-| `StationAI/App/ClaudeCodeClient.swift` (new) | The Claude runtime. Details below. |
-| `StationAI/App/ConversationTranscriptStore.swift` (new) | Per-task JSON at `<data dir>/conversation-transcripts/<taskID>.json`, guarded by a file lock. Holds `segments` (provider, startedAt, `codexTurnIDs`, `handoffDelivered`) and Claude `turns` (messages plus activities). Also `ConversationHandoff`, which builds and strips the handoff context block. |
-| `StationAI/App/BridgeCore.swift` | `ConversationManager` (renamed from `CodexConversationManager`) routes everything through the task's provider client. It composes mixed history (`compose(transcript:codex:)`), records Claude turns incrementally, implements `setProvider` (settled-state checks and boundary), builds the handoff, and holds the Goal gate. `ConversationTitleGenerator` is provider-neutral and falls back on unavailability. Bridge commands `conversation.provider.{get,set,capabilities}`, `conversation.stop`, `settings.set-default-provider`, `task.create --provider`. |
+| `Playhouse/App/ConversationModel.swift` (new) | Shared types: `ConversationMessage` (now carries `provider`), questions, `ConversationMode`, `ConversationModelOption`, `ConversationProviderBoundary`. Also the **`ConversationProviderClient` protocol**, `ConversationClients` (one client per provider, plus `helperClients(preferring:)`), and `ConversationSteerMailbox`, extracted from the Codex client. The mailbox is the cross-process steer *and interrupt* channel, keyed by native thread/session ID. |
+| `Playhouse/App/BoardTask.swift` | The base `enum ConversationProvider` lives here on purpose: `scripts/seed-task-pr-link.swift` compiles `BoardTask.swift` standalone, so it must not depend on other files. Provider extensions (`defaultModelID`, `titleModelID`, `supportsGoals`, `parse`) are in `ConversationModel.swift`. New `@Model` fields: `claudeSessionID` and `conversationProviderRawValue` (nil means Codex), plus helpers `activeConversationID`, `conversationID(for:)`, `hasConversation`. |
+| `Playhouse/App/ClaudeCodeClient.swift` (new) | The Claude runtime. Details below. |
+| `Playhouse/App/ConversationTranscriptStore.swift` (new) | Per-task JSON at `<data dir>/conversation-transcripts/<taskID>.json`, guarded by a file lock. Holds `segments` (provider, startedAt, `codexTurnIDs`, `handoffDelivered`) and Claude `turns` (messages plus activities). Also `ConversationHandoff`, which builds and strips the handoff context block. |
+| `Playhouse/App/BridgeCore.swift` | `ConversationManager` (renamed from `CodexConversationManager`) routes everything through the task's provider client. It composes mixed history (`compose(transcript:codex:)`), records Claude turns incrementally, implements `setProvider` (settled-state checks and boundary), builds the handoff, and holds the Goal gate. `ConversationTitleGenerator` is provider-neutral and falls back on unavailability. Bridge commands `conversation.provider.{get,set,capabilities}`, `conversation.stop`, `settings.set-default-provider`, `task.create --provider`. |
 | `CodexAppServerClient.swift` | Conforms to the protocol and uses the shared mailbox. Codex history parsing now tags messages `provider: .codex` and strips handoff blocks from user text. |
-| UI: `TaskConversationView.swift`, `KanbanBoardView.swift`, `StationAIApp.swift` | Both clients are app-level `@StateObject`s. The view picks the active client by `task.conversationProvider`. Added a provider menu (`conversation-provider-menu`, items `conversation-provider-<id>`), a boundary row (`provider-boundary-<provider>`), and a capability notice (`provider-capabilities-notice`). Goal UI is hidden for Claude. Labels are provider-specific. |
+| UI: `TaskConversationView.swift`, `KanbanBoardView.swift`, `PlayhouseApp.swift` | Both clients are app-level `@StateObject`s. The view picks the active client by `task.conversationProvider`. Added a provider menu (`conversation-provider-menu`, items `conversation-provider-<id>`), a boundary row (`provider-boundary-<provider>`), and a capability notice (`provider-capabilities-notice`). Goal UI is hidden for Claude. Labels are provider-specific. |
 | `scripts/build-bridge.sh` | XPC plist now sets **`JoinExistingSession = true`**. See §5. New sources were added to the shared source list, and to the pbxproj build phase inputs. |
 
 ### How a Claude turn runs
 
 1. Each turn launches `claude -p ... --permission-prompt-tool stdio --permission-mode default|plan --session-id|--resume <id>`.
-   - It also passes `--add-dir` for extra roots, and `--append-system-prompt` for StationAI's progress/outcome instructions.
+   - It also passes `--add-dir` for extra roots, and `--append-system-prompt` for Playhouse's progress/outcome instructions.
    - The cwd is the first root.
-2. StationAI sends `initialize` and checks the version, then writes the user message with a known `uuid`.
+2. Playhouse sends `initialize` and checks the version, then writes the user message with a known `uuid`.
 3. **Turn end = a `result` arrived and every command UUID we submitted has reached `completed`/`cancelled`/`failed` in `command_lifecycle`.** If the CLI never emits lifecycle events, `result` alone ends the turn.
 4. stdin is closed and the process exits.
 5. Session creation: `startThread` only mints a UUID, and the first turn passes `--session-id`. If `--resume` returns "No conversation found with session ID", the client retries once with `--session-id`.
 
-### Event mapping (stream-json to StationAI)
+### Event mapping (stream-json to Playhouse)
 
-| Claude event | StationAI |
+| Claude event | Playhouse |
 | --- | --- |
 | `stream_event` text deltas | `text_delta` |
 | assistant text blocks | Commentary progress messages. The last text before the turn settles becomes the final answer. |
@@ -80,9 +80,9 @@ Status as of 2026-10-24. This work is uncommitted on branch `support-codex`: not
 
 ### Handoff
 
-- On a segment's first prompt, the visible user and final-assistant text the provider hasn't seen is prepended inside `<stationai-handoff-context>…</stationai-handoff-context>`. It's capped at about 40k characters, keeping the most recent turns.
+- On a segment's first prompt, the visible user and final-assistant text the provider hasn't seen is prepended inside `<playhouse-handoff-context>…</playhouse-handoff-context>`. It's capped at about 40k characters, keeping the most recent turns.
 - `handoffDelivered` is set only after a successful turn.
-- Codex stores the block in its thread, and StationAI strips it on read. Claude's transcript stores only the typed text.
+- Codex stores the block in its thread, and Playhouse strips it on read. Claude's transcript stores only the typed text.
 - The handoff is computed **before** a new native thread is created. This ordering is deliberate: see the Codex limitation above.
 
 ### Switching rules
@@ -105,11 +105,11 @@ A Done task can't switch. A task without a conversation switches immediately, wi
 ## 4. Testing layout (per the user's instruction)
 
 - **Tests unrelated to the provider:** untouched.
-- **Shared mocked tests:** the existing fixture-based CLI/XPC and UI cases use `scripts/fixtures/codex-app-server-fixture.py`. They were **not duplicated**, because they exercise StationAI logic, not the provider.
-- **New deterministic paired cases** (CLI in `scripts/test-bridge.py`, UI in `StationAIUITests.swift`, contract in `BridgeTestContracts.json`, parity is 64/64):
+- **Shared mocked tests:** the existing fixture-based CLI/XPC and UI cases use `scripts/fixtures/codex-app-server-fixture.py`. They were **not duplicated**, because they exercise Playhouse logic, not the provider.
+- **New deterministic paired cases** (CLI in `scripts/test-bridge.py`, UI in `PlayhouseUITests.swift`, contract in `BridgeTestContracts.json`, parity is 64/64):
   - `test_conversation_provider_selection_persists_and_validates`
   - `test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary`
-- **Shared real (non-mocked) tests:** `scripts/test-live-integration.{sh,py}`, with a provider switch `--provider claude|codex|all`, or `STATIONAI_LIVE_PROVIDER`. Default is **claude**. Gate: `STATIONAI_RUN_LIVE_INTEGRATION=1`.
+- **Shared real (non-mocked) tests:** `scripts/test-live-integration.{sh,py}`, with a provider switch `--provider claude|codex|all`, or `PLAYHOUSE_LIVE_PROVIDER`. Default is **claude**. Gate: `PLAYHOUSE_RUN_LIVE_INTEGRATION=1`.
   - Shared scenarios: plan/edit/resume/reload across two roots; steer into an active turn; stop from another process; concurrent auto-branch claim.
   - Claude-only: `AskUserQuestion` round trip; native capability report.
   - Codex-only: pinned model. The Codex Goal case is the live UI case.
@@ -118,7 +118,7 @@ A Done task can't switch. A task without a conversation switches immediately, wi
   - The old `scripts/test-codex-integration.py` was replaced by `test-live-integration.py`. Its auto-branch scenario was moved over verbatim.
 - **Live UI:**
   - `scripts/test-ui-tart.sh --live-provider claude|codex`; `--live-codex` is an alias.
-  - The guest marker is now `/tmp/stationai-live-ui-integration`, and its content is the provider name.
+  - The guest marker is now `/tmp/playhouse-live-ui-integration`, and its content is the provider name.
   - UI tests read it through `liveProvider`. Shared live UI cases call `useLiveProvider(taskID:)`. The Goal live case only goes live for Codex.
 
 ## 5. Things to be aware of (gotchas found the hard way)
@@ -127,12 +127,12 @@ A Done task can't switch. A task without a conversation switches immediately, wi
 - **Claude backgrounds long commands (mitigated, not designed away).** Claude ran `sleep 25` as a background task and ended its turn early. Each turn's process exits at turn end, so background work would be lost. The current fix is an instruction appended to every Claude session (`ClaudeCodeClient.foregroundExecutionInstruction`): run commands in the foreground, never `run_in_background`, never `&`, never end a turn while started work is still running. Verified live (steer and stop pass). Still open: a Claude-side mechanism that keeps a process alive across background tasks would make this robust if the model ignores the instruction. Track as a design item.
 - **Codex can't resume a thread that never ran a turn** ("no rollout found") and can't list its items ("thread/items/list is not supported yet"). This is pre-existing: a Codex-only task whose first turn fails after `thread/start` already hits it. The send path now avoids creating such threads during a switch, but tasks already in that state stay stuck. Consider starting a fresh thread when resume reports no rollout.
 - **Pre-existing path quirk.** `hasConversationTurnReservation` compares a lock path that Foundation normalizes differently once the lock file exists (`/private/tmp/...` vs `/tmp/...`). A data directory spelled `/private/tmp/...` therefore fails every send with "A turn outcome requires an active conversation turn". Real data (`~/Library/...`) and the harness (`/tmp/...`) are unaffected. Not fixed, because it's unrelated to this change.
-- **Provider child processes must receive the bridge environment explicitly (fixed).** A child inherits its launcher's environment (the XPC service or the GUI app), not the CLI caller's, so in-turn `stationai task progress`/`task outcome` calls previously went to the default service name and store. `ConversationProcessEnvironment.forwardStationAIBridgeEnvironment` sets `STATIONAI_BRIDGE_SERVICE_NAME` to `BridgeContract.serviceName(forApplication: StationAIAppIdentity.applicationIdentifier)` (app ID + `.bridge`, the same in both processes) and `STATIONAI_DATA_DIRECTORY` for Claude and Codex children. Do **not** use `Bundle.main.bundleIdentifier`: in the GUI app that's the app's own ID, which no XPC service has (the architecture review caught this). Covered by `test_task_progress_reports_publish_persist_and_clear`: the fixture records what it inherited and the outcome is reported with exactly that environment, from both a CLI-started and a composer-started turn.
+- **Provider child processes must receive the bridge environment explicitly (fixed).** A child inherits its launcher's environment (the XPC service or the GUI app), not the CLI caller's, so in-turn `playhouse task progress`/`task outcome` calls previously went to the default service name and store. `ConversationProcessEnvironment.forwardPlayhouseBridgeEnvironment` sets `PLAYHOUSE_BRIDGE_SERVICE_NAME` to `BridgeContract.serviceName(forApplication: PlayhouseAppIdentity.applicationIdentifier)` (app ID + `.bridge`, the same in both processes) and `PLAYHOUSE_DATA_DIRECTORY` for Claude and Codex children. Do **not** use `Bundle.main.bundleIdentifier`: in the GUI app that's the app's own ID, which no XPC service has (the architecture review caught this). Covered by `test_task_progress_reports_publish_persist_and_clear`: the fixture records what it inherited and the outcome is reported with exactly that environment, from both a CLI-started and a composer-started turn.
 - **A rejected branch claim restores the prior status (fixed).** `sendReserved` wraps every pre-turn step (title before worktree, `prepareRepositoryWorktrees`, workspace context, title reservation) and restores the prior status and message on failure. The composer pre-saves In Progress before calling the manager, so it passes `statusBeforeSubmission`. Architecture review left a **CONCERN** here: the composer still owns part of the send pipeline (`saveDraftAndGenerateTitle(status: .inProgress, reserveTitleForSend: true)`), so early failures before the guarded block (Done guard, image/model validation, turn-lock failure) still leave a composer-sent task In Progress, possibly with a stale "Generating title…". The better design is a manager entry point that does the pre-save and returns a submission token (prior status, message, title) that `send` consumes and rolls back on any pre-turn failure.
-- **Live harness keep switch.** `STATIONAI_LIVE_KEEP_WORKSPACE=1` keeps the disposable workspace (including `stationai-data/Diagnostics.jsonl`) for diagnosis; the default removes it.
+- **Live harness keep switch.** `PLAYHOUSE_LIVE_KEEP_WORKSPACE=1` keeps the disposable workspace (including `playhouse-data/Diagnostics.jsonl`) for diagnosis; the default removes it.
 - **Harness must not read a process's stdout while `StreamingTurn` owns it.** Use `StreamingTurn.finish()`, never `communicate()`, on a turn process (this caused a lost-output false failure).
-- **The Codex fixture reuses one turn ID for every turn** (`turn_stationai_fixture`). Segment claiming by turn ID works for the new tests, but don't write fixture-based tests that switch Codex → Claude → Codex and expect the second Codex turn after the boundary. Real Codex turn IDs are unique.
-- Failed Claude sends still leave the user prompt in StationAI's transcript. This is intentional, because Claude's own session also records it. Codex behaves the same.
+- **The Codex fixture reuses one turn ID for every turn** (`turn_playhouse_fixture`). Segment claiming by turn ID works for the new tests, but don't write fixture-based tests that switch Codex → Claude → Codex and expect the second Codex turn after the boundary. Real Codex turn IDs are unique.
+- Failed Claude sends still leave the user prompt in Playhouse's transcript. This is intentional, because Claude's own session also records it. Codex behaves the same.
 - `ConversationMessage.provider` is nil for legacy messages; the UI falls back to the task's provider.
 
 ## 6. Verification evidence
@@ -172,11 +172,11 @@ A Done task can't switch. A task without a conversation switches immediately, wi
    - `README.md`: live suite usage, replacing the Codex-only text.
    - `AGENTS.md`: references to `scripts/test-codex-integration.sh` should point at `test-live-integration.sh`, and "Live Codex turns" should become "live provider turns".
 7. **Plan items deferred or partial:**
-   - Importing Codex history into StationAI's store, so archive search and reopening don't depend on the Codex runtime.
+   - Importing Codex history into Playhouse's store, so archive search and reopening don't depend on the Codex runtime.
    - Claude subagent inspection shows only the subagent's summary and report (from the parent's tool result), not its sidechain transcript.
    - No per-turn diff for Claude (`history.diff` is nil). The changes panel uses the workspace's Git inventory.
    - Model picker for Claude: lists the `initialize` models and defaults to `default`. Not validated in the UI.
-   - Rename leftovers: many accessibility IDs and UserDefaults keys still say `codex-…` (for example `codex-activity-disclosure`, `stationai.codex.response-started-at…`). Renaming them would churn the UI tests; decide deliberately.
+   - Rename leftovers: many accessibility IDs and UserDefaults keys still say `codex-…` (for example `codex-activity-disclosure`, `playhouse.codex.response-started-at…`). Renaming them would churn the UI tests; decide deliberately.
 8. **Nice-to-haves:** a `--provider` flag on `conversation send` (switch, then send); showing the capability notice on first open, not only after a switch; and the handoff size cap could be made configurable.
 
 ## 8. Where the time went
@@ -200,17 +200,17 @@ scripts/test-e2e.sh
 scripts/test-e2e.sh --case test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary
 
 # Live suite (real providers; claude is the default)
-STATIONAI_RUN_LIVE_INTEGRATION=1 scripts/test-live-integration.sh --provider claude --skip-ui
-STATIONAI_RUN_LIVE_INTEGRATION=1 scripts/test-live-integration.sh --provider all
+PLAYHOUSE_RUN_LIVE_INTEGRATION=1 scripts/test-live-integration.sh --provider claude --skip-ui
+PLAYHOUSE_RUN_LIVE_INTEGRATION=1 scripts/test-live-integration.sh --provider all
 # Focused live scenario against an existing build:
-STATIONAI_RUN_LIVE_INTEGRATION=1 STATIONAI_APP_PATH=<StationAI.app> STATIONAI_BRIDGE_TEST_FIXTURE_ROOT=<fixture> \
+PLAYHOUSE_RUN_LIVE_INTEGRATION=1 PLAYHOUSE_APP_PATH=<Playhouse.app> PLAYHOUSE_BRIDGE_TEST_FIXTURE_ROOT=<fixture> \
   python3 scripts/test-live-integration.py --provider claude --scenario scenario_steer_active_turn
 
 # Provider operations
-stationai-cli task create --title T --root <dir> --provider claude
-stationai-cli conversation provider <task-id> [set codex|claude|capabilities]
-stationai-cli conversation stop <task-id>
-stationai-cli settings set-default-provider claude
+playhouse-cli task create --title T --root <dir> --provider claude
+playhouse-cli conversation provider <task-id> [set codex|claude|capabilities]
+playhouse-cli conversation stop <task-id>
+playhouse-cli settings set-default-provider claude
 ```
 
 The live suite creates its fixtures under `TMPDIR`; use a `/tmp/...` spelling, not `/private/tmp/...` (see §5).

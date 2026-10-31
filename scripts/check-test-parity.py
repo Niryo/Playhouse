@@ -7,9 +7,9 @@ from pathlib import Path
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
-CONTRACT_PATH = REPOSITORY_ROOT / "StationAI/BridgeTests/BridgeTestContracts.json"
+CONTRACT_PATH = REPOSITORY_ROOT / "Playhouse/BridgeTests/BridgeTestContracts.json"
 CLI_TEST_PATH = REPOSITORY_ROOT / "scripts/test-bridge.py"
-UI_TEST_PATH = REPOSITORY_ROOT / "StationAI/StationAIUITests/StationAIUITests.swift"
+UI_TEST_PATH = REPOSITORY_ROOT / "Playhouse/PlayhouseUITests/PlayhouseUITests.swift"
 CONTRACT_ANNOTATION = re.compile(r"^\s*# case-contract: (test_[A-Za-z0-9_]+) \| (.+)$")
 SWIFT_ANNOTATION = re.compile(r"^\s*// case-contract: (test_[A-Za-z0-9_]+) \| (.+)$")
 

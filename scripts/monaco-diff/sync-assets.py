@@ -24,7 +24,7 @@ def main() -> None:
     package = Path(sys.argv[3]).resolve()
     dompurify_package = package.parent / "dompurify"
     repository_root = Path(__file__).resolve().parents[2]
-    expected_resources = (repository_root / "StationAI/Resources/Monaco").resolve()
+    expected_resources = (repository_root / "Playhouse/Resources/Monaco").resolve()
     if resources != expected_resources or resources.name != "Monaco":
         raise SystemExit(f"Refusing to replace unexpected Monaco resources directory: {resources}")
     if not (dist / "diff.bundle.js").is_file():

@@ -22,7 +22,7 @@ The observed task window from creation through the successful runtime log is abo
 | 59 bridge cases, unittest total | 119.298s | 36.5% |
 | Static checks, fixture setup, locks, and runner overhead combined | About 5.7s, derived by subtraction and subject to whole-second phase rounding | About 1.7% |
 
-Slowest named cases from `/tmp/stationai-bridge.iY9WVa/bridge-tests.log`: `test_task_done_preserves_worktree_and_branch` 22.661s; `test_review_pr_conflicts_probe_and_verify` 14.469s; `test_conversation_composer_rejects_blank_and_supports_live_turn_controls` 5.933s. The first two total 37.130s, or 31.1% of case time. The log's 59 per-case values sum to 119.295s; the unittest wrapper reports 119.298s. One build logged a copy-command warning/error line, but the build proceeded and the sole full suite passed. There was no test retry or repeated full build in this task. UI coverage was reviewed statically; no UI suite or screenshots were run.
+Slowest named cases from `/tmp/playhouse-bridge.iY9WVa/bridge-tests.log`: `test_task_done_preserves_worktree_and_branch` 22.661s; `test_review_pr_conflicts_probe_and_verify` 14.469s; `test_conversation_composer_rejects_blank_and_supports_live_turn_controls` 5.933s. The first two total 37.130s, or 31.1% of case time. The log's 59 per-case values sum to 119.295s; the unittest wrapper reports 119.298s. One build logged a copy-command warning/error line, but the build proceeded and the sole full suite passed. There was no test retry or repeated full build in this task. UI coverage was reviewed statically; no UI suite or screenshots were run.
 
 ## Improvements
 

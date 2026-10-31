@@ -1,10 +1,10 @@
-# StationAI
+# Playhouse
 
-StationAI is a native macOS task board for coordinating work across agents. The MVP provides a Kanban board, task creation, drag-and-drop status changes, and local persistence.
+Playhouse is a native macOS task board for coordinating work across agents. The MVP provides a Kanban board, task creation, drag-and-drop status changes, and local persistence.
 
 ## Run the app
 
-Open `StationAI.xcodeproj` in Xcode and run the `StationAI` scheme. The app targets macOS 14 and later.
+Open `Playhouse.xcodeproj` in Xcode and run the `Playhouse` scheme. The app targets macOS 14 and later.
 
 To build and launch it from the terminal, run:
 
@@ -18,14 +18,14 @@ Tasks are stored locally with SwiftData and remain available after the app close
 
 ## CLI bridge
 
-StationAI bundles a `stationai-cli` command-line tool beside the GUI executable and an on-demand XPC service inside the app. The CLI uses the same task, workspace, settings, and conversation managers as the GUI and returns versioned JSON. Conversation sends print JSON event lines while Codex streams, followed by the final response.
+Playhouse bundles a `playhouse-cli` command-line tool beside the GUI executable and an on-demand XPC service inside the app. The CLI uses the same task, workspace, settings, and conversation managers as the GUI and returns versioned JSON. Conversation sends print JSON event lines while Codex streams, followed by the final response.
 
 Run a command from the repository:
 
 ```sh
-./scripts/stationai.sh status
-./scripts/stationai.sh board list
-./scripts/stationai.sh task list
+./scripts/playhouse.sh status
+./scripts/playhouse.sh board list
+./scripts/playhouse.sh task list
 ```
 
 The repository wrapper builds the app bundle if needed and routes each command through the bundled CLI. See [docs/bridge.md](docs/bridge.md) for the command list and JSON behavior.
@@ -40,7 +40,7 @@ Run just the CLI/XPC suite with:
 ./scripts/test-e2e.sh
 ```
 
-The visible UI suite launches StationAI and exercises the same named cases through the real interface. UI tests always run inside the Tart macOS VM; direct `test-ui.sh` invocations on the host hand off to the VM runner:
+The visible UI suite launches Playhouse and exercises the same named cases through the real interface. UI tests always run inside the Tart macOS VM; direct `test-ui.sh` invocations on the host hand off to the VM runner:
 
 ```sh
 ./scripts/test-ui.sh
@@ -59,7 +59,7 @@ To run a UI case in a Tart macOS VM while continuing to work in the host checkou
 ./scripts/test-ui-tart.sh --case test_task_creation_persists_ordered_roots_across_fresh_connections
 ```
 
-The setup script clones the Cirrus Labs Xcode 26.5 image and configures a 6 CPU, 12 GB VM. It requires at least 110 GiB free in Tart storage. The runner starts the stopped VM with the checkout mounted read-only, copies the source into a VM-local snapshot, and runs the existing UI suite there. Test data and build products stay in the guest during the run; logs and `.xcresult` bundles are copied to `${TMPDIR}/stationai-ui-tart-artifacts/`, then the per-run guest snapshot is removed. The VM is stopped when the run finishes. Use `--show-vm` to open the display and pause before testing so you can grant Xcode Helper Accessibility permission if needed; this option requires an interactive terminal. Set `STATIONAI_UI_TART_VM` or pass `--vm` to select a different VM.
+The setup script clones the Cirrus Labs Xcode 26.5 image and configures a 6 CPU, 12 GB VM. It requires at least 110 GiB free in Tart storage. The runner starts the stopped VM with the checkout mounted read-only, copies the source into a VM-local snapshot, and runs the existing UI suite there. Test data and build products stay in the guest during the run; logs and `.xcresult` bundles are copied to `${TMPDIR}/playhouse-ui-tart-artifacts/`, then the per-run guest snapshot is removed. The VM is stopped when the run finishes. Use `--show-vm` to open the display and pause before testing so you can grant Xcode Helper Accessibility permission if needed; this option requires an interactive terminal. Set `PLAYHOUSE_UI_TART_VM` or pass `--vm` to select a different VM.
 
 For full end-to-end coverage, the combined script checks that the CLI and UI tests have exactly matching case names and shared expectation text, runs CLI/XPC first, then launches the UI suite:
 
@@ -72,9 +72,9 @@ The fast verifier runs all CLI/XPC cases and checks that the UI suite has the ex
 Real provider turns use a separate opt-in suite. It runs against Claude Code by default; pass `--provider codex` for Codex or `--provider all` to also check a Claude → Codex → Claude handoff. Claude needs a working host `claude` login; Codex needs `codex login` and Luna access. Its live UI cases also run in Tart, where the VM needs the provider CLI installed and its own guest login. Use `--show-vm` on the direct Tart command when you need to sign in interactively:
 
 ```sh
-STATIONAI_RUN_LIVE_INTEGRATION=1 ./scripts/test-live-integration.sh                    # Claude
-STATIONAI_RUN_LIVE_INTEGRATION=1 ./scripts/test-live-integration.sh --provider codex
-STATIONAI_RUN_LIVE_INTEGRATION=1 ./scripts/test-live-integration.sh --skip-ui --provider all
+PLAYHOUSE_RUN_LIVE_INTEGRATION=1 ./scripts/test-live-integration.sh                    # Claude
+PLAYHOUSE_RUN_LIVE_INTEGRATION=1 ./scripts/test-live-integration.sh --provider codex
+PLAYHOUSE_RUN_LIVE_INTEGRATION=1 ./scripts/test-live-integration.sh --skip-ui --provider all
 ```
 
 `scripts/test-codex-integration.sh` remains as a wrapper for `--provider codex`. For a focused live UI case after guest sign-in, run `scripts/test-ui-tart.sh --live-provider claude --case test_conversation_composer_rejects_blank_and_supports_live_turn_controls`.

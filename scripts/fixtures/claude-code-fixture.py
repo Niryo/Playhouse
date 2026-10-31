@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Deterministic stand-in for the `claude` CLI's stream-json protocol.
 
-StationAI launches it exactly like Claude Code (`-p --input-format stream-json
+Playhouse launches it exactly like Claude Code (`-p --input-format stream-json
 --output-format stream-json ... --append-system-prompt <instructions>`). Each
-process serves one turn, as Claude Code does under StationAI. The reply
-reproduces Claude's observed habit of answering, running its StationAI report
+process serves one turn, as Claude Code does under Playhouse. The reply
+reproduces Claude's observed habit of answering, running its Playhouse report
 commands, and then adding a closing line. The report commands are taken from the
-instructions StationAI appended and really run, so outcomes reach the task.
+instructions Playhouse appended and really run, so outcomes reach the task.
 
 Every turn is recorded in `<executable>.history` for test assertions.
 """
@@ -40,7 +40,7 @@ def argument(name):
 
 
 def report_command(instructions, marker, replacement=None):
-    """Returns the CLI command line StationAI's instructions give for `marker`."""
+    """Returns the CLI command line Playhouse's instructions give for `marker`."""
     for line in instructions.splitlines():
         if marker in line:
             command = line.strip()
@@ -90,7 +90,7 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         write({"type": "control_request", "request_id": "question-request-1", "request": {
             "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
         }})
-    elif "stationai internal outcome reminder:" in user_text.lower() and "outcome-reminder-question" in Path(sys.argv[0]).name:
+    elif "playhouse internal outcome reminder:" in user_text.lower() and "outcome-reminder-question" in Path(sys.argv[0]).name:
         question_input = {
             "questions": [{
                 "header": "Color",
@@ -103,11 +103,11 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         write({"type": "control_request", "request_id": "question-request-1", "request": {
             "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
         }})
-    elif "stationai internal outcome reminder:" in user_text.lower() and not preserve_no_outcome:
+    elif "playhouse internal outcome reminder:" in user_text.lower() and not preserve_no_outcome:
         command = report_command(instructions, " task outcome ", "waiting-response")
         if command:
             commands.append({"command": command, "output": run_tool("toolu_outcome_reminder", "Bash", {"command": command}, command)})
-    elif "answer to the pending question from the prior stationai session" in user_text.lower():
+    elif "answer to the pending question from the prior playhouse session" in user_text.lower():
         answer = user_text.split("Answer: ", 1)[-1].splitlines()[0].strip()
         text("msg_recovered_question_answer", f"Recovered answer: {answer}.")
     elif "ask a restart-safe structured question" in user_text.lower():
@@ -222,7 +222,7 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         payload = user_text.split("<response-comments>", 1)[1].split("</response-comments>", 1)[0]
         comments = json.loads(payload)
         answer = "\n".join(
-            f':stationai-annotation{{index="{index}"}} For ‘{item["text"]}’: {item["comment"]}'
+            f':playhouse-annotation{{index="{index}"}} For ‘{item["text"]}’: {item["comment"]}'
             for index, item in enumerate(comments)
         )
         text("msg_comments", answer)
@@ -367,7 +367,7 @@ def main():
         "sessionID": argument("--session-id") or argument("--resume"),
         "resumed": "--resume" in sys.argv,
         "cwd": os.getcwd(),
-        "bridgeServiceName": os.environ.get("STATIONAI_BRIDGE_SERVICE_NAME"),
+        "bridgeServiceName": os.environ.get("PLAYHOUSE_BRIDGE_SERVICE_NAME"),
         "effort": os.environ.get("CLAUDE_CODE_EFFORT_LEVEL"),
     }
     for line in sys.stdin:
@@ -396,9 +396,9 @@ def main():
                     {"value": "claude-haiku-4-5-20251001", "displayName": "Haiku 4.5"},
                     {"value": "claude-haiku-4-6", "displayName": "Haiku 4.6"},
                 ]
-                if os.environ.get("STATIONAI_CLAUDE_MODEL_LIST") == "aliases-only" or "aliases-only" in Path(sys.argv[0]).name:
+                if os.environ.get("PLAYHOUSE_CLAUDE_MODEL_LIST") == "aliases-only" or "aliases-only" in Path(sys.argv[0]).name:
                     models = models[:2] + models[5:6] + models[8:9]
-                # Tests seed StationAI's model cache through a real discovery of this list.
+                # Tests seed Playhouse's model cache through a real discovery of this list.
                 models_override = Path(str(sys.argv[0]) + ".models-override")
                 if models_override.exists():
                     models = json.loads(models_override.read_text(encoding="utf-8"))
@@ -420,7 +420,7 @@ def main():
             updated_input = response.get("updatedInput", {})
             answers = updated_input.get("answers", {})
             if response.get("behavior") != "allow" or not isinstance(answers, dict) or not answers:
-                if "stationai internal outcome reminder:" in turn.get("userText", "").lower():
+                if "playhouse internal outcome reminder:" in turn.get("userText", "").lower():
                     rejection_log = Path(str(sys.argv[0]) + ".private-reminder-question-rejection")
                     with rejection_log.open("a", encoding="utf-8") as stream:
                         stream.write(response.get("message", "") + "\n")
@@ -447,7 +447,7 @@ def main():
             user_text = "".join(block.get("text", "") for block in content if block.get("type") == "text")
             turn["userText"] = user_text
             recovery_error = Path(str(sys.argv[0]) + ".recovery-error")
-            if "answer to the pending question from the prior stationai session" in user_text.lower() and recovery_error.exists():
+            if "answer to the pending question from the prior playhouse session" in user_text.lower() and recovery_error.exists():
                 recovery_error.unlink(missing_ok=True)
                 turn["failure"] = "Fixture provider echoed Answer: Green and the private recovery prompt."
                 history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else {"turns": []}
@@ -460,7 +460,7 @@ def main():
             previous_prompt = next((
                 prior.get("userText", "").lower()
                 for prior in reversed(prior_turns)
-                if "stationai internal outcome reminder:" not in prior.get("userText", "").lower()
+                if "playhouse internal outcome reminder:" not in prior.get("userText", "").lower()
             ), "")
             preserve_no_outcome = any(marker in previous_prompt for marker in ("please inspect the workspace", "start the checks"))
             turn["reportCommands"] = respond(user_text, instructions, preserve_no_outcome=preserve_no_outcome)
@@ -469,14 +469,14 @@ def main():
             history_path.write_text(json.dumps(history), encoding="utf-8")
             if PENDING_QUESTION_SUCCESS_MARKER in user_text.lower():
                 # Exercise a completed provider turn whose question remains unanswered.
-                # Let StationAI persist and emit the request before reporting success.
+                # Let Playhouse persist and emit the request before reporting success.
                 time.sleep(0.1)
                 write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
             elif "structured question" in user_text.lower() or (
-                "stationai internal outcome reminder:" in user_text.lower()
+                "playhouse internal outcome reminder:" in user_text.lower()
                 and "outcome-reminder-question" in Path(str(sys.argv[0])).name
             ):
-                # Keep the provider turn alive until StationAI answers or rejects
+                # Keep the provider turn alive until Playhouse answers or rejects
                 # the control request; otherwise a pending question races with
                 # an already successful result.
                 continue

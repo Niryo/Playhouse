@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repository_root="${STATIONAI_UI_TART_REPOSITORY_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+repository_root="${PLAYHOUSE_UI_TART_REPOSITORY_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 script_path="${repository_root}/scripts/test-ui-tart.sh"
-vm_name="${STATIONAI_UI_TART_VM:-stationai-ui}"
-artifact_root="${STATIONAI_UI_TART_ARTIFACTS:-${TMPDIR:-/tmp}/stationai-ui-tart-artifacts}"
-export STATIONAI_UI_LOCK_TIMEOUT_SECONDS="${STATIONAI_UI_LOCK_TIMEOUT_SECONDS:-120}"
+vm_name="${PLAYHOUSE_UI_TART_VM:-playhouse-ui}"
+artifact_root="${PLAYHOUSE_UI_TART_ARTIFACTS:-${TMPDIR:-/tmp}/playhouse-ui-tart-artifacts}"
+export PLAYHOUSE_UI_LOCK_TIMEOUT_SECONDS="${PLAYHOUSE_UI_LOCK_TIMEOUT_SECONDS:-120}"
 
 # Hold the host checkout's UI-test lock for the entire VM run.
 # test-ui.sh sets the marker only when its caller already owns that host lock.
-if [[ "${STATIONAI_UI_TART_HOST_LOCKED:-0}" != "1" ]]; then
-	exec "${repository_root}/scripts/with-e2e-lock.sh" -- env STATIONAI_UI_TART_HOST_LOCKED=1 bash "${script_path}" "$@"
+if [[ "${PLAYHOUSE_UI_TART_HOST_LOCKED:-0}" != "1" ]]; then
+	exec "${repository_root}/scripts/with-e2e-lock.sh" -- env PLAYHOUSE_UI_TART_HOST_LOCKED=1 bash "${script_path}" "$@"
 fi
-if [[ "${STATIONAI_UI_TART_IMMUTABLE:-0}" != "1" ]]; then
-	immutable_runner="$(mktemp "${TMPDIR:-/tmp}/stationai-ui-tart-runner.XXXXXX")"
+if [[ "${PLAYHOUSE_UI_TART_IMMUTABLE:-0}" != "1" ]]; then
+	immutable_runner="$(mktemp "${TMPDIR:-/tmp}/playhouse-ui-tart-runner.XXXXXX")"
 	cp "${script_path}" "${immutable_runner}"
 	chmod 700 "${immutable_runner}"
 	exec env \
-		STATIONAI_UI_TART_IMMUTABLE=1 \
-		STATIONAI_UI_TART_IMMUTABLE_PATH="${immutable_runner}" \
-		STATIONAI_UI_TART_REPOSITORY_ROOT="${repository_root}" \
+		PLAYHOUSE_UI_TART_IMMUTABLE=1 \
+		PLAYHOUSE_UI_TART_IMMUTABLE_PATH="${immutable_runner}" \
+		PLAYHOUSE_UI_TART_REPOSITORY_ROOT="${repository_root}" \
 		bash "${immutable_runner}" "$@"
 fi
 original_args=("$@")
@@ -40,8 +40,8 @@ Pass --live-provider only when the guest has that provider's CLI and a login
 --live-provider codex.
 
 Environment:
-  STATIONAI_UI_TART_VM         VM name (default: stationai-ui)
-  STATIONAI_UI_TART_ARTIFACTS  Host artifact root
+  PLAYHOUSE_UI_TART_VM         VM name (default: playhouse-ui)
+  PLAYHOUSE_UI_TART_ARTIFACTS  Host artifact root
   --live-provider <provider>   Run live UI cases against claude or codex; guest access is required
   --stop-vm-after-run          Stop the persistent VM after this run
   --reset-vm-state             Reset guest app/test processes before this run
@@ -119,12 +119,12 @@ fi
 
 # Repository locks are worktree-local, while a Tart VM is shared host-wide.
 # Serialize ownership checks, startup, execution, and cleanup for each VM.
-if [[ "${STATIONAI_UI_TART_VM_LOCKED:-0}" != "1" ]]; then
+if [[ "${PLAYHOUSE_UI_TART_VM_LOCKED:-0}" != "1" ]]; then
 	vm_lock_name="${vm_name//\//_}"
-	runner="${STATIONAI_UI_TART_IMMUTABLE_PATH:-${script_path}}"
+	runner="${PLAYHOUSE_UI_TART_IMMUTABLE_PATH:-${script_path}}"
 	exec python3 "${repository_root}/scripts/with-file-lock.py" \
-		"/tmp/stationai-ui-tart-${vm_lock_name}.lock" \
-		env STATIONAI_UI_TART_VM_LOCKED=1 bash "${runner}" ${original_args[@]+"${original_args[@]}"}
+		"/tmp/playhouse-ui-tart-${vm_lock_name}.lock" \
+		env PLAYHOUSE_UI_TART_VM_LOCKED=1 bash "${runner}" ${original_args[@]+"${original_args[@]}"}
 fi
 
 if ! command -v tart >/dev/null 2>&1; then
@@ -145,7 +145,7 @@ vm_started=0
 # VM ownership is global per host VM, not per checkout's TMPDIR. A
 # TMPDIR-scoped marker lets two worktrees both believe they own the same
 # persistent VM and causes Tart guest transport collisions.
-session_marker="${STATIONAI_UI_TART_SESSION_MARKER:-/tmp/stationai-ui-tart-${vm_name}.session}"
+session_marker="${PLAYHOUSE_UI_TART_SESSION_MARKER:-/tmp/playhouse-ui-tart-${vm_name}.session}"
 session_value="${repository_root}"$'\n'"${artifact_root}"
 session_marker_owned=0
 if [[ -L "$session_marker" ]]; then
@@ -170,7 +170,7 @@ cleanup() {
 		printf '\nTart VM launch log: %s\n' "$launch_log" >&2
 		tail -40 "$launch_log" >&2 || true
 	fi
-	rm -f "${STATIONAI_UI_TART_IMMUTABLE_PATH:-}"
+	rm -f "${PLAYHOUSE_UI_TART_IMMUTABLE_PATH:-}"
 }
 trap cleanup EXIT INT TERM
 
@@ -303,21 +303,21 @@ if [[ "$live_provider" == "none" ]]; then
 fi
 reset_failed=0
 if [[ "$reset_vm_state" == "1" ]]; then
-	pkill -x StationAI >/dev/null 2>&1 || true
-	pkill -x StationAIUITests-Runner >/dev/null 2>&1 || true
+	pkill -x Playhouse >/dev/null 2>&1 || true
+	pkill -x PlayhouseUITests-Runner >/dev/null 2>&1 || true
 	pkill -x "Diagnostics Reporter" >/dev/null 2>&1 || true
-	pkill -f 'xcodebuild.*StationAI' >/dev/null 2>&1 || true
+	pkill -f 'xcodebuild.*Playhouse' >/dev/null 2>&1 || true
 	for _ in $(seq 1 40); do
-		if ! pgrep -x StationAI >/dev/null 2>&1 &&
-			! pgrep -x StationAIUITests-Runner >/dev/null 2>&1 &&
-			! pgrep -f 'xcodebuild.*StationAI' >/dev/null 2>&1; then
+		if ! pgrep -x Playhouse >/dev/null 2>&1 &&
+			! pgrep -x PlayhouseUITests-Runner >/dev/null 2>&1 &&
+			! pgrep -f 'xcodebuild.*Playhouse' >/dev/null 2>&1; then
 			break
 		fi
 		sleep 0.25
 	done
-	if pgrep -x StationAI >/dev/null 2>&1 ||
-		pgrep -x StationAIUITests-Runner >/dev/null 2>&1 ||
-		pgrep -f 'xcodebuild.*StationAI' >/dev/null 2>&1; then
+	if pgrep -x Playhouse >/dev/null 2>&1 ||
+		pgrep -x PlayhouseUITests-Runner >/dev/null 2>&1 ||
+		pgrep -f 'xcodebuild.*Playhouse' >/dev/null 2>&1; then
 		reset_failed=1
 	fi
 fi
@@ -330,11 +330,11 @@ if [[ ! "$run_id" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]]; then
 fi
 artifact_root="/Volumes/My Shared Files/artifacts"
 source_root="${artifact_root}/${run_id}/source"
-snapshot_root="${HOME}/StationAIUITestRuns/${run_id}"
-source_snapshot_root="${HOME}/StationAIUITestRuns/SourceSnapshot"
-source_snapshot_owner="${HOME}/StationAIUITestRuns/.source-snapshot-owner"
-source_snapshot_owner_contents="StationAI Tart owns this reusable source snapshot (v1)."
-guest_tmp="/tmp/stationai-ui-tart-${run_id}"
+snapshot_root="${HOME}/PlayhouseUITestRuns/${run_id}"
+source_snapshot_root="${HOME}/PlayhouseUITestRuns/SourceSnapshot"
+source_snapshot_owner="${HOME}/PlayhouseUITestRuns/.source-snapshot-owner"
+source_snapshot_owner_contents="Playhouse Tart owns this reusable source snapshot (v1)."
+guest_tmp="/tmp/playhouse-ui-tart-${run_id}"
 guest_log="${snapshot_root}/ui-test.log"
 guest_artifacts="${artifact_root}/${run_id}"
 
@@ -354,8 +354,8 @@ if ! mkdir -p "$guest_artifacts"; then
 	printf 'Cannot create host artifact share path %s; guest run data is retained at %s.\n' "$guest_artifacts" "$snapshot_root" >&2
 	exit 74
 fi
-if [[ ! -d "$source_root/StationAI.xcodeproj" ]]; then
-	printf 'Shared source directory is unavailable or missing StationAI.xcodeproj: %s\n' "$source_root" >&2
+if [[ ! -d "$source_root/Playhouse.xcodeproj" ]]; then
+	printf 'Shared source directory is unavailable or missing Playhouse.xcodeproj: %s\n' "$source_root" >&2
 	exit 2
 fi
 if ! xcode-select -p >/dev/null 2>&1; then
@@ -408,21 +408,21 @@ pkill -x "Diagnostics Reporter" >/dev/null 2>&1 || true
 sleep 2
 
 if [[ -n "$live_provider" ]]; then
-	printf '%s\n' "$live_provider" > /tmp/stationai-live-ui-integration
-	export STATIONAI_RUN_LIVE_INTEGRATION=1
-	export STATIONAI_LIVE_PROVIDER="$live_provider"
+	printf '%s\n' "$live_provider" > /tmp/playhouse-live-ui-integration
+	export PLAYHOUSE_RUN_LIVE_INTEGRATION=1
+	export PLAYHOUSE_LIVE_PROVIDER="$live_provider"
 fi
 if (( reset_failed == 1 )); then
-	printf 'Guest reset did not finish: an existing StationAI or Xcode test process is still running.\n' | tee "$guest_log"
+	printf 'Guest reset did not finish: an existing Playhouse or Xcode test process is still running.\n' | tee "$guest_log"
 	test_status=74
 else
 	set +e
-	STATIONAI_UI_TART_GUEST=1 STATIONAI_UI_TESTS_CONFIRMED=1 STATIONAI_UI_DASHBOARD=0 TMPDIR="$guest_tmp" "${source_snapshot_root}/scripts/test-ui.sh" "$@" 2>&1 | tee "$guest_log"
+	PLAYHOUSE_UI_TART_GUEST=1 PLAYHOUSE_UI_TESTS_CONFIRMED=1 PLAYHOUSE_UI_DASHBOARD=0 TMPDIR="$guest_tmp" "${source_snapshot_root}/scripts/test-ui.sh" "$@" 2>&1 | tee "$guest_log"
 	test_status=${PIPESTATUS[0]}
 	set -e
 fi
 if [[ -n "$live_provider" ]]; then
-	rm -f /tmp/stationai-live-ui-integration
+	rm -f /tmp/playhouse-live-ui-integration
 fi
 
 artifact_copy_status=0
@@ -437,7 +437,7 @@ if [[ -n "${guest_tmp:-}" && -d "$guest_tmp" ]]; then
 			printf 'Failed to copy test output %s to the host artifact share.\n' "$test_output" >&2
 			artifact_copy_status=1
 		fi
-	done < <(find "$guest_tmp" -maxdepth 1 -type d -name 'stationai-ui.*' -print0)
+	done < <(find "$guest_tmp" -maxdepth 1 -type d -name 'playhouse-ui.*' -print0)
 fi
 if ! printf '%s\n' "$test_status" > "${guest_artifacts}/exit-status.txt"; then
 	printf 'Failed to write the UI test exit status to the host artifact share.\n' >&2

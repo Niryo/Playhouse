@@ -10,9 +10,9 @@ This timeline is partial. The task began on 2026-10-27; conflict investigation, 
 | --- | ---: | --- |
 | Investigate master conflict and resolve merge content | Unknown | Task handoff; no timed progress record supplied |
 | Static review detects dropped `answerUserInput` methods and recovery failure lifecycle status; repair and re-review | Unknown | Task handoff; reviewer response times unavailable |
-| First full fast CLI/XPC run: 86 cases, recovery case failed | About 152 s build + 181.630 s cases; log ends 05:52:59 UTC | Task verification ledger; `/tmp/stationai-bridge.glruap/bridge-tests.log` |
-| Repair Codex fixture turn attribution; focused recovery case passes | Repair time unknown; about 148 s rebuild + 3.035 s case; log ends 05:57:11 UTC | Task verification ledger; `/tmp/stationai-bridge.d0FwpJ/bridge-tests.log` |
-| Final full fast CLI/XPC run: 86/86 pass | 188.365 s cases; log ends 06:00:29 UTC | `/tmp/stationai-bridge.qUMZEz/bridge-tests.log` |
+| First full fast CLI/XPC run: 86 cases, recovery case failed | About 152 s build + 181.630 s cases; log ends 05:52:59 UTC | Task verification ledger; `/tmp/playhouse-bridge.glruap/bridge-tests.log` |
+| Repair Codex fixture turn attribution; focused recovery case passes | Repair time unknown; about 148 s rebuild + 3.035 s case; log ends 05:57:11 UTC | Task verification ledger; `/tmp/playhouse-bridge.d0FwpJ/bridge-tests.log` |
+| Final full fast CLI/XPC run: 86/86 pass | 188.365 s cases; log ends 06:00:29 UTC | `/tmp/playhouse-bridge.qUMZEz/bridge-tests.log` |
 
 The measured or approximately measured command components total **about 673 s (11 min 13 s)**: about 300 s building (45%) and 373.030 s running cases (55%). This excludes command overhead, conflict investigation, reviews, repair, and waits between commands. The first suite finished 7 min 30 s before the final one; combined with its approximately 334 s build and case time, the visible verification window spans **at least about 13 min 4 s**. Roughly 110 s within that window is not allocated to a measured operation; the full task duration is unknown. This is wall time, not active agent time.
 

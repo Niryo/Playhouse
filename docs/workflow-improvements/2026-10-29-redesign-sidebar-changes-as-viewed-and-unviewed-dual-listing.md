@@ -3,7 +3,7 @@
 - Task: Redesign Sidebar Changes as Viewed and Unviewed (`F543169F-AC84-4A27-A7C7-6FF0FE87E1DF`)
 - Date: 2026-10-29
 - Scope: this turn only — the requirement change from "edited viewed file returns to pending" to permanent dual listing (pinned Viewed row at branch base -> snapshot, plus a re-listed row in the renamed "Changes" section at snapshot -> worktree).
-- Changed files at report time (`git diff --stat`, unstaged): 9 files, 638 insertions / 317 deletions, concentrated in `StationAI/App/WorkspaceChanges.swift` (339), `StationAI/StationAIUITests/StationAIUITests.swift` (232), `scripts/test-bridge.py` (204), `StationAI/App/TaskConversationView.swift` (99), `StationAI/App/BridgeCore.swift` (53).
+- Changed files at report time (`git diff --stat`, unstaged): 9 files, 638 insertions / 317 deletions, concentrated in `Playhouse/App/WorkspaceChanges.swift` (339), `Playhouse/PlayhouseUITests/PlayhouseUITests.swift` (232), `scripts/test-bridge.py` (204), `Playhouse/App/TaskConversationView.swift` (99), `Playhouse/App/BridgeCore.swift` (53).
 
 ## Timeline
 
@@ -38,7 +38,7 @@ Action: when a repair in response to any reviewer adds or changes a user-visible
 
 Evidence: round 1's rejection found two assertions that passed without exercising anything — a section-title lookup that collided with the sidebar pane header, and a filename identifier that matched two rows once dual listing made one path appear in both sections. Both are identifier-resolution defects created by the model change (`WorkspaceChangeEntry.id` now includes the group, so a bare filename is no longer unique). Measured cost: 96s + the repair cycle; the class recurred in round 2. The repairs were group-scoped filename identifiers and section-title identifiers.
 
-Action: make UI element lookup helpers in `StationAI/StationAIUITests/StationAIUITests.swift` assert a unique match — require exactly one matching element before acting or asserting, and fail with the match count otherwise. A duplicate or shadowed identifier then fails as a test failure at authoring time instead of surfacing as reviewer prose two static rounds later. Verify by deliberately asserting on a bare filename that now exists in both sections and confirming the helper fails rather than passing on the first row.
+Action: make UI element lookup helpers in `Playhouse/PlayhouseUITests/PlayhouseUITests.swift` assert a unique match — require exactly one matching element before acting or asserting, and fail with the match count otherwise. A duplicate or shadowed identifier then fails as a test failure at authoring time instead of surfacing as reviewer prose two static rounds later. Verify by deliberately asserting on a bare filename that now exists in both sections and confirming the helper fails rather than passing on the first row.
 
 ### 3. Second session restart in this task lost an in-flight background static review
 

@@ -3,7 +3,7 @@
 - Task: Add a deterministic Claude Code stand-in fixture and paired test (follow-up; the user explicitly authorized a fake Claude program)
 - Date: 2026-10-24
 - Paired case: `test_claude_answer_stays_final_around_outcome_report`
-- Evidence checked: the caller's verification ledger, `/tmp/stationai-qa/claude-case.log`, `/tmp/stationai-qa/mutant.log`, `/tmp/stationai-qa/e2e3.log` (file mtimes and lock timestamps), `scripts/prepare-e2e-build.py`, and `StationAI/StationAIUITests/StationAIUITests.swift`. The conversation transcript was not available to this analysis.
+- Evidence checked: the caller's verification ledger, `/tmp/playhouse-qa/claude-case.log`, `/tmp/playhouse-qa/mutant.log`, `/tmp/playhouse-qa/e2e3.log` (file mtimes and lock timestamps), `scripts/prepare-e2e-build.py`, and `Playhouse/PlayhouseUITests/PlayhouseUITests.swift`. The conversation transcript was not available to this analysis.
 
 ## Timeline (partial)
 
@@ -46,9 +46,9 @@ The first two cases take 39.1 s, about 31% of case time. The new case took 2.9 s
 
 ### 1. UI-test-only edits invalidate the headless E2E build cache
 
-- Evidence: the UI repair between the smoke run and the final run changed only `StationAIUITests.swift`. The final run still logged `Building E2E cache miss eddc27c08240c042` and spent 111 s building. `scripts/prepare-e2e-build.py` `source_fingerprint()` hashes every tracked or untracked file outside a short exclusion list, and that list does not exclude `StationAI/StationAIUITests/`. The build also runs `xcodebuild build-for-testing -only-testing:StationAIUITests/StationAIUITests`, even though neither `scripts/test-e2e.sh` nor `scripts/test-bridge.py` refers to the UI test bundle. The build also compiles UI tests, which is where the two UI-test warnings in every log come from. `scripts/fixtures/*.py` are hashed too, although `test-bridge.py` reads them at runtime from the repository.
+- Evidence: the UI repair between the smoke run and the final run changed only `PlayhouseUITests.swift`. The final run still logged `Building E2E cache miss eddc27c08240c042` and spent 111 s building. `scripts/prepare-e2e-build.py` `source_fingerprint()` hashes every tracked or untracked file outside a short exclusion list, and that list does not exclude `Playhouse/PlayhouseUITests/`. The build also runs `xcodebuild build-for-testing -only-testing:PlayhouseUITests/PlayhouseUITests`, even though neither `scripts/test-e2e.sh` nor `scripts/test-bridge.py` refers to the UI test bundle. The build also compiles UI tests, which is where the two UI-test warnings in every log come from. `scripts/fixtures/*.py` are hashed too, although `test-bridge.py` reads them at runtime from the repository.
 - Cost: 111 s per UI-test-only repair cycle on the headless suite, measured once in this task.
-- Action: check whether the app or CLI target embeds anything from `StationAI/StationAIUITests/` or `scripts/fixtures/`. If it does not, exclude those paths from `source_fingerprint()`. Then decide whether the headless build can use the app scheme's `build` instead of UI `build-for-testing`, keeping the UI runner's own build separate.
+- Action: check whether the app or CLI target embeds anything from `Playhouse/PlayhouseUITests/` or `scripts/fixtures/`. If it does not, exclude those paths from `source_fingerprint()`. Then decide whether the headless build can use the app scheme's `build` instead of UI `build-for-testing`, keeping the UI runner's own build separate.
 - Verify: change only the UI test file, run `scripts/test-e2e.sh --case <id>`, and expect `Reusing matching E2E build` with `phase=build` close to 0 s.
 
 ### 2. Every E2E cache miss is a clean build, about 110 s
@@ -60,7 +60,7 @@ The first two cases take 39.1 s, about 31% of case time. The new case took 2.9 s
 
 ### 3. Fixture launch environment is duplicated across UI launch paths
 
-- Evidence: `STATIONAI_E2E_CLAUDE_EXECUTABLE` is injected separately at four sites in `StationAIUITests.swift`: `app.launchEnvironment`, two `environment[...]` dictionaries, and `opener --env`. The Codex variable is likewise set at many individual call sites. The ledger records that one scripted insertion failed because its anchor env block occurred twice.
+- Evidence: `PLAYHOUSE_E2E_CLAUDE_EXECUTABLE` is injected separately at four sites in `PlayhouseUITests.swift`: `app.launchEnvironment`, two `environment[...]` dictionaries, and `opener --env`. The Codex variable is likewise set at many individual call sites. The ledger records that one scripted insertion failed because its anchor env block occurred twice.
 - Cost: one failed edit plus a retry. The duration is unknown because there are no timestamps.
 - Action: build provider-fixture launch environment in a single helper that all four launch paths consume, so the next provider or override needs one edit.
 - Verify: adding a new fixture variable touches one site.

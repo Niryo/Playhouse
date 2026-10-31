@@ -15,7 +15,7 @@ Unstaged source fingerprint at verification: `7bdab22f2bf5bce02c4af2e07e32bcea62
 
 The observed task-to-runtime interval is about **19 min 40 s** (derived from supplied timestamps). The measured suite accounts for **6 min 3 s**, or 31% of that interval. The remaining **about 13 min 37 s** contains exploration, implementation, static review and repair, communication, and unobserved gaps; evidence does not divide it into active work, tool wait, or idle time. The timeline is partial through handoff.
 
-The full run passed **92/92** bridge cases with no skips. Its build took 39% of the measured run and its case phase took 60%. The slowest named cases in the retained `/private/tmp/stationai-bridge.X16KCP/bridge-tests.log` were `test_task_done_preserves_worktree_and_branch` (31.488 s), `test_codex_questions_can_be_answered_over_cli_xpc` (27.771 s), and `test_review_pr_conflicts_probe_and_verify` (15.166 s). Together they took 74.425 s, 34% of bridge-case time and 21% of the full run. The changed composer case took 7.587 s. Per-case durations sum to 219.531 s, consistent with the suite's 219.532 s result.
+The full run passed **92/92** bridge cases with no skips. Its build took 39% of the measured run and its case phase took 60%. The slowest named cases in the retained `/private/tmp/playhouse-bridge.X16KCP/bridge-tests.log` were `test_task_done_preserves_worktree_and_branch` (31.488 s), `test_codex_questions_can_be_answered_over_cli_xpc` (27.771 s), and `test_review_pr_conflicts_probe_and_verify` (15.166 s). Together they took 74.425 s, 34% of bridge-case time and 21% of the full run. The changed composer case took 7.587 s. Per-case durations sum to 219.531 s, consistent with the suite's 219.532 s result.
 
 ## Improvements supported by this task
 

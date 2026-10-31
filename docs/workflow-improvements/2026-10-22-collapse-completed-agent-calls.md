@@ -11,7 +11,7 @@ Client date: 2026-10-22
 | Implementation and two UI static review/repair rounds | Task progress supplied to optimizer | Order known; durations unavailable |
 | Button feedback check failed, then help hint was added | Task progress supplied to optimizer; final diff shows `.help(...)` | One failure and repair; duration unavailable |
 | Final static approval | Task progress supplied to optimizer, fingerprint `ba2d1b7dd08a7b695b89ee9537256ffebe6a583a4133ecf3cc73c6f2ceccafe5` | Timestamp and duration unavailable |
-| Final parity and CLI/XPC verification | Task progress supplied to optimizer, `scripts/test-e2e.sh` phase reporter, and `/private/tmp/stationai-bridge.VIMP7q/bridge-tests.log` | 175 s measured total: 81 s build, 92 s cases, 2 s combined other phases/rounding; 56/56 cases passed in 91.897 s |
+| Final parity and CLI/XPC verification | Task progress supplied to optimizer, `scripts/test-e2e.sh` phase reporter, and `/private/tmp/playhouse-bridge.VIMP7q/bridge-tests.log` | 175 s measured total: 81 s build, 92 s cases, 2 s combined other phases/rounding; 56/56 cases passed in 91.897 s |
 | Report and handoff | This report | Duration unavailable |
 
 This is a **partial lifecycle timeline**. The only measured elapsed interval is the final 175 s CLI run. Its build was 46.3% and case phase 52.6% of that run; the remaining 1.1% covers static checks, fixture setup, and integer-second rounding. There are no reliable absolute start/end timestamps or active-agent measurements for implementation, reviews, repairs, or handoff, so total task wall time cannot be reconciled. The bridge log modification time is an artifact timestamp, not a reliable task end signal. No UI runtime suite was reported for routine verification.
