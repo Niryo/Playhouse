@@ -42,8 +42,9 @@ def argument(name):
 def report_command(instructions, marker, replacement=None):
     """Returns the CLI command line StationAI's instructions give for `marker`."""
     for line in instructions.splitlines():
-        if marker in line:
-            command = line.strip()
+        command = line.strip()
+        # Command lines start with the quoted CLI path; prose may mention the same words.
+        if command.startswith("'") and marker in command:
             return command.replace("<completed|waiting-response>", replacement) if replacement else command
     return None
 
@@ -72,6 +73,29 @@ def run_tool(tool_id, name, tool_input, command=None):
 
 
 background_result_sent = False
+
+
+def parent_request_started(message_id, woken=False):
+    """Mirrors the real CLI starting a parent model request. A woken turn,
+    which Claude Code starts to deliver a finished background task's
+    notification after the parent's result, first sends `system init`."""
+    if woken:
+        write({"type": "system", "subtype": "init"})
+    write({"type": "stream_event", "parent_tool_use_id": None,
+           "event": {"type": "message_start", "message": {"id": message_id, "role": "assistant"}}})
+
+
+def wait_for_release(name, description):
+    """Pauses at a protocol point when the test created `<fixture>.<name>-pause`."""
+    if not Path(str(sys.argv[0]) + f".{name}-pause").exists():
+        return
+    Path(str(sys.argv[0]) + f".{name}-ready").write_text(f"{description}\n", encoding="utf-8")
+    release = Path(str(sys.argv[0]) + f".{name}-release")
+    deadline = time.monotonic() + 30
+    while not release.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if not release.exists():
+        raise TimeoutError(f"The test did not release the fixture after: {description}")
 
 
 def respond(user_text, instructions, preserve_no_outcome=False):
@@ -321,8 +345,7 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         ]})
         # The woken parent has only begun streaming when the last agent
         # finishes; no complete assistant message has arrived yet.
-        write({"type": "stream_event", "parent_tool_use_id": None,
-               "event": {"type": "message_start", "message": {"id": "msg_wake_resumed", "role": "assistant"}}})
+        parent_request_started("msg_wake_resumed", woken=True)
         write({"type": "system", "subtype": "task_notification", "task_id": second_task, "run_id": "fixture-run-1",
                "tool_use_id": second_tool, "status": "completed", "output_file": "", "summary": "Reviewer B finished."})
         write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
@@ -338,6 +361,8 @@ def respond(user_text, instructions, preserve_no_outcome=False):
                 raise TimeoutError("The test did not release the woken parent's final answer.")
         text("msg_wake_resumed", "WAKE RESUMED")
         run_tool("toolu_wake_read", "Read", {"file_path": os.path.join(os.getcwd(), "README.md")})
+        # The woken turn's next request carries Reviewer B's queued notification.
+        parent_request_started("msg_wake_final")
         text("msg_wake_final", "WAKE FINAL")
         write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
     elif "background agent" in user_text.lower():
@@ -392,6 +417,57 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
                "tool_use_id": tool_id, "status": terminal_status, "output_file": "", "summary": result_summary})
         write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+        if did_fail:
+            # The running turn's next request carries the notification; no wake follows.
+            parent_request_started("msg_background_failure_seen")
+            text("msg_background_failure_seen", "The background check failed.")
+        else:
+            parent_request_started("msg_background_woken", woken=True)
+            text("msg_background_woken", "BACKGROUND HANDLED")
+            write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+    elif "background shell" in user_text.lower():
+        # Mirrors the real `claude` CLI for a Bash call with run_in_background:
+        # the tool_result only confirms the launch, the shell reports through
+        # the same system task events as an agent, and Claude Code then starts
+        # a woken parent turn to deliver its notification. When the shell
+        # finishes early, that woken turn starts before the first result.
+        tool_id = "toolu_background_shell"
+        task_id = "bgshell-fixture-1"
+        finishes_early = "finishes early" in user_text.lower()
+        assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": "Bash", "input": {
+            "command": "sleep 1; echo SHELL DONE", "description": "Fixture shell", "run_in_background": True,
+        }}])
+        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tool_id, "is_error": False,
+             "content": f"Command running in background with ID: {task_id}."},
+        ]}})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
+            {"task_id": task_id, "run_id": "fixture-run-1", "task_type": "local_bash", "description": "Fixture shell"},
+        ]})
+        write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "description": "Fixture shell", "task_type": "local_bash"})
+        text("msg_shell_started", "SHELL STARTED")
+        if not finishes_early:
+            write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+            wait_for_release("background-shell-running", "Parent result sent while the shell runs.")
+        write({"type": "system", "subtype": "task_updated", "task_id": task_id, "run_id": "fixture-run-1",
+               "patch": {"status": "completed", "end_time": 0}})
+        write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "status": "completed", "output_file": "",
+               "summary": 'Background command "Fixture shell" completed (exit code 0)'})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+        wait_for_release("background-shell-wake", "The shell finished before the parent woke.")
+        parent_request_started("msg_shell_woken", woken=True)
+        text("msg_shell_woken", "SHELL HANDLED")
+        outcome = report_command(instructions, " task outcome ", "completed")
+        if outcome:
+            commands.append({"command": outcome, "output": run_tool("toolu_shell_outcome", "Bash", {"command": outcome}, outcome)})
+        if finishes_early:
+            # The first turn's result arrives only after the woken turn began.
+            write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+            wait_for_release("background-shell-second-result", "The first result arrived; the woken turn's is pending.")
+        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+        background_result_sent = True
     else:
         text("msg_simple", SIMPLE_ANSWER)
     return commands

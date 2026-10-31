@@ -43,7 +43,21 @@ final class ClaudeSessionRunner {
     private struct TurnCompletion {
         var resultReceived = false
         var resultError: Error?
+        /// Results Claude sent during this logical turn, including woken turns.
+        var resultCount = 0
+        /// Provider turns Claude Code started to deliver a background task's
+        /// notification. Each owes its own result, which can arrive after the
+        /// earlier turn's result or before it.
+        var wokenTurnCount = 0
+        /// A top-level background task finished and Claude Code has not yet
+        /// delivered its notification to the parent, either in a new provider
+        /// turn (`system init`) or in the running one's next request.
+        var awaitingParentWake = false
     }
+
+    /// How long a settled turn waits for Claude Code to deliver a finished
+    /// background task before treating the notification as already consumed.
+    nonisolated static let parentWakeGracePeriod: Duration = .seconds(15)
 
     let sessionID: String
     private let executable: String
@@ -88,10 +102,15 @@ final class ClaudeSessionRunner {
     /// as its own activity row. Their notifications are internal to the agent's
     /// own work and must not spawn a stray top-level activity.
     private var nestedBackgroundTaskIDs: Set<String> = []
-    /// Tool-use ids for Agent/Task calls launched with `run_in_background: true`,
-    /// so their instant launch-confirmation tool_result isn't mistaken for the
-    /// agent's actual completion.
+    /// Tool-use ids for Agent/Task and Bash calls launched with
+    /// `run_in_background: true`, so their instant launch-confirmation
+    /// tool_result isn't mistaken for the actual completion.
     private var backgroundedToolUseIDs: Set<String> = []
+    /// Top-level background shells (`local_bash` not owned by a subagent). They
+    /// keep the turn open like agents, but their summary is command status, not
+    /// an agent report for the transcript.
+    private var backgroundShellTaskIDs: Set<String> = []
+    private var parentWakeBackstopGeneration = 0
 
     private(set) var activeTurnID: String?
     private(set) var isTurnActive = false
@@ -183,6 +202,7 @@ final class ClaudeSessionRunner {
         let userMessageID = UUID().uuidString.lowercased()
         activeTurnID = turnID
         turnCompletion = TurnCompletion()
+        parentWakeBackstopGeneration += 1
         pendingCommandUUIDs = [userMessageID]
         try writeUserMessage(text: providerPrompt, imageDataURLs: imageDataURLs, uuid: userMessageID, priority: nil)
         isTurnActive = true
@@ -343,11 +363,11 @@ final class ClaudeSessionRunner {
         if modelID != ClaudeCodeClient.defaultModelID { arguments += ["--model", modelID] }
         if !persistsSessions { arguments.append("--no-session-persistence") }
         for root in workspace.roots.dropFirst() { arguments += ["--add-dir", root.path] }
-        // Backgrounded shell commands have no completion protocol StationAI can
-        // observe (unlike the Agent tool's task events), so a `&`-backgrounded Bash
-        // command would be silently lost once the turn settles. Keep shell work
-        // in the foreground; background Agent/Task calls are tracked separately.
-        var systemPrompt = ClaudeCodeClient.foregroundExecutionInstruction
+        // Background Bash and Agent/Task calls report through Claude Code's task
+        // events and keep the turn open, so Claude may end its response while
+        // they run instead of blocking on a wait it cannot satisfy. Only a process
+        // detached with `&` or `nohup` is invisible to Claude Code and StationAI.
+        var systemPrompt = ClaudeCodeClient.executionInstruction
         if let developerInstructions, !developerInstructions.isEmpty {
             systemPrompt += "\n\n" + developerInstructions
         }
@@ -504,10 +524,19 @@ final class ClaudeSessionRunner {
         }
     }
 
+    /// Whether Claude has finished everything this logical turn owns: its
+    /// result, steered input, background tasks, and any turn Claude Code starts
+    /// to deliver a finished background task. A failure settles regardless.
+    private var isTurnSettled: Bool {
+        guard turnCompletion.resultReceived, pendingCommandUUIDs.isEmpty || !sawCommandLifecycle,
+              outstandingBackgroundTaskIDs.isEmpty,
+              pendingBackgroundTaskNotificationIDs.isEmpty else { return false }
+        if turnCompletion.resultError != nil { return true }
+        return !turnCompletion.awaitingParentWake && turnCompletion.resultCount > turnCompletion.wokenTurnCount
+    }
+
     private func waitForTurnCompletion() async throws {
-        if turnCompletion.resultReceived, pendingCommandUUIDs.isEmpty || !sawCommandLifecycle,
-           outstandingBackgroundTaskIDs.isEmpty,
-           pendingBackgroundTaskNotificationIDs.isEmpty {
+        if isTurnSettled {
             if let error = turnCompletion.resultError { throw error }
             return
         }
@@ -613,6 +642,10 @@ final class ClaudeSessionRunner {
         case "stream_event":
             guard message["parent_tool_use_id"] is NSNull || message["parent_tool_use_id"] == nil else { return }
             noteParentResponseStarted()
+            // A new parent request carries any notification queued before it.
+            if (message["event"] as? [String: Any])?["type"] as? String == "message_start" {
+                setAwaitingParentWake(false)
+            }
             guard let event = message["event"] as? [String: Any],
                   event["type"] as? String == "content_block_delta",
                   let delta = event["delta"] as? [String: Any],
@@ -742,7 +775,7 @@ final class ClaudeSessionRunner {
                     pendingTextSpansOutcomeReport = false
                 }
                 activityStartedAtUptime[toolID] = DispatchTime.now().uptimeNanoseconds
-                if (name == "Task" || name == "Agent"), input["run_in_background"] as? Bool == true {
+                if ["Task", "Agent", "Bash"].contains(name), input["run_in_background"] as? Bool == true {
                     backgroundedToolUseIDs.insert(toolID)
                 }
                 let activity = ClaudeCodeClient.activity(toolID: toolID, name: name, input: input, status: "inProgress", turnID: activeTurnID)
@@ -797,6 +830,13 @@ final class ClaudeSessionRunner {
     private func handleSystem(_ message: [String: Any]) {
         guard let subtype = message["subtype"] as? String else { return }
         switch subtype {
+        case "init":
+            // Claude Code starts a provider turn of its own to deliver a finished
+            // background task; that turn's result also belongs to this one.
+            if turnCompletion.awaitingParentWake {
+                setAwaitingParentWake(false)
+                turnCompletion.wokenTurnCount += 1
+            }
         case "background_tasks_changed":
             let tasks = message["tasks"] as? [[String: Any]] ?? []
             outstandingBackgroundTaskIDs = Set(tasks.compactMap { $0["task_id"] as? String })
@@ -804,10 +844,13 @@ final class ClaudeSessionRunner {
         case "task_started":
             guard let taskID = message["task_id"] as? String,
                   let toolUseID = message["tool_use_id"] as? String else { return }
-            guard message["task_type"] as? String == "local_agent" else {
+            let taskType = message["task_type"] as? String
+            guard message["owned_by_subagent"] as? Bool != true,
+                  taskType == "local_agent" || taskType == "local_bash" else {
                 nestedBackgroundTaskIDs.insert(taskID)
                 return
             }
+            if taskType == "local_bash" { backgroundShellTaskIDs.insert(taskID) }
             pendingBackgroundTaskNotificationIDs.insert(taskID)
             backgroundTaskToolUseIDs[taskID] = toolUseID
             guard var activity = toolActivities[toolUseID] else { return }
@@ -831,6 +874,9 @@ final class ClaudeSessionRunner {
                 pendingBackgroundTaskNotificationIDs.remove(taskID)
             }
             guard !nestedBackgroundTaskIDs.contains(taskID) else { return }
+            // Claude Code delivers every top-level notification to the parent.
+            if isTaskNotification { setAwaitingParentWake(true) }
+            let isShell = backgroundShellTaskIDs.contains(taskID)
             let patch = message["patch"] as? [String: Any]
             guard let rawStatus = (message["status"] as? String) ?? (patch?["status"] as? String) else {
                 completeTurnIfSettled()
@@ -856,7 +902,7 @@ final class ClaudeSessionRunner {
                     childThreadID: existing.childThreadID, agentPath: existing.agentPath, model: existing.model,
                     toolKind: existing.toolKind, server: existing.server, tool: existing.tool,
                     durationMs: duration ?? existing.durationMs, turnID: existing.turnID, backgroundTaskID: taskID,
-                    backgroundTaskSummary: summary ?? existing.backgroundTaskSummary
+                    backgroundTaskSummary: isShell ? nil : summary ?? existing.backgroundTaskSummary
                 )
                 if let duration { activityDurations[activity.id] = duration }
                 toolActivities[toolUseID] = activity
@@ -904,7 +950,35 @@ final class ClaudeSessionRunner {
         } else {
             turnCompletion.resultReceived = true
         }
+        turnCompletion.resultCount += 1
         completeTurnIfSettled()
+    }
+
+    /// Every change to the expected wake invalidates a pending backstop, so a
+    /// timer started for one notification can't clear a later one.
+    private func setAwaitingParentWake(_ awaiting: Bool) {
+        turnCompletion.awaitingParentWake = awaiting
+        parentWakeBackstopGeneration += 1
+    }
+
+    /// When only an undelivered background notification holds a finished turn
+    /// open, settle after a grace period: Claude Code normally starts the woken
+    /// turn within milliseconds, and a notification it consumed without a new
+    /// request must not hold the task In Progress indefinitely.
+    private func scheduleParentWakeBackstopIfNeeded() {
+        guard turnCompletion.awaitingParentWake, turnCompletion.resultError == nil,
+              turnCompletion.resultReceived, turnCompletion.resultCount > turnCompletion.wokenTurnCount,
+              outstandingBackgroundTaskIDs.isEmpty, pendingBackgroundTaskNotificationIDs.isEmpty else { return }
+        parentWakeBackstopGeneration += 1
+        let generation = parentWakeBackstopGeneration
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: ClaudeSessionRunner.parentWakeGracePeriod)
+            guard let self, self.parentWakeBackstopGeneration == generation,
+                  self.turnCompletion.awaitingParentWake else { return }
+            StationAIDiagnostics.record("claude.turn.parent_wake_timeout", fields: self.diagnosticFields([:]))
+            self.setAwaitingParentWake(false)
+            self.completeTurnIfSettled()
+        }
     }
 
     /// Claude Code wakes the parent for a background agent's notification after
@@ -916,9 +990,10 @@ final class ClaudeSessionRunner {
     }
 
     private func completeTurnIfSettled() {
-        guard turnCompletion.resultReceived, pendingCommandUUIDs.isEmpty || !sawCommandLifecycle,
-              outstandingBackgroundTaskIDs.isEmpty,
-              pendingBackgroundTaskNotificationIDs.isEmpty else { return }
+        guard isTurnSettled else {
+            scheduleParentWakeBackstopIfNeeded()
+            return
+        }
         if let error = turnCompletion.resultError {
             finishTurn(.failure(error))
             return
@@ -967,8 +1042,8 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     /// The first Claude Code release StationAI verified for active-turn steering
     /// (`priority: "next"`) and command lifecycle events.
     nonisolated static let minimumVersion = "2.1.296"
-    nonisolated static let foregroundExecutionInstruction = """
-        Run every shell command in the foreground and wait for it to finish, including long sleeps, builds, and tests. Never set run_in_background, never background a command with &, and never end your turn while work you started is still running.
+    nonisolated static let executionInstruction = """
+        Run shell commands in the foreground or with the Bash tool's run_in_background, and run Agent/Task calls in the foreground or in the background, whichever suits the work. Never detach a process with & or nohup: StationAI tracks background work only through the Bash and Agent tools. StationAI keeps the task running while background shells or agents are outstanding and you are woken when each one finishes, so after launching them you can end your response instead of waiting; never poll or loop on a condition that cannot become true. Report the task outcome only after you have handled every background result.
         """
 
     let provider = ConversationProvider.claude

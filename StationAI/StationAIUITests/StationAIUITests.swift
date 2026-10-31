@@ -9067,7 +9067,7 @@ final class StationAIUITests: XCTestCase {
         )
     }
 
-    // case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early. A status-only completion update is not shown as an agent result; the summary-bearing notification is persisted as one normal assistant message in the parent conversation, appears in the visible transcript, and survives fresh CLI/XPC history reads and app reopening without duplication. A failed background agent remains inspectable as a failed activity, and its error summary is not added as an assistant result. When a background agent's notification wakes the parent after its result, the turn stays open through that resumed work, including when the last agent finishes while the woken parent is still streaming, and ends only with the parent's next result, keeping its final answer and both agent reports.
+    // case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early. A status-only completion update is not shown as an agent result; the summary-bearing notification is persisted as one normal assistant message in the parent conversation, appears in the visible transcript, and survives fresh CLI/XPC history reads and app reopening without duplication. A failed background agent remains inspectable as a failed activity, and its error summary is not added as an assistant result. When a background agent's notification wakes the parent after its result, the turn stays open through that resumed work, including when the last agent finishes while the woken parent is still streaming, and ends only with the parent's next result, keeping its final answer and both agent reports. A failed agent whose notification the running turn already consumed ends the send promptly instead of waiting for a wake. The system prompt StationAI appends for Claude lets it run shell commands and agents in the foreground or background, forbids only processes detached with & or nohup, says it can end its response while background work runs instead of waiting and must report the outcome only after the background results, and no longer tells it to sleep, keep shell commands in the foreground, or keep its turn open for work it started.
     func test_claude_background_agent_keeps_turn_open_until_resolved() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-background-agent")
         try FileManager.default.copyItem(
@@ -9140,6 +9140,22 @@ final class StationAIUITests: XCTestCase {
         let activity = try XCTUnwrap(activities.first { $0["childThreadID"] as? String == "toolu_background_agent" })
         XCTAssertEqual(activity["status"] as? String, "completed")
         XCTAssertEqual(activity["backgroundTaskID"] as? String, "bgtask-fixture-1")
+        let launchHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any])
+        let launchArguments = try XCTUnwrap((launchHistory["turns"] as? [[String: Any]])?.first?["arguments"] as? [String])
+        let systemPromptIndex = try XCTUnwrap(launchArguments.firstIndex(of: "--append-system-prompt"))
+        let systemPrompt = launchArguments[systemPromptIndex + 1]
+        for guidance in [
+            "Never detach a process with & or nohup",
+            "in the foreground or with the Bash tool's run_in_background",
+            "run Agent/Task calls in the foreground or in the background",
+            "you can end your response instead of waiting",
+            "Report the task outcome only after you have handled every background result",
+        ] {
+            XCTAssertTrue(systemPrompt.contains(guidance), "Claude should be told how StationAI handles background agents: \(guidance)")
+        }
+        for contradiction in ["including long sleeps", "never end your turn while work you started is still running", "Never background a shell command"] {
+            XCTAssertFalse(systemPrompt.contains(contradiction), "Claude must not be told to block on background agents it launched: \(contradiction)")
+        }
 
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
@@ -9159,14 +9175,20 @@ final class StationAIUITests: XCTestCase {
         element("message-composer").click()
         element("message-composer").typeText("Launch a background agent failure case.")
         element("send-message-button").click()
+        let failedSentAt = Date()
         XCTAssertTrue(
-            waitUntil({ self.transcriptContains("STARTED") }, timeout: 15),
-            "The parent response should remain visible for a failed agent turn."
+            waitUntil({ self.transcriptContains("The background check failed.") }, timeout: 15),
+            "The parent's answer should remain visible for a failed agent turn."
         )
         element("codex-activity-disclosure").click()
         let failedAgentRow = element("codex-subagent-row-toolu_background_agent")
         XCTAssertTrue(waitUntil({ failedAgentRow.label.contains("failed") }, timeout: 15), failedAgentRow.label)
         XCTAssertFalse(element(reportIdentifier).exists, "A failed agent summary must not appear as a successful assistant result.")
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 20))
+        XCTAssertLessThan(
+            Date().timeIntervalSince(failedSentAt), 10,
+            "A notification the running turn already consumed must not hold the turn open for a wake that never comes."
+        )
         let failedHistory = try XCTUnwrap(try runCLI(
             ["conversation", "history", failedTaskID],
             extraEnvironment: ["STATIONAI_E2E_CLAUDE_EXECUTABLE": executable.path]
@@ -9226,6 +9248,109 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(
             wakeMessages.filter { $0["phase"] as? String == "subagent_report" }.compactMap { $0["text"] as? String }.sorted(),
             ["Reviewer A finished.", "Reviewer B finished."]
+        )
+    }
+
+    // case-contract: test_claude_background_shell_keeps_turn_open_through_wake | A Claude Bash call launched with run_in_background stays an in-progress activity after its launch confirmation and keeps the turn open after Claude's result while the shell runs, and still after the shell's notification empties the background task list, until the parent turn Claude Code wakes to deliver that notification sends its own result. The woken turn's answer is the final answer, the outcome it reports moves the task to Review without private outcome reminders, and the shell's completion resolves its activity with the command status without becoming an agent report. When the shell finishes before Claude's first result, so the woken turn starts before that result arrives, the turn waits for both results.
+    func test_claude_background_shell_keeps_turn_open_through_wake() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-background-shell")
+        try FileManager.default.copyItem(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try "StationAI test owns this Claude Code protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".stationai-claude-fixture-owner"),
+            atomically: true,
+            encoding: .utf8
+        )
+        claudeFixtureExecutable = executable.path
+        func stage(_ name: String) -> URL { URL(fileURLWithPath: executable.path + ".background-shell-\(name)") }
+        try "Pause while the shell runs.\n".write(to: stage("running-pause"), atomically: true, encoding: .utf8)
+        try "Pause before the woken turn.\n".write(to: stage("wake-pause"), atomically: true, encoding: .utf8)
+        defer {
+            try? "Release.\n".write(to: stage("running-release"), atomically: true, encoding: .utf8)
+            try? "Release.\n".write(to: stage("wake-release"), atomically: true, encoding: .utf8)
+        }
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude background shell", "--root", fixture.primary.path, "--provider", "claude"
+        ]) ["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Claude background shell")
+        element("message-composer").click()
+        element("message-composer").typeText("Launch a background shell for this turn.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: stage("running-ready").path) }, timeout: 15),
+                      "The fixture should pause after Claude's result while the shell runs.")
+        XCTAssertTrue(waitUntil({ self.transcriptContains("SHELL STARTED") }, timeout: 10))
+        XCTAssertTrue(element("pause-response-button").exists, "The turn must stay active while a background shell runs.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+        let claudeEnvironment = ["STATIONAI_E2E_CLAUDE_EXECUTABLE": executable.path]
+        let running = try XCTUnwrap(try runCLI(["conversation", "history", taskID], extraEnvironment: claudeEnvironment)["result"] as? [String: Any])
+        let runningShell = try XCTUnwrap((running["activities"] as? [[String: Any]])?.first { $0["id"] as? String == "toolu_background_shell" })
+        XCTAssertEqual(runningShell["status"] as? String, "inProgress", "The launch confirmation must not resolve a background shell.")
+
+        try "Finish the shell.\n".write(to: stage("running-release"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: stage("wake-ready").path) }, timeout: 15),
+                      "The fixture should pause between the shell's notification and the woken turn.")
+        // Settling when the background task list empties would end the turn here;
+        // give that regression time to show.
+        XCTAssertFalse(waitUntil({ !self.element("pause-response-button").exists }, timeout: 2),
+                       "The turn must stay active until the woken turn that delivers the shell's notification reports.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+        XCTAssertFalse(transcriptContains("SHELL HANDLED"))
+
+        try "Start the woken turn.\n".write(to: stage("wake-release"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ self.transcriptContains("SHELL HANDLED") }, timeout: 15),
+                      "The woken turn's answer should appear as the final answer.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 15),
+                      "The outcome Claude reports in its woken turn should move the task to Review.")
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID], extraEnvironment: claudeEnvironment)["result"] as? [String: Any])
+        let shell = try XCTUnwrap((history["activities"] as? [[String: Any]])?.first { $0["id"] as? String == "toolu_background_shell" })
+        XCTAssertEqual(shell["status"] as? String, "completed")
+        XCTAssertEqual(shell["backgroundTaskID"] as? String, "bgshell-fixture-1")
+        XCTAssertTrue((shell["detail"] as? String ?? "").contains("completed (exit code 0)"))
+        XCTAssertNil(shell["backgroundTaskSummary"] as? String, "A shell's status line is not an agent result.")
+        let messages = history["messages"] as? [[String: Any]] ?? []
+        XCTAssertFalse(messages.contains { $0["phase"] as? String == "subagent_report" })
+        XCTAssertEqual(messages.filter { $0["role"] as? String == "assistant" }.last?["text"] as? String, "SHELL HANDLED")
+
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        try FileManager.default.removeItem(at: stage("running-pause"))
+        try FileManager.default.removeItem(at: stage("wake-pause"))
+        try "Pause between the first and the woken turn's results.\n".write(to: stage("second-result-pause"), atomically: true, encoding: .utf8)
+        defer { try? "Release.\n".write(to: stage("second-result-release"), atomically: true, encoding: .utf8) }
+        let early = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude early background shell", "--root", fixture.primary.path, "--provider", "claude"
+        ]) ["result"] as? [String: Any])
+        let earlyID = try XCTUnwrap(early["id"] as? String)
+        openTask(named: "Claude early background shell")
+        element("message-composer").click()
+        element("message-composer").typeText("Launch a background shell that finishes early.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: stage("second-result-ready").path) }, timeout: 15),
+                      "The fixture should pause between the first result and the woken turn's result.")
+        XCTAssertFalse(waitUntil({ !self.element("pause-response-button").exists }, timeout: 2),
+                       "The first turn's result must not end the turn while the woken turn that started before it is unfinished.")
+        XCTAssertEqual(try taskRecord(id: earlyID)?["status"] as? String, "In Progress")
+        try "Send the woken turn's result.\n".write(to: stage("second-result-release"), atomically: true, encoding: .utf8)
+        let secondResultSentAt = Date()
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: earlyID)?["status"] as? String) == "Review" }, timeout: 20),
+                      "When the woken turn starts before Claude's first result, the turn must wait for both results.")
+        XCTAssertLessThan(Date().timeIntervalSince(secondResultSentAt), 10,
+                          "The woken turn's result should settle the turn without waiting for the wake backstop.")
+        XCTAssertTrue(transcriptContains("SHELL HANDLED"))
+        let earlyHistory = try XCTUnwrap(try runCLI(["conversation", "history", earlyID], extraEnvironment: claudeEnvironment)["result"] as? [String: Any])
+        XCTAssertEqual(
+            (earlyHistory["messages"] as? [[String: Any]] ?? []).filter { $0["role"] as? String == "assistant" }.last?["text"] as? String,
+            "SHELL HANDLED"
+        )
+        let recorded = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any])
+        XCTAssertFalse(
+            (recorded["turns"] as? [[String: Any]] ?? []).contains { ($0["userText"] as? String)?.contains("previous request finished without reporting") == true },
+            "An outcome reported in the woken turn must not trigger private outcome reminders."
         )
     }
 

@@ -6644,7 +6644,7 @@ class StationAIBridgeTests(unittest.TestCase):
         resumed, _ = self.call_cli("conversation", "history", task_id)
         self.assertIsNone(self.assert_success(resumed).get("pendingUserInputRequest"))
 
-    # case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early. A status-only completion update is not shown as an agent result; the summary-bearing notification is persisted as one normal assistant message in the parent conversation, appears in the visible transcript, and survives fresh CLI/XPC history reads and app reopening without duplication. A failed background agent remains inspectable as a failed activity, and its error summary is not added as an assistant result. When a background agent's notification wakes the parent after its result, the turn stays open through that resumed work, including when the last agent finishes while the woken parent is still streaming, and ends only with the parent's next result, keeping its final answer and both agent reports.
+    # case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early. A status-only completion update is not shown as an agent result; the summary-bearing notification is persisted as one normal assistant message in the parent conversation, appears in the visible transcript, and survives fresh CLI/XPC history reads and app reopening without duplication. A failed background agent remains inspectable as a failed activity, and its error summary is not added as an assistant result. When a background agent's notification wakes the parent after its result, the turn stays open through that resumed work, including when the last agent finishes while the woken parent is still streaming, and ends only with the parent's next result, keeping its final answer and both agent reports. A failed agent whose notification the running turn already consumed ends the send promptly instead of waiting for a wake. The system prompt StationAI appends for Claude lets it run shell commands and agents in the foreground or background, forbids only processes detached with & or nohup, says it can end its response while background work runs instead of waiting and must report the outcome only after the background results, and no longer tells it to sleep, keep shell commands in the foreground, or keep its turn open for work it started.
     def test_claude_background_agent_keeps_turn_open_until_resolved(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-background-agent"
@@ -6736,16 +6736,33 @@ class StationAIBridgeTests(unittest.TestCase):
         fresh_history = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
         fresh_reports = [message for message in fresh_history["messages"] if message.get("phase") == "subagent_report"]
         self.assertEqual(fresh_reports, reports, "Fresh XPC reads should preserve one stable result message without duplication.")
+        launch_arguments = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"][0]["arguments"]
+        system_prompt = launch_arguments[launch_arguments.index("--append-system-prompt") + 1]
+        for guidance in [
+            "Never detach a process with & or nohup",
+            "in the foreground or with the Bash tool's run_in_background",
+            "run Agent/Task calls in the foreground or in the background",
+            "you can end your response instead of waiting",
+            "Report the task outcome only after you have handled every background result",
+        ]:
+            self.assertIn(guidance, system_prompt, "Claude should be told how StationAI handles background agents.")
+        for contradiction in ["including long sleeps", "never end your turn while work you started is still running", "Never background a shell command"]:
+            self.assertNotIn(contradiction, system_prompt, "Claude must not be told to block on background agents it launched.")
 
         failed_task_response, _ = self.call_cli(
             "task", "create", "--title", "Claude failed background agent", "--root", self.primary, "--provider", "claude"
         )
         failed_task_id = self.assert_success(failed_task_response)["id"]
+        failed_started = time.monotonic()
         failed_send, _ = self.call_cli(
             "conversation", "send", failed_task_id, "--message", "Launch a background agent failure case.",
             extra_environment=env,
         )
         self.assert_success(failed_send)
+        self.assertLess(
+            time.monotonic() - failed_started, 10,
+            "A notification the running turn already consumed must not hold the turn open for a wake that never comes.",
+        )
         failed_history = self.assert_success(self.call_cli("conversation", "history", failed_task_id, extra_environment=env)[0])
         failed_activity = next(a for a in failed_history["activities"] if a["childThreadID"] == "toolu_background_agent")
         self.assertEqual(failed_activity["status"], "failed")
@@ -6802,6 +6819,108 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(
             any(activity["id"] == "toolu_wake_read" for activity in wake_history["activities"]),
             "Tool work the woken parent ran should be recorded in the turn.",
+        )
+
+    # case-contract: test_claude_background_shell_keeps_turn_open_through_wake | A Claude Bash call launched with run_in_background stays an in-progress activity after its launch confirmation and keeps the turn open after Claude's result while the shell runs, and still after the shell's notification empties the background task list, until the parent turn Claude Code wakes to deliver that notification sends its own result. The woken turn's answer is the final answer, the outcome it reports moves the task to Review without private outcome reminders, and the shell's completion resolves its activity with the command status without becoming an agent report. When the shell finishes before Claude's first result, so the woken turn starts before that result arrives, the turn waits for both results.
+    def test_claude_background_shell_keeps_turn_open_through_wake(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / "claude-fixture-background-shell"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
+            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        created, _ = self.call_cli(
+            "task", "create", "--title", "Claude background shell", "--root", self.primary, "--provider", "claude"
+        )
+        task_id = self.assert_success(created)["id"]
+        stage = {name: Path(f"{executable}.background-shell-{name}") for name in [
+            "running-pause", "running-ready", "running-release", "wake-pause", "wake-ready", "wake-release",
+            "second-result-pause", "second-result-ready", "second-result-release",
+        ]}
+        stage["running-pause"].write_text("Pause while the shell runs.\n", encoding="utf-8")
+        stage["wake-pause"].write_text("Pause between the shell's notification and the woken turn.\n", encoding="utf-8")
+
+        def wait_for(path):
+            deadline = time.monotonic() + 20
+            while not path.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(path.exists(), f"The fixture should reach {path.name}.")
+            # Give a premature settle time to end the send before asserting it is open.
+            time.sleep(0.5)
+
+        command = ("conversation", "send", task_id, "--message", "Launch a background shell for this turn.")
+        process = self.start_cli(*command, extra_environment=env)
+        try:
+            wait_for(stage["running-ready"])
+            self.assertIsNone(process.poll(), "The send must stay open while a background shell runs after Claude's result.")
+            running = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+            shell = next(a for a in running["activities"] if a["id"] == "toolu_background_shell")
+            self.assertEqual(shell["status"], "inProgress", "The launch confirmation must not resolve a background shell.")
+            stage["running-release"].write_text("Finish the shell.\n", encoding="utf-8")
+            wait_for(stage["wake-ready"])
+            self.assertIsNone(
+                process.poll(),
+                "The send must stay open after the shell's notification until Claude's woken turn reports its result.",
+            )
+            self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress")
+            stage["wake-release"].write_text("Start the woken turn.\n", encoding="utf-8")
+            response, events = self.finish_cli(process, command, timeout=60)
+        finally:
+            stage["running-release"].write_text("Release after failure.\n", encoding="utf-8")
+            stage["wake-release"].write_text("Release after failure.\n", encoding="utf-8")
+            if process.poll() is None:
+                process.communicate(timeout=30)
+        self.assert_success(response)
+        self.assertEqual([e["payload"]["text"] for e in events if e["type"] == "assistant_final"], ["SHELL HANDLED"])
+        self.assertEqual(
+            self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Review",
+            "The outcome Claude reports in its woken turn should be honored.",
+        )
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        shell = next(a for a in history["activities"] if a["id"] == "toolu_background_shell")
+        self.assertEqual(shell["status"], "completed")
+        self.assertEqual(shell["backgroundTaskID"], "bgshell-fixture-1")
+        self.assertIn("completed (exit code 0)", shell["detail"])
+        self.assertIsNone(shell.get("backgroundTaskSummary"), "A shell's status line is not an agent result.")
+        self.assertFalse(any(m.get("phase") == "subagent_report" for m in history["messages"]))
+        self.assertEqual(
+            [m["text"] for m in history["messages"] if m["role"] == "assistant"][-1], "SHELL HANDLED",
+            "The woken turn's answer should be the turn's last assistant message.",
+        )
+
+        early_created, _ = self.call_cli(
+            "task", "create", "--title", "Claude early background shell", "--root", self.primary, "--provider", "claude"
+        )
+        early_id = self.assert_success(early_created)["id"]
+        for name in ("running-pause", "wake-pause"):
+            stage[name].unlink()
+        stage["second-result-pause"].write_text("Pause between the first and the woken turn's results.\n", encoding="utf-8")
+        early_command = ("conversation", "send", early_id, "--message", "Launch a background shell that finishes early.")
+        process = self.start_cli(*early_command, extra_environment=env)
+        try:
+            wait_for(stage["second-result-ready"])
+            self.assertIsNone(
+                process.poll(),
+                "The first turn's result must not end the send while the woken turn that started before it is unfinished.",
+            )
+            stage["second-result-release"].write_text("Send the woken turn's result.\n", encoding="utf-8")
+            early, early_events = self.finish_cli(process, early_command, timeout=60)
+        finally:
+            stage["second-result-release"].write_text("Release after failure.\n", encoding="utf-8")
+            if process.poll() is None:
+                process.communicate(timeout=30)
+        self.assert_success(early)
+        self.assertEqual(
+            [e["payload"]["text"] for e in early_events if e["type"] == "assistant_final"], ["SHELL HANDLED"],
+            "When the woken turn starts before Claude's first result, the turn must wait for both results.",
+        )
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", early_id)[0])["status"], "Review")
+        recorded = json.loads(Path(f"{executable}.history").read_text(encoding="utf-8"))["turns"]
+        self.assertFalse(
+            any("previous request finished without reporting" in (t.get("userText") or "") for t in recorded),
+            "An outcome reported in the woken turn must not trigger private outcome reminders.",
         )
 
     # case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, StationAI returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics.

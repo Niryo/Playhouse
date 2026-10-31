@@ -1,3 +1,3 @@
 # Workflow improvement reports
 
-The workflow optimizer writes one dated, task-specific Markdown report per run in this directory. Reports are separate records; later runs must create a new file instead of editing or consolidating earlier reports.
+This directory archives the dated, task-specific reports the workflow optimizer agent wrote, one per task. That agent has been retired; the reports remain as separate historical records.
