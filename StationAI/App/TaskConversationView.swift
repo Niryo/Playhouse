@@ -578,7 +578,16 @@ struct TaskConversationView: View {
             await Task.yield()
             var transaction = Transaction()
             transaction.disablesAnimations = true
-            let pin = { proxy.scrollTo(turnStartID, anchor: .top) }
+            let pin = {
+                // A pending question form renders below the newest turn and
+                // must be fully reachable, Submit included; pinning the turn's
+                // question to the top can leave the form behind the composer.
+                if let request = userInputRequest, request.threadID == task.activeConversationID {
+                    proxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
+                } else {
+                    proxy.scrollTo(turnStartID, anchor: .top)
+                }
+            }
             withTransaction(transaction, pin)
             // The rows below the pin are realized by that first scroll; pinning
             // again lands on their real positions instead of estimates.

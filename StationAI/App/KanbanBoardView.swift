@@ -1187,52 +1187,9 @@ private struct TaskCardView: View {
     let onMoveToDone: (() -> Void)?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            if showPullRequestControls || hasLiveStatus {
-                HStack(alignment: .center, spacing: 6) {
-                    if showPullRequestControls {
-                        pullRequestControls
-                        Spacer(minLength: 8)
-                    }
-                    if let progressLabel = task.progressLabel, !progressLabel.isEmpty {
-                        HStack(alignment: .top, spacing: 6) {
-                            let progressType = TaskProgressType(rawValue: task.progressTypeRawValue ?? "")
-                            Image(systemName: progressType?.symbol ?? "sparkle")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(Color.accentColor)
-                                .accessibilityLabel(progressType?.symbol ?? "sparkle")
-                                .accessibilityIdentifier("task-progress-icon-\(task.id.uuidString)")
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(progressLabel)
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(WorkspaceTheme.conversationText)
-                                    .accessibilityIdentifier("task-progress-label-\(task.id.uuidString)")
-                                if let progressDetail = task.progressDetail, !progressDetail.isEmpty {
-                                    Text(progressDetail)
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(2)
-                                        .accessibilityIdentifier("task-progress-detail-\(task.id.uuidString)")
-                                }
-                            }
-                        }
-                        .accessibilityElement(children: .contain)
-                        .accessibilityIdentifier("task-progress-report-\(task.id.uuidString)")
-                        .accessibilityLabel([progressLabel, task.progressDetail].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", "))
-                        .accessibilityValue("Progress icon: \(TaskProgressType(rawValue: task.progressTypeRawValue ?? "")?.symbol ?? "sparkle")")
-                    }
-                }
-            }
-
-            if let statusMessage = task.statusMessage, !statusMessage.isEmpty {
-                Text(statusMessage)
-                    .font(.system(size: 10))
-                    .foregroundStyle(task.status == .blocked ? Color.red : Color.secondary)
-                    .lineLimit(3)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityIdentifier("task-status-message-\(task.id.uuidString)")
-            }
-
+        // Card rows, top to bottom: the title, the live updates, then the time
+        // on the left with the pull-request controls on the right.
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
                 if task.title == "Generating title…" { ProgressView().controlSize(.small) }
                 Text(task.title)
@@ -1243,40 +1200,75 @@ private struct TaskCardView: View {
                 .foregroundStyle(WorkspaceTheme.conversationText)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("task-title-\(task.id.uuidString)")
+                .allowsHitTesting(false)
 
-            HStack(spacing: 6) {
-                Image(systemName: "clock")
-                    .font(.system(size: 10))
-                if task.status == .inProgress {
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        Text(workingDuration(at: context.date))
-                            .font(.system(size: 10))
-                            .accessibilityIdentifier("task-working-duration-\(task.id.uuidString)")
+            if let progressLabel = task.progressLabel, !progressLabel.isEmpty {
+                HStack(alignment: .top, spacing: 6) {
+                    let progressType = TaskProgressType(rawValue: task.progressTypeRawValue ?? "")
+                    Image(systemName: progressType?.symbol ?? "sparkle")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .accessibilityLabel(progressType?.symbol ?? "sparkle")
+                        .accessibilityIdentifier("task-progress-icon-\(task.id.uuidString)")
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(progressLabel)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(WorkspaceTheme.conversationText)
+                            .accessibilityIdentifier("task-progress-label-\(task.id.uuidString)")
+                        if let progressDetail = task.progressDetail, !progressDetail.isEmpty {
+                            Text(progressDetail)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .accessibilityIdentifier("task-progress-detail-\(task.id.uuidString)")
+                        }
                     }
-                } else {
-                    Text(task.createdAt.formatted(date: .abbreviated, time: .omitted))
-                        .font(.system(size: 10))
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("task-progress-report-\(task.id.uuidString)")
+                .accessibilityLabel([progressLabel, task.progressDetail].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", "))
+                .accessibilityValue("Progress icon: \(TaskProgressType(rawValue: task.progressTypeRawValue ?? "")?.symbol ?? "sparkle")")
+                .allowsHitTesting(false)
+            }
+
+            if let statusMessage = task.statusMessage, !statusMessage.isEmpty {
+                Text(statusMessage)
+                    .font(.system(size: 10))
+                    .foregroundStyle(task.status == .blocked ? Color.red : Color.secondary)
+                    .lineLimit(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("task-status-message-\(task.id.uuidString)")
+                    .allowsHitTesting(false)
+            }
+
+            HStack(alignment: .center, spacing: 8) {
+                timeRow
+                Spacer(minLength: 8)
+                if showPullRequestControls {
+                    pullRequestControls
                 }
             }
-            .foregroundStyle(.tertiary)
+            .frame(minHeight: showPullRequestControls ? 30 : nil)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(WorkspaceTheme.windowBackground)
-                .shadow(color: .black.opacity(0.035), radius: 5, x: 0, y: 2)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
-        }
-        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .background {
+            // The open button sits behind the content and owns the card chrome.
+            // The content above it must not absorb clicks (no fill, no
+            // contentShape, and non-interactive rows disable hit testing), so a
+            // click anywhere on the card except the pull-request controls
+            // reaches this button.
             Button(action: {
                 DispatchQueue.main.async(execute: onOpen)
             }) {
-                Color.clear
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(WorkspaceTheme.windowBackground)
+                    .shadow(color: .black.opacity(0.035), radius: 5, x: 0, y: 2)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
+                    }
                     .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1314,9 +1306,23 @@ private struct TaskCardView: View {
         task.status != .backlog && !task.repositoryWorktrees.isEmpty
     }
 
-    private var hasLiveStatus: Bool {
-        guard let progressLabel = task.progressLabel else { return false }
-        return !progressLabel.isEmpty
+    private var timeRow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "clock")
+                .font(.system(size: 10))
+            if task.status == .inProgress {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(workingDuration(at: context.date))
+                        .font(.system(size: 10))
+                        .accessibilityIdentifier("task-working-duration-\(task.id.uuidString)")
+                }
+            } else {
+                Text(task.createdAt.formatted(date: .abbreviated, time: .omitted))
+                    .font(.system(size: 10))
+            }
+        }
+        .foregroundStyle(.tertiary)
+        .allowsHitTesting(false)
     }
 
     @ViewBuilder

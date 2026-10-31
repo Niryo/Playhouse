@@ -2185,9 +2185,8 @@ final class StationAIUITests: XCTestCase {
 
         openTask(named: "Waiting layout")
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 5))
-        app.buttons["Blue"].click()
-        element("ai-question-answer-token").click()
-        element("ai-question-answer-token").typeText("fixture-secret")
+        selectQuestionOption("Blue")
+        typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
         XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
         XCTAssertEqual(try taskRecord(id: waitingTaskID)?["status"] as? String, "Waiting Response")
@@ -4643,9 +4642,8 @@ final class StationAIUITests: XCTestCase {
         element("message-composer").typeText("Start with Codex.")
         element("send-message-button").click()
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
-        app.buttons["Blue"].click()
-        element("ai-question-answer-token").click()
-        element("ai-question-answer-token").typeText("fixture-secret")
+        selectQuestionOption("Blue")
+        typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: active.path) }, timeout: 10), "The fixture turn should stay active.")
         XCTAssertFalse(providerMenu.isEnabled, "The provider menu is disabled during an active turn.")
@@ -6240,9 +6238,8 @@ final class StationAIUITests: XCTestCase {
             return !imageDiagnostics.isEmpty
         }, timeout: 5), "The visible attachment send should leave diagnostics.")
         XCTAssertFalse(String(data: try JSONSerialization.data(withJSONObject: imageDiagnostics), encoding: .utf8)?.contains(pickedImage) ?? true)
-        app.buttons["Blue"].click()
-        element("ai-question-answer-token").click()
-        element("ai-question-answer-token").typeText("fixture-secret")
+        selectQuestionOption("Blue")
+        typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
         let firstAnswer = element("assistant-message-item_assistant_fixture_1")
         XCTAssertTrue(firstAnswer.waitForExistence(timeout: 10))
@@ -6261,9 +6258,8 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(composerEnabled, "The composer should be enabled after the first image turn settles. Recent events: \(recentCodexEvents)")
         element("send-message-button").click()
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10), "The follow-up turn should refresh the existing conversation history.")
-        app.buttons["Blue"].click()
-        element("ai-question-answer-token").click()
-        element("ai-question-answer-token").typeText("fixture-secret")
+        selectQuestionOption("Blue")
+        typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
         let followupMessage = transcriptMessage(followupPrompt)
         XCTAssertTrue(followupMessage.waitForExistence(timeout: 10), "The follow-up prompt should appear in the conversation.")
@@ -6332,9 +6328,8 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("pending-chat-images").waitForExistence(timeout: 5), "Pasting an image should create a composer preview.")
         element("send-message-button").click()
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
-        app.buttons["Blue"].click()
-        element("ai-question-answer-token").click()
-        element("ai-question-answer-token").typeText("fixture-secret")
+        selectQuestionOption("Blue")
+        typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
         let pastedAnswer = app.descendants(matching: .any).matching(
             NSPredicate(format: "label == %@", "Answers received: Blue / fixture-secret.")
@@ -8754,8 +8749,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["Which color should I use?"].exists)
         element("ai-question-option-color-Green").click()
-        element("ai-question-answer-token").click()
-        element("ai-question-answer-token").typeText("fixture-secret")
+        typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
         XCTAssertTrue(transcriptMessage("Recovered answer: Green; private token [redacted secret answer] was applied.").waitForExistence(timeout: 15))
         relaunchApp()
@@ -8827,8 +8821,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(greenOption.value as? String, "not selected", "Options must behave as a single-select radio group, not independently toggled checkboxes.")
         let secretAnswer = element("ai-question-answer-token")
         XCTAssertTrue(secretAnswer.exists)
-        secretAnswer.click()
-        secretAnswer.typeText("fixture-secret")
+        typeIntoField(secretAnswer, text: "fixture-secret")
         attachScreenshot(named: "Codex structured questions with option and private answer fields")
         element("submit-ai-answers-button").click()
 
@@ -8852,13 +8845,8 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(try pendingQuestion(taskID)["mode"] as? String, "plan")
         XCTAssertEqual(try pendingQuestion(parallelID)["threadID"] as? String, parallelThread)
         XCTAssertEqual(try pendingQuestion(parallelID)["mode"] as? String, "default")
-        // The answered turn's history reload lands alongside this form and
-        // scrolls the transcript; let the form settle before clicking into it.
-        XCTAssertTrue(waitForStableFrame(element("ai-question-option-color-Blue")), "The second question's options should settle in place.")
-        element("ai-question-option-color-Blue").click()
-        XCTAssertEqual(element("ai-question-option-color-Blue").value as? String, "selected", "The second question's option click should register before answering the rest.")
-        element("ai-question-answer-token").click()
-        element("ai-question-answer-token").typeText("fixture-secret")
+        selectQuestionOption("Blue")
+        typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
 
         let completionDeadline = Date().addingTimeInterval(10)
@@ -8879,8 +8867,7 @@ final class StationAIUITests: XCTestCase {
         openTask(named: "Another conversation")
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 5), "Finishing the first task must preserve the parallel question.")
         element("ai-question-option-color-Blue").click()
-        element("ai-question-answer-token").click()
-        element("ai-question-answer-token").typeText("fixture-secret")
+        typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
         let parallelDeadline = Date().addingTimeInterval(10)
         while Date() < parallelDeadline, try taskRecord(id: parallelID)?["status"] as? String != "Waiting Response" {
@@ -9144,9 +9131,8 @@ final class StationAIUITests: XCTestCase {
         let queuedText = "Follow up after I review the interrupted turn."
         let queued = try runCLI(["conversation", "queue", interruptedID, "--message", queuedText])["result"] as? [String: Any]
         let queuedID = try XCTUnwrap(queued?["id"] as? String)
-        app.buttons["Blue"].click()
-        element("ai-question-answer-token").click()
-        element("ai-question-answer-token").typeText("fixture-secret")
+        selectQuestionOption("Blue")
+        typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
 
         XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10))
@@ -9173,9 +9159,8 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(retryQueuedButton.waitForExistence(timeout: 10), "The retained follow-up should remain explicitly retryable after reopening and completing a new turn.")
         retryQueuedButton.click()
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10), "Explicit retry should submit the queued message to Codex.")
-        app.buttons["Blue"].click()
-        element("ai-question-answer-token").click()
-        element("ai-question-answer-token").typeText("fixture-secret")
+        selectQuestionOption("Blue")
+        typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
         XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10))
         XCTAssertTrue(waitUntil({
@@ -9775,6 +9760,37 @@ final class StationAIUITests: XCTestCase {
 
     /// Waits until the element stops moving. The transcript appends messages
     /// and auto-scrolls as a turn settles, so a click issued the instant a
+    /// Clicks a text field once it has settled, confirms it took keyboard focus
+    /// (retrying the click once), then types. A click that lands while the
+    /// form is still scrolling into place can leave the field unfocused, and
+    /// typeText then fails with "Neither element nor any descendant has
+    /// keyboard focus".
+    private func typeIntoField(_ field: XCUIElement, text: String, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(field.waitForExistence(timeout: 5), "Text field is missing.", file: file, line: line)
+        waitForStableFrame(field)
+        field.click()
+        if !waitUntil({ (field.value(forKey: "hasKeyboardFocus") as? Bool) == true }, timeout: 2) {
+            field.click()
+            XCTAssertTrue(waitUntil({ (field.value(forKey: "hasKeyboardFocus") as? Bool) == true }, timeout: 2), "Clicking the text field should focus it.", file: file, line: line)
+        }
+        field.typeText(text)
+    }
+
+    /// Selects a question option once the form has settled. The question form
+    /// arrives with a transcript reload that scrolls it; a click issued the
+    /// moment the title exists can land before the option is in place, leaving
+    /// nothing selected and a Submit click that does nothing.
+    private func selectQuestionOption(_ label: String, file: StaticString = #filePath, line: UInt = #line) {
+        let option = app.buttons.matching(NSPredicate(format: "label == %@", label)).firstMatch
+        XCTAssertTrue(option.waitForExistence(timeout: 5), "Question option is missing: \(label)", file: file, line: line)
+        XCTAssertTrue(waitForStableFrame(option), "Question option should settle in place: \(label)", file: file, line: line)
+        option.click()
+        XCTAssertTrue(
+            waitUntil({ option.value as? String == "selected" }, timeout: 3),
+            "Clicking the question option should select it: \(label)", file: file, line: line
+        )
+    }
+
     /// control appears can land where the control was a frame earlier.
     @discardableResult
     private func waitForStableFrame(_ target: XCUIElement, timeout: TimeInterval = 5) -> Bool {
@@ -9948,9 +9964,8 @@ final class StationAIUITests: XCTestCase {
         element("message-composer").typeText(prompt)
         element("send-message-button").click()
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
-        app.buttons["Blue"].click()
-        element("ai-question-answer-token").click()
-        element("ai-question-answer-token").typeText("fixture-secret")
+        selectQuestionOption("Blue")
+        typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: active.path) }, timeout: 10), "The fixture should hold after receiving answers so the task outcome can be reported.")
         if reportCompletedOutcome {
@@ -10696,6 +10711,11 @@ final class StationAIUITests: XCTestCase {
     }
 
     private func assertNativeHelpPresentation(for control: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        // An earlier step may have left the pointer on this control long enough for the
+        // help to be showing already; park it elsewhere so the before/after pair brackets
+        // the help appearing.
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.97)).hover()
+        Thread.sleep(forTimeInterval: 0.3)
         control.hover()
         Thread.sleep(forTimeInterval: 0.25)
         let before = XCUIScreen.main.screenshot().image
