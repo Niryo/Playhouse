@@ -623,18 +623,24 @@ enum PlayhouseAppIdentity {
 }
 
 enum PlayhouseWorktreeManager {
-    static func defaultRoot() -> URL {
+    /// Task worktrees live in the app's data directory, so removing that one
+    /// folder removes them too. Worktrees made before this stay at the paths
+    /// their tasks recorded.
+    static func defaultRoot(dataDirectory: String? = nil) -> URL {
         #if DEBUG
         if let override = PlayhouseProcessEnvironment.current["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"], !override.isEmpty {
             return URL(fileURLWithPath: override, isDirectory: true).standardizedFileURL
         }
         #endif
-        var root = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".playhouse/worktrees", isDirectory: true)
-        if let key = PlayhouseAppIdentity.worktreeKey {
-            root.appendPathComponent(key, isDirectory: true)
-        }
-        return root.standardizedFileURL
+        // The same data directory the store opens: a window reads it from its
+        // launch environment, the daemon from each request.
+        let base = (dataDirectory ?? PlayhouseProcessEnvironment.current["PLAYHOUSE_DATA_DIRECTORY"])
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? (try? PlayhouseAppIdentity.defaultDataDirectory())
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".playhouse", isDirectory: true)
+        // Not "Worktrees": that folder already holds each worktree build's data
+        // directory, and the file system ignores case.
+        return base.appendingPathComponent("task-worktrees", isDirectory: true).standardizedFileURL
     }
 
     static func branchSlug(_ title: String) -> String {

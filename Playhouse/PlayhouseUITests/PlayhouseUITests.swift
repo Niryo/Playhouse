@@ -334,8 +334,9 @@ final class PlayhouseUITests: XCTestCase {
         dataDirectory = runDirectory.appendingPathComponent("data", isDirectory: true)
         try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
         appBundle = try Self.findAppBundle()
-        preferencesSuiteName = "com.playhouse.Playhouse.E2E.\(UUID().uuidString)"
-        UserDefaults(suiteName: preferencesSuiteName)?.removePersistentDomain(forName: preferencesSuiteName)
+        // An absolute path keeps the isolated preferences file with this case's
+        // data instead of ~/Library/Preferences.
+        preferencesSuiteName = dataDirectory.appendingPathComponent("preferences").path
         clearSavedWindowFrames()
         cliURL = appBundle.appendingPathComponent("Contents/MacOS/playhouse-cli")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: cliURL.path), "The app-bundled CLI is missing.")
@@ -376,7 +377,6 @@ final class PlayhouseUITests: XCTestCase {
             return
         }
         clearSavedWindowFrames()
-        UserDefaults(suiteName: preferencesSuiteName)?.removePersistentDomain(forName: preferencesSuiteName)
         if (testRun?.failureCount ?? 0) > 0 {
             // Keep the failed case's app data (Diagnostics.jsonl, transcripts,
             // store) for diagnosis; the runner prunes these on its next start.
@@ -393,7 +393,7 @@ final class PlayhouseUITests: XCTestCase {
             XCTFail("Refusing to remove UI test data without its ownership marker: \(runDirectory.path)")
             return
         }
-        let testWorktrees = dataDirectory.appendingPathComponent("worktrees", isDirectory: true)
+        let testWorktrees = dataDirectory.appendingPathComponent("task-worktrees", isDirectory: true)
         if FileManager.default.fileExists(atPath: testWorktrees.path) {
             try FileManager.default.removeItem(at: testWorktrees)
             for repository in [fixture.primary, fixture.secondary, fixture.alternate, fixture.changes] {
@@ -506,7 +506,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(element("message-composer").value as? String, "Protected draft")
     }
 
-    // case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots; a saved conversation remains visible after an app restart.
+    // case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory; a saved conversation remains visible after an app restart.
     func test_worktree_app_profiles_isolate_identity_and_store() throws {
         let script = repositoryRoot.appendingPathComponent("scripts/app-profile.sh")
         func profile(for worktree: URL) throws -> [String: String] {
@@ -544,6 +544,11 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(linked, try profile(for: fixture.existingWorktree))
         for key in ["bundleID", "bridgeID", "derivedData", "dataDirectory", "logFile", "worktreeRoot"] {
             XCTAssertNotEqual(primary[key], linked[key], "Separate source worktrees must isolate \(key).")
+        }
+        for appProfile in [primary, linked] {
+            XCTAssertEqual(appProfile["worktreeRoot"], appProfile["dataDirectory"].map {
+                URL(fileURLWithPath: $0).appendingPathComponent("task-worktrees").path
+            }, "Task worktrees must live inside the profile's data directory.")
         }
         XCTAssertEqual(linked["bridgeID"], linked["bundleID"].map { $0 + ".bridge" })
         XCTAssertEqual(linked["dataDirectory"], linked["key"].map {
@@ -1413,7 +1418,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(pendingRecord["worktreePath"] as? String, fixture.primary.path)
         let worktreePath = try XCTUnwrap(preparedRecord["worktreePath"] as? String)
         XCTAssertTrue(FileManager.default.fileExists(atPath: worktreePath))
-        let worktreeRoot = dataDirectory.appendingPathComponent("worktrees", isDirectory: true).standardizedFileURL.path + "/"
+        let worktreeRoot = dataDirectory.appendingPathComponent("task-worktrees", isDirectory: true).standardizedFileURL.path + "/"
         XCTAssertTrue(URL(fileURLWithPath: worktreePath).standardizedFileURL.path.hasPrefix(worktreeRoot))
         XCTAssertEqual(
             try runGitOutput(fixture.primary, "worktree", "list", "--porcelain").components(separatedBy: "worktree ").count - 1,
@@ -2412,7 +2417,6 @@ final class PlayhouseUITests: XCTestCase {
         environment["PLAYHOUSE_DATA_DIRECTORY"] = dataDirectory.path
         environment["CODEX_HOME"] = dataDirectory.appendingPathComponent("codex-home").path
         environment["PLAYHOUSE_WORKTREE_LABEL"] = "Playhouse UI Test Worktree"
-        environment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = serviceName
         environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = executable.path
@@ -2704,7 +2708,6 @@ final class PlayhouseUITests: XCTestCase {
         environment["PLAYHOUSE_DATA_DIRECTORY"] = dataDirectory.path
         environment["CODEX_HOME"] = dataDirectory.appendingPathComponent("codex-home").path
         environment["PLAYHOUSE_WORKTREE_LABEL"] = "Playhouse UI Test Worktree"
-        environment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = serviceName
         environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = executable.path
@@ -3203,7 +3206,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Edited ordered folders in task conversation")
     }
 
-    // case-contract: test_conversation_repository_picker_adds_repository_worktree | Repository suggestions can be filtered and navigated with Up/Down, and Enter selects the highlighted repository; UI selection waits for an active turn and persists a pending auto branch. While the conversation is empty, a prominent theme-colored heading names all selected repositories and updates as repository APIs add or replace context; compact repository labels remain in the header without a duplicate repository summary. Dark and light themes use distinct prominent title colors, the supporting model prompt sits below with generous spacing, and the generic Start a conversation heading is absent. Additional context folders remain identifiable. The task repository API remains available during an active turn, prepares a managed worktree, updates saved repository selection, replaces repository context safely, and the paired UI shows API additions/removals. The main assistant is instructed to list repositories through Playhouse, inspect listed source paths read-only without attaching them, and add repositories only when it needs a task worktree for changes or commits.
+    // case-contract: test_conversation_repository_picker_adds_repository_worktree | Repository suggestions can be filtered and navigated with Up/Down, and Enter selects the highlighted repository; UI selection waits for an active turn and persists a pending auto branch. While the conversation is empty, a prominent theme-colored heading names all selected repositories and updates as repository APIs add or replace context; compact repository labels remain in the header without a duplicate repository summary. Dark and light themes use distinct prominent title colors, the supporting model prompt sits below with generous spacing, and the generic Start a conversation heading is absent. Additional context folders remain identifiable. The task repository API remains available during an active turn, prepares a managed worktree inside the app data directory's task-worktrees folder, updates saved repository selection, replaces repository context safely, and the paired UI shows API additions/removals. The main assistant is instructed to list repositories through Playhouse, inspect listed source paths read-only without attaching them, and add repositories only when it needs a task worktree for changes or commits.
     func test_conversation_repository_picker_adds_repository_worktree() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -3308,7 +3311,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(secondary["isPending"] as? Bool, false, "The AI-facing API should return an editable worktree.")
         let managedWorktree = try XCTUnwrap(secondary["worktreePath"] as? String)
         XCTAssertNotEqual(managedWorktree, fixture.secondary.path)
-        XCTAssertTrue(managedWorktree.hasPrefix(dataDirectory.appendingPathComponent("worktrees", isDirectory: true).path))
+        XCTAssertTrue(managedWorktree.hasPrefix(dataDirectory.appendingPathComponent("task-worktrees", isDirectory: true).path))
         XCTAssertTrue(element("conversation-repository-badge-secondary").waitForExistence(timeout: 10), "Repository additions made through the AI API should appear in the open task header.")
         XCTAssertEqual(accessibleLabelOrValue(of: repositoryTitle()), "primary · secondary", "The prominent title should update when the API adds a repository.")
         XCTAssertFalse(element("working-folders-summary").exists, "Repository worktrees should not be repeated in a separate working-folders line.")
@@ -3643,9 +3646,13 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: apiWorktreePath) }, timeout: 10), "API removal should clean up the worktree after the active reservation releases.")
     }
 
-    // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; confirmed deletion waits for an active conversation turn; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives and reports the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree.
+    // case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; confirmed deletion waits for an active conversation turn; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives and reports the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Deleting a task also removes its per-task preferences and any left by already-deleted tasks, while another task's preferences remain.
     func test_task_delete_removes_task_and_later_lookup_is_not_found() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        // Left by a task deleted before per-task preference cleanup existed.
+        let orphanedPreference = "playhouse.codex.goal-generation.\(UUID().uuidString)"
+        try PropertyListSerialization.data(fromPropertyList: [orphanedPreference: "plan"], format: .binary, options: 0)
+            .write(to: isolatedPreferencesFile)
         launchApp(defaultParent: fixture.parent.path)
 
         let pendingTitle = "Pending delete"
@@ -3657,6 +3664,23 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(pendingRecord["worktreePath"] as? String, fixture.secondary.path)
         let pendingCheck = try runCLI(["task", "delete-check", pendingID])
         XCTAssertEqual((pendingCheck["result"] as? [String: Any])?["requiresConfirmation"] as? Bool, false)
+        let keptTitle = "Kept preferences"
+        try createTaskFixture(title: keptTitle, roots: [fixture.custom.path])
+        let keptID = try taskID(named: keptTitle)
+        let pendingPreference = "conversationMode.\(pendingID.uppercased())"
+        let keptPreference = "conversationMode.\(keptID.uppercased())"
+        for title in [pendingTitle, keptTitle] {
+            openTask(named: title)
+            let modeMenu = element("conversation-mode-menu")
+            XCTAssertTrue(modeMenu.waitForExistence(timeout: 10))
+            modeMenu.click()
+            app.menuItems["Plan mode"].click()
+            XCTAssertTrue(modeMenu.label.contains("Plan mode"))
+            element("back-to-board-button").click()
+        }
+        XCTAssertTrue(waitUntil({
+            self.isolatedPreferenceKeys().isSuperset(of: [pendingPreference, keptPreference, orphanedPreference])
+        }, timeout: 10), "Choosing a conversation mode should save it in the isolated preferences.")
         deleteTaskFromContextMenu(pendingTitle)
         XCTAssertTrue(element("confirm-delete-task-button").waitForExistence(timeout: 5))
         let conversationReservation = try ConversationTurnLockBarrier(dataDirectory: dataDirectory, taskID: pendingID)
@@ -3683,6 +3707,13 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertNotNil(pendingDeleteEventValue["storePath"] as? String)
         assertCLIError(try runCLI(["task", "get", pendingID], expectedStatus: 3), code: "not_found")
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.secondary.path), "Deleting a pending task must preserve its source repository.")
+        XCTAssertTrue(waitUntil({
+            let keys = self.isolatedPreferenceKeys()
+            return !keys.contains(pendingPreference) && !keys.contains(orphanedPreference)
+        }, timeout: 10), "Deleting a task must remove its preferences and those left by already-deleted tasks.")
+        XCTAssertTrue(isolatedPreferenceKeys().contains(keptPreference), "Another task's preferences must survive a delete.")
+        XCTAssertEqual((try runCLI(["task", "delete", keptID])["result"] as? [String: Any])?["deleted"] as? Bool, true)
+        XCTAssertTrue(waitUntil({ !self.isolatedPreferenceKeys().contains(keptPreference) }, timeout: 10))
 
         let cleanTitle = "Clean delete \(String(UUID().uuidString.prefix(8)).lowercased())"
         _ = try runCLI(["task", "create", "--title", cleanTitle, "--repo", fixture.primary.path])
@@ -4267,7 +4298,6 @@ final class PlayhouseUITests: XCTestCase {
         sendEnvironment["PLAYHOUSE_DATA_DIRECTORY"] = dataDirectory.path
         sendEnvironment["CODEX_HOME"] = dataDirectory.appendingPathComponent("codex-home").path
         sendEnvironment["PLAYHOUSE_WORKTREE_LABEL"] = "Playhouse UI Test Worktree"
-        sendEnvironment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         sendEnvironment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         sendEnvironment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = serviceName
         sendEnvironment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = chatFixtureExecutable.path
@@ -7665,6 +7695,116 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("chat-image-\(imageID)-0").waitForExistence(timeout: 10), "Reopening the Codex conversation should render the exact published image.")
     }
 
+    /// Sends a held fixture turn from the window, reopens the conversation so it
+    /// no longer reads that turn's stream, and checks that the turn's progress
+    /// still reaches it before the turn ends.
+    private func assertTurnProgressReachesReopenedConversation(provider: String, fixtureSource: String, executableName: String, activityID: String, modelID: String? = nil) throws {
+        let display = provider == "claude" ? "Claude" : "Codex"
+        let source = WorkspaceFixture.root.appendingPathComponent(fixtureSource)
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: source.path))
+        let executable = dataDirectory.appendingPathComponent(executableName)
+        try FileManager.default.copyItem(at: source, to: executable)
+        if provider == "claude" {
+            claudeFixtureExecutable = executable.path
+            try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8)
+                .write(to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"))
+        } else {
+            codexFixtureExecutable = executable.path
+            try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8)
+                .write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
+        }
+        let started = URL(fileURLWithPath: executable.path + ".follow-turn-started")
+        let resume = URL(fileURLWithPath: executable.path + ".follow-turn-continue")
+        let ready = URL(fileURLWithPath: executable.path + ".follow-turn-ready")
+        let release = URL(fileURLWithPath: executable.path + ".follow-turn-release")
+        defer {
+            try? Data("Release after assertion failure.\n".utf8).write(to: resume)
+            try? Data("Release after assertion failure.\n".utf8).write(to: release)
+        }
+        let title = "\(display) followed turn"
+        let prompt = "Please follow-active-turn."
+        let progressText = "\(display) is partway through the followed turn."
+        let finalText = "\(display) finished the followed turn."
+        func visibleText(_ text: String) -> XCUIElement {
+            app.groups.matching(NSPredicate(format: "label CONTAINS %@", text)).firstMatch
+        }
+
+        launchApp(defaultParent: fixture.parent.path)
+        _ = try runCLI(["task", "create", "--title", title, "--root", fixture.primary.path, "--provider", provider])
+        if let modelID {
+            _ = try runCLI(["conversation", "model", try taskID(named: title), "set", modelID])
+        }
+        func fixtureHistory() -> [String: Any] {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: executable.path + ".history")),
+                  let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+            return history
+        }
+        func providerResumeCount() -> Int { fixtureHistory()["threadResumeCount"] as? Int ?? 0 }
+        openTask(named: title)
+        let composer = element("message-composer")
+        XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 10))
+        composer.click()
+        composer.typeText(prompt)
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: started.path) }, timeout: 20), "The \(display) fixture should hold the turn before any output.")
+        if let modelID {
+            let turns = fixtureHistory()["turns"] as? [[String: Any]] ?? []
+            XCTAssertEqual(turns.last?["modelID"] as? String, modelID, "The window's send should run the turn with the task's selected model.")
+        }
+        // Counted from before the reopened view's first load, which is already a mid-turn read.
+        let resumesBeforeReopen = providerResumeCount()
+
+        // A reopened conversation is a new view that no longer reads the send's stream.
+        element("back-to-board-button").click()
+        openTask(named: title)
+        XCTAssertTrue(transcriptMessage(prompt).waitForExistence(timeout: 10), "The reopened conversation should load the running turn's prompt.")
+        XCTAssertFalse(visibleText(progressText).exists, "No progress exists before the fixture continues.")
+        let taskID = try taskID(named: title)
+        func revision() throws -> Int {
+            let runtime = try runCLI(["conversation", "runtime"])["result"] as? [String: Any]
+            return (runtime?["conversationRevisions"] as? [String: Int])?[taskID] ?? 0
+        }
+        let quietRevision = try revision()
+
+        try Data("Show progress.\n".utf8).write(to: resume)
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: ready.path) }, timeout: 20), "The \(display) fixture should hold the turn while its progress is visible.")
+        XCTAssertTrue(visibleText(progressText).waitForExistence(timeout: 10), "The reopened conversation should show the running turn's commentary without waiting for the turn to end.")
+        let runningRow = element("codex-activity-row-\(activityID)")
+        XCTAssertTrue(runningRow.waitForExistence(timeout: 10), "The reopened conversation should show the running tool row.")
+        XCTAssertTrue(runningRow.label.contains("In progress"), "The tool row should still be running while the turn holds.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ready.path), "The turn should still be held while its progress shows.")
+        XCTAssertFalse(visibleText(finalText).exists, "The final answer must not appear before the turn finishes.")
+        let progressedRevision = try revision()
+        XCTAssertGreaterThan(progressedRevision, quietRevision, "The running turn's progress should raise the task's conversation revision.")
+        let history = try runCLI(["conversation", "history", taskID])["result"] as? [String: Any]
+        let texts = (history?["messages"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
+        XCTAssertTrue(texts.contains(progressText), "Mid-turn history should hold the running turn's commentary.")
+        XCTAssertFalse(texts.contains(finalText), "Mid-turn history must not hold a final answer yet.")
+        let activity = (history?["activities"] as? [[String: Any]] ?? []).first { $0["id"] as? String == activityID }
+        XCTAssertEqual(activity?["status"] as? String, "inProgress", "Mid-turn history should hold the running tool activity.")
+        XCTAssertEqual(providerResumeCount(), resumesBeforeReopen, "Following the running turn must read its thread as loaded, not resume it with history's default model.")
+
+        try Data("Finish the turn.\n".utf8).write(to: release)
+        XCTAssertTrue(visibleText(finalText).waitForExistence(timeout: 30), "The reopened conversation should show the final answer once the turn settles.")
+        XCTAssertTrue(waitUntil({ ((try? revision()) ?? 0) > progressedRevision }, timeout: 10), "The revision should rise again when the turn ends.")
+    }
+
+    // case-contract: test_claude_turn_progress_reaches_other_windows_mid_turn | While a Claude Code fixture turn started by another caller is still running, its commentary and tool activity raise the task's conversation revision in the daemon's runtime snapshot, a held turn with no visible output yet leaves that revision unchanged, and mid-turn history, read from Playhouse's own Claude transcript, already returns the prompt, the commentary, and the in-progress tool activity before any final answer. A conversation reopened after its send, and so no longer reading that turn's stream, shows the commentary and the running tool row while the turn is still held, then the final answer once it settles; the revision rises again when the turn ends.
+    func test_claude_turn_progress_reaches_other_windows_mid_turn() throws {
+        try assertTurnProgressReachesReopenedConversation(
+            provider: "claude", fixtureSource: "claude-fixture-ui",
+            executableName: "claude-fixture-follow-active-turn", activityID: "toolu_follow_active_step"
+        )
+    }
+
+    // case-contract: test_codex_turn_progress_reaches_other_windows_mid_turn | While a Codex app-server fixture turn started by another caller is still running, its commentary and tool activity raise the task's conversation revision in the daemon's runtime snapshot, a held turn with no visible output yet leaves that revision unchanged, and mid-turn history, read from Codex's native thread while the turn holds, already returns the prompt, the commentary, and the in-progress tool activity before any final answer. A conversation reopened after its send, and so no longer reading that turn's stream, shows the commentary and the running tool row while the turn is still held, then the final answer once it settles; the revision rises again when the turn ends. With a non-default model selected, those mid-turn history reads use the thread the running turn already loaded and never send thread/resume with history's default model.
+    func test_codex_turn_progress_reaches_other_windows_mid_turn() throws {
+        try assertTurnProgressReachesReopenedConversation(
+            provider: "codex", fixtureSource: "codex-fixture-ui",
+            executableName: "codex-fixture-follow-active-turn", activityID: "item_follow_active_command", modelID: "gpt-6-sol"
+        )
+    }
+
     // case-contract: test_conversation_rejects_invalid_image_attachments | Malformed image data is rejected with a visible composer error and an invalid_argument bridge response, without creating conversation history or advancing task status.
     func test_conversation_rejects_invalid_image_attachments() throws {
         launchApp(defaultParent: fixture.parent.path)
@@ -10867,7 +11007,6 @@ final class PlayhouseUITests: XCTestCase {
         let liveCodexHome = ProcessInfo.processInfo.environment["CODEX_HOME"] ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex").path
         app.launchEnvironment["CODEX_HOME"] = usesLiveCodex ? liveCodexHome : dataDirectory.appendingPathComponent("codex-home").path
         app.launchEnvironment["PLAYHOUSE_WORKTREE_LABEL"] = "Playhouse UI Test Worktree"
-        app.launchEnvironment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         app.launchEnvironment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         app.launchEnvironment["PLAYHOUSE_E2E_DEFAULT_PARENT_FOLDER"] = defaultParent ?? "__unset__"
         if let launchWindowTitle {
@@ -10911,7 +11050,6 @@ final class PlayhouseUITests: XCTestCase {
         let codexHome = usesLiveCodex ? liveCodexHome : dataDirectory.appendingPathComponent("codex-home").path
         environment["CODEX_HOME"] = codexHome
         environment["PLAYHOUSE_WORKTREE_LABEL"] = "Playhouse UI Test Worktree"
-        environment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         environment["PLAYHOUSE_E2E_DEFAULT_PARENT_FOLDER"] = launchDefaultParent ?? "__unset__"
         if usesLiveCodex {
@@ -11132,6 +11270,20 @@ final class PlayhouseUITests: XCTestCase {
             RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         }
         return condition()
+    }
+
+    /// The file behind `preferencesSuiteName`; the runner reads it directly
+    /// because its sandbox keeps it out of the app's preference domains.
+    private var isolatedPreferencesFile: URL {
+        URL(fileURLWithPath: preferencesSuiteName + ".plist")
+    }
+
+    private func isolatedPreferenceKeys() -> Set<String> {
+        guard let data = try? Data(contentsOf: isolatedPreferencesFile),
+              let values = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
+            return []
+        }
+        return Set(values.keys)
     }
 
     private func createTaskFixture(title: String, roots: [String]) throws {
@@ -11806,7 +11958,6 @@ final class PlayhouseUITests: XCTestCase {
         let usesLiveCodex = isLiveCodexIntegration
         let liveCodexHome = ProcessInfo.processInfo.environment["CODEX_HOME"] ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".codex").path
         environment["CODEX_HOME"] = usesLiveCodex ? liveCodexHome : dataDirectory.appendingPathComponent("codex-home").path
-        environment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = serviceName
         if let codexFixtureExecutable {
@@ -11847,7 +11998,6 @@ final class PlayhouseUITests: XCTestCase {
         process.arguments = arguments
         var environment = ProcessInfo.processInfo.environment
         environment["PLAYHOUSE_DATA_DIRECTORY"] = dataDirectory.path
-        environment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = serviceName
         environment.merge(extraEnvironment) { _, override in override }
@@ -11885,7 +12035,6 @@ final class PlayhouseUITests: XCTestCase {
         process.arguments = ["conversation", "send", taskID, "--message", "Work on this task."]
         var environment = ProcessInfo.processInfo.environment
         environment["PLAYHOUSE_DATA_DIRECTORY"] = dataDirectory.path
-        environment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
         environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
         environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = serviceName
         environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = executable.path

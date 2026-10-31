@@ -206,10 +206,14 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.test_id = f"{self._testMethodName}-{uuid.uuid4()}"
         self.data_directory = arguments.data_root / self.test_id
         self.data_directory.mkdir(parents=True)
-        self.worktree_directory = self.data_directory / "worktrees"
+        # The app's default task worktree root inside its data directory; CLI
+        # calls send no override, so they exercise that default.
+        self.worktree_directory = self.data_directory / "task-worktrees"
         self.worktree_directory.mkdir()
         (self.worktree_directory / ".playhouse-test-owner").write_text("Playhouse bridge test owns this worktree root.\n", encoding="utf-8")
-        self.defaults_suite = f"com.playhouse.bridge-tests.{uuid.uuid4()}"
+        # An absolute path keeps the isolated preferences file in this case's
+        # data directory instead of ~/Library/Preferences.
+        self.defaults_suite = str(self.data_directory / "preferences")
         if self._testMethodName != "test_task_store_repairs_missing_pending_prompt_column":
             self.assert_success(self.call_cli("settings", "set-parent", self.fixture / "suggested-parent")[0])
 
@@ -225,7 +229,6 @@ class PlayhouseBridgeTests(unittest.TestCase):
     def call_cli(self, *command, expected_status=0, timeout=90, extra_environment=None):
         environment = os.environ.copy()
         environment["PLAYHOUSE_DATA_DIRECTORY"] = str(self.data_directory)
-        environment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"] = str(self.worktree_directory)
         environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = self.defaults_suite
         environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = arguments.service_name
         environment["CODEX_HOME"] = str(self.data_directory / "codex-home")
@@ -256,7 +259,6 @@ class PlayhouseBridgeTests(unittest.TestCase):
     def start_cli(self, *command, extra_environment=None, binary_output=False):
         environment = os.environ.copy()
         environment["PLAYHOUSE_DATA_DIRECTORY"] = str(self.data_directory)
-        environment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"] = str(self.worktree_directory)
         environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = self.defaults_suite
         environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = arguments.service_name
         environment["CODEX_HOME"] = str(self.data_directory / "codex-home")
@@ -1683,7 +1685,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["savedPrompt"], "Protected draft")
 
-    # case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots; a saved conversation remains visible after an app restart.
+    # case-contract: test_worktree_app_profiles_isolate_identity_and_store | The primary and linked source worktrees resolve to stable, distinct app and XPC identities, build paths, data stores, logs, and managed worktree roots, each worktree root inside its data directory; a saved conversation remains visible after an app restart.
     def test_worktree_app_profiles_isolate_identity_and_store(self):
         script = Path(__file__).resolve().parent / "app-profile.sh"
         linked = self.fixture / "existing-worktree"
@@ -1705,6 +1707,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertNotEqual(primary_profile["dataDirectory"], linked_profile["dataDirectory"])
         self.assertNotEqual(primary_profile["logFile"], linked_profile["logFile"])
         self.assertNotEqual(primary_profile["worktreeRoot"], linked_profile["worktreeRoot"])
+        for app_profile in [primary_profile, linked_profile]:
+            self.assertEqual(app_profile["worktreeRoot"], str(Path(app_profile["dataDirectory"]) / "task-worktrees"))
         self.assertTrue(linked_profile["bundleID"].endswith(linked_profile["key"]))
         self.assertEqual(linked_profile["bridgeID"], linked_profile["bundleID"] + ".bridge")
         self.assertEqual(
@@ -3544,7 +3548,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         response, _ = self.call_cli("task", "roots", "get", task_id)
         self.assertEqual(self.assert_success(response)["roots"], expected_roots)
 
-    # case-contract: test_conversation_repository_picker_adds_repository_worktree | Repository suggestions can be filtered and navigated with Up/Down, and Enter selects the highlighted repository; UI selection waits for an active turn and persists a pending auto branch. While the conversation is empty, a prominent theme-colored heading names all selected repositories and updates as repository APIs add or replace context; compact repository labels remain in the header without a duplicate repository summary. Dark and light themes use distinct prominent title colors, the supporting model prompt sits below with generous spacing, and the generic Start a conversation heading is absent. Additional context folders remain identifiable. The task repository API remains available during an active turn, prepares a managed worktree, updates saved repository selection, replaces repository context safely, and the paired UI shows API additions/removals. The main assistant is instructed to list repositories through Playhouse, inspect listed source paths read-only without attaching them, and add repositories only when it needs a task worktree for changes or commits.
+    # case-contract: test_conversation_repository_picker_adds_repository_worktree | Repository suggestions can be filtered and navigated with Up/Down, and Enter selects the highlighted repository; UI selection waits for an active turn and persists a pending auto branch. While the conversation is empty, a prominent theme-colored heading names all selected repositories and updates as repository APIs add or replace context; compact repository labels remain in the header without a duplicate repository summary. Dark and light themes use distinct prominent title colors, the supporting model prompt sits below with generous spacing, and the generic Start a conversation heading is absent. Additional context folders remain identifiable. The task repository API remains available during an active turn, prepares a managed worktree inside the app data directory's task-worktrees folder, updates saved repository selection, replaces repository context safely, and the paired UI shows API additions/removals. The main assistant is instructed to list repositories through Playhouse, inspect listed source paths read-only without attaching them, and add repositories only when it needs a task worktree for changes or commits.
     def test_conversation_repository_picker_adds_repository_worktree(self):
         task = self.create_task("Add repository in conversation", [self.primary])
         task_id = task["id"]
@@ -3813,7 +3817,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(any(event.get("event") == "workspace.repository.deferred_removal_kept_dirty" for event in self.diagnostic_events()), "Deferred cleanup should report that active-turn edits were preserved.")
         self.assertTrue(worktree.exists(), "Deferred cleanup must preserve a worktree dirtied by the active turn.")
         self.assertTrue(in_flight_file.is_file(), "Deferred cleanup must preserve files written by the active turn.")
-    # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; confirmed deletion waits for an active conversation turn; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives and reports the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree.
+    # case-contract: test_task_delete_removes_task_and_later_lookup_is_not_found | The task context menu offers deletion. Pending repository tasks delete without confirmation and preserve the source repository; confirmed deletion waits for an active conversation turn; clean started worktrees can be deleted; dirty started worktrees require confirmation, and canceling preserves the task and worktree. CLI delete-check derives and reports the confirmation requirement from saved task and worktree state without resuming the Codex thread; confirmed deletion removes the managed worktree. Deleting a task also removes its per-task preferences and any left by already-deleted tasks, while another task's preferences remain.
     def test_task_delete_removes_task_and_later_lookup_is_not_found(self):
         pending = self.create_repo_task("Pending delete", [self.primary])
         pending_id = pending["id"]
@@ -3822,6 +3826,12 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(pending_path, str(self.primary))
         response, _ = self.call_cli("task", "delete-check", pending_id)
         self.assertFalse(self.assert_success(response)["requiresConfirmation"])
+        kept_id = self.create_task("Kept preferences", roots=[self.custom])["id"]
+        pending_preference = f"conversationMode.{pending_id.upper()}"
+        kept_preference = f"conversationMode.{kept_id.upper()}"
+        orphaned_preference = f"playhouse.codex.goal-generation.{str(uuid.uuid4()).upper()}"
+        for key in [pending_preference, kept_preference, orphaned_preference]:
+            self.write_default(key, "plan")
         lock_barrier = ConversationTurnLockBarrier(self.data_directory, pending_id)
         delete_command = ["task", "delete", pending_id]
         delete_process = None
@@ -3859,6 +3869,11 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(Path(pending_path).is_dir(), "Deleting a pending task must preserve the source repository.")
         response, _ = self.call_cli("task", "get", pending_id, expected_status=3)
         self.assert_failure(response, "not_found")
+        self.assertFalse(self.default_exists(pending_preference), "Deleting a task must remove its per-task preferences.")
+        self.assertFalse(self.default_exists(orphaned_preference), "Deleting a task must remove preferences left by already-deleted tasks.")
+        self.assertEqual(self.read_default(kept_preference)[0], "plan", "Another task's preferences must survive a delete.")
+        self.assertTrue(self.assert_success(self.call_cli("task", "delete", kept_id)[0])["deleted"])
+        self.assertFalse(self.default_exists(kept_preference))
 
         clean = self.create_repo_task(f"Clean delete {uuid.uuid4().hex[:8]}", [self.primary], materialize=True)
         clean_id = clean["id"]
@@ -5741,6 +5756,135 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertLess(image_index, followup_index, "The image should remain before the next Codex turn.")
         self.assertEqual(messages[image_index]["imageDataURLs"], image_message["imageDataURLs"])
 
+    def assert_turn_progress_reaches_followers_mid_turn(self, provider, fixture_name, environment_name, thread_key, activity_id, send_arguments=()):
+        """A window that isn't reading a turn's stream follows it through the
+        runtime snapshot's conversation revision and a history reload."""
+        display = "Claude" if provider == "claude" else "Codex"
+        progress_text = f"{display} is partway through the followed turn."
+        final_text = f"{display} finished the followed turn."
+        source_name = "claude-code-fixture.py" if provider == "claude" else "codex-app-server-fixture.py"
+        executable = self.data_directory / fixture_name
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / source_name, executable)
+        executable.chmod(0o755)
+        (self.data_directory / f".playhouse-{provider}-fixture-owner").write_text(
+            f"Playhouse test owns this {'Claude Code' if provider == 'claude' else 'Codex'} protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {environment_name: str(executable)}
+        task_id = self.create_task(f"{display} followed turn", provider=provider)["id"]
+        started = Path(str(executable) + ".follow-turn-started")
+        resume = Path(str(executable) + ".follow-turn-continue")
+        ready = Path(str(executable) + ".follow-turn-ready")
+        release = Path(str(executable) + ".follow-turn-release")
+
+        def revision(snapshot):
+            return snapshot.get("conversationRevisions", {}).get(task_id, 0)
+
+        def history_messages():
+            return self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
+
+        def snapshots_within(seconds):
+            seen = []
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                if not select.select([watcher.stdout], [], [], 0.1)[0]:
+                    continue
+                line = watcher.stdout.readline()
+                event = json.loads(line.decode("utf-8")) if line.strip() else {}
+                if event.get("type") == "runtime_state":
+                    seen.append(event["payload"])
+            return seen
+
+        watcher = self.start_cli("conversation", "runtime", "--watch", extra_environment=environment, binary_output=True)
+        prompt = "Please follow-active-turn."
+        send = self.start_cli("conversation", "send", task_id, "--message", prompt, *send_arguments, extra_environment=environment)
+        progressed = None
+        fixture_history = Path(str(executable) + ".history")
+
+        def provider_resume_count():
+            if not fixture_history.is_file():
+                return 0
+            return json.loads(fixture_history.read_text(encoding="utf-8")).get("threadResumeCount", 0)
+        try:
+            self.wait_for_marker(started, True, f"The {display} fixture should hold its turn before any output.", timeout=20)
+            if "--model" in send_arguments:
+                turns = json.loads(fixture_history.read_text(encoding="utf-8")).get("turns", [])
+                self.assertEqual(
+                    turns[-1].get("modelID"), send_arguments[send_arguments.index("--model") + 1],
+                    "The turn should run with the selected model, so history's default differs from it.",
+                )
+            thread_id = None
+            deadline = time.monotonic() + 10
+            while not thread_id and time.monotonic() < deadline:
+                thread_id = self.assert_success(self.call_cli("task", "get", task_id)[0]).get(thread_key)
+                time.sleep(0.05)
+            self.assertTrue(thread_id, f"The running {display} turn should record its {thread_key}.")
+            quiet = self.read_watcher_snapshot(watcher, lambda snapshot: thread_id in snapshot["activeThreadIDs"])
+            # Let snapshots taken before the hold drain, then the held turn stays silent.
+            quiet = ([quiet] + snapshots_within(0.5))[-1]
+            later = snapshots_within(1.5)
+            self.assertEqual(
+                [revision(snapshot) for snapshot in later if revision(snapshot) != revision(quiet)], [],
+                "A turn with no visible output yet should not ask windows to reload history.",
+            )
+
+            resumes_before_progress = provider_resume_count()
+            resume.write_text("Show progress.\n", encoding="utf-8")
+            self.wait_for_marker(ready, True, f"The {display} fixture should hold its turn while progress is visible.", timeout=20)
+            progressed = self.read_watcher_snapshot(
+                watcher, lambda snapshot: thread_id in snapshot["activeThreadIDs"] and revision(snapshot) > revision(quiet)
+            )
+            self.assertIn(thread_id, progressed["activeThreadIDs"], "The revision must rise while the turn is still running.")
+            history = None
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                history = history_messages()
+                if any(message["text"] == progress_text for message in history["messages"]) and any(
+                    activity["id"] == activity_id for activity in history["activities"]
+                ):
+                    break
+                time.sleep(0.1)
+            texts = [message["text"] for message in history["messages"]]
+            self.assertIn(prompt, texts, "Mid-turn history should hold the running turn's prompt.")
+            self.assertIn(progress_text, texts, "Mid-turn history should hold the running turn's commentary.")
+            self.assertNotIn(final_text, texts, "The final answer must not exist before the turn finishes.")
+            running = next((activity for activity in history["activities"] if activity["id"] == activity_id), None)
+            self.assertIsNotNone(running, f"Mid-turn history should hold the running {display} tool activity.")
+            self.assertEqual(running["status"], "inProgress", "The tool is still running while the turn holds.")
+            self.assertEqual(
+                provider_resume_count(), resumes_before_progress,
+                "Mid-turn history must read the running thread as loaded, not resume it with history's default model.",
+            )
+        finally:
+            resume.write_text("Show progress.\n", encoding="utf-8")
+            release.write_text("Finish the turn.\n", encoding="utf-8")
+        try:
+            self.finish_cli(send, ("conversation", "send", task_id, "--message", prompt), timeout=60)
+            settled = self.read_watcher_snapshot(
+                watcher, lambda snapshot: thread_id not in snapshot["activeThreadIDs"] and revision(snapshot) > revision(progressed)
+            )
+            self.assertGreater(revision(settled), revision(progressed))
+        finally:
+            watcher.terminate()
+            watcher.wait(timeout=10)
+        history = history_messages()
+        texts = [message["text"] for message in history["messages"]]
+        self.assertIn(final_text, texts, "The settled turn's final answer should be in history.")
+        finished = next(activity for activity in history["activities"] if activity["id"] == activity_id)
+        self.assertNotEqual(finished["status"], "inProgress", "The tool activity should settle with its turn.")
+
+    # case-contract: test_claude_turn_progress_reaches_other_windows_mid_turn | While a Claude Code fixture turn started by another caller is still running, its commentary and tool activity raise the task's conversation revision in the daemon's runtime snapshot, a held turn with no visible output yet leaves that revision unchanged, and mid-turn history, read from Playhouse's own Claude transcript, already returns the prompt, the commentary, and the in-progress tool activity before any final answer. A conversation reopened after its send, and so no longer reading that turn's stream, shows the commentary and the running tool row while the turn is still held, then the final answer once it settles; the revision rises again when the turn ends.
+    def test_claude_turn_progress_reaches_other_windows_mid_turn(self):
+        self.assert_turn_progress_reaches_followers_mid_turn(
+            "claude", "claude-fixture-follow-active-turn", "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE", "claudeSessionID", "toolu_follow_active_step"
+        )
+
+    # case-contract: test_codex_turn_progress_reaches_other_windows_mid_turn | While a Codex app-server fixture turn started by another caller is still running, its commentary and tool activity raise the task's conversation revision in the daemon's runtime snapshot, a held turn with no visible output yet leaves that revision unchanged, and mid-turn history, read from Codex's native thread while the turn holds, already returns the prompt, the commentary, and the in-progress tool activity before any final answer. A conversation reopened after its send, and so no longer reading that turn's stream, shows the commentary and the running tool row while the turn is still held, then the final answer once it settles; the revision rises again when the turn ends. With a non-default model selected, those mid-turn history reads use the thread the running turn already loaded and never send thread/resume with history's default model.
+    def test_codex_turn_progress_reaches_other_windows_mid_turn(self):
+        self.assert_turn_progress_reaches_followers_mid_turn(
+            "codex", "codex-fixture-follow-active-turn", "PLAYHOUSE_E2E_CODEX_EXECUTABLE", "codexThreadID", "item_follow_active_command",
+            send_arguments=("--model", "gpt-6-sol"),
+        )
+
     # case-contract: test_conversation_rejects_invalid_image_attachments | Malformed image data is rejected with a visible composer error and an invalid_argument bridge response, without creating conversation history or advancing task status.
     def test_conversation_rejects_invalid_image_attachments(self):
         task_id = self.create_task(title="Invalid image conversation")["id"]
@@ -6498,6 +6642,12 @@ class PlayhouseBridgeTests(unittest.TestCase):
         replacement_reported_seconds = float(replacement_goal.get("timeUsedSeconds") or 0)
         expected_baseline = prior_reported_seconds if replacement_reported_seconds >= prior_reported_seconds else 0
         self.assertAlmostEqual(float(replacement_baseline), expected_baseline, places=3, msg="A new Goal must use only the prior total when Codex reports cumulative time.")
+
+    def write_default(self, key, value):
+        subprocess.run(["/usr/bin/defaults", "write", self.defaults_suite, key, value], check=True, capture_output=True)
+
+    def default_exists(self, key):
+        return subprocess.run(["/usr/bin/defaults", "read", self.defaults_suite, key], capture_output=True).returncode == 0
 
     def read_default(self, key):
         completed = subprocess.run(

@@ -48,7 +48,7 @@ For example:
 ./scripts/playhouse.sh conversation send 33F746B9-3E5E-4D84-890A-257BDB01B66A --message "Inspect the parser and summarize its error handling."
 ```
 
-Repository worktrees are created under `~/.playhouse/worktrees`; if the requested branch already has a worktree, Playhouse reuses its current path. By default, the branch name is derived from the task title. `--branch` and `--branch-from` values are keyed to the repository path as `<repo-path>=<value>`. Branch creation uses `master`, or the detected default branch if `master` is absent. Moving a task to Done removes clean worktree directories while leaving their branches; a dirty worktree blocks the status change. Folder-only tasks store their roots directly.
+Repository worktrees are created under `task-worktrees` in the app data directory (`~/Library/Application Support/Playhouse/task-worktrees` for the primary profile), so removing that folder removes them too; worktrees made before this keep their recorded paths; if the requested branch already has a worktree, Playhouse reuses its current path. By default, the branch name is derived from the task title. `--branch` and `--branch-from` values are keyed to the repository path as `<repo-path>=<value>`. Branch creation uses `master`, or the detected default branch if `master` is absent. Moving a task to Done removes clean worktree directories while leaving their branches; a dirty worktree blocks the status change. Folder-only tasks store their roots directly.
 
 The selected worktrees and context folders define task context and the initial working directory; they do not restrict the provider's full-access sandbox configuration.
 

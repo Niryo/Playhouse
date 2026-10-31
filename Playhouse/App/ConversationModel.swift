@@ -422,17 +422,21 @@ final class ProviderOutputPump: @unchecked Sendable {
         Task { @MainActor in await self.drain() }
     }
 
+    /// Removes the next queued item, or clears `isDraining` when the queue is empty.
+    /// Kept synchronous because `NSLock` cannot be used from async contexts.
+    private func popNextOrFinishDraining() -> Item? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !items.isEmpty else {
+            isDraining = false
+            return nil
+        }
+        return items.removeFirst()
+    }
+
     @MainActor
     private func drain() async {
-        while true {
-            lock.lock()
-            guard !items.isEmpty else {
-                isDraining = false
-                lock.unlock()
-                return
-            }
-            let next = items.removeFirst()
-            lock.unlock()
+        while let next = popNextOrFinishDraining() {
             // Reports a handler that has not returned after ten seconds while it
             // is still stuck, since one that never returns would otherwise leave
             // no trace of what it was handling.

@@ -278,6 +278,30 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         if not release.exists():
             raise TimeoutError("Timed out waiting for the agent image publication test.")
         text("msg_image_order", "Claude answer after the image.")
+    elif "follow-active-turn" in user_text.lower():
+        # Holds before any output, so a test can reopen the conversation first,
+        # then again while commentary and a running tool are visible.
+        for stage, description in [("started", "Claude turn started without output."),
+                                   ("ready", "Claude turn shows progress and a running tool.")]:
+            if stage == "ready":
+                text("msg_follow_progress", "Claude is partway through the followed turn.")
+                assistant("msg_toolu_follow_active_step", [{"type": "tool_use", "id": "toolu_follow_active_step", "name": "Bash", "input": {
+                    "command": "fixture-follow-step", "description": "Fixture follow step",
+                }}])
+            marker = Path(str(sys.argv[0]) + f".follow-turn-{stage}")
+            release = Path(str(sys.argv[0]) + (".follow-turn-continue" if stage == "started" else ".follow-turn-release"))
+            marker.write_text(f"{description}\n", encoding="utf-8")
+            deadline = time.monotonic() + 60
+            while not release.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            marker.unlink(missing_ok=True)
+            if not release.exists():
+                raise TimeoutError(f"The test did not release the fixture after: {description}")
+            release.unlink(missing_ok=True)
+        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_follow_active_step", "content": "", "is_error": False},
+        ]}})
+        text("msg_follow_final", "Claude finished the followed turn.")
     elif user_text.startswith("Write a concise task title"):
         if "title-failure" not in sys.argv[0]:
             text("msg_title", "Generated Claude title")

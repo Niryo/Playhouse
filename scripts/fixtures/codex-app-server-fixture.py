@@ -341,6 +341,21 @@ def diagnostic_action_items(cwd):
     ]
 
 
+def follow_turn_items(finished):
+    """The `-follow-active-turn` turn's items, as its stream and history report them."""
+    items = [
+        {"id": "item_follow_commentary", "type": "agentMessage", "phase": "commentary",
+         "text": "Codex is partway through the followed turn."},
+        {"id": "item_follow_active_command", "type": "commandExecution", "command": "fixture-follow-step",
+         "cwd": "/tmp/playhouse-fixture", "status": "completed" if finished else "inProgress",
+         **({"exitCode": 0, "durationMs": 25} if finished else {})},
+    ]
+    if finished:
+        items.append({"id": "item_follow_final", "type": "agentMessage", "phase": "final_answer",
+                      "text": "Codex finished the followed turn."})
+    return items
+
+
 def main():
     global THREAD_ID, TURN_ID
     _ = None
@@ -1056,6 +1071,50 @@ def main():
                     "threadId": THREAD_ID,
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
+            elif mode.endswith("-follow-active-turn"):
+                # Holds before any output, so a test can reopen the conversation first,
+                # then again while commentary and a running command are visible.
+                Path(str(sys.argv[0]) + ".follow-turn-done").unlink(missing_ok=True)
+                for stage, description in [("started", "Codex turn started without output."),
+                                           ("ready", "Codex turn shows progress and a running command.")]:
+                    if stage == "ready":
+                        for item in follow_turn_items(finished=False):
+                            write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                                "threadId": THREAD_ID, "turnId": TURN_ID,
+                                "item": {**item, "text": ""} if item["type"] == "agentMessage" else item,
+                            }})
+                            if item["type"] == "agentMessage":
+                                write({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {
+                                    "threadId": THREAD_ID, "turnId": TURN_ID, "itemId": item["id"], "delta": item["text"],
+                                }})
+                                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                                    "threadId": THREAD_ID, "turnId": TURN_ID, "item": item,
+                                }})
+                    ready = Path(str(sys.argv[0]) + f".follow-turn-{stage}")
+                    release = Path(str(sys.argv[0]) + (".follow-turn-continue" if stage == "started" else ".follow-turn-release"))
+                    ready.write_text(f"{description}\n", encoding="utf-8")
+                    deadline = time.monotonic() + 60
+                    while not release.exists() and time.monotonic() < deadline:
+                        drain_pending_stdin()
+                        time.sleep(0.02)
+                    if not release.exists():
+                        os._exit(3)
+                    if stage == "ready":
+                        Path(str(sys.argv[0]) + ".follow-turn-done").touch()
+                    ready.unlink(missing_ok=True)
+                    release.unlink(missing_ok=True)
+                for item in follow_turn_items(finished=True)[1:]:
+                    if item["type"] == "agentMessage":
+                        write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                            "threadId": THREAD_ID, "turnId": TURN_ID, "item": {**item, "text": ""},
+                        }})
+                        write({"jsonrpc": "2.0", "method": "item/agentMessage/delta", "params": {
+                            "threadId": THREAD_ID, "turnId": TURN_ID, "itemId": item["id"], "delta": item["text"],
+                        }})
+                    write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                        "threadId": THREAD_ID, "turnId": TURN_ID, "item": item,
+                    }})
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": THREAD_ID, "turn": {"id": TURN_ID, "status": "completed"}}})
             elif mode.endswith("-context-compaction"):
                 compaction_item = {"id": "item_playhouse_compaction", "type": "contextCompaction", "payload": {"opaque": "COMPACTION_OPAQUE_SENTINEL"}}
                 write({"jsonrpc": "2.0", "method": "item/started", "params": {
@@ -1694,6 +1753,14 @@ def main():
                     {"id": "item_playhouse_compaction", "type": "contextCompaction", "payload": {"opaque": "COMPACTION_OPAQUE_SENTINEL"}},
                     {"id": "item_playhouse_final", "type": "agentMessage", "phase": "final_answer", "text": "Context compaction completed."},
                 ]
+            if mode.endswith("-follow-active-turn"):
+                # A running turn's history holds the items it has reported so far.
+                contents = [{"id": "item_user_fixture", "type": "userMessage",
+                             "content": [{"type": "text", "text": saved_history.get("userMessage") or ""}]}]
+                if Path(str(sys.argv[0]) + ".follow-turn-done").exists():
+                    contents.extend(follow_turn_items(finished=True))
+                elif Path(str(sys.argv[0]) + ".follow-turn-ready").exists():
+                    contents.extend(follow_turn_items(finished=False))
             if "-long-history-" in mode:
                 contents = []
                 for index in range(1, 61):

@@ -124,7 +124,7 @@ class LiveWorkspace:
         self.environment = os.environ.copy()
         self.environment["PLAYHOUSE_DATA_DIRECTORY"] = str(self.data_directory)
         self.environment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"] = str(self.worktree_directory)
-        self.environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = f"com.playhouse.live-integration.{uuid.uuid4()}"
+        self.environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = str(self.data_directory / "preferences")
         self.environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = service_name
 
     def run_cli(self, *command):

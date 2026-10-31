@@ -299,6 +299,10 @@ struct TaskConversationView: View {
     @State private var unconfirmedStreamedSteers: [String] = []
     /// This window's own sends whose turn stream it is reading right now.
     @State private var followedTurnStreams = 0
+    /// A history reload for another caller's turn is running, and whether a
+    /// newer revision arrived since it started.
+    @State private var isFollowingHistory = false
+    @State private var followedHistoryIsStale = false
     @State private var composerHeight: CGFloat = 28
     private var draftAutosaveTask: Task<Void, Never>? {
         get { composerDraft.autosaveTask }
@@ -684,15 +688,15 @@ struct TaskConversationView: View {
     }
 
     private var responseStartedAtDefaultsKey: String {
-        "playhouse.codex.response-started-at.\(task.id.uuidString)"
+        TaskPreferenceKeys.responseStartedAt(taskID: task.id)
     }
 
     private var completedResponseDurationDefaultsKey: String {
-        "playhouse.codex.completed-response-duration.\(task.id.uuidString)"
+        TaskPreferenceKeys.completedResponseDuration(taskID: task.id)
     }
 
     private var goalAchievementTimelineDefaultsKey: String {
-        "playhouse.codex.goal-achievement-timeline.\(task.id.uuidString)"
+        TaskPreferenceKeys.goalAchievementTimeline(taskID: task.id)
     }
 
     private var goalGenerationDefaultsKey: String {
@@ -730,7 +734,7 @@ struct TaskConversationView: View {
         .background(WorkspaceTheme.windowBackground)
         .onAppear {
             if !isReadOnly,
-               let savedMode = UserDefaults.standard.string(forKey: conversationModeDefaultsKey),
+               let savedMode = WorkspaceSettings.preferencesStore.string(forKey: conversationModeDefaultsKey),
                let mode = ConversationMode(rawValue: savedMode) {
                 conversationMode = mode
             }
@@ -865,9 +869,9 @@ struct TaskConversationView: View {
             // window only through history.
             guard !isReadOnly else { return }
             refreshQueuedMessages()
-            // Mid-turn history lags what this window has already shown.
-            guard followedTurnStreams == 0, !providerTurnIsActive else { return }
-            Task { @MainActor in await refreshGoalConversation() }
+            // History lags what this window's own stream has already shown.
+            guard followedTurnStreams == 0 else { return }
+            followHistory()
         }
         .onChange(of: conversationRuntime.snapshot.goal.stateRevision) { _, _ in
             guard conversationRuntime.snapshot.goal.stateThreadID == task.codexThreadID else { return }
@@ -2805,21 +2809,24 @@ struct TaskConversationView: View {
         if let cached = markdownNSAttributedStringCache.object(forKey: cacheKey) {
             return cached
         }
-        var attributed = Self.markdownAttributedText(markdown)
+        let attributed = Self.markdownAttributedText(markdown)
+        // Fonts are applied on the NSAttributedString because NSFont is not Sendable,
+        // which AttributedString's AppKit font attribute requires.
+        let result = NSMutableAttributedString(attributed)
         for run in attributed.runs {
             guard let intent = run.inlinePresentationIntent else { continue }
+            let font: NSFont
             if intent.contains(.code) {
-                attributed[run.range].appKit.font = NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .regular)
+                font = NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .regular)
             } else {
                 var traits: NSFontTraitMask = []
                 if intent.contains(.stronglyEmphasized) { traits.insert(.boldFontMask) }
                 if intent.contains(.emphasized) { traits.insert(.italicFontMask) }
-                if !traits.isEmpty {
-                    attributed[run.range].appKit.font = NSFontManager.shared.convert(baseFont, toHaveTrait: traits)
-                }
+                guard !traits.isEmpty else { continue }
+                font = NSFontManager.shared.convert(baseFont, toHaveTrait: traits)
             }
+            result.addAttribute(.font, value: font, range: NSRange(run.range, in: attributed))
         }
-        let result = NSAttributedString(attributed)
         markdownNSAttributedStringCache.setObject(result, forKey: cacheKey)
         return result
     }
@@ -4119,8 +4126,8 @@ struct TaskConversationView: View {
         let startedAt = Date()
         responseStartedAt = startedAt
         completedResponseDuration = nil
-        UserDefaults.standard.set(startedAt, forKey: responseStartedAtDefaultsKey)
-        UserDefaults.standard.removeObject(forKey: completedResponseDurationDefaultsKey)
+        WorkspaceSettings.preferencesStore.set(startedAt, forKey: responseStartedAtDefaultsKey)
+        WorkspaceSettings.preferencesStore.removeObject(forKey: completedResponseDurationDefaultsKey)
         if usesComposerDraft { draft = "" }
         let imageDataURLs = usesComposerDraft ? pendingImages.map(\.dataURL) : []
         if usesComposerDraft { pendingImages = [] }
@@ -4157,12 +4164,12 @@ struct TaskConversationView: View {
                 }
                 isResponding = false
                 responseStartedAt = nil
-                UserDefaults.standard.removeObject(forKey: responseStartedAtDefaultsKey)
+                WorkspaceSettings.preferencesStore.removeObject(forKey: responseStartedAtDefaultsKey)
                 completedResponseDuration = previousResponseDuration
                 if let previousResponseDuration {
-                    UserDefaults.standard.set(previousResponseDuration, forKey: completedResponseDurationDefaultsKey)
+                    WorkspaceSettings.preferencesStore.set(previousResponseDuration, forKey: completedResponseDurationDefaultsKey)
                 } else {
-                    UserDefaults.standard.removeObject(forKey: completedResponseDurationDefaultsKey)
+                    WorkspaceSettings.preferencesStore.removeObject(forKey: completedResponseDurationDefaultsKey)
                 }
                 return
             }
@@ -4265,8 +4272,8 @@ struct TaskConversationView: View {
                             if let responseStartedAt {
                                 let duration = Self.elapsedSeconds(since: responseStartedAt, now: Date())
                                 completedResponseDuration = duration
-                                UserDefaults.standard.set(duration, forKey: completedResponseDurationDefaultsKey)
-                                UserDefaults.standard.removeObject(forKey: responseStartedAtDefaultsKey)
+                                WorkspaceSettings.preferencesStore.set(duration, forKey: completedResponseDurationDefaultsKey)
+                                WorkspaceSettings.preferencesStore.removeObject(forKey: responseStartedAtDefaultsKey)
                             }
                             let finalAnswer = history.messages.last { (message: ConversationMessage) -> Bool in
                                 message.role == .assistant && message.phase == "final_answer"
@@ -4335,7 +4342,7 @@ struct TaskConversationView: View {
                     onConflictResolutionChecked(false)
                 }
                 responseStartedAt = nil
-                UserDefaults.standard.removeObject(forKey: responseStartedAtDefaultsKey)
+                WorkspaceSettings.preferencesStore.removeObject(forKey: responseStartedAtDefaultsKey)
                 if conversationRuntime.wasLastTurnInterrupted(threadID: task.activeConversationID ?? "") {
                     hasPausedResponse = true
                 } else {
@@ -4437,6 +4444,23 @@ struct TaskConversationView: View {
             providerBoundaries = history.providerBoundaries
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Reloads history for a turn this window isn't streaming. A running turn
+    /// can bump the revision many times a second, so reloads run one at a
+    /// time and at most once a second, and the newest revision always loads.
+    private func followHistory() {
+        followedHistoryIsStale = true
+        guard !isFollowingHistory else { return }
+        isFollowingHistory = true
+        Task { @MainActor in
+            while followedHistoryIsStale, followedTurnStreams == 0 {
+                followedHistoryIsStale = false
+                await refreshGoalConversation()
+                try? await Task.sleep(for: .seconds(1))
+            }
+            isFollowingHistory = false
         }
     }
 
@@ -4996,12 +5020,12 @@ struct TaskConversationView: View {
     }
 
     private var conversationModeDefaultsKey: String {
-        "conversationMode.\(task.id.uuidString)"
+        TaskPreferenceKeys.conversationMode(taskID: task.id)
     }
 
     private func setConversationMode(_ mode: ConversationMode) {
         conversationMode = mode
-        UserDefaults.standard.set(mode.rawValue, forKey: conversationModeDefaultsKey)
+        WorkspaceSettings.preferencesStore.set(mode.rawValue, forKey: conversationModeDefaultsKey)
     }
 
     private func startImplementingPlan() {

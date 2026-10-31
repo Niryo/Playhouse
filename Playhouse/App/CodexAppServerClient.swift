@@ -267,12 +267,16 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             goalObservationThreadID = threadID
             Self.activeClientsByThreadID[threadID] = self
         }
+        // A thread with a turn running here is already loaded with that turn's
+        // model and instructions; resuming it with history's defaults would
+        // replace them under the running turn.
         try await resumeThreadIfNeeded(
             id: threadID,
             workspace: workspace,
             developerInstructions: developerInstructions,
             sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
-            sensitiveConversation: sensitiveConversation
+            sensitiveConversation: sensitiveConversation,
+            reusingLoadedThread: turnContexts[threadID] != nil
         )
         return try await readMessages(threadID: threadID)
     }

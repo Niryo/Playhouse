@@ -50,7 +50,7 @@ enum CodexGoalGenerationStore {
         "playhouse.codex.goal-generation-time-baseline.\(taskID.uuidString)"
     }
 
-    private static func clearedTimeCarryoverKey(taskID: UUID) -> String {
+    static func clearedTimeCarryoverKey(taskID: UUID) -> String {
         "playhouse.codex.goal-cleared-time-carryover.\(taskID.uuidString)"
     }
 
@@ -76,6 +76,46 @@ enum CodexGoalGenerationStore {
         defaults.set(goal.objective, forKey: objectiveKey(taskID: taskID))
         defaults.set(timeBaseline, forKey: timeBaselineKey(taskID: taskID))
         defaults.removeObject(forKey: clearedTimeCarryoverKey(taskID: taskID))
+    }
+}
+
+/// Preference keys that hold one task's or chat's state, each ending in its UUID.
+/// They belong to that conversation, so they're removed once it no longer exists.
+/// A new per-conversation key must be listed in `all` to be removed.
+enum TaskPreferenceKeys {
+    static func responseStartedAt(taskID: UUID) -> String {
+        "playhouse.codex.response-started-at.\(taskID.uuidString)"
+    }
+
+    static func completedResponseDuration(taskID: UUID) -> String {
+        "playhouse.codex.completed-response-duration.\(taskID.uuidString)"
+    }
+
+    static func goalAchievementTimeline(taskID: UUID) -> String {
+        "playhouse.codex.goal-achievement-timeline.\(taskID.uuidString)"
+    }
+
+    static func conversationMode(taskID: UUID) -> String {
+        "conversationMode.\(taskID.uuidString)"
+    }
+
+    private static let all: [(UUID) -> String] = [
+        responseStartedAt, completedResponseDuration, goalAchievementTimeline, conversationMode,
+        CodexGoalGenerationStore.generationIDKey, CodexGoalGenerationStore.objectiveKey,
+        CodexGoalGenerationStore.timeBaselineKey, CodexGoalGenerationStore.clearedTimeCarryoverKey,
+    ]
+
+    /// Removes every per-conversation key whose task or chat isn't in `liveIDs`,
+    /// including keys left by tasks deleted before this cleanup existed.
+    static func removeOrphans(keeping liveIDs: Set<UUID>, defaults: UserDefaults) {
+        let uuidLength = UUID().uuidString.count
+        let prefixes = Set(all.map { String($0(UUID()).dropLast(uuidLength)) })
+        for key in defaults.dictionaryRepresentation().keys where key.count > uuidLength {
+            guard prefixes.contains(String(key.dropLast(uuidLength))),
+                  let id = UUID(uuidString: String(key.suffix(uuidLength))),
+                  !liveIDs.contains(id) else { continue }
+            defaults.removeObject(forKey: key)
+        }
     }
 }
 
@@ -1280,10 +1320,16 @@ final class BoardTaskManager {
     private let conversationTurnLockDirectory: URL?
     private let worktreeService = PlayhouseWorktreeService()
     private let pullRequestService = PlayhousePullRequestService()
+    private let preferences: UserDefaults
 
-    init(modelContext: ModelContext, worktreeRoot: URL = PlayhouseWorktreeManager.defaultRoot()) {
+    init(
+        modelContext: ModelContext,
+        worktreeRoot: URL = PlayhouseWorktreeManager.defaultRoot(),
+        preferences: UserDefaults = WorkspaceSettings.preferencesStore
+    ) {
         self.modelContext = modelContext
         self.worktreeRoot = worktreeRoot
+        self.preferences = preferences
         self.taskOperationLockDirectory = modelContext.container.configurations.first?.url
             .deletingLastPathComponent()
             .appendingPathComponent("task-operation-locks", isDirectory: true)
@@ -2971,6 +3017,7 @@ final class BoardTaskManager {
             modelContext.delete(task)
             try await saveTaskContext(taskID: taskID)
             try? conversationTranscriptStore().remove(taskID)
+            removeOrphanedTaskPreferences()
             PlayhouseDiagnostics.record("task.delete.succeeded", fields: fields)
         } catch {
             fields["phase"] = phase
@@ -2984,6 +3031,16 @@ final class BoardTaskManager {
 
     func taskModel(_ id: UUID) throws -> BoardTask {
         try requireTask(id)
+    }
+
+    private func removeOrphanedTaskPreferences() {
+        do {
+            let taskIDs = try modelContext.fetch(FetchDescriptor<BoardTask>()).map(\.id)
+            let chatIDs = try modelContext.fetch(FetchDescriptor<StandaloneChat>()).map(\.id)
+            TaskPreferenceKeys.removeOrphans(keeping: Set(taskIDs + chatIDs), defaults: preferences)
+        } catch {
+            PlayhouseDiagnostics.record("task.preferences.cleanup_failed", fields: PlayhouseDiagnostics.errorFields(error))
+        }
     }
 
     /// Resolves whatever owns the conversation with this ID: a board task or the standalone
@@ -3746,10 +3803,17 @@ final class ConversationManager {
     private var dispatchingQueuedMessages = false
     private static var dispatchingQueuedTaskIDs = Set<UUID>()
     /// Bumped whenever a turn changes what a task's conversation shows (its
-    /// transcript or its queue). The turn's own stream reaches only the caller
-    /// that started it; any other window follows these instead.
+    /// transcript or its queue), including while the turn is still running.
+    /// The turn's own stream reaches only the caller that started it; any
+    /// other window follows these instead.
     private(set) static var visibleRevisions: [UUID: Int] = [:]
     private static func bumpVisibleRevision(_ taskID: UUID) { visibleRevisions[taskID, default: 0] += 1 }
+    /// Turn updates whose content history can already return. Text deltas are
+    /// left out: they arrive many times a second, each bump makes a following
+    /// window reload history, and the completed message bumps anyway.
+    private static let historyVisibleUpdateTypes: Set<String> = [
+        "queue_changed", "steered_message", "assistant_progress", "assistant_final", "activity", "diff",
+    ]
     private static var pendingQueuedTaskDispatchIDs = Set<UUID>()
     private var activeSendTaskIDs = Set<UUID>()
     // ConversationManager is lightweight and some entry points construct one per send.
@@ -4919,7 +4983,7 @@ final class ConversationManager {
     ) async throws -> ConversationHistory {
         let streamUpdate = onUpdate
         let onUpdate: (ConversationUpdate) -> Void = { update in
-            if update.type == "queue_changed" || update.type == "steered_message" { Self.bumpVisibleRevision(taskID) }
+            if Self.historyVisibleUpdateTypes.contains(update.type) { Self.bumpVisibleRevision(taskID) }
             streamUpdate(update)
         }
         defer { Self.bumpVisibleRevision(taskID) }
@@ -6615,13 +6679,15 @@ final class PlayhouseBridgeRuntime {
             let container = try PlayhouseStore.makeContainer(dataDirectory: dataDirectory)
             try await PlayhouseStore.prepareLifecycle(container: container, dataDirectory: dataDirectory)
             let context = ModelContext(container)
+            // Beside the store this request opened, whatever chose its directory.
+            let storeDirectory = container.configurations.first?.url.deletingLastPathComponent().path ?? dataDirectory
             let worktreeRoot: URL
             #if DEBUG
-            worktreeRoot = request.worktreeDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) } ?? PlayhouseWorktreeManager.defaultRoot()
+            worktreeRoot = request.worktreeDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }
+                ?? PlayhouseWorktreeManager.defaultRoot(dataDirectory: storeDirectory)
             #else
-            worktreeRoot = PlayhouseWorktreeManager.defaultRoot()
+            worktreeRoot = PlayhouseWorktreeManager.defaultRoot(dataDirectory: storeDirectory)
             #endif
-            let taskManager = BoardTaskManager(modelContext: context, worktreeRoot: worktreeRoot)
             let preferences: UserDefaults
             #if DEBUG
             if let suite = request.defaultsSuite, let isolated = UserDefaults(suiteName: suite) {
@@ -6636,6 +6702,7 @@ final class PlayhouseBridgeRuntime {
                 ?? "com.playhouse.app"
             preferences = UserDefaults(suiteName: applicationIdentifier) ?? .standard
             #endif
+            let taskManager = BoardTaskManager(modelContext: context, worktreeRoot: worktreeRoot, preferences: preferences)
             let settings = WorkspaceSettingsManager(defaults: preferences)
             let workspaces = WorkspaceManager(taskManager: taskManager, settingsManager: settings)
             try await workspaces.reconcileDeferredRepositoryRemovals()
