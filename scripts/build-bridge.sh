@@ -40,12 +40,14 @@ fi
 
 shared_sources=(
   "${repository_root}/StationAI/App/BoardTask.swift"
+  "${repository_root}/StationAI/App/ConversationSubject.swift"
   "${repository_root}/StationAI/App/WorkspaceSupport.swift"
   "${repository_root}/StationAI/App/WorkspaceChanges.swift"
   "${repository_root}/StationAI/App/CodexAppServerClient.swift"
   "${repository_root}/StationAI/App/ConversationModel.swift"
   "${repository_root}/StationAI/App/ClaudeCodeClient.swift"
   "${repository_root}/StationAI/App/ConversationTranscriptStore.swift"
+  "${repository_root}/StationAI/App/StandaloneChatStore.swift"
   "${repository_root}/StationAI/App/BridgeCore.swift"
   "${repository_root}/StationAI/Bridge/BridgeContract.swift"
   "${repository_root}/StationAI/Bridge/BridgeSocket.swift"

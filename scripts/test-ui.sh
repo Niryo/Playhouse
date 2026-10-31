@@ -186,8 +186,13 @@ source_bundle_identifier="$("${repository_root}/scripts/app-profile.sh" "${repos
 task_pr_seeder="${fixture_root}/seed-task-pr-link"
 xcrun swiftc -module-name StationAI \
   "${repository_root}/StationAI/App/BoardTask.swift" \
+  "${repository_root}/StationAI/App/ConversationSubject.swift" \
   "${repository_root}/scripts/seed-task-pr-link.swift" \
   -o "${task_pr_seeder}"
+legacy_chat_seeder="${fixture_root}/seed-legacy-standalone-chat-task"
+xcrun swiftc -parse-as-library -swift-version 5 -O \
+  "${repository_root}/scripts/seed-legacy-standalone-chat-task.swift" \
+  -o "${legacy_chat_seeder}"
 legacy_store_seeder="${fixture_root}/seed-legacy-task-store"
 xcrun swiftc -parse-as-library -swift-version 5 -O \
   "${repository_root}/scripts/seed-legacy-task-store.swift" \

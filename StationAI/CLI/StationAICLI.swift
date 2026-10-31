@@ -25,8 +25,17 @@ enum StationAICLI {
         configuredRequest.dataDirectory = dataDirectory
         configuredRequest.defaultsSuite = defaultsSuite
         configuredRequest.worktreeDirectory = ProcessInfo.processInfo.environment["STATIONAI_E2E_WORKTREE_DIRECTORY"]
+        // Same identity lookup as BridgeClient.applicationIdentifier(): this CLI
+        // lives at `<App>.app/Contents/MacOS/stationai-cli`, so `Bundle.main`
+        // already resolves to the app's own Info.plist.
+        let applicationIdentifier = Bundle.main.infoDictionary?["StationAIApplicationBundleIdentifier"] as? String
+            ?? Bundle.main.bundleIdentifier ?? ""
+        let forwardableNames = BridgeContract.environmentNamesToForward(
+            applicationIdentifier: applicationIdentifier,
+            from: ProcessInfo.processInfo.environment
+        )
         configuredRequest.environment = ProcessInfo.processInfo.environment
-            .filter { BridgeContract.sessionEnvironmentNames.contains($0.key) }
+            .filter { forwardableNames.contains($0.key) }
         if let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"] {
             configuredRequest.arguments["__codexHome"] = .string(codexHome)
         }
@@ -109,7 +118,7 @@ enum StationAICLI {
                 ])
             case "pr":
                 guard tail.count >= 2 else {
-                    throw CLIError.usage("Use: stationai task pr create|conflicts|status|verify|resolve <task-id> [action]")
+                    throw CLIError.usage("Use: stationai task pr create|conflicts|status|verify|resolve|sync <task-id> [action]")
                 }
                 switch tail[0] {
                 case "create" where tail.count == 2:
@@ -122,8 +131,10 @@ enum StationAICLI {
                     return BridgeRequest(command: "task.pr.verify", arguments: ["taskID": .string(tail[1])])
                 case "resolve" where tail.count == 3:
                     return BridgeRequest(command: "task.pr.resolve", arguments: ["taskID": .string(tail[1]), "action": .string(tail[2])])
+                case "sync" where tail.count == 2:
+                    return BridgeRequest(command: "task.pr.sync", arguments: ["taskID": .string(tail[1])])
                 default:
-                    throw CLIError.usage("Use: stationai task pr create|conflicts|status|verify|resolve <task-id> [resolve-and-push|resolve-only|keep]")
+                    throw CLIError.usage("Use: stationai task pr create|conflicts|status|verify|resolve|sync <task-id> [resolve-and-push|resolve-only|keep]")
                 }
             case "progress":
                 guard let action = tail.first else { throw CLIError.usage("Use: stationai task progress publish|custom|clear <task-id> ...") }
@@ -301,6 +312,52 @@ enum StationAICLI {
             default:
                 throw CLIError.usage("Unknown task operation '\(operation)'.")
             }
+        case "chat":
+            if rest == ["open"] {
+                return BridgeRequest(command: "chat.open")
+            }
+            if rest == ["status"] {
+                return BridgeRequest(command: "chat.status")
+            }
+            guard rest.first == "page", rest.count >= 2 else {
+                throw CLIError.usage("Use: stationai chat open or stationai chat page list|search|read|new|close-turn ...")
+            }
+            let tail = Array(rest.dropFirst(2))
+            switch rest[1] {
+            case "list":
+                let flags = try parseFlags(tail, valueFlags: ["--limit"])
+                var arguments: [String: BridgeValue] = [:]
+                if let limit = flags["--limit"]?.first { arguments["limit"] = .string(limit) }
+                return BridgeRequest(command: "chat.page.list", arguments: arguments)
+            case "search":
+                let query = try firstPositional(tail)
+                return BridgeRequest(command: "chat.page.search", arguments: ["query": .string(query)])
+            case "read":
+                let id = try firstPositional(tail)
+                return BridgeRequest(command: "chat.page.read", arguments: ["pageID": .string(id)])
+            case "new":
+                let flags = try parseFlags(tail, valueFlags: ["--title"])
+                let title = try requiredFlag("--title", flags: flags).first!
+                return BridgeRequest(command: "chat.page.new", arguments: ["title": .string(title)])
+            case "close-turn":
+                guard let chatID = tail.first else {
+                    throw CLIError.usage("Use: stationai chat page close-turn <chat-id> --continues <true|false> [--new-title <title>]")
+                }
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--continues", "--new-title", "--summary-hint"])
+                let continuesValue = try requiredFlag("--continues", flags: flags).first!
+                guard continuesValue == "true" || continuesValue == "false" else {
+                    throw CLIError.usage("Use --continues true or --continues false.")
+                }
+                var arguments: [String: BridgeValue] = [
+                    "chatID": .string(chatID),
+                    "continues": .boolean(continuesValue == "true"),
+                ]
+                if let newTitle = flags["--new-title"]?.first { arguments["newTitle"] = .string(newTitle) }
+                if let summaryHint = flags["--summary-hint"]?.first { arguments["summaryHint"] = .string(summaryHint) }
+                return BridgeRequest(command: "chat.page.close-turn", arguments: arguments)
+            default:
+                throw CLIError.usage("Unknown chat page operation '\(rest[1])'.")
+            }
         case "workspace":
             if rest == ["repos", "list"] {
                 return BridgeRequest(command: "workspace.repositories.list")
@@ -464,7 +521,7 @@ enum StationAICLI {
                     "answers": .object(answers.mapValues { .array($0.map(BridgeValue.string)) })
                 ])
             case "send":
-                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode", "--model", "--answer", "--image"])
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode", "--model", "--answer", "--image", "--context-page"])
                 var answers: [String: [String]] = [:]
                 for pair in flags["--answer"] ?? [] {
                     guard let separator = pair.firstIndex(of: "="), separator != pair.startIndex else {
@@ -493,6 +550,10 @@ enum StationAICLI {
                 ]
                 // Without --model, the task's provider chooses its default model.
                 if let model = flags["--model"]?.first { sendArguments["model"] = .string(model) }
+                // Standalone chat only: pages an annotation points at, carried for this turn.
+                if let contextPages = flags["--context-page"] {
+                    sendArguments["contextPages"] = .array(contextPages.map(BridgeValue.string))
+                }
                 return BridgeRequest(command: "conversation.send", arguments: sendArguments)
             default: throw CLIError.usage("Unknown conversation operation '\(operation)'.")
             }
@@ -574,6 +635,7 @@ enum StationAICLI {
       stationai task pr create <task-id>
       stationai task pr status <task-id>
       stationai task pr verify <task-id>
+      stationai task pr sync <task-id>
       stationai task progress publish <task-id> --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail <text>]
       stationai task progress custom <task-id> --label <label> [--detail <text>]
       stationai task progress clear <task-id>
@@ -592,6 +654,13 @@ enum StationAICLI {
       stationai task changes mark-viewed <task-id> --repository <path> --path <relative-path>
       stationai task delete <task-id>
       stationai task delete-check <task-id>
+      stationai chat open
+      stationai chat status
+      stationai chat page list [--limit <n>]
+      stationai chat page search <query>
+      stationai chat page read <page-id>
+      stationai chat page new --title <title>
+      stationai chat page close-turn <chat-id> --continues <true|false> [--new-title <title>] [--summary-hint <text>]
       stationai workspace suggest --parent <path>
       stationai workspace repos list
       stationai settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>
@@ -618,7 +687,7 @@ enum StationAICLI {
       stationai conversation stop <task-id>
       stationai conversation provider <task-id> [set <codex|claude>|capabilities]
       stationai conversation goal <task-id> <get|set|pause|resume|clear> [--text <objective>]
-      stationai conversation send <task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...]
+      stationai conversation send <task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...] [--context-page <page-id>]...
 
     Results are JSON. Conversation send emits JSON event lines followed by a final response.
     Conversation commands use the task's provider; tasks without one use Codex.

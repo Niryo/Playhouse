@@ -24,7 +24,7 @@ struct CodexQuestionOwnershipProbe {
         guard let originalID = UUID(uuidString: arguments[3]), let parallelID = UUID(uuidString: arguments[4]) else {
             throw NSError(domain: "CodexQuestionOwnershipProbe", code: 2)
         }
-        let schema = Schema([BoardTask.self])
+        let schema = Schema([BoardTask.self, StandaloneChat.self])
         let configuration = ModelConfiguration(schema: schema, url: directory.appendingPathComponent("StationAI-v2.store"))
         let container = try ModelContainer(for: schema, configurations: [configuration])
         let tasks = BoardTaskManager(modelContext: container.mainContext)

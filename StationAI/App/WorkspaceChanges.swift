@@ -197,9 +197,9 @@ enum WorkspaceChangeScanner {
             "workspaceRootCount": String(workspaceRoots.count)
         ])
         do {
-            let inventory = try await Task.detached(priority: .utility) {
+            let inventory = try await StationAIBackgroundOperation.run {
                 try inventorySynchronously(workspaceRoots: workspaceRoots, branchFromByRepository: branchFromByRepository, viewedChanges: viewedChanges).changes
-            }.value
+            }
             StationAIDiagnostics.record("workspace.files.inventory.succeeded", fields: [
                 "operationID": operationID,
                 "unviewedCount": String(inventory.unviewed.count),
@@ -237,7 +237,7 @@ enum WorkspaceChangeScanner {
         ]
         StationAIDiagnostics.record("workspace.file.read.started", fields: fields)
         do {
-            let diff = try await Task.detached(priority: .utility) {
+            let diff = try await StationAIBackgroundOperation.run {
                 try diffSynchronously(
                     workspaceRoots: workspaceRoots,
                     repositoryPath: repositoryPath,
@@ -246,7 +246,7 @@ enum WorkspaceChangeScanner {
                     branchFrom: branchFrom,
                     viewedChanges: viewedChanges
                 )
-            }.value
+            }
             StationAIDiagnostics.record("workspace.file.read.succeeded", fields: fields.merging([
                 "originalBytes": String(diff.original?.utf8.count ?? 0),
                 "modifiedBytes": String(diff.modified?.utf8.count ?? 0),
@@ -265,7 +265,7 @@ enum WorkspaceChangeScanner {
 
     @MainActor
     static func captureViewedChange(workspaceRoots: [String], repositoryPath: String, relativePath: String) async throws -> WorkspaceViewedChange {
-        let (isPresent, contents) = try await Task.detached(priority: .utility) {
+        let (isPresent, contents) = try await StationAIBackgroundOperation.run {
             guard isSafeRelativePath(relativePath) else {
                 throw BridgeCommandError(code: "invalid_argument", message: "The changed file path must be relative to its repository.")
             }
@@ -279,7 +279,7 @@ enum WorkspaceChangeScanner {
             let contents = isPresent ? try worktreeBytes(repository: repository, path: relativePath) : Data()
             try stageViewedChange(repository: repository, path: relativePath)
             return (isPresent, contents)
-        }.value
+        }
         return WorkspaceViewedChange(repository: URL(fileURLWithPath: repositoryPath).standardizedFileURL.path, path: relativePath, isPresent: isPresent, contents: contents)
     }
 

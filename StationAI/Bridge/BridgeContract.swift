@@ -20,6 +20,31 @@ enum BridgeContract {
         applicationIdentifier.isEmpty ? serviceName : applicationIdentifier + ".bridge"
     }
 
+    /// True only for a DEBUG build whose bundle identifier marks it as this
+    /// repository's e2e/UI test harness build (see `scripts/prepare-e2e-build.py`
+    /// and `scripts/app-profile.sh`), never for a normally-signed Release build.
+    /// Shared by the app, CLI, and daemon — each compiles this file separately
+    /// (see `scripts/build-bridge.sh`) — so all three agree on when test-only
+    /// overrides are safe to honor.
+    static func isTestBundle(_ applicationIdentifier: String) -> Bool {
+        #if DEBUG
+        return applicationIdentifier.contains(".e2e.")
+        #else
+        return false
+        #endif
+    }
+
+    /// The caller's environment names this request's `environment` field should
+    /// carry in addition to `sessionEnvironmentNames`: in a test bundle only, its
+    /// `STATIONAI_E2E_*` test-fixture overrides (for example the `gh` fixture's
+    /// state/call-log paths), since those names only ever exist in the test
+    /// harness and would otherwise be stripped before reaching a subprocess
+    /// (like `gh`) that the request spawns.
+    static func environmentNamesToForward(applicationIdentifier: String, from environment: [String: String]) -> Set<String> {
+        guard isTestBundle(applicationIdentifier) else { return sessionEnvironmentNames }
+        return sessionEnvironmentNames.union(environment.keys.filter { $0.hasPrefix("STATIONAI_E2E_") })
+    }
+
     /// A Unix domain socket's path is limited to ~104 bytes on macOS
     /// (`sizeof(sockaddr_un.sun_path)`), which a per-worktree-profile path under
     /// `~/Library/Application Support/...` can exceed. The socket lives at a short,

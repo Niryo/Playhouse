@@ -33,11 +33,16 @@ struct KanbanBoardView: View {
     @State private var mergedPullRequestCheckTimerScheduled = false
     @State private var lastMergedPullRequestCheckAt: Date?
     @State private var taskAwaitingUnmergedConfirmation: UUID?
+    @State private var syncingReviewTaskIDs = Set<UUID>()
+    @State private var attemptedReviewSyncSignatures: [UUID: String] = [:]
     @State private var pullRequestError: String?
     @State private var doneMoveError: String?
     @State private var isShowingBoardSearch = false
     @State private var boardSearchText = ""
     @FocusState private var isBoardSearchFocused: Bool
+    @State private var isShowingChatSidebar = false
+    @State private var chatTask: StandaloneChat?
+    @State private var isOpeningChatSidebar = false
 
     /// Provider-owning operations run in the bridge daemon.
     private var remoteConversations: RemoteConversationManager {
@@ -45,6 +50,27 @@ struct KanbanBoardView: View {
     }
 
     var body: some View {
+        HStack(spacing: 0) {
+            if isShowingChatSidebar, let chatTask {
+                TaskConversationView(
+                    task: chatTask, isNewTask: false, isReadOnly: false,
+                    conflictResolutionRequested: false,
+                    onConflictResolutionChecked: { _ in }
+                ) {
+                    withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = false }
+                }
+                .frame(width: 460)
+                .transition(.move(edge: .leading).combined(with: .opacity))
+                .id(chatTask.id)
+                .accessibilityIdentifier("chat-sidebar")
+                Divider()
+            }
+            mainContent
+        }
+        .animation(.easeInOut(duration: 0.22), value: isShowingChatSidebar)
+    }
+
+    private var mainContent: some View {
         Group {
             if let selectedTask {
                 TaskConversationView(
@@ -67,6 +93,9 @@ struct KanbanBoardView: View {
         .background(WorkspaceTheme.windowBackground)
         .frame(minWidth: 980, minHeight: 640)
         .onAppear {
+            // The board renders from its own @Query, not the board.list path, so it has to
+            // convert a chat still stored as a hidden task itself or that row shows as a card.
+            try? BoardTaskManager(modelContext: modelContext).migrateLegacyStandaloneChatTasks()
             checkReviewPullRequests()
             let retained = StationAIStore.takeLifecycleResetNotice(
                 dataDirectory: ProcessInfo.processInfo.environment["STATIONAI_DATA_DIRECTORY"]
@@ -472,6 +501,20 @@ struct KanbanBoardView: View {
                 .accessibilityIdentifier("done-archive-button")
 
                 Button {
+                    openChatSidebar()
+                } label: {
+                    Label("Chat", systemImage: "bubble.left.and.bubble.right")
+                        .font(.system(size: 13, weight: .semibold))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                }
+                .buttonHoverPointer()
+                .help("Open the standalone chat")
+                .buttonStyle(.bordered)
+                .disabled(isOpeningChatSidebar)
+                .accessibilityIdentifier("chat-sidebar-button")
+
+                Button {
                     openNewTask()
                 } label: {
                     Label("New Task", systemImage: "plus")
@@ -655,6 +698,38 @@ struct KanbanBoardView: View {
         )
     }
 
+    private func openChatSidebar() {
+        if isShowingChatSidebar {
+            withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = false }
+            return
+        }
+        guard !isOpeningChatSidebar else { return }
+        if let chatTask {
+            withAnimation(.easeInOut(duration: 0.22)) {
+                self.chatTask = chatTask
+                isShowingChatSidebar = true
+            }
+            return
+        }
+        isOpeningChatSidebar = true
+        Task { @MainActor in
+            defer { isOpeningChatSidebar = false }
+            do {
+                let manager = BoardTaskManager(modelContext: modelContext)
+                let record = try await manager.getOrCreateStandaloneChat(
+                    provider: WorkspaceSettingsManager().defaultConversationProvider
+                )
+                guard let chat = try manager.standaloneChatModel(record.id) else {
+                    throw BridgeCommandError(code: "operation_failed", message: "The standalone chat could not be opened.")
+                }
+                chatTask = chat
+                withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = true }
+            } catch {
+                saveError = error.localizedDescription
+            }
+        }
+    }
+
     private func openNewTask() {
         guard !isCreatingNewTask else { return }
         isCreatingNewTask = true
@@ -783,6 +858,7 @@ struct KanbanBoardView: View {
                         else { mergedReviewTaskIDs.remove(id) }
                         if states.contains(where: \.requiresConflictResolution) { conflictedReviewTaskIDs.insert(id) }
                         else { conflictedReviewTaskIDs.remove(id) }
+                        syncReviewChangesIfNeeded(for: id, states: states)
                     } else if let error {
                         mergedReviewTaskIDs.remove(id)
                         conflictedReviewTaskIDs.remove(id)
@@ -792,6 +868,43 @@ struct KanbanBoardView: View {
             }
             mergedReviewTaskIDs.formIntersection(reviewIDs)
             conflictedReviewTaskIDs.formIntersection(reviewIDs)
+        }
+    }
+
+    /// A reviewed task must not hold local-only pull request changes. When a
+    /// probe finds the local and remote heads diverged on a mergeable PR, sync
+    /// (commit, merge remote PR commits, push) through the shared bridge command.
+    /// Each head pairing is attempted once, so a repository the sync cannot act
+    /// on (for example, one with no publishing remote) keeps its conflict action
+    /// without a retry loop; the daemon moves the task to Blocked when a sync fails.
+    private func syncReviewChangesIfNeeded(for id: UUID, states: [PullRequestReviewState]) {
+        let needsSync = states.contains { state in
+            !state.merged && !state.hasConflicts && state.headRefOid != nil && state.headRefOid != state.localHeadOid
+        }
+        guard needsSync else { return }
+        let signature = states
+            .map { "\($0.number):\($0.headRefOid ?? "-"):\($0.localHeadOid ?? "-")" }
+            .sorted()
+            .joined(separator: "|")
+        guard attemptedReviewSyncSignatures[id] != signature, !syncingReviewTaskIDs.contains(id) else { return }
+        attemptedReviewSyncSignatures[id] = signature
+        syncingReviewTaskIDs.insert(id)
+        Task { @MainActor in
+            defer { syncingReviewTaskIDs.remove(id) }
+            do {
+                let outcome = try await remoteConversations.syncPullRequestChanges(taskID: id)
+                if outcome.skipped != nil {
+                    // An active turn owns the worktree; let a later probe retry.
+                    attemptedReviewSyncSignatures.removeValue(forKey: id)
+                    return
+                }
+                guard outcome.records.contains(where: { $0.action.hasSuffix("pushed") }) else { return }
+                lastMergedPullRequestCheckAt = nil
+                checkReviewPullRequests()
+            } catch {
+                attemptedReviewSyncSignatures.removeValue(forKey: id)
+                pullRequestError = error.localizedDescription
+            }
         }
     }
 
