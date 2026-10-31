@@ -747,7 +747,9 @@ struct TaskConversationView: View {
                         .accessibilityIdentifier("chat-image-full-size")
                 }
                 .padding(16)
-                .frame(minWidth: 600, minHeight: 420)
+                // Stay within the window's own 980x640 content minimum so the sheet
+                // can never outgrow its host window and push Close out of reach.
+                .frame(minWidth: 900, minHeight: 600)
             }
         }
         .fileImporter(isPresented: $isShowingImagePicker, allowedContentTypes: [.image], allowsMultipleSelection: true) { result in
@@ -2665,9 +2667,15 @@ struct TaskConversationView: View {
 
             ForEach(Array(message.imageDataURLs.enumerated()), id: \.offset) { index, dataURL in
                 if let image = Self.image(fromDataURL: dataURL) {
-                    Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 520, maxHeight: 420)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
+                    Button { selectedChatImage = image } label: {
+                        Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 520, maxHeight: 420)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Open attached image")
+                    .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
+                    .buttonHoverPointer()
+                    .help("Open image at full size")
                 }
             }
             if !displayText.isEmpty {

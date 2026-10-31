@@ -980,6 +980,20 @@ enum PullRequestResolutionCheck: String, Codable, Sendable {
     case inconclusive
 }
 
+/// What the review sync did to one PR-linked repository: no-remote,
+/// no-remote-branch, up-to-date, pushed, merged-and-pushed, or resolved-and-pushed.
+struct TaskBranchSyncResult: Codable, Sendable {
+    let repositoryPath: String
+    let action: String
+}
+
+/// The `task.pr.sync` command's result: per-repository actions, or
+/// `skipped == "turn-active"` when an active turn owns the worktree.
+struct PullRequestSyncOutcome: Codable, Sendable {
+    let records: [TaskBranchSyncResult]
+    let skipped: String?
+}
+
 struct StationAIPullRequestService {
 
     func resolveExecutable() throws -> String {
@@ -2254,63 +2268,157 @@ final class BoardTaskManager {
             let conflicted = try await pullRequestConflictRepositoriesUnlocked(id)
             guard !conflicted.isEmpty else { return try get(id) }
             let affected = records.filter { conflicted.contains($0.repositoryPath) }
-            let roots = try ConversationWorkspaceContext(roots: affected.map { URL(fileURLWithPath: $0.worktreePath, isDirectory: true) })
             for record in affected {
                 guard let target = record.mergeTarget else { continue }
-                // A prior Codex attempt may have left Git's merge in progress,
+                // A prior provider attempt may have left Git's merge in progress,
                 // including after every conflict file was staged. Resume it.
                 if try await worktreeService.hasMergeInProgress(record) == false {
                     try await worktreeService.mergeTarget(record, target: target)
                 }
             }
-            var finalMessage = ""
-            var needsCodexResolution = false
+            try await resolveMergeConflictsWithProvider(affected, provider: try requireTask(id).conversationProvider, clients: clients)
             for record in affected {
-                if try await worktreeService.hasUnmergedFiles(record) {
-                    needsCodexResolution = true
-                    break
-                }
-            }
-            if needsCodexResolution {
-                let client = clients.client(for: try requireSubject(id).conversationProvider)
-                let thread = try await client.startThread(workspace: roots, modelID: client.provider.defaultModelID, developerInstructions: nil)
-                do {
-                    try await client.sendMessage(
-                        "Resolve every Git merge conflict in the current workspace. Preserve the intended changes from both sides, inspect the resulting files, and stage the resolved files. Do not commit or push. Report which conflicts you resolved.",
-                        mode: .code,
-                        modelID: client.provider.defaultModelID,
-                        threadID: thread,
-                        workspace: roots,
-                        onFinalMessage: { finalMessage = $0 },
-                        onUserInput: { request in
-                            client.rejectUserInput(
-                                requestID: request.id,
-                                threadID: request.threadID,
-                                message: "Conflict resolution cannot continue while \(client.provider.displayName) is waiting for user input."
-                            )
-                        }
-                    )
-                } catch {
-                    for record in affected {
-                        if try await worktreeService.hasUnmergedFiles(record) {
-                            throw BridgeCommandError(code: "operation_failed", message: "Codex couldn't resolve every merge conflict. The task branch was left available for manual resolution.")
-                        }
-                    }
-                    throw error
-                }
-            }
-            for record in affected {
-                guard try await worktreeService.hasUnmergedFiles(record) == false else {
-                    throw BridgeCommandError(code: "operation_failed", message: "Codex couldn't resolve every merge conflict. The task branch was left available for manual resolution.")
-                }
                 try await worktreeService.commitChanges(record, message: "Resolve merge conflicts with \(record.mergeTarget ?? "target")")
                 if action == "resolve-and-push" { try await worktreeService.publishBranch(record) }
             }
             StationAIDiagnostics.record("task.pr.conflicts.resolved", fields: [
-                "taskID": id.uuidString, "repositoryCount": String(affected.count), "pushed": String(action == "resolve-and-push"),
-                "hasCodexSummary": String(!finalMessage.isEmpty)
+                "taskID": id.uuidString, "repositoryCount": String(affected.count), "pushed": String(action == "resolve-and-push")
             ])
             return try get(id)
+        }
+    }
+
+    /// Runs a provider turn that resolves the staged Git merge conflicts in the
+    /// given worktrees, then verifies none remain. Throws when any conflict is
+    /// left, leaving the merge in progress for manual resolution.
+    private func resolveMergeConflictsWithProvider(
+        _ records: [RepositoryWorktreeRecord],
+        provider: ConversationProvider,
+        clients: ConversationClients
+    ) async throws {
+        var unresolved: [RepositoryWorktreeRecord] = []
+        for record in records {
+            if try await worktreeService.hasUnmergedFiles(record) { unresolved.append(record) }
+        }
+        guard !unresolved.isEmpty else { return }
+        let client = clients.client(for: provider)
+        let failureMessage = "\(client.provider.displayName) couldn't resolve every merge conflict. The task branch was left available for manual resolution."
+        let roots = try ConversationWorkspaceContext(roots: unresolved.map { URL(fileURLWithPath: $0.worktreePath, isDirectory: true) })
+        let thread = try await client.startThread(workspace: roots, modelID: client.provider.defaultModelID, developerInstructions: nil)
+        do {
+            try await client.sendMessage(
+                "Resolve every Git merge conflict in the current workspace. Preserve the intended changes from both sides, inspect the resulting files, and stage the resolved files. Do not commit or push. Report which conflicts you resolved.",
+                mode: .code,
+                modelID: client.provider.defaultModelID,
+                threadID: thread,
+                workspace: roots,
+                onFinalMessage: { _ in },
+                onUserInput: { request in
+                    client.rejectUserInput(
+                        requestID: request.id,
+                        threadID: request.threadID,
+                        message: "Conflict resolution cannot continue while \(client.provider.displayName) is waiting for user input."
+                    )
+                }
+            )
+        } catch {
+            for record in unresolved {
+                if try await worktreeService.hasUnmergedFiles(record) {
+                    throw BridgeCommandError(code: "operation_failed", message: failureMessage)
+                }
+            }
+            throw error
+        }
+        for record in unresolved {
+            if try await worktreeService.hasUnmergedFiles(record) {
+                throw BridgeCommandError(code: "operation_failed", message: failureMessage)
+            }
+        }
+    }
+
+    static let reviewSyncBlockedMessagePrefix = "StationAI couldn't sync this task's changes with its pull request"
+
+    static func reviewSyncBlockedMessage(_ error: Error) -> String {
+        "\(reviewSyncBlockedMessagePrefix): \(error.localizedDescription)"
+    }
+
+    /// Commits local work, merges new remote pull request commits, and pushes
+    /// every PR-linked task branch, so a reviewed task never holds local-only
+    /// changes. Merge conflicts are resolved by the task's provider. A repository
+    /// without a publishing remote or remote branch is left untouched. Throws on
+    /// any failure so the caller can move the task to Blocked.
+    func syncPullRequestChanges(_ id: UUID, clients: ConversationClients) async throws -> [TaskBranchSyncResult] {
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            let provider = task.conversationProvider
+            let title = task.title
+            let records = task.repositoryWorktrees.filter { !$0.isPending && $0.pullRequestNumber != nil }
+            var results: [TaskBranchSyncResult] = []
+            for record in records {
+                // A failed earlier sync can leave its merge in progress; resolve
+                // its conflicts before anything else touches the working tree.
+                if try await worktreeService.hasMergeInProgress(record) {
+                    try await resolveMergeConflictsWithProvider([record], provider: provider, clients: clients)
+                }
+                let hadLocalChanges = try await worktreeService.hasChanges(record)
+                if hadLocalChanges {
+                    try await worktreeService.commitChanges(record, message: "Complete task: \(title)")
+                }
+                let state = try await worktreeService.fetchRemoteBranchState(record)
+                guard state.remote != nil else {
+                    results.append(TaskBranchSyncResult(repositoryPath: record.repositoryPath, action: "no-remote"))
+                    continue
+                }
+                guard state.remoteBranchExists else {
+                    results.append(TaskBranchSyncResult(repositoryPath: record.repositoryPath, action: "no-remote-branch"))
+                    continue
+                }
+                var resolvedConflicts = false
+                if state.behindCount > 0 {
+                    try await worktreeService.mergeFetchedRemoteBranch(record)
+                    if try await worktreeService.hasUnmergedFiles(record) {
+                        resolvedConflicts = true
+                        try await resolveMergeConflictsWithProvider([record], provider: provider, clients: clients)
+                    }
+                    try await worktreeService.commitChanges(record, message: "Merge remote changes for \(record.branch)")
+                }
+                if state.aheadCount > 0 || state.behindCount > 0 || hadLocalChanges {
+                    try await worktreeService.publishBranch(record)
+                    let action = resolvedConflicts ? "resolved-and-pushed" : (state.behindCount > 0 ? "merged-and-pushed" : "pushed")
+                    results.append(TaskBranchSyncResult(repositoryPath: record.repositoryPath, action: action))
+                } else {
+                    results.append(TaskBranchSyncResult(repositoryPath: record.repositoryPath, action: "up-to-date"))
+                }
+            }
+            StationAIDiagnostics.record("task.review.sync.completed", fields: [
+                "taskID": id.uuidString,
+                "actions": results.map { "\($0.repositoryPath)=\($0.action)" }.joined(separator: ",")
+            ])
+            return results
+        }
+    }
+
+    /// The review guarantee for a task already on the board: after this call the
+    /// task either has no local-only pull request changes or sits in Blocked with
+    /// the sync failure message. A successful rerun heals a block this sync caused.
+    func syncPullRequestChangesOrBlock(_ id: UUID, clients: ConversationClients) async throws -> [TaskBranchSyncResult] {
+        do {
+            let results = try await syncPullRequestChanges(id, clients: clients)
+            if let task = try? requireTask(id), task.status == .blocked,
+               task.statusMessage?.hasPrefix(Self.reviewSyncBlockedMessagePrefix) == true {
+                _ = try await setLifecycleStatus(id, to: .review)
+            }
+            return results
+        } catch {
+            StationAIDiagnostics.record("task.review.sync.failed", fields: [
+                "taskID": id.uuidString,
+                "error": error.localizedDescription
+            ])
+            let status = (try? requireTask(id))?.status
+            if status == .review || status == .blocked {
+                _ = try? await setLifecycleStatus(id, to: .blocked, message: Self.reviewSyncBlockedMessage(error))
+            }
+            throw error
         }
     }
 
@@ -5991,8 +6099,32 @@ final class ConversationManager {
                     }
                 }
             } else if reportedOutcome != nil || !deferMissingOutcomeStatus {
-                let finalStatus: TaskStatus = reportedOutcome == "completed" ? .review : .waitingResponse
-                _ = try await tasks.setLifecycleStatus(taskID, to: finalStatus)
+                if reportedOutcome == "completed" {
+                    // A reviewed task must hold no local-only pull request changes:
+                    // sync them first, and block instead of resting partially pushed.
+                    phase = "review-sync"
+                    var syncError: Error?
+                    do {
+                        _ = try await tasks.syncPullRequestChanges(taskID, clients: clients)
+                    } catch {
+                        syncError = error
+                    }
+                    if let syncError {
+                        StationAIDiagnostics.record("task.review.sync.failed", fields: [
+                            "taskID": taskID.uuidString,
+                            "error": syncError.localizedDescription
+                        ])
+                        _ = try await tasks.setLifecycleStatus(
+                            taskID,
+                            to: .blocked,
+                            message: BoardTaskManager.reviewSyncBlockedMessage(syncError)
+                        )
+                    } else {
+                        _ = try await tasks.setLifecycleStatus(taskID, to: .review)
+                    }
+                } else {
+                    _ = try await tasks.setLifecycleStatus(taskID, to: .waitingResponse)
+                }
             }
         } catch {
             await titleGeneration?.value
@@ -6464,6 +6596,24 @@ final class StationAIBridgeRuntime {
                     request.requiredUUID("taskID"), action: request.requiredString("action"),
                     clients: conversationClients()
                 ))
+            case "task.pr.sync":
+                let taskID = try request.requiredUUID("taskID")
+                // An active turn owns the worktree (the same reservation workspace
+                // changes use); skip instead of committing half-written files. The
+                // turn's own completion gate syncs when it finishes.
+                if try taskManager.hasConversationTurnReservation(taskID) {
+                    result = .object([
+                        "records": .array([]),
+                        "status": .string(try taskManager.taskModel(taskID).status.rawValue),
+                        "skipped": .string("turn-active")
+                    ])
+                } else {
+                    let records = try await taskManager.syncPullRequestChangesOrBlock(taskID, clients: conversationClients())
+                    result = .object([
+                        "records": try .encoding(records),
+                        "status": .string(try taskManager.taskModel(taskID).status.rawValue)
+                    ])
+                }
             case "task.progress.publish":
                 let rawType = try request.requiredString("type")
                 guard let type = TaskProgressType(rawValue: rawType) else {

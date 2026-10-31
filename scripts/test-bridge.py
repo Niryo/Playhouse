@@ -22,6 +22,10 @@ import unittest
 import uuid
 from pathlib import Path
 
+# A CLI run inside a StationAI conversation inherits the host app's bridge
+# socket; every harness subprocess must reach the daemon derived from this
+# run's service name instead.
+os.environ.pop("STATIONAI_BRIDGE_SOCKET_PATH", None)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--cli", required=True, type=Path)
@@ -700,7 +704,7 @@ class StationAIBridgeTests(unittest.TestCase):
             task = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         return task
 
-    def complete_fixture_turn(self, task_id, executable_name="codex-fixture", message="Complete this task."):
+    def complete_fixture_turn(self, task_id, executable_name="codex-fixture", message="Complete this task.", expected_status="Review"):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / executable_name
         hold_marker = Path(str(executable) + ".hold-release")
@@ -745,7 +749,7 @@ class StationAIBridgeTests(unittest.TestCase):
             hold_marker.unlink(missing_ok=True)
         result = self.assert_success(response)
         current, _ = self.call_cli("task", "get", task_id)
-        self.assertEqual(self.assert_success(current)["status"], "Review")
+        self.assertEqual(self.assert_success(current)["status"], expected_status)
         return result
 
     def complete_standalone_chat_fixture_turn(self, chat_task_id, message, continues=True, new_title=None, executable_name="codex-fixture-chat", skip_close_turn=False):
@@ -2658,6 +2662,162 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertIsNone(self.assert_success(self.call_cli("task", "get", task["id"])[0])["repositoryWorktrees"][0].get("pullRequestNumber"))
         invalid, _ = self.call_cli("task", "pr", "resolve", task["id"], "unknown", expected_status=2)
         self.assert_failure(invalid, "invalid_argument")
+        self.run_git(self.primary, "remote", "remove", "origin")
+
+    # case-contract: test_review_sync_pushes_unpushed_changes_on_completion | A completed turn outcome on a task with a PR-linked repository and a configured remote commits local work, merges new remote pull request commits, and pushes the branch before the task reaches Review, so the reviewed worktree holds no local-only changes. A linked repository without a publishing remote is left untouched and still reaches Review. When the sync cannot complete, the task moves to Blocked with the sync failure message instead of resting in Review, and a later successful sync pushes the stranded commits and returns the task to Review. While a provider turn holds the task's worktree, the sync command skips it untouched and reports turn-active.
+    def test_review_sync_pushes_unpushed_changes_on_completion(self):
+        task = self.create_repo_task("Review sync push", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
+        record = task["repositoryWorktrees"][0]
+        worktree = Path(record["worktreePath"])
+        branch = record["branch"]
+        self.seed_done_task_pull_request(task["id"], number=123)
+
+        # Without a publishing remote, the sync has nothing to act on and Review is untouched.
+        no_remote, _ = self.call_cli("task", "pr", "sync", task["id"])
+        no_remote_result = self.assert_success(no_remote)
+        self.assertEqual([item["action"] for item in no_remote_result["records"]], ["no-remote"])
+        self.assertEqual(no_remote_result["status"], "Review")
+
+        # While a provider turn owns the worktree, the sync skips instead of mutating it.
+        process, _, active, release = self.start_progress_fixture_turn(task["id"], "codex-fixture-review-sync-hold-release")
+        try:
+            skipped, _ = self.call_cli("task", "pr", "sync", task["id"])
+            skipped_result = self.assert_success(skipped)
+            self.assertEqual(skipped_result.get("skipped"), "turn-active")
+            self.assertEqual(skipped_result["records"], [])
+            outcome, _ = self.call_cli("task", "outcome", task["id"], "completed")
+            self.assertEqual(self.assert_success(outcome)["outcome"], "completed")
+            release.write_text("Release the active turn.\n", encoding="utf-8")
+            process.communicate(timeout=30)
+            self.assertEqual(process.returncode, 0)
+        finally:
+            if process.poll() is None:
+                release.write_text("Release the active turn.\n", encoding="utf-8")
+                process.communicate(timeout=20)
+            active.unlink(missing_ok=True)
+            release.unlink(missing_ok=True)
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review")
+
+        remote = self.data_directory / "review-sync-origin.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+        self.run_git(self.primary, "remote", "add", "origin", str(remote))
+        self.run_git(worktree, "push", "--set-upstream", "origin", branch)
+
+        # A reviewer commit on the remote PR branch the local branch has not seen.
+        clone = self.data_directory / "review-sync-clone"
+        subprocess.run(["git", "clone", "--branch", branch, str(remote), str(clone)], check=True, capture_output=True, text=True)
+        (clone / "remote-side.txt").write_text("Remote reviewer commit.\n", encoding="utf-8")
+        self.run_git(clone, "add", "remote-side.txt")
+        self.run_git(clone, "commit", "-m", "Remote PR commit")
+        self.run_git(clone, "push", "origin", branch)
+        reviewer_head = self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip()
+
+        # Local uncommitted work the completed turn leaves behind.
+        (worktree / "local-side.txt").write_text("Local turn output.\n", encoding="utf-8")
+        self.complete_fixture_turn(task["id"], executable_name="codex-fixture-review-sync")
+        self.assertEqual(self.run_git(worktree, "status", "--porcelain", "--untracked-files=all").strip(), "")
+        local_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        self.assertEqual(self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip(), local_head)
+        self.assertNotEqual(local_head, reviewer_head, "The sync should push a merge of the reviewer commit and the local work.")
+        self.assertEqual((worktree / "remote-side.txt").read_text(encoding="utf-8"), "Remote reviewer commit.\n")
+        pushed_local_side = subprocess.run(
+            ["git", "--git-dir", str(remote), "show", f"refs/heads/{branch}:local-side.txt"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        self.assertEqual(pushed_local_side, "Local turn output.\n")
+
+        # A sync the daemon cannot complete blocks the task instead of resting in Review.
+        self.run_git(self.primary, "remote", "set-url", "origin", str(self.data_directory / "missing-remote.git"))
+        (worktree / "local-side.txt").write_text("Unpushable local change.\n", encoding="utf-8")
+        self.complete_fixture_turn(task["id"], executable_name="codex-fixture-review-sync", expected_status="Blocked")
+        blocked = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertIn("couldn't sync this task's changes with its pull request", blocked.get("statusMessage") or "")
+
+        # A later successful sync pushes the stranded commit and returns the task to Review.
+        self.run_git(self.primary, "remote", "set-url", "origin", str(remote))
+        healed, _ = self.call_cli("task", "pr", "sync", task["id"])
+        healed_result = self.assert_success(healed)
+        self.assertEqual([item["action"] for item in healed_result["records"]], ["pushed"])
+        self.assertEqual(healed_result["status"], "Review")
+        healed_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        self.assertEqual(self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip(), healed_head)
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review")
+        self.run_git(self.primary, "remote", "remove", "origin")
+
+    # case-contract: test_review_sync_resolves_conflicts_with_provider_or_blocks | When the remote pull request branch conflicts with local task commits, the review sync merges the remote branch and instructs the task's provider to resolve every conflict; if conflicts remain after the provider turn, the sync fails, the task moves to Blocked with the sync failure message, the merge stays in progress for manual resolution, and the remote branch is unchanged. A rerun with the conflicts staged commits the resolution, pushes the merged branch, and returns the task to Review. The board triggers the same sync automatically when a mergeable pull request's remote head diverges from the local head.
+    def test_review_sync_resolves_conflicts_with_provider_or_blocks(self):
+        task = self.create_repo_task("Review sync conflicts", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
+        record = task["repositoryWorktrees"][0]
+        worktree = Path(record["worktreePath"])
+        branch = record["branch"]
+        self.seed_done_task_pull_request(task["id"], number=123)
+        remote = self.data_directory / "review-sync-conflict-origin.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+        self.run_git(self.primary, "remote", "add", "origin", str(remote))
+        conflict_path = "review-sync-conflict.txt"
+        (worktree / conflict_path).write_text("base version\n", encoding="utf-8")
+        self.run_git(worktree, "add", conflict_path)
+        self.run_git(worktree, "commit", "-m", "Base for sync conflict")
+        self.run_git(worktree, "push", "--set-upstream", "origin", branch)
+
+        clone = self.data_directory / "review-sync-conflict-clone"
+        subprocess.run(["git", "clone", "--branch", branch, str(remote), str(clone)], check=True, capture_output=True, text=True)
+        (clone / conflict_path).write_text("remote version\n", encoding="utf-8")
+        self.run_git(clone, "add", conflict_path)
+        self.run_git(clone, "commit", "-m", "Remote conflicting commit")
+        self.run_git(clone, "push", "origin", branch)
+        remote_head = self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip()
+        (worktree / conflict_path).write_text("local version\n", encoding="utf-8")
+        self.run_git(worktree, "add", conflict_path)
+        self.run_git(worktree, "commit", "-m", "Local conflicting commit")
+        local_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+
+        # The provider fixture turn runs but resolves nothing, so the sync fails closed.
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-review-conflicts"
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        environment = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        failed, _ = self.call_cli("task", "pr", "sync", task["id"], extra_environment=environment, expected_status=1)
+        self.assert_failure(failed, "operation_failed")
+        self.assertIn("couldn't resolve every merge conflict", failed["error"]["message"])
+        blocked = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(blocked["status"], "Blocked")
+        self.assertIn("couldn't sync this task's changes with its pull request", blocked.get("statusMessage") or "")
+        self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), local_head)
+        merge_in_progress = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "--verify", "MERGE_HEAD"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(merge_in_progress.returncode, 0, "The failed sync should leave its merge in progress for manual resolution.")
+        self.assertEqual(self.run_git(worktree, "diff", "--name-only", "--diff-filter=U").strip(), conflict_path)
+        self.assertEqual(self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip(), remote_head, "A failed sync must leave the remote branch unchanged.")
+
+        # Staging the resolution lets a rerun commit the merge, push, and restore Review.
+        resolved_content = "resolved local and remote versions\n"
+        (worktree / conflict_path).write_text(resolved_content, encoding="utf-8")
+        self.run_git(worktree, "add", conflict_path)
+        healed, _ = self.call_cli("task", "pr", "sync", task["id"], extra_environment=environment)
+        healed_result = self.assert_success(healed)
+        self.assertEqual([item["action"] for item in healed_result["records"]], ["pushed"])
+        self.assertEqual(healed_result["status"], "Review")
+        self.assertEqual(self.run_git(worktree, "status", "--porcelain", "--untracked-files=all").strip(), "")
+        finished_merge = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "--verify", "MERGE_HEAD"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(finished_merge.returncode, 128, "The rerun should finish the merge it resumed.")
+        healed_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        self.assertEqual(self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip(), healed_head)
+        pushed_content = subprocess.run(
+            ["git", "--git-dir", str(remote), "show", f"refs/heads/{branch}:{conflict_path}"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        self.assertEqual(pushed_content, resolved_content)
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review")
         self.run_git(self.primary, "remote", "remove", "origin")
 
     # case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC fresh reads confirm saved PR data; the UI shows active and archived PR links and an active task's Create PR button. Hovering the outer padded edge of each control triggers its hover feedback.
@@ -5179,7 +5339,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(failure_items[failed_target_record["id"]]["state"], "needsAction")
         self.assertEqual(failure_items[later_record["id"]]["state"], "queued", "A failed targeted send must not drain later queued messages.")
 
-    # case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a composer or transcript attachment opens the original image in a large viewer, which can be closed to return to the conversation.
+    # case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a composer attachment, a user transcript attachment, or an agent-published assistant image opens the original image in a large viewer, which can be closed to return to the conversation; a published assistant image preserves the original file bytes.
     def test_conversation_sends_image_attachments(self):
         task_id = self.create_task(title="Image conversation") ["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -5280,6 +5440,11 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assertEqual(saved_agent_image["id"], published_message["id"])
         self.assertEqual(saved_agent_image["imageDataURLs"], published_message["imageDataURLs"])
+        self.assertEqual(
+            base64.b64decode(saved_agent_image["imageDataURLs"][0].split(",", 1)[1]),
+            image.read_bytes(),
+            "The assistant image the viewer opens must keep the original published file bytes.",
+        )
         thread_instructions = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["threadStartDeveloperInstructions"]
         self.assertIn("conversation present-image", thread_instructions)
         jpeg = self.data_directory / "agent-image.jpg"

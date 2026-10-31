@@ -25,8 +25,17 @@ enum StationAICLI {
         configuredRequest.dataDirectory = dataDirectory
         configuredRequest.defaultsSuite = defaultsSuite
         configuredRequest.worktreeDirectory = ProcessInfo.processInfo.environment["STATIONAI_E2E_WORKTREE_DIRECTORY"]
+        // Same identity lookup as BridgeClient.applicationIdentifier(): this CLI
+        // lives at `<App>.app/Contents/MacOS/stationai-cli`, so `Bundle.main`
+        // already resolves to the app's own Info.plist.
+        let applicationIdentifier = Bundle.main.infoDictionary?["StationAIApplicationBundleIdentifier"] as? String
+            ?? Bundle.main.bundleIdentifier ?? ""
+        let forwardableNames = BridgeContract.environmentNamesToForward(
+            applicationIdentifier: applicationIdentifier,
+            from: ProcessInfo.processInfo.environment
+        )
         configuredRequest.environment = ProcessInfo.processInfo.environment
-            .filter { BridgeContract.sessionEnvironmentNames.contains($0.key) }
+            .filter { forwardableNames.contains($0.key) }
         if let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"] {
             configuredRequest.arguments["__codexHome"] = .string(codexHome)
         }
@@ -109,7 +118,7 @@ enum StationAICLI {
                 ])
             case "pr":
                 guard tail.count >= 2 else {
-                    throw CLIError.usage("Use: stationai task pr create|conflicts|status|verify|resolve <task-id> [action]")
+                    throw CLIError.usage("Use: stationai task pr create|conflicts|status|verify|resolve|sync <task-id> [action]")
                 }
                 switch tail[0] {
                 case "create" where tail.count == 2:
@@ -122,8 +131,10 @@ enum StationAICLI {
                     return BridgeRequest(command: "task.pr.verify", arguments: ["taskID": .string(tail[1])])
                 case "resolve" where tail.count == 3:
                     return BridgeRequest(command: "task.pr.resolve", arguments: ["taskID": .string(tail[1]), "action": .string(tail[2])])
+                case "sync" where tail.count == 2:
+                    return BridgeRequest(command: "task.pr.sync", arguments: ["taskID": .string(tail[1])])
                 default:
-                    throw CLIError.usage("Use: stationai task pr create|conflicts|status|verify|resolve <task-id> [resolve-and-push|resolve-only|keep]")
+                    throw CLIError.usage("Use: stationai task pr create|conflicts|status|verify|resolve|sync <task-id> [resolve-and-push|resolve-only|keep]")
                 }
             case "progress":
                 guard let action = tail.first else { throw CLIError.usage("Use: stationai task progress publish|custom|clear <task-id> ...") }
@@ -624,6 +635,7 @@ enum StationAICLI {
       stationai task pr create <task-id>
       stationai task pr status <task-id>
       stationai task pr verify <task-id>
+      stationai task pr sync <task-id>
       stationai task progress publish <task-id> --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail <text>]
       stationai task progress custom <task-id> --label <label> [--detail <text>]
       stationai task progress clear <task-id>
