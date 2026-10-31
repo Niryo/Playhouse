@@ -283,7 +283,9 @@ fi
 printf 'Running UI tests in VM-local source snapshot...\n'
 source_sync_root="${run_artifacts}/source"
 mkdir -p "$source_sync_root"
-if ! rsync -a --delete --exclude='__pycache__/' --exclude='*.pyc' "${repository_root}/" "${source_sync_root}/"; then
+# Git metadata and build outputs are not needed in the VM (the snapshot gets its own
+# repository below); copying them through the shared mount exhausted its file handles.
+if ! rsync -a --delete --exclude='.git' --exclude='DerivedData/' --exclude='build/' --exclude='*.xcresult/' --exclude='node_modules/' --exclude='.idea/' --exclude='xcuserdata/' --exclude='.tmp-*' --exclude='.e2e.lock' --exclude='*.profraw' --exclude='__pycache__/' --exclude='*.pyc' "${repository_root}/" "${source_sync_root}/"; then
 	printf 'Could not synchronize the current checkout into the Tart artifact share.\n' >&2
 	exit 74
 fi
@@ -382,15 +384,15 @@ if [[ -e "$source_snapshot_root" ]]; then
 fi
 mkdir -p "$source_snapshot_root"
 printf '%s\n' "$source_snapshot_owner_contents" > "$source_snapshot_owner"
-if ! rsync -a --exclude='__pycache__/' --exclude='*.pyc' "${source_root}/" "${source_snapshot_root}/"; then
+if ! rsync -a --exclude='.git' --exclude='DerivedData/' --exclude='build/' --exclude='*.xcresult/' --exclude='node_modules/' --exclude='.idea/' --exclude='xcuserdata/' --exclude='.tmp-*' --exclude='.e2e.lock' --exclude='*.profraw' --exclude='__pycache__/' --exclude='*.pyc' "${source_root}/" "${source_snapshot_root}/"; then
 	printf 'Could not create the VM-local source snapshot; guest run data is retained at %s.\n' "$snapshot_root" >&2
 	exit 74
 fi
-# A linked worktree's .git file points back to the host's common Git directory,
-# which is not mounted in the VM. The snapshot only needs local repository
+# The host's Git metadata is not copied (a linked worktree's .git file would point
+# at an unmounted common directory anyway). The snapshot only needs local repository
 # identity for app-profile.sh, so give this disposable copy its own metadata.
-if [[ -f "${source_snapshot_root}/.git" ]]; then
-	mv "${source_snapshot_root}/.git" "${source_snapshot_root}/.git-host-worktree-pointer"
+if [[ ! -d "${source_snapshot_root}/.git" ]]; then
+	rm -f "${source_snapshot_root}/.git"
 	git -C "$source_snapshot_root" init --quiet
 fi
 printf 'VM-local source snapshot: %s\n' "$source_snapshot_root"

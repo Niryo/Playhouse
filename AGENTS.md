@@ -8,6 +8,7 @@ These rules govern development work in this repository. They describe the develo
 - This includes `git add`, `commit`, `push`, `pull`, `stash`, `restore`, `reset`, `checkout`, `switch`, `clean`, `merge`, `rebase`, `cherry-pick`, branch or tag creation/deletion, and worktree creation/removal.
 - A request to implement, edit, or review code is not permission to run a Git write command. Read-only commands such as `git status`, `git diff`, and `git log` are allowed.
 - Explicitly invoking `$full-ui-verification` authorizes that skill to stage and commit only changes made for its verification and repair work, then push that commit to the current branch's configured upstream. It does not authorize including unrelated or pre-existing staged changes; if those prevent a scoped commit, finish verification and report the commit/push blocker.
+- Explicitly invoking `$nightly-tests-improver` (`.agents/skills/nightly-tests-improver/SKILL.md`) authorizes that skill, in the same path-scoped way, to stage, commit, and push the changes of its improvement round once its confirmation UI run is green. It likewise never includes pre-existing staged changes.
 
 ## App operations through the bridge
 

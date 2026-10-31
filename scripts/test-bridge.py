@@ -1642,22 +1642,13 @@ class StationAIBridgeTests(unittest.TestCase):
         gh_calls = gh_directory / "calls"
         gh_state.write_text("123=merged\n456=unmerged\n", encoding="utf-8")
         gh = gh_directory / "gh"
-        gh.write_text(
-            "#!/bin/sh\n"
-            "if [ \"$1\" != pr ] || [ \"$2\" != view ] || { [ \"$3\" != 123 ] && [ \"$3\" != 456 ]; } || [ \"$4\" != --json ] || [ \"$5\" != mergedAt ]; then\n"
-            "  echo 'Unexpected gh fixture command' >&2\n"
-            "  exit 2\n"
-            "fi\n"
-            f"printf '%s\\n' \"$3\" >> '{gh_calls}'\n"
-            f"if [ \"$(awk -F= -v number=\"$3\" '$1 == number {{ print $2 }}' '{gh_state}')\" = merged ]; then\n"
-            "  printf '{\"mergedAt\":\"2026-10-22T00:00:00Z\"}\\n'\n"
-            "else\n"
-            "  printf '{\"mergedAt\":null}\\n'\n"
-            "fi\n",
-            encoding="utf-8",
-        )
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
         gh.chmod(0o755)
-        gh_environment = {"PATH": f"{gh_directory}:{os.environ.get('PATH', '')}"}
+        gh_environment = {
+            "PATH": f"{gh_directory}:{os.environ.get('PATH', '')}",
+            "STATIONAI_E2E_GH_STATE_PATH": str(gh_state),
+            "STATIONAI_E2E_GH_CALL_LOG": str(gh_calls),
+        }
         linked = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(linked["repositoryWorktrees"][0]["pullRequestURL"], pr_url)
         self.assertEqual(linked["repositoryWorktrees"][1]["pullRequestURL"], second_pr_url)
@@ -2909,7 +2900,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(self.assert_success(response)["deleted"])
         self.assertFalse(broken_worktree.exists())
 
-    # case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, the removed PR conflict preference is absent from CLI/XPC and Settings, and appearance changes update the open Settings picker.
+    # case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, the removed PR conflict preference is absent from CLI/XPC and Settings, and appearance changes update the open Settings picker. Clearing the default parent does not change roots already saved on a task.
     def test_default_parent_settings_read_write_clear_and_validation(self):
         self.assert_success(self.call_cli("settings", "clear-parent")[0])
         response, _ = self.call_cli("settings", "get")
@@ -3063,16 +3054,6 @@ class StationAIBridgeTests(unittest.TestCase):
             [str(self.primary), str(self.empty_git_repository)],
             "A failed restore must preserve the ordered repository defaults.",
         )
-
-    # case-contract: test_task_roots_remain_after_default_parent_is_cleared | Clearing the default parent does not change roots already saved on a task.
-    def test_task_roots_remain_after_default_parent_is_cleared(self):
-        task_id = self.create_task(title="Persistent task roots")["id"]
-        response, _ = self.call_cli("settings", "set-parent", self.fixture / "suggested-parent")
-        self.assertEqual(self.assert_success(response)["defaultParentFolder"], str(self.fixture / "suggested-parent"))
-        response, _ = self.call_cli("settings", "clear-parent")
-        self.assertIsNone(self.assert_success(response)["defaultParentFolder"])
-        response, _ = self.call_cli("task", "roots", "get", task_id)
-        self.assertEqual(self.assert_success(response)["roots"], [str(self.primary)])
 
     # case-contract: test_new_task_has_empty_conversation_history | The CLI creates an Untitled task with no roots, logs task.create.succeeded for its ID, verifies empty history, and deletes it cleanly. New Task logs start and completion events with the same attempt ID and created task ID, then opens one empty conversation with the repository picker closed, the composer focused, and no create sheet. With no selected repositories, the empty conversation prominently says no repository is selected; typing starts immediately and, with a configured repository root, the UI enables standalone Send. Adding folder-only context leaves history empty, and backing out deletes the pending task without confirmation.
     def test_new_task_has_empty_conversation_history(self):
@@ -5780,7 +5761,7 @@ class StationAIBridgeTests(unittest.TestCase):
         resumed, _ = self.call_cli("conversation", "history", task_id)
         self.assertIsNone(self.assert_success(resumed).get("pendingUserInputRequest"))
 
-    # case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early. A status-only completion update is not shown as an agent result; the summary-bearing notification is persisted as one normal assistant message in the parent conversation, appears in the visible transcript, and survives fresh CLI/XPC history reads and app reopening without duplication. A failed background agent remains inspectable as a failed activity, and its error summary is not added as an assistant result.
+    # case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early. A status-only completion update is not shown as an agent result; the summary-bearing notification is persisted as one normal assistant message in the parent conversation, appears in the visible transcript, and survives fresh CLI/XPC history reads and app reopening without duplication. A failed background agent remains inspectable as a failed activity, and its error summary is not added as an assistant result. When a background agent's notification wakes the parent after its result, the turn stays open through that resumed work, including when the last agent finishes while the woken parent is still streaming, and ends only with the parent's next result, keeping its final answer and both agent reports.
     def test_claude_background_agent_keeps_turn_open_until_resolved(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-background-agent"
@@ -5889,6 +5870,55 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertFalse(
             any(message.get("phase") == "subagent_report" for message in failed_history["messages"]),
             "A failed agent summary must not be presented as a successful assistant result.",
+        )
+
+        wake_task_response, _ = self.call_cli(
+            "task", "create", "--title", "Claude woken parent", "--root", self.primary, "--provider", "claude"
+        )
+        wake_task_id = self.assert_success(wake_task_response)["id"]
+        wake_command = ("conversation", "send", wake_task_id, "--message", "Launch background agents wake the parent.")
+        wake_pause = Path(str(executable) + ".background-wake-pause")
+        wake_ready = Path(str(executable) + ".background-wake-ready")
+        wake_release = Path(str(executable) + ".background-wake-release")
+        wake_pause.write_text("Pause after the last notification arrives mid-work.\n", encoding="utf-8")
+        wake_process = self.start_cli(*wake_command, extra_environment=env, binary_output=True)
+        try:
+            deadline = time.monotonic() + 20
+            while not wake_ready.exists() and wake_process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(wake_ready.exists(), "The fixture should pause after the last notification arrives mid-work.")
+            # Settling on the stale earlier result would end the send right after
+            # this notification; give that regression time to show.
+            settle_deadline = time.monotonic() + 2
+            while wake_process.poll() is None and time.monotonic() < settle_deadline:
+                time.sleep(0.05)
+            self.assertIsNone(
+                wake_process.poll(),
+                "A parent woken by a background notification must keep the turn open until its next result.",
+            )
+            wake_release.write_text("Release the woken parent's final answer.\n", encoding="utf-8")
+            wake_stdout, wake_stderr = wake_process.communicate(timeout=60)
+            self.assertEqual(wake_process.returncode, 0, f"CLI exit mismatch for {wake_command}: {wake_stderr!r}")
+        finally:
+            wake_release.write_text("Release after assertion failure.\n", encoding="utf-8")
+            if wake_process.poll() is None:
+                wake_process.communicate(timeout=30)
+        wake_lines = [line for line in wake_stdout.decode("utf-8").splitlines() if line.strip()]
+        wake_result = self.assert_success(json.loads(wake_lines[-1]))
+        self.assertTrue(any(message["text"] == "WAKE FINAL" for message in wake_result["messages"]), wake_result["messages"])
+        wake_history = self.assert_success(self.call_cli("conversation", "history", wake_task_id, extra_environment=env)[0])
+        wake_texts = [message["text"] for message in wake_history["messages"] if message["role"] == "assistant"]
+        self.assertIn("WAKE RESUMED", wake_texts)
+        self.assertEqual(
+            [message for message in wake_history["messages"] if message["role"] == "assistant" and message.get("phase") != "subagent_report"][-1]["text"],
+            "WAKE FINAL",
+            "The woken parent's final answer should be the turn's last assistant message.",
+        )
+        wake_reports = sorted(message["text"] for message in wake_history["messages"] if message.get("phase") == "subagent_report")
+        self.assertEqual(wake_reports, ["Reviewer A finished.", "Reviewer B finished."])
+        self.assertTrue(
+            any(activity["id"] == "toolu_wake_read" for activity in wake_history["activities"]),
+            "Tool work the woken parent ran should be recorded in the turn.",
         )
 
     # case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, StationAI returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics.
@@ -6267,7 +6297,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(any(message["text"] == "Answers received: " + expected_reply
                             for message in delivered_history["messages"]))
 
-    # case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; clean and unexpected relaunch preserve the prompt and conversation and allow a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
+    # case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; a turn running when the window quits cleanly or is killed keeps running in the bridge daemon, stays In Progress with its prompt visible after relaunch, finishes, and allows a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
     def test_codex_interrupted_turn_blocks_with_reason_and_can_retry(self):
         task_id = self.create_task("Interrupted turn", roots=[self.primary])["id"]
         self.complete_fixture_turn(task_id, message="Create the conversation thread before interruption.")

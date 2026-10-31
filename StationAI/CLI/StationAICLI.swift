@@ -27,6 +27,9 @@ enum StationAICLI {
         configuredRequest.worktreeDirectory = ProcessInfo.processInfo.environment["STATIONAI_E2E_WORKTREE_DIRECTORY"]
         configuredRequest.environment = ProcessInfo.processInfo.environment
             .filter { BridgeContract.sessionEnvironmentNames.contains($0.key) }
+        if let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"] {
+            configuredRequest.arguments["__codexHome"] = .string(codexHome)
+        }
         if let fixtureExecutable = ProcessInfo.processInfo.environment["STATIONAI_E2E_CODEX_EXECUTABLE"] {
             configuredRequest.arguments["__codexExecutable"] = .string(fixtureExecutable)
         }
@@ -396,7 +399,6 @@ enum StationAICLI {
                 let flags = try parseFlags(Array(tail.dropFirst(2)), valueFlags: ["--text"])
                 var arguments: [String: BridgeValue] = ["taskID": .string(id), "action": .string(action)]
                 if let text = flags["--text"]?.first { arguments["objective"] = .string(text) }
-                if let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"] { arguments["__codexHome"] = .string(codexHome) }
                 return BridgeRequest(command: "conversation.goal", arguments: arguments)
             case "queue":
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message"])

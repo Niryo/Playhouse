@@ -1,6 +1,12 @@
 import Darwin
 import Foundation
 
+/// One stderr line with time and pid; the spawner routes stderr to the socket's `.log`.
+func daemonLog(_ message: String) {
+    let stamp = ISO8601DateFormatter().string(from: Date())
+    FileHandle.standardError.write(Data("\(stamp) stationai-daemon[\(ProcessInfo.processInfo.processIdentifier)]: \(message)\n".utf8))
+}
+
 /// Tracks how many connections are open and how many `StationAIBridgeRuntime
 /// .perform` calls are still running, and exits the process once both are zero
 /// for a short grace period. This is what gives the daemon "runs only when
@@ -67,7 +73,7 @@ final class DaemonLifecycle: @unchecked Sendable {
         let stillIdle = openConnections == 0 && inFlightRequests == 0
         lock.unlock()
         guard stillIdle else { return }
-        FileHandle.standardError.write(Data("stationai-daemon: idle, exiting\n".utf8))
+        daemonLog("idle, exiting")
         exit(0)
     }
 }
@@ -114,10 +120,10 @@ enum StationAIBridgeDaemonMain {
         do {
             listener = try BridgeSocketListener.listen(at: socketURL.path)
         } catch {
-            FileHandle.standardError.write(Data("stationai-daemon: couldn't listen at \(socketURL.path): \(error)\n".utf8))
+            daemonLog("couldn't listen at \(socketURL.path): \(error)")
             exit(70)
         }
-        FileHandle.standardError.write(Data("stationai-daemon: listening at \(socketURL.path) (pid \(ProcessInfo.processInfo.processIdentifier))\n".utf8))
+        daemonLog("listening at \(socketURL.path)")
 
         // How long the daemon lingers with no connection and no running request.
         let lifecycle = environment["STATIONAI_BRIDGE_IDLE_GRACE_SECONDS"].flatMap(TimeInterval.init).map { DaemonLifecycle(gracePeriod: $0) }

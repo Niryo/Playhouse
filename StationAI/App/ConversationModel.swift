@@ -370,6 +370,103 @@ extension ConversationProviderClient {
 /// What a window needs to know about the turns the bridge daemon is running,
 /// so it can show progress, questions, and goal changes without owning any
 /// provider process itself.
+/// Delivers a provider child process's output and exit to a main-actor
+/// consumer in arrival order without parking a dispatch thread per chunk.
+///
+/// The previous design ran one dispatch block per read that blocked on a
+/// semaphore until the main actor had consumed the chunk. A handler that never
+/// returned then held that worker thread forever, and once enough had piled up
+/// no provider's output was read at all; at EOF the readability source also
+/// kept enqueueing blocks, which is how the daemon grew to tens of gigabytes.
+/// Here the producers only append under a lock and a single main-actor drain
+/// consumes sequentially, so a slow handler delays its own client only.
+final class ProviderOutputPump: @unchecked Sendable {
+    enum Item {
+        case output(Data)
+        case exit(Process)
+    }
+
+    private let label: String
+    private let consume: @MainActor (Item) async -> Void
+    private let lock = NSLock()
+    private var items: [Item] = []
+    private var isDraining = false
+
+    init(label: String, consume: @escaping @MainActor (Item) async -> Void) {
+        self.label = label
+        self.consume = consume
+    }
+
+    /// Serializes the producers' reads with their pushes, so output a
+    /// readability callback is reading cannot land after the exit the
+    /// termination handler pushes.
+    func push(_ item: Item) {
+        lock.lock()
+        items.append(item)
+        let startDrain = !isDraining
+        if startDrain { isDraining = true }
+        lock.unlock()
+        guard startDrain else { return }
+        Task { @MainActor in await self.drain() }
+    }
+
+    /// Runs `read` and pushes its result atomically with respect to other pushes.
+    func pushReading(_ read: () -> Item?) {
+        lock.lock()
+        let item = read()
+        if let item { items.append(item) }
+        let startDrain = item != nil && !isDraining
+        if startDrain { isDraining = true }
+        lock.unlock()
+        guard startDrain else { return }
+        Task { @MainActor in await self.drain() }
+    }
+
+    @MainActor
+    private func drain() async {
+        while true {
+            lock.lock()
+            guard !items.isEmpty else {
+                isDraining = false
+                lock.unlock()
+                return
+            }
+            let next = items.removeFirst()
+            lock.unlock()
+            // Reports a handler that has not returned after ten seconds while it
+            // is still stuck, since one that never returns would otherwise leave
+            // no trace of what it was handling.
+            let head: String
+            switch next {
+            case .output(let data): head = String(decoding: data.prefix(200), as: UTF8.self)
+            case .exit(let process): head = "exit status \(process.terminationStatus)"
+            }
+            let label = label
+            let watchdog = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(10))
+                guard !Task.isCancelled else { return }
+                StationAIDiagnostics.record("provider.output.handling_stalled", fields: ["provider": label, "head": head])
+            }
+            await consume(next)
+            watchdog.cancel()
+        }
+    }
+
+    /// Every byte a closed pipe still holds, without blocking.
+    nonisolated static func readAvailableBytes(from descriptor: Int32) -> Data {
+        var collected = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            var pollDescriptor = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+            guard poll(&pollDescriptor, 1, 0) > 0, pollDescriptor.revents & Int16(POLLIN) != 0 else { break }
+            let count = read(descriptor, &buffer, buffer.count)
+            guard count > 0 else { break }
+            collected.append(buffer, count: count)
+        }
+        return collected
+    }
+}
+
 struct ConversationRuntimeSnapshot: Codable, Equatable {
     struct Goal: Codable, Equatable {
         var stateThreadID: String?
@@ -388,19 +485,26 @@ struct ConversationRuntimeSnapshot: Codable, Equatable {
     /// Conversations whose most recent turn was paused rather than finished.
     var interruptedThreadIDs: [String] = []
     var pendingUserInput: [String: ConversationUserInputRequest] = [:]
+    /// See `ConversationManager.visibleRevisions`, keyed by task ID.
+    var conversationRevisions: [String: Int] = [:]
     var goal = Goal()
 
     func isTurnActive(threadID: String) -> Bool { activeThreadIDs.contains(threadID) }
     func canInterruptActiveTurn(threadID: String) -> Bool { interruptibleThreadIDs.contains(threadID) }
     func wasLastTurnInterrupted(threadID: String) -> Bool { interruptedThreadIDs.contains(threadID) }
 
+    /// `dataDirectory` limits the snapshot to the clients serving that data
+    /// directory. Debug/test requests carry one so that two isolated stores
+    /// in the same daemon never see each other's turns; production requests
+    /// carry none and see every client.
     @MainActor
-    static func current() -> ConversationRuntimeSnapshot {
+    static func current(dataDirectory: String? = nil) -> ConversationRuntimeSnapshot {
+        let scope = dataDirectory.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
         var snapshot = ConversationRuntimeSnapshot()
         var active = Set<String>()
         var interruptible = Set<String>()
         var interrupted = Set<String>()
-        for client in CodexAppServerClient.allSharedClients {
+        for client in CodexAppServerClient.allSharedClients where scope == nil || client.runtimeScope == scope {
             active.formUnion(client.activeThreadIDsSnapshot)
             interruptible.formUnion(client.activeThreadIDsSnapshot.filter { client.canInterruptActiveTurn(threadID: $0) })
             interrupted.formUnion(client.interruptedThreadIDsSnapshot)
@@ -414,12 +518,13 @@ struct ConversationRuntimeSnapshot: Codable, Equatable {
             snapshot.goal.turnStartedThreadID = client.goalTurnStartedThreadID
             snapshot.goal.observedThreadIDs = client.observedGoalThreadIDs
         }
-        for client in ClaudeCodeClient.allSharedPrimaryClients {
+        for client in ClaudeCodeClient.allSharedPrimaryClients where scope == nil || client.runtimeScope == scope {
             active.formUnion(client.activeThreadIDsSnapshot)
             interruptible.formUnion(client.activeThreadIDsSnapshot.filter { client.canInterruptActiveTurn(threadID: $0) })
             interrupted.formUnion(client.interruptedThreadIDsSnapshot)
             snapshot.pendingUserInput.merge(client.pendingUserInputsSnapshot) { current, _ in current }
         }
+        snapshot.conversationRevisions = Dictionary(uniqueKeysWithValues: ConversationManager.visibleRevisions.map { ($0.key.uuidString, $0.value) })
         snapshot.activeThreadIDs = active.sorted()
         snapshot.interruptibleThreadIDs = interruptible.sorted()
         snapshot.interruptedThreadIDs = interrupted.sorted()
@@ -430,12 +535,12 @@ struct ConversationRuntimeSnapshot: Codable, Equatable {
     /// consumer stops iterating. Provider state is in this process's memory, so
     /// sampling it is cheap and needs no cross-process signalling.
     @MainActor
-    static func changes() -> AsyncStream<ConversationRuntimeSnapshot> {
+    static func changes(dataDirectory: String? = nil) -> AsyncStream<ConversationRuntimeSnapshot> {
         AsyncStream { continuation in
             let task = Task { @MainActor in
                 var last: ConversationRuntimeSnapshot?
                 while !Task.isCancelled {
-                    let snapshot = current()
+                    let snapshot = current(dataDirectory: dataDirectory)
                     if snapshot != last {
                         last = snapshot
                         continuation.yield(snapshot)
@@ -676,6 +781,21 @@ enum ConversationProcessEnvironment {
 /// A provider executable override is honored only inside a directory that a
 /// StationAI test fixture owns, so the environment can't redirect real turns.
 enum ConversationProviderFixture {
+    /// How to start an executable. A test's owned fixture script written by the
+    /// sandboxed UI test runner is quarantined, and macOS refuses to exec a
+    /// quarantined script directly, so such a script runs through its
+    /// interpreter instead; its `argv[0]` stays the script path.
+    static func launchCommand(executable: String, arguments: [String]) -> (executable: String, arguments: [String]) {
+        guard getxattr(executable, "com.apple.quarantine", nil, 0, 0, 0) >= 0,
+              let handle = FileHandle(forReadingAtPath: executable),
+              let head = try? handle.read(upToCount: 256),
+              let line = String(data: head, encoding: .utf8)?.split(separator: "\n").first,
+              line.hasPrefix("#!") else { return (executable, arguments) }
+        let shebang = line.dropFirst(2).split(separator: " ").map(String.init)
+        guard let interpreter = shebang.first else { return (executable, arguments) }
+        return (interpreter, Array(shebang.dropFirst()) + [executable] + arguments)
+    }
+
     static func ownedExecutable(_ path: String?, providerMarker: (name: String, value: String)) -> String? {
         guard let path, FileManager.default.isExecutableFile(atPath: path) else { return nil }
         let directory = URL(fileURLWithPath: path).deletingLastPathComponent()

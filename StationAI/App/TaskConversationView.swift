@@ -93,6 +93,8 @@ private struct CodeBlockCardView: View {
                 .padding(.vertical, 10)
         }
         .background(WorkspaceTheme.inputBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        // Keeps the language label and copy action identifiable inside the identified card.
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -190,7 +192,18 @@ private struct ResponseCommentHoverCard: View {
 
 private final class CommentTrackingTextView: NSTextView {
     var hoverTrackingOwner: AnyObject?
+    /// The whole message this block belongs to; copying a fully selected block copies it all.
+    var wholeMessageText: String?
     private var hoverTrackingArea: NSTrackingArea?
+
+    override func copy(_ sender: Any?) {
+        guard let wholeMessageText, selectedRange() == NSRange(location: 0, length: string.utf16.count) else {
+            super.copy(sender)
+            return
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(wholeMessageText, forType: .string)
+    }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -258,6 +271,13 @@ struct TaskConversationView: View {
     let onBack: () -> Void
 
     @State private var draft = ""
+    /// Steers this window has shown but the turn's stream hasn't echoed yet, and
+    /// the reverse. The turn streams every steer, including this window's own,
+    /// but a reopened window no longer reads that stream, so it shows its own.
+    @State private var unechoedLocalSteers: [String] = []
+    @State private var unconfirmedStreamedSteers: [String] = []
+    /// This window's own sends whose turn stream it is reading right now.
+    @State private var followedTurnStreams = 0
     @State private var composerHeight: CGFloat = 28
     @State private var draftAutosaveTask: Task<Void, Never>?
     @State private var draftNeedsAutosave = false
@@ -339,6 +359,10 @@ struct TaskConversationView: View {
     @State private var queuedMessages: [QueuedConversationMessage] = []
     @State private var isSubmittingLiveMessage = false
     @State private var userInputRequest: ConversationUserInputRequest?
+    // The live snapshot can still carry a request this window just answered.
+    @State private var answeredUserInputRequestIDs: Set<String> = []
+    // Safe replies this window streamed for secret recovery turns, which history hides.
+    @State private var streamedRecoveryReplies: [String: String] = [:]
     @State private var userInputAnswers: [String: [String]] = [:]
     @State private var userInputOther: [String: String] = [:]
     @State private var userInputOtherSelected: Set<String> = []
@@ -732,12 +756,26 @@ struct TaskConversationView: View {
                 sendMessage(overrideText: "The PR has conflicts. Fix them, commit, and push.")
             }
         }
-        .onChange(of: providerPendingUserInputRequest) { _, request in
-            guard let request, request.threadID == task.activeConversationID, request != userInputRequest else { return }
-            userInputRequest = request
-            userInputAnswers = [:]
-            userInputOther = [:]
-            userInputOtherSelected = []
+        .onChange(of: providerPendingUserInputRequest) { previous, request in
+            // Once the snapshot drops it, a later question may reuse an answered request's ID.
+            if request == nil { answeredUserInputRequestIDs.removeAll() }
+            // A live question can end without an answer here (a rejected private
+            // question, or another window's answer); keep it only if it was saved.
+            if request == nil, let previous, userInputRequest?.id == previous.id {
+                Task { @MainActor in
+                    guard let history = try? await conversationManager.history(taskID: task.id),
+                          userInputRequest?.id == previous.id else { return }
+                    let saved = history.pendingUserInputRequest
+                    userInputRequest = saved?.threadID == task.activeConversationID ? saved : nil
+                }
+            }
+            guard let request, request.threadID == task.activeConversationID, request != userInputRequest,
+                  !answeredUserInputRequestIDs.contains(request.id) else { return }
+            showUserInputRequest(request)
+        }
+        .onChange(of: messages) { _, _ in
+            // History reloads bring back the hidden text for replies this window streamed.
+            if !streamedRecoveryReplies.isEmpty { showStreamedRecoveryReplies() }
         }
         .onChange(of: providerTurnIsActive) { _, isTurnActive in
             if !isTurnActive, !isReadOnly {
@@ -753,6 +791,34 @@ struct TaskConversationView: View {
             isResponding = completedTurnIsVisible
                 ? false
                 : submittedTurnIsPending || (isTurnActive && conversationRuntime.isTurnActive(threadID: taskThreadID))
+            // A turn stopped while this window followed it (not sent from it) can still be continued.
+            if !isTurnActive, !isResponding, conversationRuntime.wasLastTurnInterrupted(threadID: taskThreadID) {
+                hasPausedResponse = true
+            }
+        }
+        .onChange(of: task.pendingSubmittedPrompt == nil) { _, cleared in
+            // The daemon clears the submitted prompt after the turn ends, which can be after
+            // this window saw it end. A turn parked on a question is not over, even while the
+            // runtime snapshot lags, so leave the answer flow to settle it.
+            if cleared, isResponding, !providerTurnIsActive,
+               userInputRequest == nil, providerPendingUserInputRequest == nil,
+               !conversationRuntime.isTurnActive(threadID: task.activeConversationID ?? "") {
+                isResponding = false
+            }
+        }
+        .onChange(of: conversationRuntime.wasLastTurnInterrupted(threadID: task.activeConversationID ?? "")) { _, interrupted in
+            // The daemon can report the stop after this window loaded the settled turn.
+            if interrupted, !isResponding, !providerTurnIsActive { hasPausedResponse = true }
+        }
+        .onChange(of: conversationRuntime.snapshot.conversationRevisions[task.id.uuidString]) { _, _ in
+            // Another caller's turn (a queued follow-up, a CLI send or steer, or
+            // a turn this window started before it was reopened) reaches this
+            // window only through history.
+            guard !isReadOnly else { return }
+            refreshQueuedMessages()
+            // Mid-turn history lags what this window has already shown.
+            guard followedTurnStreams == 0, !providerTurnIsActive else { return }
+            Task { @MainActor in await refreshGoalConversation() }
         }
         .onChange(of: conversationRuntime.snapshot.goal.stateRevision) { _, _ in
             guard conversationRuntime.snapshot.goal.stateThreadID == task.codexThreadID else { return }
@@ -1055,7 +1121,13 @@ struct TaskConversationView: View {
 
                 safetyNotice
 
-                conversation
+                // An agent's conversation covers this one; laying out the hidden
+                // transcript underneath it would only cost time.
+                if selectedSubagent == nil {
+                    conversation
+                } else {
+                    Spacer(minLength: 0)
+                }
 
                 Rectangle()
                     .fill(Color.primary.opacity(0.07))
@@ -1073,6 +1145,13 @@ struct TaskConversationView: View {
                 }
             }
             .accessibilityHidden(selectedSubagent != nil)
+            // The final answer folds this turn's activity, agents included, into
+            // Worked for, even while an agent's conversation covers the transcript.
+            .onChange(of: hasCompletedAssistantResponse) { _, hasCompletedResponse in
+                if hasCompletedResponse {
+                    isActivityExpanded = false
+                }
+            }
 
             if isDiffPresented {
                 fileDiffOverlay
@@ -1393,7 +1472,8 @@ struct TaskConversationView: View {
     }
 
     private var repositoryBadges: some View {
-        HStack(spacing: 5) {
+        let suggestedRepositoryPaths = suggestedRepositories.map(\.path)
+        return HStack(spacing: 5) {
             ForEach(task.repositoryWorktrees, id: \.repositoryPath) { repository in
                 let name = URL(fileURLWithPath: repository.repositoryPath).lastPathComponent
                 Button {
@@ -1454,7 +1534,8 @@ struct TaskConversationView: View {
             .buttonHoverPointer()
             .buttonStyle(.plain).help("Add a repository").accessibilityLabel("Add repository")
             .accessibilityIdentifier("add-conversation-repository-button")
-            .popover(isPresented: $isShowingRepositoryPicker, arrowEdge: .bottom) { repositoryPicker }
+            // The popover content only refreshes with this view, so key it to the suggestions it lists.
+            .popover(isPresented: $isShowingRepositoryPicker, arrowEdge: .bottom) { repositoryPicker.id(suggestedRepositoryPaths) }
             .disabled(isReadOnly)
         }
     }
@@ -1751,10 +1832,10 @@ struct TaskConversationView: View {
                                     .font(.system(size: 29, weight: .regular))
                                     .foregroundStyle(Color.accentColor.opacity(0.8))
                                     .accessibilityLabel("Conversation")
-                                Text("Send a message to \(provider.assistantLabel(modelName: selectedModelName)).")
+                                Text("Send a message to \(provider.assistantLabel(modelName: promptModelName)).")
                                     .font(.system(size: 14, weight: .medium))
                                     .foregroundStyle(.secondary)
-                                    .accessibilityLabel("Send a message to \(provider.assistantLabel).")
+                                    .accessibilityLabel("Send a message to \(provider.assistantLabel(modelName: promptModelName)).")
                                     .accessibilityIdentifier("model-prompt")
                             }
                             Spacer(minLength: 28)
@@ -1765,7 +1846,10 @@ struct TaskConversationView: View {
                         .accessibilityElement(children: .contain)
                         .accessibilityIdentifier("empty-conversation")
                     } else if !messages.isEmpty {
-                        LazyVStack(alignment: .leading, spacing: 16) {
+                        // A plain stack: a LazyVStack of these AppKit-backed rows could keep
+                        // re-estimating its rows after a send and never finish layout. At most
+                        // a recent window of messages renders, and older batches load on demand.
+                        VStack(alignment: .leading, spacing: 16) {
                             ForEach(goalAchievementTimelineEntries.filter {
                                 goalAchievementAnchorMessageID(for: $0) == nil
                             }) { entry in
@@ -1910,11 +1994,6 @@ struct TaskConversationView: View {
                     scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
                 }
             }
-            .onChange(of: hasCompletedAssistantResponse) { _, hasCompletedResponse in
-                if hasCompletedResponse && activities.isEmpty {
-                    isActivityExpanded = false
-                }
-            }
             .onChange(of: activities) { _, _ in
                 if isResponding && !hasPresentedLatestConversation {
                     scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
@@ -1935,7 +2014,6 @@ struct TaskConversationView: View {
                     scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
                 }
             }
-            }
             .onChange(of: userInputRequest?.id) { _, requestID in
                 // The question form sits below the latest message; bring it into view
                 // whether it arrives with the history or later from the daemon.
@@ -1946,6 +2024,7 @@ struct TaskConversationView: View {
                         scrollProxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
                     }
                 }
+            }
             }
         }
     }
@@ -2007,14 +2086,6 @@ struct TaskConversationView: View {
             .accessibilityHint("Shows Codex progress messages and completed activity details.")
             .accessibilityIdentifier("codex-activity-disclosure")
 
-            // Keep active child rows in the materialized activity container so
-            // accessibility can discover them even when the conversation
-            // timeline is still settling its scroll position.
-            if isDisplayingActiveResponse || !activeSubagents.isEmpty {
-                ForEach(activities.filter(\.isSubagent)) { activity in
-                    subagentTimelineRow(activity)
-                }
-            }
 
             Divider()
                 .opacity(0.32)
@@ -2082,17 +2153,24 @@ struct TaskConversationView: View {
     }
 
     private func subagentTimelineRow(_ activity: ConversationActivity) -> some View {
-        Button {
-            openSubagent(activity)
-        } label: {
-            HStack(alignment: .top, spacing: 10) {
+        // The icon sits beside the button, not in its label, because a macOS
+        // button folds its label into one accessible element and the icon must
+        // stay a distinct image.
+        HStack(alignment: .top, spacing: 10) {
+            VStack(spacing: 0) {
+                Color.clear.frame(width: 20, height: 5).accessibilityHidden(true)
                 Image("SubagentIcon")
                     .resizable()
                     .interpolation(.high)
                     .scaledToFit()
                     .frame(width: 20, height: 20)
-                    .accessibilityElement()
+                    .contentShape(Rectangle())
+                    .onTapGesture { openSubagent(activity) }
                     .accessibilityLabel("\(activity.title) agent icon")
+            }
+            Button {
+                openSubagent(activity)
+            } label: {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("\(activity.title) \(activity.timelineStatus)")
                         .font(.system(size: 14, weight: .medium))
@@ -2115,14 +2193,16 @@ struct TaskConversationView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
+                .contentShape(Rectangle())
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 5)
             }
-            .contentShape(Rectangle())
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 5)
+            .buttonHoverPointer()
+            .help("Open the read-only conversation for this agent")
+            .buttonStyle(.plain)
         }
-        .buttonHoverPointer()
-        .help("Open the read-only conversation for this agent")
-        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("\(activity.title) \(activity.timelineStatus)")
         .accessibilityValue([activity.detail, activity.durationLabel()].compactMap { $0 }.joined(separator: "\n"))
         .accessibilityIdentifier("codex-subagent-row-\(activity.childThreadID ?? activity.id)")
@@ -2337,6 +2417,7 @@ struct TaskConversationView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(WorkspaceTheme.windowBackground)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("subagent-conversation-panel")
     }
 
@@ -2771,7 +2852,7 @@ struct TaskConversationView: View {
             ForEach(blocks) { block in
                 switch block.kind {
                 case .heading(let level):
-                    selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations)
+                    selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations, wholeMessageText: markdown)
                         .font(.system(size: level == 1 ? 19 : level == 2 ? 17 : 15, weight: .semibold))
                         .accessibilityIdentifier("assistant-markdown-heading-\(block.id)")
                 case .listItem:
@@ -2783,24 +2864,27 @@ struct TaskConversationView: View {
                     // what actually guarantees pixel alignment instead of a guessed padding value.
                     HStack(alignment: .top, spacing: 7) {
                         markerText("•")
-                        selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations)
+                        selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations, wholeMessageText: markdown)
                             .accessibilityIdentifier("assistant-markdown-list-content-\(block.id)")
                     }
                     .accessibilityElement(children: .combine)
+                    // The text views inside do not contribute to a combined label.
+                    .accessibilityLabel(String(Self.markdownAttributedText(block.text).characters))
                     .accessibilityIdentifier("assistant-markdown-list-item-\(block.id)")
                 case .orderedListItem(let number):
                     HStack(alignment: .top, spacing: 7) {
                         markerText("\(number).")
-                        selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations)
+                        selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations, wholeMessageText: markdown)
                             .accessibilityIdentifier("assistant-markdown-ordered-list-content-\(block.id)")
                     }
                     .accessibilityElement(children: .combine)
+                    .accessibilityLabel("\(number). " + String(Self.markdownAttributedText(block.text).characters))
                     .accessibilityIdentifier("assistant-markdown-ordered-list-item-\(block.id)")
                 case .codeBlock(let language):
                     CodeBlockCardView(blockID: block.id, code: block.text, language: language, font: block.font)
                         .accessibilityIdentifier("assistant-markdown-code-block-\(block.id)")
                 case .paragraph:
-                    selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations)
+                    selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations, wholeMessageText: markdown)
                         .accessibilityIdentifier("assistant-markdown-paragraph-\(block.id)")
                         .padding(.bottom, 5)
                 }
@@ -2812,7 +2896,8 @@ struct TaskConversationView: View {
     private func selectableAnnotationText(
         _ block: AssistantMarkdownBlock,
         messageID: String?,
-        responseAnnotations: [ResponseAnnotationReference] = []
+        responseAnnotations: [ResponseAnnotationReference] = [],
+        wholeMessageText: String? = nil
     ) -> some View {
         if let messageID {
             SelectableAnnotationText(
@@ -2825,7 +2910,8 @@ struct TaskConversationView: View {
                     currentTextSelection = text.isEmpty ? nil : AnnotationSelection(messageID: messageID, blockID: block.id, range: range, text: text, bounds: bounds)
                 },
                 formattedText: Self.markdownNSAttributedString(block.text, baseFont: block.font),
-                font: block.font
+                font: block.font,
+                wholeMessageText: wholeMessageText
             )
                 .fixedSize(horizontal: false, vertical: true)
                 .overlay(alignment: .topLeading) { selectionHint(messageID: messageID, blockID: block.id) }
@@ -3189,7 +3275,7 @@ struct TaskConversationView: View {
                     }
                     .padding(.horizontal, 14).padding(.vertical, 10)
                     .background(Color.primary.opacity(0.10), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1) }
+                    .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1).allowsHitTesting(false) }
                     .accessibilityElement(children: .contain)
                     .accessibilityValue(conversationRuntime.snapshot.goal.turnStartedThreadID == task.codexThreadID ? "Work started" : (conversationRuntime.isTurnActive(threadID: task.codexThreadID ?? "") ? "Working" : "Waiting"))
                     .accessibilityIdentifier("active-goal-progress-row")
@@ -3391,11 +3477,15 @@ struct TaskConversationView: View {
                                 .font(.system(size: 14, weight: .medium))
                                 .foregroundStyle(Color.accentColor)
                                 .accessibilityIdentifier("selected-model-effort")
-                            EffortStepSlider(selection: $pickerEffort, choices: pickerEffortChoices)
-                                // The native slider knob is translucent on macOS 26, so it is drawn by EffortStepSlider
-                                // and the native Slider serves only as the accessibility representation.
-                                .accessibilityRepresentation {
-                                    if pickerEffortChoices.count > 1 {
+                            if pickerEffortChoices.count > 1 {
+                                // The native slider knob is translucent on macOS 26, so it is drawn by
+                                // EffortStepSlider; an undrawn native slider laid over it takes the
+                                // pointer and keyboard, and a SwiftUI Slider represents it to accessibility.
+                                EffortStepSlider(selection: $pickerEffort, choices: pickerEffortChoices)
+                                    .overlay {
+                                        EffortAccessibilitySlider(selection: $pickerEffort, choices: pickerEffortChoices)
+                                    }
+                                    .accessibilityRepresentation {
                                         Slider(value: Binding(
                                             get: { Double(pickerEffortChoices.firstIndex(of: pickerEffort) ?? 0) },
                                             set: { pickerEffort = pickerEffortChoices[min(max(Int($0.rounded()), 0), pickerEffortChoices.count - 1)] }
@@ -3403,22 +3493,27 @@ struct TaskConversationView: View {
                                         .accessibilityLabel("Model effort")
                                         .accessibilityValue(pickerEffort.title)
                                         .accessibilityIdentifier("model-effort-slider")
-                                        .focusEffectDisabled()
-                                    } else {
+                                    }
+                            } else {
+                                EffortStepSlider(selection: $pickerEffort, choices: pickerEffortChoices)
+                                    .accessibilityRepresentation {
                                         Text(pickerEffort.title)
                                             .accessibilityElement()
                                             .accessibilityLabel("Model effort")
                                             .accessibilityValue(pickerEffort.title)
                                             .accessibilityIdentifier("model-effort-slider")
                                     }
-                                }
+                            }
                         }
                         .padding(.horizontal, 18)
                         .padding(.vertical, 13)
                         .frame(width: 320)
                     }
 
-                    if isDisplayingActiveResponse {
+                    // A turn still finishing after its final answer can still be stopped; one
+                    // that is only waiting on a question keeps the composer's send control.
+                    if isDisplayingActiveResponse
+                        || (isResponding && providerTurnIsActive && userInputRequest == nil && providerPendingUserInputRequest == nil) {
                         Button(action: pauseResponse) {
                             Image(systemName: "stop.fill")
                                 .font(.system(size: 11, weight: .bold))
@@ -3572,6 +3667,8 @@ struct TaskConversationView: View {
         }
         isResponding = true
         errorMessage = nil
+        // A recovery turn streams its redacted reply before history hides it.
+        var streamedRecoveryFinals: [String] = []
         do {
             let accepted = try await conversationManager.answerUserInput(
                 taskID: task.id,
@@ -3579,11 +3676,11 @@ struct TaskConversationView: View {
                 answers: answers,
                 modelID: selectedModelID.isEmpty ? nil : selectedModelID,
                 onUpdate: { update in
+                    if update.type == "assistant_final", let text = update.text, !text.isEmpty {
+                        streamedRecoveryFinals.append(text)
+                    }
                     guard update.type == "user_input", let nextRequest = update.userInputRequest else { return }
-                    userInputRequest = nextRequest
-                    userInputAnswers = [:]
-                    userInputOther = [:]
-                    userInputOtherSelected = []
+                    showUserInputRequest(nextRequest)
                 }
             )
             guard accepted else {
@@ -3591,11 +3688,19 @@ struct TaskConversationView: View {
                 errorMessage = "\(provider.displayName) couldn't accept those answers. Please check the responses and try again."
                 return
             }
+            answeredUserInputRequestIDs.insert(request.id)
             userInputRequest = nil
             userInputAnswers = [:]
             userInputOther = [:]
             userInputOtherSelected = []
             await loadConversation()
+            // This window keeps showing the safe reply it streamed; a reload shows it hidden.
+            if let finalText = streamedRecoveryFinals.last,
+               let index = messages.lastIndex(where: { $0.role == .assistant }),
+               messages[index].text == Self.hiddenRecoveryReplyText {
+                streamedRecoveryReplies[messages[index].id] = finalText
+                showStreamedRecoveryReplies()
+            }
         } catch {
             isResponding = conversationRuntime.isTurnActive(threadID: request.threadID)
             errorMessage = error.localizedDescription
@@ -3627,6 +3732,7 @@ struct TaskConversationView: View {
                 : nil
             let currentProviderRequest = providerPendingUserInputRequest
             let liveUserInputRequest = currentProviderRequest?.threadID == task.activeConversationID
+                && !answeredUserInputRequestIDs.contains(currentProviderRequest?.id ?? "")
                 ? currentProviderRequest
                 : nil
             // A history read can finish after the provider has raised a question
@@ -3661,8 +3767,12 @@ struct TaskConversationView: View {
                 }
             }
             goalStatusUpdatedAt = .now
+            // Autosave pauses during a turn, so the saved draft can be text that
+            // was since steered or queued; neither belongs back in the composer.
+            let queuedTexts = Set(((try? conversationManager.queuedMessages(taskID: task.id)) ?? []).map(\.text))
             let promptWasSent = task.savedPrompt.map { prompt in
                 history.messages.contains { $0.role == .user && $0.text == prompt }
+                    || queuedTexts.contains(prompt.trimmingCharacters(in: .whitespacesAndNewlines))
             } ?? false
             let hasPendingSubmittedPrompt = task.pendingSubmittedPrompt != nil
             if hasPendingSubmittedPrompt,
@@ -3722,6 +3832,12 @@ struct TaskConversationView: View {
             oldestRenderedMessageID = latestConversationTurnStartID
         } catch {
             errorMessage = error.localizedDescription
+            // History failed, but an unanswered question stays answerable.
+            let saved = try? conversationManager.savedUserInputRequest(taskID: task.id)
+            if userInputRequest == nil, let request = saved ?? providerPendingUserInputRequest,
+               request.threadID == task.activeConversationID, !answeredUserInputRequestIDs.contains(request.id) {
+                showUserInputRequest(request)
+            }
         }
     }
 
@@ -3768,6 +3884,14 @@ struct TaskConversationView: View {
         } catch {
             // Keep the last known model available when an offline or unauthenticated app-server cannot list models.
         }
+    }
+
+    /// The prompt names only models the provider lists; Claude's "Default" is a
+    /// placeholder, not a model, and an unlisted ID isn't a name.
+    private var promptModelName: String? {
+        if !selectedModelID.isEmpty, !modelOptions.contains(where: { $0.id == selectedModelID }) { return nil }
+        let name = selectedModelName
+        return provider == .claude && name == provider.defaultModelName ? nil : name
     }
 
     private var selectedModelName: String {
@@ -3834,7 +3958,8 @@ struct TaskConversationView: View {
         let freeformText = (overrideText ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
         let pendingAnnotations = annotations.filter(\.pending)
         let usesComposerDraft = overrideText == nil
-        guard (!freeformText.isEmpty || (usesComposerDraft && !pendingImages.isEmpty) || !pendingAnnotations.isEmpty), !isResponding, !isLoadingHistory, userInputRequest == nil else { return }
+        // An empty Goal still goes to the bridge, which explains the length rule.
+        guard (!freeformText.isEmpty || (usesComposerDraft && (!pendingImages.isEmpty || isEnteringGoal)) || !pendingAnnotations.isEmpty), !isResponding, !isLoadingHistory, userInputRequest == nil else { return }
         let annotationPrompt: String
         if pendingAnnotations.isEmpty {
             annotationPrompt = freeformText
@@ -3900,6 +4025,8 @@ struct TaskConversationView: View {
         if usesComposerDraft { draft = "" }
         let imageDataURLs = usesComposerDraft ? pendingImages.map(\.dataURL) : []
         if usesComposerDraft { pendingImages = [] }
+        // Question IDs can repeat across turns.
+        answeredUserInputRequestIDs.removeAll()
         hasPausedResponse = false
         isPausingResponse = false
         errorMessage = nil
@@ -3940,6 +4067,8 @@ struct TaskConversationView: View {
                 }
                 return
             }
+            followedTurnStreams += 1
+            defer { followedTurnStreams -= 1 }
             do {
                 _ = try await conversationManager.setEffort(taskID: task.id, effort: selectedEffort)
                 _ = try await conversationManager.send(taskID: task.id, text: text, imageDataURLs: imageDataURLs, mode: conversationMode, modelID: selectedModelID.isEmpty ? nil : selectedModelID, statusBeforeSubmission: statusBeforeSubmission, onTurnStarting: {
@@ -4053,7 +4182,13 @@ struct TaskConversationView: View {
                     case "queue_changed":
                         refreshQueuedMessages()
                     case "steered_message":
-                        messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: update.message ?? "", imageDataURLs: update.imageDataURLs ?? []))
+                        let steered = update.message ?? ""
+                        if let index = unechoedLocalSteers.firstIndex(of: steered) {
+                            unechoedLocalSteers.remove(at: index)
+                        } else {
+                            unconfirmedStreamedSteers.append(steered)
+                            messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: steered, imageDataURLs: update.imageDataURLs ?? []))
+                        }
                         if let message = update.message, draft == message { draft = "" }
                     case "action_notice":
                         actionNotice = update.message
@@ -4061,10 +4196,7 @@ struct TaskConversationView: View {
                         break
                     }
                 }, onUserInput: { request in
-                    userInputRequest = request
-                    userInputAnswers = [:]
-                    userInputOther = [:]
-                    userInputOtherSelected = []
+                    showUserInputRequest(request)
                 })
                 if messages.first(where: { $0.id == assistantMessageID })?.text.isEmpty == true {
                     messages.removeAll { $0.id == assistantMessageID }
@@ -4265,7 +4397,7 @@ struct TaskConversationView: View {
                     errorMessage = nil
                     return
                 }
-                messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: outcome.message))
+                showLocalSteer(outcome.message)
                 refreshQueuedMessages()
                 errorMessage = nil
             } catch {
@@ -4296,7 +4428,7 @@ struct TaskConversationView: View {
                     errorMessage = nil
                     return
                 }
-                messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: text, imageDataURLs: imageDataURLs))
+                showLocalSteer(text, imageDataURLs: imageDataURLs)
                 draft = ""
                 pendingImages.removeAll()
                 errorMessage = nil
@@ -4311,10 +4443,7 @@ struct TaskConversationView: View {
         Task { @MainActor in
             do {
                 let retried = try await conversationManager.retryQueuedMessage(taskID: task.id, messageID: message.id, onUserInput: { request in
-                    userInputRequest = request
-                    userInputAnswers = [:]
-                    userInputOther = [:]
-                    userInputOtherSelected = []
+                    showUserInputRequest(request)
                 })
                 guard retried else {
                     throw BridgeCommandError(code: "operation_failed", message: "The queued follow-up still needs your attention.")
@@ -4448,7 +4577,8 @@ struct TaskConversationView: View {
         if isResponding { onBack(); return }
         let hasStartedRepository = task.repositoryWorktrees.contains { !$0.isPending }
         let hasDraft = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        if isNewTask, !hasStartedRepository, task.contextFolderPaths.isEmpty,
+        // Folder-only context is not work in progress: an otherwise empty new task is discarded.
+        if isNewTask, !hasStartedRepository,
            pendingImages.isEmpty, messages.isEmpty, activities.isEmpty,
            !hasDraft, !isLoadingHistory {
             Task { @MainActor in
@@ -4474,6 +4604,33 @@ struct TaskConversationView: View {
             return
         }
         Task { @MainActor in _ = await saveDraftAndGenerateTitle(status: nil, then: onBack) }
+    }
+
+    private static let hiddenRecoveryReplyText = "[Response to private answer hidden]"
+
+    private func showStreamedRecoveryReplies() {
+        for index in messages.indices where messages[index].text == Self.hiddenRecoveryReplyText {
+            if let text = streamedRecoveryReplies[messages[index].id] { messages[index].text = text }
+        }
+    }
+
+    /// Shows a question; the same question can arrive again, so keep its answers.
+    private func showUserInputRequest(_ request: ConversationUserInputRequest) {
+        let isNewQuestion = request.id != userInputRequest?.id
+        userInputRequest = request
+        guard isNewQuestion else { return }
+        userInputAnswers = [:]
+        userInputOther = [:]
+        userInputOtherSelected = []
+    }
+
+    private func showLocalSteer(_ text: String, imageDataURLs: [String] = []) {
+        if let index = unconfirmedStreamedSteers.firstIndex(of: text) {
+            unconfirmedStreamedSteers.remove(at: index)
+            return
+        }
+        unechoedLocalSteers.append(text)
+        messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: text, imageDataURLs: imageDataURLs))
     }
 
     private func scheduleDraftAutosave(_ value: String) {
@@ -4916,6 +5073,7 @@ private struct ConversationScrollContentHeightKey: PreferenceKey {
     }
 }
 
+
 // The native text view owns wrapping and document sizing. SwiftUI only receives
 // a bounded viewport height; it never asks a multiline TextField for its ideal size.
 private struct NativeChatEditor: NSViewRepresentable {
@@ -5154,6 +5312,7 @@ private struct SelectableAnnotationText: NSViewRepresentable {
     let onSelection: (NSRange, String, CGRect) -> Void
     var formattedText: NSAttributedString? = nil
     var font = NSFont.systemFont(ofSize: 16)
+    var wholeMessageText: String? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -5186,6 +5345,7 @@ private struct SelectableAnnotationText: NSViewRepresentable {
     }
 
     func updateNSView(_ view: NSTextView, context: Context) {
+        (view as? CommentTrackingTextView)?.wholeMessageText = wholeMessageText
         context.coordinator.onSelection = onSelection
         context.coordinator.responseCommentSourcePrefix = responseCommentSourcePrefix
         context.coordinator.anchorView = view
@@ -5476,6 +5636,52 @@ private struct SelectableAnnotationText: NSViewRepresentable {
 }
 
 /// A discrete effort slider whose knob is an opaque white disc, so it stays solid over any track or popover background.
+/// An undrawn native slider over the drawn effort track, so pointer clicks,
+/// drags, and arrow keys behave exactly as a macOS slider's do.
+private struct EffortAccessibilitySlider: NSViewRepresentable {
+    @Binding var selection: ConversationEffort
+    let choices: [ConversationEffort]
+
+    final class InputSlider: NSSlider {
+        // EffortStepSlider draws the control; this one only takes input.
+        override func draw(_ dirtyRect: NSRect) {}
+        // Clicking the effort track lets the arrow keys step it, as with the
+        // visible slider, regardless of the Full Keyboard Access setting.
+        override var acceptsFirstResponder: Bool { true }
+        override func mouseDown(with event: NSEvent) {
+            window?.makeFirstResponder(self)
+            super.mouseDown(with: event)
+        }
+    }
+
+    final class Coordinator: NSObject {
+        var parent: EffortAccessibilitySlider
+        init(_ parent: EffortAccessibilitySlider) { self.parent = parent }
+        @objc func changed(_ sender: NSSlider) {
+            let index = min(max(Int(sender.doubleValue.rounded()), 0), parent.choices.count - 1)
+            parent.selection = parent.choices[index]
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> InputSlider {
+        let slider = InputSlider(value: 0, minValue: 0, maxValue: 1, target: context.coordinator, action: #selector(Coordinator.changed(_:)))
+        slider.allowsTickMarkValuesOnly = true
+        slider.focusRingType = .none
+        // The SwiftUI representation around it is what accessibility reads.
+        slider.setAccessibilityElement(false)
+        return slider
+    }
+
+    func updateNSView(_ slider: InputSlider, context: Context) {
+        context.coordinator.parent = self
+        slider.maxValue = Double(choices.count - 1)
+        slider.numberOfTickMarks = choices.count
+        slider.doubleValue = Double(choices.firstIndex(of: selection) ?? 0)
+    }
+}
+
 private struct EffortStepSlider: View {
     @Binding var selection: ConversationEffort
     let choices: [ConversationEffort]

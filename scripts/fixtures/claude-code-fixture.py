@@ -246,6 +246,61 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         run_tool("toolu_checks_first", "Read", {"file_path": os.path.join(os.getcwd(), "README.md")})
         text("msg_checks_last", UNANSWERED_LAST)
         run_tool("toolu_checks_last", "Read", {"file_path": os.path.join(os.getcwd(), "README.md")})
+    elif "background agents wake" in user_text.lower():
+        # Mirrors the real CLI waking the parent for a background agent's
+        # notification after the parent already sent its result. The last
+        # agent finishes while the woken parent is still streaming, and only
+        # the parent's next result ends the turn.
+        agents = [("toolu_wake_agent_a", "bgtask-wake-a", "Wake reviewer A"),
+                  ("toolu_wake_agent_b", "bgtask-wake-b", "Wake reviewer B")]
+        assistant("msg_wake_agents", [{"type": "tool_use", "id": tool_id, "name": "Agent", "input": {
+            "subagent_type": "Explore", "description": description, "prompt": "review something",
+            "run_in_background": True,
+        }} for tool_id, _, description in agents])
+        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tool_id, "content": "Async agent launched successfully.", "is_error": False}
+            for tool_id, _, _ in agents
+        ]}})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
+            {"task_id": task_id, "run_id": "fixture-run-1", "task_type": "local_agent",
+             "subagent_type": "Explore", "description": description}
+            for _, task_id, description in agents
+        ]})
+        for tool_id, task_id, description in agents:
+            write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
+                   "tool_use_id": tool_id, "description": description, "subagent_type": "Explore",
+                   "is_backgrounded": True, "spawn_depth": 1, "task_type": "local_agent"})
+        text("msg_wake_started", "WAKE STARTED")
+        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+        background_result_sent = True
+        (first_tool, first_task, _), (second_tool, second_task, second_description) = agents
+        write({"type": "system", "subtype": "task_notification", "task_id": first_task, "run_id": "fixture-run-1",
+               "tool_use_id": first_tool, "status": "completed", "output_file": "", "summary": "Reviewer A finished."})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
+            {"task_id": second_task, "run_id": "fixture-run-1", "task_type": "local_agent",
+             "subagent_type": "Explore", "description": second_description},
+        ]})
+        # The woken parent has only begun streaming when the last agent
+        # finishes; no complete assistant message has arrived yet.
+        write({"type": "stream_event", "parent_tool_use_id": None,
+               "event": {"type": "message_start", "message": {"id": "msg_wake_resumed", "role": "assistant"}}})
+        write({"type": "system", "subtype": "task_notification", "task_id": second_task, "run_id": "fixture-run-1",
+               "tool_use_id": second_tool, "status": "completed", "output_file": "", "summary": "Reviewer B finished."})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+        wake_pause = Path(str(sys.argv[0]) + ".background-wake-pause")
+        if wake_pause.exists():
+            wake_ready = Path(str(sys.argv[0]) + ".background-wake-ready")
+            wake_release = Path(str(sys.argv[0]) + ".background-wake-release")
+            wake_ready.write_text("Last notification sent mid-work.\n", encoding="utf-8")
+            wake_deadline = time.monotonic() + 30
+            while not wake_release.exists() and time.monotonic() < wake_deadline:
+                time.sleep(0.02)
+            if not wake_release.exists():
+                raise TimeoutError("The test did not release the woken parent's final answer.")
+        text("msg_wake_resumed", "WAKE RESUMED")
+        run_tool("toolu_wake_read", "Read", {"file_path": os.path.join(os.getcwd(), "README.md")})
+        text("msg_wake_final", "WAKE FINAL")
+        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
     elif "background agent" in user_text.lower():
         # Mirrors the real `claude` CLI's --forward-subagent-text protocol for a
         # backgrounded Agent/Task call: the launch confirmation tool_result is not
@@ -343,6 +398,13 @@ def main():
                 ]
                 if os.environ.get("STATIONAI_CLAUDE_MODEL_LIST") == "aliases-only" or "aliases-only" in Path(sys.argv[0]).name:
                     models = models[:2] + models[5:6] + models[8:9]
+                # Tests seed StationAI's model cache through a real discovery of this list.
+                models_override = Path(str(sys.argv[0]) + ".models-override")
+                if models_override.exists():
+                    models = json.loads(models_override.read_text(encoding="utf-8"))
+                # Lets a test observe the cached list before discovery replaces it.
+                if Path(str(sys.argv[0]) + ".models-delay").exists():
+                    time.sleep(8)
                 response = {"claude_code_version": "2.1.308 (Claude Code fixture)",
                             "models": models,
                             "commands": [], "agents": []}

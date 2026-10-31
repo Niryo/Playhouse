@@ -717,7 +717,10 @@ struct KanbanBoardView: View {
 
     private func checkReviewPullRequests() {
         let now = Date()
-        let minimumInterval: TimeInterval = 20
+        // Tests shorten the cooldown; what they check (checks suppressed while it runs,
+        // then exactly one trailing check) does not depend on its length.
+        let minimumInterval = ProcessInfo.processInfo.environment["STATIONAI_E2E_PR_CHECK_COOLDOWN_SECONDS"]
+            .flatMap(TimeInterval.init) ?? 20
         if checkingMergedPullRequests {
             mergedPullRequestCheckPending = true
             return

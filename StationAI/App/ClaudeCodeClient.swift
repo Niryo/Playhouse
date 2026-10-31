@@ -51,7 +51,7 @@ final class ClaudeSessionRunner {
     private let persistsSessions: Bool
     private weak var owner: ClaudeCodeClient?
 
-    private let outputQueue = DispatchQueue(label: "com.stationai.claude.stdout")
+    private var outputPump: ProviderOutputPump?
     private var stdoutBuffer = Data()
     private var stderrTail = ""
     private var process: Process?
@@ -371,8 +371,9 @@ final class ClaudeSessionRunner {
         let stdin = Pipe()
         let stdout = Pipe()
         let stderr = Pipe()
-        child.executableURL = URL(fileURLWithPath: executable)
-        child.arguments = arguments
+        let command = ConversationProviderFixture.launchCommand(executable: executable, arguments: arguments)
+        child.executableURL = URL(fileURLWithPath: command.executable)
+        child.arguments = command.arguments
         child.currentDirectoryURL = workspace.cwd
         child.standardInput = stdin
         child.standardOutput = stdout
@@ -386,29 +387,46 @@ final class ClaudeSessionRunner {
         // The provider's output and exit are handled outside the request that
         // launched it; keep that request's environment and diagnostics routing.
         let requestContext = StationAIRequestContext.capture()
-        let queue = outputQueue
-        stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            queue.async { [weak self] in
-                let data = handle.availableData
-                guard !data.isEmpty else { return }
-                let consumed = DispatchSemaphore(value: 0)
-                Task { @MainActor [weak self] in
-                    await requestContext.run { await self?.consumeOutput(data) }
-                    consumed.signal()
+        let pump = ProviderOutputPump(label: "claude") { [weak self] item in
+            await requestContext.run {
+                switch item {
+                case .output(let data): await self?.consumeOutput(data)
+                case .exit(let terminated): self?.processDidTerminate(terminated)
                 }
-                consumed.wait()
             }
         }
-        stderr.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        outputPump = pump
+        stdout.fileHandleForReading.readabilityHandler = { [weak child] handle in
+            pump.pushReading {
+                // At EOF this fires continuously with empty data; an empty read
+                // while the child still runs is a spurious wakeup.
+                let data = handle.availableData
+                guard !data.isEmpty else {
+                    if child?.isRunning != true { handle.readabilityHandler = nil }
+                    return nil
+                }
+                return .output(data)
+            }
+        }
+        stderr.fileHandleForReading.readabilityHandler = { [weak self, weak child] handle in
             let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            guard !data.isEmpty else {
+                if child?.isRunning != true { handle.readabilityHandler = nil }
+                return
+            }
+            guard let text = String(data: data, encoding: .utf8) else { return }
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.stderrTail = String((self.stderrTail + text).suffix(4_000))
             }
         }
-        child.terminationHandler = { [weak self] terminated in
-            Task { @MainActor [weak self] in await requestContext.run { self?.processDidTerminate(terminated) } }
+        child.terminationHandler = { terminated in
+            pump.pushReading {
+                stdout.fileHandleForReading.readabilityHandler = nil
+                let remaining = ProviderOutputPump.readAvailableBytes(from: stdout.fileHandleForReading.fileDescriptor)
+                return remaining.isEmpty ? nil : .output(remaining)
+            }
+            pump.push(.exit(terminated))
         }
         do {
             try child.run()
@@ -593,8 +611,9 @@ final class ClaudeSessionRunner {
             pendingCommandUUIDs.remove(uuid)
             completeTurnIfSettled()
         case "stream_event":
-            guard message["parent_tool_use_id"] is NSNull || message["parent_tool_use_id"] == nil,
-                  let event = message["event"] as? [String: Any],
+            guard message["parent_tool_use_id"] is NSNull || message["parent_tool_use_id"] == nil else { return }
+            noteParentResponseStarted()
+            guard let event = message["event"] as? [String: Any],
                   event["type"] as? String == "content_block_delta",
                   let delta = event["delta"] as? [String: Any],
                   delta["type"] as? String == "text_delta",
@@ -687,6 +706,7 @@ final class ClaudeSessionRunner {
               let content = body["content"] as? [[String: Any]] else { return }
         let parentToolID = message["parent_tool_use_id"] as? String
         let messageID = body["id"] as? String ?? UUID().uuidString
+        if parentToolID == nil { noteParentResponseStarted() }
         for (index, block) in content.enumerated() {
             switch block["type"] as? String {
             case "text":
@@ -887,6 +907,14 @@ final class ClaudeSessionRunner {
         completeTurnIfSettled()
     }
 
+    /// Claude Code wakes the parent for a background agent's notification after
+    /// its earlier result, so any new parent response means that result no
+    /// longer ends the turn; only the parent's next result does.
+    private func noteParentResponseStarted() {
+        guard turnCompletion.resultReceived, turnCompletion.resultError == nil else { return }
+        turnCompletion.resultReceived = false
+    }
+
     private func completeTurnIfSettled() {
         guard turnCompletion.resultReceived, pendingCommandUUIDs.isEmpty || !sawCommandLifecycle,
               outstandingBackgroundTaskIDs.isEmpty,
@@ -1000,6 +1028,8 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
     /// global, so a different client instance's concurrently-resolved
     /// directory can never leak into this one's child process environment.
     fileprivate let dataDirectoryOverride: String?
+    /// The data directory this client serves (debug/test isolation); nil in production.
+    var runtimeScope: String? { dataDirectoryOverride.map { URL(fileURLWithPath: $0).standardizedFileURL.path } }
     private var runners: [String: ClaudeSessionRunner] = [:]
     private var newSessionIDs = Set<String>()
     private var startingSessionIDs = Set<String>()
@@ -1174,6 +1204,8 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         runner.userInputHandler = onUserInput
         runners[sessionID] = runner
         Self.activeRunnersBySessionID[sessionID] = runner
+        // A new turn supersedes a stop another client recorded for this session.
+        for client in Self.allSharedPrimaryClients { client.interruptedThreadIDs.remove(sessionID) }
         interruptedThreadIDs.remove(sessionID)
         activityDurationsByThread[sessionID] = [:]
         lastFinishedThreadID = sessionID
@@ -1226,7 +1258,10 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         guard let runner = Self.activeRunnersBySessionID[threadID] else {
             return try await ConversationSteerMailbox.requestSteer(threadID: threadID, text: normalized, imageDataURLs: imageDataURLs)
         }
-        return try runner.sendSteerInput(text: normalized, imageDataURLs: imageDataURLs)
+        let accepted = try runner.sendSteerInput(text: normalized, imageDataURLs: imageDataURLs)
+        // The turn's own stream shows and records the steer, whoever sent it.
+        if accepted { runner.steerMessageHandler?(normalized, imageDataURLs) }
+        return accepted
     }
 
     func answerUserInput(requestID: String, threadID: String, answers: [String: [String]]) -> Bool {

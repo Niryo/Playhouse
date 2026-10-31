@@ -151,6 +151,14 @@ final class BridgeSocketListener {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
+        // Never unlink a socket a daemon is still accepting on. A spawner that only
+        // thought nothing was listening (a connect that failed transiently, or a
+        // sandboxed caller whose own bind is going to fail) would otherwise leave
+        // that daemon alive but unreachable for every later caller.
+        if let live = try? BridgeSocketConnection.connect(to: path) {
+            live.close()
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EADDRINUSE))
+        }
         unlink(path) // best-effort; ENOENT is fine, any other failure surfaces at bind()
         let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
@@ -244,10 +252,13 @@ enum BridgeDaemonLauncher {
         process.environment = environment
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
-        // Keep the daemon's own startup diagnostics beside its socket.
+        // Keep the daemon's own diagnostics beside its socket, appending so one
+        // daemon's start doesn't erase what its predecessors reported.
         let logPath = socketPath + ".log"
-        FileManager.default.createFile(atPath: logPath, contents: nil, attributes: [.posixPermissions: 0o600])
-        process.standardError = FileHandle(forWritingAtPath: logPath) ?? FileHandle.nullDevice
+        let logDescriptor = Darwin.open(logPath, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0o600)
+        process.standardError = logDescriptor >= 0
+            ? FileHandle(fileDescriptor: logDescriptor, closeOnDealloc: true)
+            : FileHandle.nullDevice
         try process.run()
 
         // `run()` only means fork/exec happened, not that the daemon has bound

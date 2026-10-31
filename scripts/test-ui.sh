@@ -77,7 +77,7 @@ codex_fixtures=(
   ui empty nonblocking slow plan-slow question-isolation-plan-slow interrupted abort success unique-turns-success goal-success
   title-success title-failure title-success-wait title-archive-ui hold
   hold-interrupt hold-reject-interrupt
-  progress-hold-release progress-hold-release-failed progress-hold-release-interrupted
+  progress-hold-release progress-hold-release-failed progress-hold-release-interrupted unique-turns-progress-hold-release
   progress-question progress-user-question success-wait store-write-success-wait concurrent-serial-success-wait restart-question restart-question-no-secret unassociated-restart-question
   status-transition-ui nonblocking-slow nonblocking-restart-question async-question async-question-queued subagent context-compaction tool-activity long-history-success markdown steer-queue-serial-success-wait
 )
@@ -86,10 +86,19 @@ for fixture in "${codex_fixtures[@]}"; do
   cp "${repository_root}/scripts/fixtures/codex-app-server-fixture.py" "${fixture_path}"
   chmod 755 "${fixture_path}"
 done
+mkdir -p "${fixture_root}/gh-fixture"
+cp "${repository_root}/scripts/fixtures/gh-fixture.sh" "${fixture_root}/gh-fixture/gh"
+chmod 755 "${fixture_root}/gh-fixture/gh"
+mkdir -p "${fixture_root}/git-hold"
+cp "${repository_root}/scripts/fixtures/git-hold.sh" "${fixture_root}/git-hold/git"
+chmod 755 "${fixture_root}/git-hold/git"
+rm -f "${fixture_root}/git-hold/hold" "${fixture_root}/git-hold/hold.waiting"
 cp "${repository_root}/scripts/fixtures/claude-code-fixture.py" "${fixture_root}/claude-fixture-ui"
 chmod 755 "${fixture_root}/claude-fixture-ui"
 cp "${repository_root}/scripts/fixtures/claude-code-fixture.py" "${fixture_root}/claude-fixture-hold-reject-interrupt"
 chmod 755 "${fixture_root}/claude-fixture-hold-reject-interrupt"
+cp "${repository_root}/scripts/fixtures/claude-code-fixture.py" "${fixture_root}/claude-fixture-ui-aliases-only"
+chmod 755 "${fixture_root}/claude-fixture-ui-aliases-only"
 for fixture in subagent context-compaction tool-activity long-history-success markdown async-question async-question-queued goal-success; do
   fixture_path="${fixture_root}/codex-fixture-${fixture}"
   xattr -d com.apple.quarantine "${fixture_path}" 2>/dev/null || true
@@ -156,6 +165,22 @@ else
   derived_data_root="${TMPDIR:-/tmp}"
 fi
 derived_data_dir="${derived_data_root}/stationai-ui-derived-data-${xcode_version}-${architecture}-${repository_cache_key}"
+if [[ "${STATIONAI_UI_TART_GUEST:-0}" == "1" ]]; then
+  # Disk pressure in the guest makes macOS purge app-container caches, and that
+  # purge terminates the sandboxed XCTest runner mid-case (RunningBoard
+  # CacheDeleteAppContainerCaches). Drop builds for other source trees that
+  # nothing has used for a day, and per-case data left behind by failed cases.
+  find "${derived_data_root}" -mindepth 1 -maxdepth 1 -type d -name 'stationai-ui-derived-data-*' \
+    ! -path "${derived_data_dir}" -mtime +1 -exec rm -rf -- {} + 2>/dev/null || true
+  # The ownership marker is often gone here: the daemon recreates `data/` under
+  # a removed case directory when it writes diagnostics after teardown, so the
+  # test-owned name prefix and age are the criteria.
+  for stale_case_data in /tmp/stationai-ui-test-data/StationAIUITests-*; do
+    [[ -d "${stale_case_data}" ]] || continue
+    [[ -z "$(find "${stale_case_data}" -maxdepth 0 -mmin -120)" ]] || continue
+    rm -rf -- "${stale_case_data}"
+  done
+fi
 source_bundle_identifier="$("${repository_root}/scripts/app-profile.sh" "${repository_root}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["bundleID"])')"
 task_pr_seeder="${fixture_root}/seed-task-pr-link"
 xcrun swiftc -module-name StationAI \
@@ -357,12 +382,17 @@ else
   mv -f "${build_stamp}.tmp" "${build_stamp}"
 fi
 
-# Each case gets its own xcodebuild session so the one-minute watchdog applies
-# to one UI test at a time and a stalled case cannot delay later cases.
-batch_size=1
+# One xcodebuild session runs every selected case: starting xcodebuild and the test
+# runner costs about ten seconds per session, a quarter of a full run when each case
+# had its own. XCTest's execution time allowance ends a stalled case by itself (it
+# kills and relaunches the runner, and the remaining cases still run), so the outer
+# watchdog only guards the whole session. STATIONAI_UI_BATCH_SIZE splits the session
+# when a smaller blast radius is wanted.
+ui_test_timeout_seconds="${STATIONAI_UI_TEST_TIMEOUT_SECONDS:-180}"
+batch_size="${STATIONAI_UI_BATCH_SIZE:-${#selected_cases[@]}}"
+if (( batch_size < 1 )); then batch_size=1; fi
 batch_count=$(( (${#selected_cases[@]} + batch_size - 1) / batch_size ))
 overall_failed=0
-ui_test_timeout_seconds="${STATIONAI_UI_TEST_TIMEOUT_SECONDS:-120}"
 # The UI test runner is App Sandboxed, and the CLI it launches inherits that, so a
 # daemon started by the CLI could not bind its socket. Start the bridge daemon
 # from this unsandboxed script instead, and keep it alive for the whole run by
@@ -371,10 +401,20 @@ bridge_watcher_pid=""
 # A daemon left from an earlier build would silently serve this run's requests.
 pkill -f "${compiled_app}/Contents/MacOS/stationai-daemon" 2>/dev/null || true
 if [[ -x "${compiled_app}/Contents/MacOS/stationai-cli" ]]; then
-  STATIONAI_BRIDGE_SERVICE_NAME="${app_bundle_identifier}.bridge" \
-    "${compiled_app}/Contents/MacOS/stationai-cli" conversation runtime --watch >/dev/null 2>&1 &
+  # Reconnect whenever the watcher ends (a case that kills the daemon ends it too);
+  # reconnecting also starts a fresh daemon.
+  (
+    # The watcher exits non-zero when its daemon dies; under `set -e` that must not end this loop.
+    while true; do
+      watcher_status=0
+      STATIONAI_BRIDGE_SERVICE_NAME="${app_bundle_identifier}.bridge" \
+        "${compiled_app}/Contents/MacOS/stationai-cli" conversation runtime --watch >/dev/null 2>"${test_output_dir}/bridge-watcher.err" || watcher_status=$?
+      printf '%s watcher exited rc=%s: %s\n' "$(date +%H:%M:%S)" "${watcher_status}" "$(tail -c 300 "${test_output_dir}/bridge-watcher.err" | tr '\n' ' ')" >> "${test_output_dir}/bridge-watcher.log"
+      sleep 1
+    done
+  ) &
   bridge_watcher_pid=$!
-  trap 'kill "${bridge_watcher_pid}" 2>/dev/null || true; cleanup' EXIT
+  trap 'pkill -P "${bridge_watcher_pid}" 2>/dev/null || true; kill "${bridge_watcher_pid}" 2>/dev/null || true; cleanup' EXIT
 fi
 for (( batch_index=0; batch_index<batch_count; batch_index++ )); do
   first_case=$(( batch_index * batch_size ))
@@ -384,7 +424,12 @@ for (( batch_index=0; batch_index<batch_count; batch_index++ )); do
   result_bundle="${test_output_dir}/StationAI-UI-batch-${batch_tag}.xcresult"
   summary_path="${test_output_dir}/test-summary-batch-${batch_tag}.json"
   dashboard_log="${test_output_dir}/xcodebuild-batch-${batch_tag}.log"
-  test_arguments=(test-without-building "${base_test_arguments[@]}" -resultBundlePath "${result_bundle}")
+  test_arguments=(
+    test-without-building "${base_test_arguments[@]}" -resultBundlePath "${result_bundle}"
+    -test-timeouts-enabled YES
+    -default-test-execution-time-allowance "${ui_test_timeout_seconds}"
+    -maximum-test-execution-time-allowance $(( ui_test_timeout_seconds * 2 ))
+  )
   for ui_case in "${batch_cases[@]}"; do
     test_arguments+=("-only-testing:StationAIUITests/StationAIUITests/${ui_case}")
   done
@@ -397,7 +442,9 @@ for (( batch_index=0; batch_index<batch_count; batch_index++ )); do
   if (( dashboard_inline == 1 )); then
     tracker_arguments+=(--announce)
   fi
-  caffeinate -d "${watchdog_command[@]}" "${ui_test_timeout_seconds}" \
+  # Whole-session backstop: every case's maximum allowance plus runner relaunches.
+  case_timeout_seconds=$(( ui_test_timeout_seconds * 2 * ${#batch_cases[@]} + 300 ))
+  caffeinate -d "${watchdog_command[@]}" "${case_timeout_seconds}" \
     "${test_output_dir}/timeout-${batch_tag}.png" \
     xcodebuild "${test_arguments[@]}" 2>&1 \
     | python3 "${dashboard_script}" "${tracker_arguments[@]}"

@@ -13,6 +13,7 @@ final class DaemonClient: @unchecked Sendable {
         var worktreeDirectory: String?
         var codexExecutable: String?
         var claudeExecutable: String?
+        var codexHome: String?
         var serviceName: String
         var socketPath: String
 
@@ -25,6 +26,7 @@ final class DaemonClient: @unchecked Sendable {
                 worktreeDirectory: environment["STATIONAI_E2E_WORKTREE_DIRECTORY"],
                 codexExecutable: environment["STATIONAI_E2E_CODEX_EXECUTABLE"],
                 claudeExecutable: environment["STATIONAI_E2E_CLAUDE_EXECUTABLE"],
+                codexHome: environment["CODEX_HOME"],
                 serviceName: serviceName,
                 socketPath: environment["STATIONAI_BRIDGE_SOCKET_PATH"] ?? BridgeContract.socketURL(forServiceName: serviceName).path
             )
@@ -83,6 +85,7 @@ final class DaemonClient: @unchecked Sendable {
         request.arguments["__guiRuntime"] = .boolean(true)
         if let codex = configuration.codexExecutable { request.arguments["__codexExecutable"] = .string(codex) }
         if let claude = configuration.claudeExecutable { request.arguments["__claudeExecutable"] = .string(claude) }
+        if let codexHome = configuration.codexHome { request.arguments["__codexHome"] = .string(codexHome) }
         request.dataDirectory = configuration.dataDirectory
         request.defaultsSuite = configuration.defaultsSuite
         request.worktreeDirectory = configuration.worktreeDirectory
