@@ -886,6 +886,8 @@ class StationAIBridgeTests(unittest.TestCase):
         if not marker.is_file() or marker.read_text(encoding="utf-8") != "StationAI bridge tests own this deterministic fixture (v1).\n":
             raise RuntimeError(f"Refusing to modify the Git fixture without its ownership marker: {self.fixture}")
 
+        self.run_git(self.changes, "reset", "--mixed", "HEAD")
+        self.run_git(self.changes, "checkout", "--", ".")
         (self.changes / "staged.txt").write_text("Staged index version.\n", encoding="utf-8")
         (self.changes / "shared.txt").write_text("Shared index version.\n", encoding="utf-8")
         (self.changes / "syntax.json").write_text('{"value":"working version"}\n', encoding="utf-8")
@@ -916,10 +918,10 @@ class StationAIBridgeTests(unittest.TestCase):
             text=True,
         ).returncode == 0
 
-    def changes_diff(self, task_id, path, group, expected_status=0):
+    def changes_diff(self, task_id, path, group, expected_status=0, repository=None):
         response, _ = self.call_cli(
             "task", "changes", "diff", task_id,
-            "--repository", self.changes,
+            "--repository", repository or self.changes,
             "--path", path,
             "--group", group,
             expected_status=expected_status,
@@ -957,7 +959,7 @@ class StationAIBridgeTests(unittest.TestCase):
         reopened = self.assert_success(self.call_cli("chat", "open")[0])
         self.assertEqual(reopened["id"], legacy_id, "Migration must run once, not create a second chat.")
 
-    # case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, and the Changes sidebar. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state.
+    # case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, and the Changes sidebar. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state. A chat turn never triggers the private task-outcome reminders, because the chat is told not to report an outcome; its developer instructions teach it that task language means StationAI's own board and give it the StationAI task CLI, and they never ask it to write the page title into its visible answer.
     def test_standalone_chat_separate_model_and_pages_round_trip(self):
         opened = self.assert_success(self.call_cli("chat", "open")[0])
         self.assertEqual(opened["title"], "Chat")
@@ -1062,6 +1064,27 @@ class StationAIBridgeTests(unittest.TestCase):
             self.assert_success(self.call_cli("task", "list")[0])["tasks"], [],
             "The standalone chat must stay absent from task/board listing in every turn state.",
         )
+        # The chat is told never to report a task outcome, so chasing one with private
+        # reminders can only spend extra provider turns and bury the user's next message in
+        # a reminder turn that answers nobody.
+        chat_fixture_history = json.loads(
+            Path(str(self.data_directory / "codex-fixture-chat-unique-turns-hold-release") + ".history").read_text(encoding="utf-8")
+        )
+        self.assertTrue(chat_fixture_history.get("turns"), "The chat fixture should have recorded its turns.")
+        self.assertFalse(
+            any("outcome reminder" in (turn.get("userMessage") or "").lower() for turn in chat_fixture_history["turns"]),
+            "A standalone chat turn must not trigger the private task-outcome reminders.",
+        )
+        # The chat must know it is StationAI's own chat and own the board through the CLI,
+        # instead of reaching for an unrelated task tool that the user can never see.
+        chat_instructions = chat_fixture_history.get("threadStartDeveloperInstructions") or ""
+        self.assertIn("task create", chat_instructions, "The chat must be taught the StationAI task CLI.")
+        self.assertIn("they always mean StationAI", chat_instructions)
+        # Page titles reach the user as transcript separators, parsed from close-turn.
+        # Assert the prohibition positively too: pinning only the old wording would let the
+        # instruction come back phrased differently.
+        self.assertIn("never write the page name", chat_instructions)
+        self.assertNotIn("Page: <current page title>", chat_instructions)
         recipes_read = self.assert_success(self.call_cli("chat", "page", "read", recipes["id"])[0])
         self.assertEqual(recipes_read["filePath"], str(recipes_archive_path))
         recipes_archive = json.loads(Path(recipes_read["filePath"]).read_text(encoding="utf-8"))
@@ -2336,22 +2359,13 @@ class StationAIBridgeTests(unittest.TestCase):
         gh_calls = gh_directory / "calls"
         gh_state.write_text("123=merged\n456=unmerged\n", encoding="utf-8")
         gh = gh_directory / "gh"
-        gh.write_text(
-            "#!/bin/sh\n"
-            "if [ \"$1\" != pr ] || [ \"$2\" != view ] || { [ \"$3\" != 123 ] && [ \"$3\" != 456 ]; } || [ \"$4\" != --json ] || [ \"$5\" != mergedAt ]; then\n"
-            "  echo 'Unexpected gh fixture command' >&2\n"
-            "  exit 2\n"
-            "fi\n"
-            f"printf '%s\\n' \"$3\" >> '{gh_calls}'\n"
-            f"if [ \"$(awk -F= -v number=\"$3\" '$1 == number {{ print $2 }}' '{gh_state}')\" = merged ]; then\n"
-            "  printf '{\"mergedAt\":\"2026-10-22T00:00:00Z\"}\\n'\n"
-            "else\n"
-            "  printf '{\"mergedAt\":null}\\n'\n"
-            "fi\n",
-            encoding="utf-8",
-        )
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
         gh.chmod(0o755)
-        gh_environment = {"PATH": f"{gh_directory}:{os.environ.get('PATH', '')}"}
+        gh_environment = {
+            "PATH": f"{gh_directory}:{os.environ.get('PATH', '')}",
+            "STATIONAI_E2E_GH_STATE_PATH": str(gh_state),
+            "STATIONAI_E2E_GH_CALL_LOG": str(gh_calls),
+        }
         linked = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(linked["repositoryWorktrees"][0]["pullRequestURL"], pr_url)
         self.assertEqual(linked["repositoryWorktrees"][1]["pullRequestURL"], second_pr_url)
@@ -3603,7 +3617,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(self.assert_success(response)["deleted"])
         self.assertFalse(broken_worktree.exists())
 
-    # case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, the removed PR conflict preference is absent from CLI/XPC and Settings, and appearance changes update the open Settings picker.
+    # case-contract: test_default_parent_settings_read_write_clear_and_validation | The default parent can be read, changed, cleared, and an unavailable path is rejected; a fresh CLI read and repository discovery use the persisted parent. Dark and Light appearance choices persist, the removed PR conflict preference is absent from CLI/XPC and Settings, and appearance changes update the open Settings picker. Clearing the default parent does not change roots already saved on a task.
     def test_default_parent_settings_read_write_clear_and_validation(self):
         self.assert_success(self.call_cli("settings", "clear-parent")[0])
         response, _ = self.call_cli("settings", "get")
@@ -3758,16 +3772,6 @@ class StationAIBridgeTests(unittest.TestCase):
             "A failed restore must preserve the ordered repository defaults.",
         )
 
-    # case-contract: test_task_roots_remain_after_default_parent_is_cleared | Clearing the default parent does not change roots already saved on a task.
-    def test_task_roots_remain_after_default_parent_is_cleared(self):
-        task_id = self.create_task(title="Persistent task roots")["id"]
-        response, _ = self.call_cli("settings", "set-parent", self.fixture / "suggested-parent")
-        self.assertEqual(self.assert_success(response)["defaultParentFolder"], str(self.fixture / "suggested-parent"))
-        response, _ = self.call_cli("settings", "clear-parent")
-        self.assertIsNone(self.assert_success(response)["defaultParentFolder"])
-        response, _ = self.call_cli("task", "roots", "get", task_id)
-        self.assertEqual(self.assert_success(response)["roots"], [str(self.primary)])
-
     # case-contract: test_new_task_has_empty_conversation_history | The CLI creates an Untitled task with no roots, logs task.create.succeeded for its ID, verifies empty history, and deletes it cleanly. New Task logs start and completion events with the same attempt ID and created task ID, then opens one empty conversation with the repository picker closed, the composer focused, and no create sheet. With no selected repositories, the empty conversation prominently says no repository is selected; typing starts immediately and, with a configured repository root, the UI enables standalone Send. Adding folder-only context leaves history empty, and backing out deletes the pending task without confirmation.
     def test_new_task_has_empty_conversation_history(self):
         response, _ = self.call_cli("task", "create", "--title", "Untitled task")
@@ -3894,7 +3898,7 @@ class StationAIBridgeTests(unittest.TestCase):
         serialized_title_events = json.dumps(title_events)
         self.assertNotIn("Explain the delayed title result.", serialized_title_events)
         self.assertNotIn("Generated fixture title", serialized_title_events)
-    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation; if it is concurrently renamed while title generation is pending, the custom title determines the auto branch. A standalone Untitled task starts and persists its provider thread while background title generation is still pending. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
+    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. As content is typed in short increments through successive wrapped lines after a line break, the newest insertion remains inside the visible composer viewport while its internal document follows the caret without scrolling backward. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation; if it is concurrently renamed while title generation is pending, the custom title determines the auto branch. A standalone Untitled task starts and persists its provider thread while background title generation is still pending. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
     def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         task_id = self.create_task(title="Blank conversation send", roots=[self.primary])["id"]
@@ -5599,7 +5603,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertLess(user["timelineOrder"], reloaded_rows[0]["timelineOrder"])
         self.assertLess(reloaded_rows[0]["timelineOrder"], assistant["timelineOrder"])
 
-    # case-contract: test_conversation_loads_newest_messages_before_older_history | A 120-message conversation initially presents its newest 40 messages; scrolling to the top reveals older messages in batches without losing the newest messages or changing order. CLI/XPC history remains complete and ordered across fresh reads.
+    # case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation immediately presents only the latest user question, pinned to the top of the viewport with its answer below. Scrolling upward loads earlier messages automatically in 40-message batches, including when the latest turn alone is shorter than the viewport, while keeping the anchored message in place and preserving chronological order. No separate control is needed on systems that report scroll position; below macOS 15 the transcript keeps an explicit Load earlier messages control inside that runway instead. A conversation that was empty when it opened establishes no window and keeps the newest 40 messages rendered as they arrive. Reloading history in place reopens on that same latest turn and keeps upward paging working. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch.
     def test_conversation_loads_newest_messages_before_older_history(self):
         task_id = self.create_task(title="Long conversation history")["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -5624,6 +5628,14 @@ class StationAIBridgeTests(unittest.TestCase):
         fresh_response, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         fresh_messages = self.assert_success(fresh_response)["messages"]
         self.assertEqual([message["text"] for message in fresh_messages], [message["text"] for message in messages])
+        # An in-place reload (the provider switch the UI performs without
+        # leaving the conversation) must keep the whole transcript available to
+        # the window the transcript reopens on.
+        switched, _ = self.call_cli("conversation", "provider", task_id, "set", "claude", extra_environment=env)
+        self.assertEqual(self.assert_success(switched)["conversationProvider"], "claude")
+        reloaded_response, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
+        reloaded_messages = self.assert_success(reloaded_response)["messages"]
+        self.assertEqual([message["text"] for message in reloaded_messages], [message["text"] for message in messages])
 
     # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs. A fresh `conversation subagent-history` read returns the completed child's stored conversation content.
     def test_conversation_shows_subagent_delegation(self):
@@ -5788,7 +5800,7 @@ class StationAIBridgeTests(unittest.TestCase):
             "A fresh read-only subagent inspection should return the child conversation's stored content.",
         )
 
-    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics.
+    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in, the question that started it stays pinned near the top of the transcript instead of being auto-scrolled past as the answer grows, consistent with the user message preceding its final answer in CLI/XPC history.
     def test_plan_mode_renders_markdown_in_conversation(self):
         task_id = self.create_task(title="Plan mode Markdown", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -6467,7 +6479,7 @@ class StationAIBridgeTests(unittest.TestCase):
         resumed, _ = self.call_cli("conversation", "history", task_id)
         self.assertIsNone(self.assert_success(resumed).get("pendingUserInputRequest"))
 
-    # case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early. A status-only completion update is not shown as an agent result; the summary-bearing notification is persisted as one normal assistant message in the parent conversation, appears in the visible transcript, and survives fresh CLI/XPC history reads and app reopening without duplication. A failed background agent remains inspectable as a failed activity, and its error summary is not added as an assistant result.
+    # case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early. A status-only completion update is not shown as an agent result; the summary-bearing notification is persisted as one normal assistant message in the parent conversation, appears in the visible transcript, and survives fresh CLI/XPC history reads and app reopening without duplication. A failed background agent remains inspectable as a failed activity, and its error summary is not added as an assistant result. When a background agent's notification wakes the parent after its result, the turn stays open through that resumed work, including when the last agent finishes while the woken parent is still streaming, and ends only with the parent's next result, keeping its final answer and both agent reports.
     def test_claude_background_agent_keeps_turn_open_until_resolved(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-background-agent"
@@ -6576,6 +6588,55 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertFalse(
             any(message.get("phase") == "subagent_report" for message in failed_history["messages"]),
             "A failed agent summary must not be presented as a successful assistant result.",
+        )
+
+        wake_task_response, _ = self.call_cli(
+            "task", "create", "--title", "Claude woken parent", "--root", self.primary, "--provider", "claude"
+        )
+        wake_task_id = self.assert_success(wake_task_response)["id"]
+        wake_command = ("conversation", "send", wake_task_id, "--message", "Launch background agents wake the parent.")
+        wake_pause = Path(str(executable) + ".background-wake-pause")
+        wake_ready = Path(str(executable) + ".background-wake-ready")
+        wake_release = Path(str(executable) + ".background-wake-release")
+        wake_pause.write_text("Pause after the last notification arrives mid-work.\n", encoding="utf-8")
+        wake_process = self.start_cli(*wake_command, extra_environment=env, binary_output=True)
+        try:
+            deadline = time.monotonic() + 20
+            while not wake_ready.exists() and wake_process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(wake_ready.exists(), "The fixture should pause after the last notification arrives mid-work.")
+            # Settling on the stale earlier result would end the send right after
+            # this notification; give that regression time to show.
+            settle_deadline = time.monotonic() + 2
+            while wake_process.poll() is None and time.monotonic() < settle_deadline:
+                time.sleep(0.05)
+            self.assertIsNone(
+                wake_process.poll(),
+                "A parent woken by a background notification must keep the turn open until its next result.",
+            )
+            wake_release.write_text("Release the woken parent's final answer.\n", encoding="utf-8")
+            wake_stdout, wake_stderr = wake_process.communicate(timeout=60)
+            self.assertEqual(wake_process.returncode, 0, f"CLI exit mismatch for {wake_command}: {wake_stderr!r}")
+        finally:
+            wake_release.write_text("Release after assertion failure.\n", encoding="utf-8")
+            if wake_process.poll() is None:
+                wake_process.communicate(timeout=30)
+        wake_lines = [line for line in wake_stdout.decode("utf-8").splitlines() if line.strip()]
+        wake_result = self.assert_success(json.loads(wake_lines[-1]))
+        self.assertTrue(any(message["text"] == "WAKE FINAL" for message in wake_result["messages"]), wake_result["messages"])
+        wake_history = self.assert_success(self.call_cli("conversation", "history", wake_task_id, extra_environment=env)[0])
+        wake_texts = [message["text"] for message in wake_history["messages"] if message["role"] == "assistant"]
+        self.assertIn("WAKE RESUMED", wake_texts)
+        self.assertEqual(
+            [message for message in wake_history["messages"] if message["role"] == "assistant" and message.get("phase") != "subagent_report"][-1]["text"],
+            "WAKE FINAL",
+            "The woken parent's final answer should be the turn's last assistant message.",
+        )
+        wake_reports = sorted(message["text"] for message in wake_history["messages"] if message.get("phase") == "subagent_report")
+        self.assertEqual(wake_reports, ["Reviewer A finished.", "Reviewer B finished."])
+        self.assertTrue(
+            any(activity["id"] == "toolu_wake_read" for activity in wake_history["activities"]),
+            "Tool work the woken parent ran should be recorded in the turn.",
         )
 
     # case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, StationAI returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics.
@@ -6954,7 +7015,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertTrue(any(message["text"] == "Answers received: " + expected_reply
                             for message in delivered_history["messages"]))
 
-    # case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; clean and unexpected relaunch preserve the prompt and conversation and allow a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
+    # case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; a turn running when the window quits cleanly or is killed keeps running in the bridge daemon, stays In Progress with its prompt visible after relaunch, finishes, and allows a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
     def test_codex_interrupted_turn_blocks_with_reason_and_can_retry(self):
         task_id = self.create_task("Interrupted turn", roots=[self.primary])["id"]
         self.complete_fixture_turn(task_id, message="Create the conversation thread before interruption.")
@@ -7073,72 +7134,139 @@ class StationAIBridgeTests(unittest.TestCase):
         recovered_thread, _ = self.call_cli("task", "get", threaded_restart["id"])
         self.assertEqual(self.assert_success(recovered_thread)["status"], "Review")
 
-    # case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view separates staged and working Git changes, and selecting text or JSON files opens a calculated, highlighted side-by-side diff over the conversation. Diagnostics record inventory and file-read outcomes with paths and byte counts, without logging file contents.
+    # case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view lists every file changed from the task branch's recorded base in a Changes section below a collapsed Viewed section, including committed branch changes and current staged, unstaged, and untracked edits, and excluding commits unique to the base branch. Marking a file viewed saves its current contents, stages the file in Git, and adds a Viewed entry that keeps showing the reviewed work from the branch base to that snapshot. Work done after that review is listed again under Changes and diffed against the saved snapshot, so one file can appear in both sections at once; a path with no content in the branch base and no current file is zero net change and is hidden entirely, even with a stale viewed snapshot, rather than showing a ghost entry. Selecting text or JSON files opens a calculated side-by-side diff whose header names the baseline used. Viewed snapshots persist across fresh CLI/XPC connections. Files that aren't current Changes entries, including already-viewed and unknown paths, are rejected by the mark-viewed CLI operation, and the UI offers that action only for Changes entries. Uncommitted filenames are green. Diagnostics record inventory and file-read outcomes without logging file contents.
     def test_task_workspace_changes_group_staged_and_unstaged_diffs(self):
         self.prepare_workspace_changes()
         task_id = self.create_task(title="Workspace changes", roots=[self.changes])["id"]
 
         response, _ = self.call_cli("task", "changes", "list", task_id)
         inventory = self.assert_success(response)
-        staged = {entry["path"]: entry for entry in inventory["staged"]}
-        working = {entry["path"]: entry for entry in inventory["working"]}
-        self.assertEqual(set(staged), {"shared.txt", "staged-deleted.txt", "staged.txt"})
-        self.assertEqual(set(working), {"deleted.txt", "shared.txt", "syntax.json", "untracked.txt", "working.txt"})
-        self.assertEqual(staged["staged-deleted.txt"]["status"], "deleted")
-        self.assertEqual(working["deleted.txt"]["status"], "deleted")
-        self.assertEqual(working["untracked.txt"]["status"], "untracked")
+        unviewed = {entry["path"]: entry for entry in inventory["unviewed"]}
+        self.assertEqual(set(unviewed), {"deleted.txt", "shared.txt", "staged-deleted.txt", "staged.txt", "syntax.json", "untracked.txt", "working.txt"})
+        self.assertEqual(inventory["viewed"], [])
+        self.assertEqual(unviewed["deleted.txt"]["status"], "deleted")
+        self.assertEqual(unviewed["untracked.txt"]["status"], "untracked")
+        self.assertTrue(unviewed["shared.txt"]["isUncommitted"])
+        self.assertFalse(unviewed["shared.txt"]["hasViewedSnapshot"], "A never-viewed file has no saved snapshot baseline.")
 
-        staged_shared = self.assert_success(self.changes_diff(task_id, "shared.txt", "staged"))
-        self.assertEqual(staged_shared["original"], "Shared baseline.\n")
-        self.assertEqual(staged_shared["modified"], "Shared index version.\n")
-        self.assertNotEqual(staged_shared["original"], staged_shared["modified"])
-        self.assertTrue(staged_shared["isText"])
-
-        working_shared = self.assert_success(self.changes_diff(task_id, "shared.txt", "working"))
-        self.assertEqual(working_shared["original"], "Shared index version.\n")
-        self.assertEqual(working_shared["modified"], "Shared working version.\n")
-
-        syntax = self.assert_success(self.changes_diff(task_id, "syntax.json", "working"))
+        shared = self.assert_success(self.changes_diff(task_id, "shared.txt", "unviewed"))
+        self.assertEqual(shared["original"], "Shared baseline.\n")
+        self.assertEqual(shared["modified"], "Shared working version.\n")
+        syntax = self.assert_success(self.changes_diff(task_id, "syntax.json", "unviewed"))
         self.assertEqual(syntax["original"], '{"value":"baseline"}\n')
         self.assertEqual(syntax["modified"], '{"value":"working version"}\n')
-        self.assertTrue(syntax["isText"])
-
-        untracked = self.assert_success(self.changes_diff(task_id, "untracked.txt", "working"))
+        untracked = self.assert_success(self.changes_diff(task_id, "untracked.txt", "unviewed"))
         self.assertEqual(untracked["original"], "")
         self.assertEqual(untracked["modified"], "Untracked file.\n")
-
-        deleted = self.assert_success(self.changes_diff(task_id, "deleted.txt", "working"))
+        deleted = self.assert_success(self.changes_diff(task_id, "deleted.txt", "unviewed"))
         self.assertEqual(deleted["original"], "Deleted baseline.\n")
         self.assertEqual(deleted["modified"], "")
 
-        staged_deleted = self.assert_success(self.changes_diff(task_id, "staged-deleted.txt", "staged"))
-        self.assertEqual(staged_deleted["original"], "Staged deletion baseline.\n")
-        self.assertEqual(staged_deleted["modified"], "")
+        marked, _ = self.call_cli("task", "changes", "mark-viewed", task_id, "--repository", str(self.changes), "--path", "shared.txt")
+        self.assertEqual(self.assert_success(marked), {"viewed": True})
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        self.assertNotIn("shared.txt", [entry["path"] for entry in inventory["unviewed"]])
+        viewed = {entry["path"]: entry for entry in inventory["viewed"]}
+        self.assertIn("shared.txt", viewed, "A newly viewed file stays visible in Viewed before it changes again.")
+        self.assertTrue(viewed["shared.txt"]["hasViewedSnapshot"])
+        viewed_diff = self.assert_success(self.changes_diff(task_id, "shared.txt", "viewed"))
+        self.assertEqual(viewed_diff["original"], "Shared baseline.\n", "A viewed entry keeps showing the reviewed work from the branch base.")
+        self.assertEqual(viewed_diff["modified"], "Shared working version.\n")
+        remark, _ = self.call_cli("task", "changes", "mark-viewed", task_id, "--repository", str(self.changes), "--path", "shared.txt", expected_status=3)
+        self.assert_failure(remark, "not_found")
 
-        self.assert_failure(self.changes_diff(task_id, "stale.txt", "working", expected_status=3), "not_found")
+        (self.changes / "shared.txt").write_text("Edited after viewing.\n", encoding="utf-8")
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        viewed = {entry["path"]: entry for entry in inventory["viewed"]}
+        unviewed = {entry["path"]: entry for entry in inventory["unviewed"]}
+        self.assertIn("shared.txt", viewed, "A later edit leaves the reviewed work listed under Viewed.")
+        self.assertEqual(viewed["shared.txt"]["statusCode"], "M ", "A snapshot row badges its own state, not the live index state.")
+        self.assertEqual(unviewed["shared.txt"]["statusCode"], "M ")
+        self.assertIn("shared.txt", unviewed, "A later edit is also listed as a change still to review.")
+        self.assertTrue(unviewed["shared.txt"]["isUncommitted"])
+        self.assertTrue(unviewed["shared.txt"]["hasViewedSnapshot"])
+        unchanged_viewed_diff = self.assert_success(self.changes_diff(task_id, "shared.txt", "viewed"))
+        self.assertEqual(unchanged_viewed_diff["original"], "Shared baseline.\n", "The viewed diff is unaffected by work done after the review.")
+        self.assertEqual(unchanged_viewed_diff["modified"], "Shared working version.\n")
+        pending_diff = self.assert_success(self.changes_diff(task_id, "shared.txt", "unviewed"))
+        self.assertEqual(pending_diff["original"], "Shared working version.\n", "A re-edited file diffs against its saved viewed snapshot, not the branch base.")
+        self.assertEqual(pending_diff["modified"], "Edited after viewing.\n")
+
+        marked_untracked, _ = self.call_cli("task", "changes", "mark-viewed", task_id, "--repository", str(self.changes), "--path", "untracked.txt")
+        self.assertEqual(self.assert_success(marked_untracked), {"viewed": True})
+        staged_status = self.run_git(self.changes, "status", "--porcelain", "--", "untracked.txt")
+        self.assertEqual(staged_status.strip(), "A  untracked.txt", "Marking a file viewed stages its untracked contents.")
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        viewed = {entry["path"]: entry for entry in inventory["viewed"]}
+        self.assertIn("untracked.txt", viewed)
+        self.assertEqual(viewed["untracked.txt"]["status"], "added")
+        new_file_viewed_diff = self.assert_success(self.changes_diff(task_id, "untracked.txt", "viewed"))
+        self.assertEqual(new_file_viewed_diff["original"], "")
+        self.assertEqual(new_file_viewed_diff["modified"], "Untracked file.\n")
+        (self.changes / "untracked.txt").write_text("Untracked file, edited after viewing.\n", encoding="utf-8")
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        self.assertIn("untracked.txt", [entry["path"] for entry in inventory["viewed"]])
+        unviewed = {entry["path"]: entry for entry in inventory["unviewed"]}
+        self.assertIn("untracked.txt", unviewed, "Editing a viewed new file lists it as a change still to review.")
+        self.assertEqual(unviewed["untracked.txt"]["status"], "modified")
+        untracked_diff = self.assert_success(self.changes_diff(task_id, "untracked.txt", "unviewed"))
+        self.assertEqual(untracked_diff["original"], "Untracked file.\n")
+        self.assertEqual(untracked_diff["modified"], "Untracked file, edited after viewing.\n")
+
+        marked_deleted, _ = self.call_cli("task", "changes", "mark-viewed", task_id, "--repository", str(self.changes), "--path", "deleted.txt")
+        self.assertEqual(self.assert_success(marked_deleted), {"viewed": True})
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        viewed = {entry["path"]: entry for entry in inventory["viewed"]}
+        self.assertEqual(viewed["deleted.txt"]["status"], "deleted")
+        deleted_viewed_diff = self.assert_success(self.changes_diff(task_id, "deleted.txt", "viewed"))
+        self.assertEqual(deleted_viewed_diff["original"], "Deleted baseline.\n")
+        self.assertEqual(deleted_viewed_diff["modified"], "")
+        (self.changes / "deleted.txt").write_text("Recreated after viewing.\n", encoding="utf-8")
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        recreated = {entry["path"]: entry for entry in inventory["unviewed"]}
+        self.assertIn("deleted.txt", recreated, "Recreating a viewed deleted file lists it as a change still to review.")
+        self.assertEqual(recreated["deleted.txt"]["status"], "added")
+        self.assertEqual(recreated["deleted.txt"]["statusCode"], "A ")
+        viewed = {entry["path"]: entry for entry in inventory["viewed"]}
+        self.assertEqual(viewed["deleted.txt"]["status"], "deleted", "The reviewed row keeps reporting the deletion it reviewed.")
+        self.assertEqual(viewed["deleted.txt"]["statusCode"], "D ")
+        recreated_diff = self.assert_success(self.changes_diff(task_id, "deleted.txt", "unviewed"))
+        self.assertEqual(recreated_diff["original"], "")
+        self.assertEqual(recreated_diff["modified"], "Recreated after viewing.\n")
+        self.assert_failure(self.changes_diff(task_id, "stale.txt", "unviewed", expected_status=3), "not_found")
+        stale_mark, _ = self.call_cli("task", "changes", "mark-viewed", task_id, "--repository", str(self.changes), "--path", "stale.txt", expected_status=3)
+        self.assert_failure(stale_mark, "not_found")
+
+        # A file that never existed in the branch base, created then renamed away by two
+        # separate file operations (not `git mv`, which Git would recognize as one rename),
+        # nets to zero change once both the deletion and the replacement are reviewed.
+        (self.changes / "ephemeral.txt").write_text("Ephemeral content.\n", encoding="utf-8")
+        marked_ephemeral, _ = self.call_cli("task", "changes", "mark-viewed", task_id, "--repository", str(self.changes), "--path", "ephemeral.txt")
+        self.assertEqual(self.assert_success(marked_ephemeral), {"viewed": True})
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        viewed = {entry["path"]: entry for entry in inventory["viewed"]}
+        self.assertEqual(viewed["ephemeral.txt"]["status"], "added")
+        (self.changes / "ephemeral.txt").unlink()
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        unviewed = {entry["path"]: entry for entry in inventory["unviewed"]}
+        self.assertEqual(unviewed["ephemeral.txt"]["status"], "deleted", "Deleting a reviewed new file lists the deletion as a change still to review.")
+        marked_ephemeral_deleted, _ = self.call_cli("task", "changes", "mark-viewed", task_id, "--repository", str(self.changes), "--path", "ephemeral.txt")
+        self.assertEqual(self.assert_success(marked_ephemeral_deleted), {"viewed": True})
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        self.assertNotIn("ephemeral.txt", [entry["path"] for entry in inventory["viewed"]], "A reviewed file with no base content and no current file is zero net change, not a ghost entry.")
+        self.assertNotIn("ephemeral.txt", [entry["path"] for entry in inventory["unviewed"]])
+        (self.changes / "ephemeral.txt").write_text("Reborn content.\n", encoding="utf-8")
+        inventory = self.assert_success(self.call_cli("task", "changes", "list", task_id)[0])
+        unviewed = {entry["path"]: entry for entry in inventory["unviewed"]}
+        self.assertEqual(unviewed["ephemeral.txt"]["status"], "added", "Recreating the file afterward surfaces it as a fresh change to review.")
+
         diagnostics = self.diagnostic_events()
-        self.assertTrue(any(
-            event.get("event") == "workspace.files.inventory.succeeded"
-            and int(event.get("stagedCount", "0")) == 3
-            and int(event.get("workingCount", "0")) == 5
-            for event in diagnostics
-        ))
-        staged_read = next(
-            event for event in diagnostics
-            if event.get("event") == "workspace.file.read.succeeded"
-            and event.get("path") == "shared.txt"
-            and event.get("group") == "staged"
-        )
-        self.assertGreater(int(staged_read["originalBytes"]), 0)
-        self.assertGreater(int(staged_read["modifiedBytes"]), 0)
-        self.assertTrue(any(
-            event.get("event") == "workspace.file.read.failed" and event.get("path") == "stale.txt"
-            for event in diagnostics
-        ))
-        serialized_diagnostics = json.dumps(diagnostics)
-        self.assertNotIn("Shared index version.", serialized_diagnostics)
+        self.assertTrue(any(event.get("event") == "workspace.files.inventory.succeeded" and int(event.get("unviewedCount", "0")) > 0 for event in diagnostics))
+        self.assertTrue(any(event.get("event") == "workspace.file.read.succeeded" and event.get("group") == "viewed" for event in diagnostics))
+        self.assertTrue(any(event.get("event") == "workspace.file.read.failed" and event.get("path") == "stale.txt" for event in diagnostics))
+        self.assertNotIn("Shared working version.", json.dumps(diagnostics))
 
-    # case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | External file edits and Git commits update the open task's changes sidebar automatically, and fresh CLI connections report the same Git status.
+    # case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory.
     def test_external_git_edits_and_commit_refresh_workspace_changes(self):
         repository = self.data_directory / "external-git"
         repository.mkdir()
@@ -7148,32 +7276,50 @@ class StationAIBridgeTests(unittest.TestCase):
         self.run_git(repository, "config", "user.email", "stationai-bridge-test@example.invalid")
         self.run_git(repository, "add", "tracked.txt")
         self.run_git(repository, "commit", "-m", "Baseline")
-        task_id = self.create_task(title="External Git", roots=[repository])["id"]
+        task_id = self.create_task(title="External Git", roots=[])["id"]
+        added, _ = self.call_cli("task", "repository", "add", task_id, "--repo", str(repository))
+        task_record = self.assert_success(added)
+        record = next(item for item in task_record["repositoryWorktrees"] if item["repositoryPath"] == str(repository))
+        self.assertEqual(record["branchFrom"], "main")
+        worktree = Path(record["worktreePath"])
 
-        response, _ = self.call_cli("task", "changes", "list", task_id)
-        self.assertEqual(self.assert_success(response), {"staged": [], "working": []})
-
-        (repository / "tracked.txt").write_text("Edited externally.\n", encoding="utf-8")
         response, _ = self.call_cli("task", "changes", "list", task_id)
         inventory = self.assert_success(response)
-        self.assertEqual(inventory["staged"], [])
-        self.assertEqual([entry["path"] for entry in inventory["working"]], ["tracked.txt"])
+        self.assertEqual(inventory["unviewed"], [])
+        self.assertEqual(inventory["viewed"], [])
 
-        self.run_git(repository, "add", "tracked.txt")
+        (worktree / "tracked.txt").write_text("Branch commit.\n", encoding="utf-8")
+        self.run_git(worktree, "add", "tracked.txt")
+        self.run_git(worktree, "commit", "-m", "Task branch commit")
+        (repository / "base-only.txt").write_text("Base-only commit.\n", encoding="utf-8")
+        self.run_git(repository, "add", "base-only.txt")
+        self.run_git(repository, "commit", "-m", "Base-only commit")
+
         response, _ = self.call_cli("task", "changes", "list", task_id)
         inventory = self.assert_success(response)
-        self.assertEqual([entry["path"] for entry in inventory["staged"]], ["tracked.txt"])
-        self.assertEqual(inventory["working"], [])
+        entries = {entry["path"]: entry for entry in inventory["unviewed"]}
+        self.assertEqual(set(entries), {"tracked.txt"})
+        self.assertFalse(entries["tracked.txt"]["isUncommitted"])
+        self.assertNotIn("base-only.txt", entries)
+        branch_diff = self.assert_success(self.changes_diff(task_id, "tracked.txt", "unviewed", repository=worktree))
+        self.assertEqual(branch_diff["original"], "Baseline.\n")
+        self.assertEqual(branch_diff["modified"], "Branch commit.\n")
 
-        self.run_git(repository, "commit", "-m", "External commit")
+        (worktree / "tracked.txt").write_text("Edited externally.\n", encoding="utf-8")
+        (worktree / "untracked.txt").write_text("Untracked external file.\n", encoding="utf-8")
         response, _ = self.call_cli("task", "changes", "list", task_id)
-        self.assertEqual(self.assert_success(response), {"staged": [], "working": []})
-        response, _ = self.call_cli(
-            "task", "changes", "diff", task_id,
-            "--repository", repository, "--path", "tracked.txt", "--group", "staged",
-            expected_status=3,
-        )
-        self.assert_failure(response, "not_found")
+        inventory = self.assert_success(response)
+        entries = {entry["path"]: entry for entry in inventory["unviewed"]}
+        self.assertEqual(set(entries), {"tracked.txt", "untracked.txt"})
+        self.assertTrue(entries["tracked.txt"]["isUncommitted"])
+        self.assertTrue(entries["untracked.txt"]["isUncommitted"])
+        self.run_git(worktree, "add", "tracked.txt", "untracked.txt")
+        self.run_git(worktree, "commit", "-m", "Second task branch commit")
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        entries = {entry["path"]: entry for entry in self.assert_success(response)["unviewed"]}
+        self.assertEqual(set(entries), {"tracked.txt", "untracked.txt"})
+        self.assertFalse(entries["tracked.txt"]["isUncommitted"])
+        self.assertNotIn("base-only.txt", entries)
 
 
 

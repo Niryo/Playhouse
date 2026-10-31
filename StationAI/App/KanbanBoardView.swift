@@ -5,10 +5,7 @@ import SwiftUI
 struct KanbanBoardView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var conversationRuntime: ConversationRuntimeModel
-    @Query(
-        filter: #Predicate<BoardTask> { $0.statusRawValue != "Done" },
-        sort: \BoardTask.createdAt, order: .reverse
-    ) private var tasks: [BoardTask]
+    @Query(filter: #Predicate<BoardTask> { $0.statusRawValue != "Done" }, sort: \BoardTask.createdAt, order: .reverse) private var tasks: [BoardTask]
     @State private var isCreatingNewTask = false
     @State private var saveError: String?
     @State private var lifecycleResetNotice: String?
@@ -793,7 +790,10 @@ struct KanbanBoardView: View {
 
     private func checkReviewPullRequests() {
         let now = Date()
-        let minimumInterval: TimeInterval = 20
+        // Tests shorten the cooldown; what they check (checks suppressed while it runs,
+        // then exactly one trailing check) does not depend on its length.
+        let minimumInterval = ProcessInfo.processInfo.environment["STATIONAI_E2E_PR_CHECK_COOLDOWN_SECONDS"]
+            .flatMap(TimeInterval.init) ?? 20
         if checkingMergedPullRequests {
             mergedPullRequestCheckPending = true
             return
@@ -1260,17 +1260,20 @@ private struct TaskCardView: View {
     let onMoveToDone: (() -> Void)?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 13) {
+        // Card rows, top to bottom: the title, the live updates, then the time
+        // on the left with the pull-request controls on the right.
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
-                Image(systemName: "circle.inset.filled")
-                    .font(.system(size: 9))
-                    .foregroundStyle(task.status.accent)
-                Text(task.status.rawValue)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-                Spacer(minLength: 0)
+                if task.title == "Generating title…" { ProgressView().controlSize(.small) }
+                Text(task.title)
+                    .lineSpacing(2)
             }
+                .font(.system(size: 13, weight: .semibold))
+                .tracking(0.35)
+                .foregroundStyle(WorkspaceTheme.conversationText)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("task-title-\(task.id.uuidString)")
+                .allowsHitTesting(false)
 
             if let progressLabel = task.progressLabel, !progressLabel.isEmpty {
                 HStack(alignment: .top, spacing: 6) {
@@ -1293,12 +1296,13 @@ private struct TaskCardView: View {
                                 .accessibilityIdentifier("task-progress-detail-\(task.id.uuidString)")
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("task-progress-report-\(task.id.uuidString)")
                 .accessibilityLabel([progressLabel, task.progressDetail].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", "))
                 .accessibilityValue("Progress icon: \(TaskProgressType(rawValue: task.progressTypeRawValue ?? "")?.symbol ?? "sparkle")")
+                .allowsHitTesting(false)
             }
 
             if let statusMessage = task.statusMessage, !statusMessage.isEmpty {
@@ -1308,52 +1312,36 @@ private struct TaskCardView: View {
                     .lineLimit(3)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityIdentifier("task-status-message-\(task.id.uuidString)")
+                    .allowsHitTesting(false)
             }
 
-            HStack(spacing: 6) {
-                if task.title == "Generating title…" { ProgressView().controlSize(.small) }
-                Text(task.title)
-                    .lineSpacing(2)
-            }
-                .font(.system(size: 13, weight: .semibold))
-                .tracking(0.35)
-                .foregroundStyle(WorkspaceTheme.conversationText)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier("task-title-\(task.id.uuidString)")
-
-            HStack(spacing: 6) {
-                Image(systemName: "clock")
-                    .font(.system(size: 10))
-                if task.status == .inProgress {
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        Text(workingDuration(at: context.date))
-                            .font(.system(size: 10))
-                            .accessibilityIdentifier("task-working-duration-\(task.id.uuidString)")
-                    }
-                } else {
-                    Text(task.createdAt.formatted(date: .abbreviated, time: .omitted))
-                        .font(.system(size: 10))
+            HStack(alignment: .center, spacing: 8) {
+                timeRow
+                Spacer(minLength: 8)
+                if showPullRequestControls {
+                    pullRequestControls
                 }
             }
-            .foregroundStyle(.tertiary)
+            .frame(minHeight: showPullRequestControls ? 30 : nil)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(WorkspaceTheme.windowBackground)
-                .shadow(color: .black.opacity(0.035), radius: 5, x: 0, y: 2)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
-        }
-        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay {
+            // The open button sits behind the content and owns the card chrome.
+            // The content above it must not absorb clicks (no fill, no
+            // contentShape, and non-interactive rows disable hit testing), so a
+            // click anywhere on the card except the pull-request controls
+            // reaches this button.
             Button(action: {
                 DispatchQueue.main.async(execute: onOpen)
             }) {
-                Color.clear
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(WorkspaceTheme.windowBackground)
+                    .shadow(color: .black.opacity(0.035), radius: 5, x: 0, y: 2)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
+                    }
                     .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1365,80 +1353,6 @@ private struct TaskCardView: View {
             .accessibilityIdentifier("task-card-\(task.id.uuidString)")
         }
         .accessibilityElement(children: .contain)
-        .overlay(alignment: .topTrailing) {
-            if task.status != .backlog && !task.repositoryWorktrees.isEmpty {
-                HStack(spacing: 5) {
-                    let linked = linkedPullRequests
-                    if linked.isEmpty {
-                        Button(action: onCreatePullRequests) {
-                            if isCreatingPullRequests {
-                                ProgressView().controlSize(.mini)
-                            } else {
-                                Text("PR").font(.system(size: 10, weight: .semibold))
-                                    .frame(minWidth: 30, minHeight: 30)
-                            }
-                        }
-                        .actionButtonHoverEmphasis(padding: 10)
-                        .buttonHoverPointer()
-                        .help("Create a pull request for each repository linked to this task")
-                        .disabled(isCreatingPullRequests)
-                        .frame(width: 30, height: 30)
-                        .contentShape(Rectangle())
-                        .accessibilityLabel("Create a pull request for each repository linked to this task")
-                        .accessibilityIdentifier("task-create-pr-\(task.id.uuidString)")
-                    } else {
-                        if isPullRequestMerged, let onMoveToDone {
-                            Button(action: onMoveToDone) {
-                                Image(systemName: "checkmark")
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundStyle(.green)
-                            }
-                            .actionButtonHoverEmphasis(padding: 10)
-                            .buttonHoverPointer()
-                            .help("Complete task: all linked pull requests have merged")
-                            .frame(width: 30, height: 30)
-                            .contentShape(Rectangle())
-                            .accessibilityLabel("Green checkmark. Complete task, all linked pull requests merged")
-                            .accessibilityIdentifier("task-complete-merged-pr-\(task.id.uuidString)")
-                        } else {
-                            if hasPullRequestConflicts {
-                                Button(action: onResolveConflicts) {
-                                    Image("ConflictIndicator")
-                                        .resizable()
-                                        .scaledToFit()
-                                        .frame(width: 30, height: 12)
-                                        .accessibilityIdentifier("task-resolve-pr-conflicts-icon-\(task.id.uuidString)")
-                                }
-                                .actionButtonHoverEmphasis(padding: 10)
-                                .buttonHoverPointer()
-                                .help("Resolve pull request conflicts with \(task.conversationProvider.displayName)")
-                                .accessibilityLabel("Resolve pull request conflicts")
-                                .accessibilityIdentifier("task-resolve-pr-conflicts-\(task.id.uuidString)")
-                                .frame(minWidth: 30, minHeight: 30)
-                                .contentShape(Rectangle())
-                            }
-                            ForEach(linked, id: \.repositoryPath) { record in
-                                if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
-                                    Link("#\(number)", destination: url)
-                                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                        .frame(minWidth: 30, minHeight: 30)
-                                        .actionButtonHoverEmphasis(padding: 10)
-                                        .buttonHoverPointer()
-                                        .help("Open pull request #\(number) in your browser")
-                                        .frame(width: 30, height: 30)
-                                        .contentShape(Rectangle())
-                                        .accessibilityIdentifier("task-pr-link-\(task.id.uuidString)-\(number)")
-                                }
-                            }
-                        }
-                    }
-                }
-                .buttonStyle(.borderless)
-                .padding(.trailing, 14)
-                .padding(.top, 12)
-                .zIndex(2)
-            }
-        }
         .contextMenu {
             if let onMoveToDone {
                 Button("Move to Done", systemImage: "checkmark.circle", action: onMoveToDone)
@@ -1461,11 +1375,105 @@ private struct TaskCardView: View {
         task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
     }
 
+    private var showPullRequestControls: Bool {
+        task.status != .backlog && !task.repositoryWorktrees.isEmpty
+    }
+
+    private var timeRow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "clock")
+                .font(.system(size: 10))
+            if task.status == .inProgress {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(workingDuration(at: context.date))
+                        .font(.system(size: 10))
+                        .accessibilityIdentifier("task-working-duration-\(task.id.uuidString)")
+                }
+            } else {
+                Text(task.createdAt.formatted(date: .abbreviated, time: .omitted))
+                    .font(.system(size: 10))
+            }
+        }
+        .foregroundStyle(.tertiary)
+        .allowsHitTesting(false)
+    }
+
+    @ViewBuilder
+    private var pullRequestControls: some View {
+        HStack(spacing: 5) {
+            let linked = linkedPullRequests
+            if linked.isEmpty {
+                Button(action: onCreatePullRequests) {
+                    if isCreatingPullRequests {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Text("PR").font(.system(size: 10, weight: .semibold))
+                            .frame(minWidth: 30, minHeight: 30)
+                    }
+                }
+                .actionButtonHoverEmphasis(padding: 10)
+                .buttonHoverPointer()
+                .help("Create a pull request for each repository linked to this task")
+                .disabled(isCreatingPullRequests)
+                .frame(width: 30, height: 30)
+                .contentShape(Rectangle())
+                .accessibilityLabel("Create a pull request for each repository linked to this task")
+                .accessibilityIdentifier("task-create-pr-\(task.id.uuidString)")
+            } else {
+                if isPullRequestMerged, let onMoveToDone {
+                    Button(action: onMoveToDone) {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(.green)
+                    }
+                    .actionButtonHoverEmphasis(padding: 10)
+                    .buttonHoverPointer()
+                    .help("Complete task: all linked pull requests have merged")
+                    .frame(width: 30, height: 30)
+                    .contentShape(Rectangle())
+                    .accessibilityLabel("Green checkmark. Complete task, all linked pull requests merged")
+                    .accessibilityIdentifier("task-complete-merged-pr-\(task.id.uuidString)")
+                } else {
+                    if hasPullRequestConflicts {
+                        Button(action: onResolveConflicts) {
+                            Image("ConflictIndicator")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 30, height: 12)
+                                .accessibilityIdentifier("task-resolve-pr-conflicts-icon-\(task.id.uuidString)")
+                        }
+                        .actionButtonHoverEmphasis(padding: 10)
+                        .buttonHoverPointer()
+                        .help("Resolve pull request conflicts with \(task.conversationProvider.displayName)")
+                        .accessibilityLabel("Resolve pull request conflicts")
+                        .accessibilityIdentifier("task-resolve-pr-conflicts-\(task.id.uuidString)")
+                        .frame(minWidth: 30, minHeight: 30)
+                        .contentShape(Rectangle())
+                    }
+                    ForEach(linked, id: \.repositoryPath) { record in
+                        if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
+                            Link("#\(number)", destination: url)
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .frame(minWidth: 30, minHeight: 30)
+                                .actionButtonHoverEmphasis(padding: 10)
+                                .buttonHoverPointer()
+                                .help("Open pull request #\(number) in your browser")
+                                .frame(width: 30, height: 30)
+                                .contentShape(Rectangle())
+                                .accessibilityIdentifier("task-pr-link-\(task.id.uuidString)-\(number)")
+                        }
+                    }
+                }
+            }
+        }
+        .buttonStyle(.borderless)
+    }
+
     private func workingDuration(at date: Date) -> String {
         let activeInterval = task.inProgressStartedAt.map { max(0, date.timeIntervalSince($0)) } ?? 0
         let activeText = Self.shortDuration(activeInterval)
-        guard task.totalInProgressSeconds > 0 else { return "Working for \(activeText)" }
-        return "Working for \(activeText) (\(Self.shortDuration(task.totalInProgressSeconds + activeInterval)) total)"
+        guard task.totalInProgressSeconds > 0 else { return activeText }
+        return "\(activeText) (\(Self.shortDuration(task.totalInProgressSeconds + activeInterval)) total)"
     }
 
     private static func shortDuration(_ seconds: TimeInterval) -> String {

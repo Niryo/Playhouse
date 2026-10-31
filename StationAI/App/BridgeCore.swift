@@ -399,6 +399,7 @@ enum StationAIStore {
                    t0.ZCREATEDAT, t0.ZCODEXTHREADID, t0.ZSAVEDPROMPT,
                    t0.ZPENDINGSUBMITTEDPROMPT, t0.ZWORKSPACEROOTPATHSDATA,
                    t0.ZREPOSITORYWORKTREESDATA, t0.ZCONTEXTFOLDERPATHSDATA,
+                   t0.ZVIEWEDWORKSPACECHANGESDATA,
                    t0.ZDRAFTIMAGEDATAURLSDATA
             FROM ZBOARDTASK t0 LIMIT 0
             """
@@ -924,10 +925,12 @@ enum GitHubPullRequestManager {
 
     private static func run(_ executable: String, _ arguments: [String], directory: String) throws -> String {
         let result: StationAIProcessResult
+        // A quarantined test fixture script runs through its interpreter.
+        let command = ConversationProviderFixture.launchCommand(executable: executable, arguments: arguments)
         do {
             result = try StationAIProcessRunner.run(
-                executable: executable,
-                arguments: arguments,
+                executable: command.executable,
+                arguments: command.arguments,
                 directory: directory
             )
         } catch {
@@ -2539,9 +2542,8 @@ final class BoardTaskManager {
             switch task.status {
             case .inProgress:
                 message = "StationAI closed while this turn was running. Your conversation is saved; review it and send a follow-up to continue."
-            case .waitingResponse:
-                message = "StationAI reopened before the pending question was answered. Review the conversation and send a prompt to continue."
             default:
+                // Waiting Response without a saved question is a finished turn waiting for the user.
                 return BoardTaskRecord(task: task)
             }
             task.status = .waitingResponse
@@ -2855,6 +2857,15 @@ final class BoardTaskManager {
         var descriptor = FetchDescriptor<StandaloneChat>(predicate: #Predicate { $0.id == id })
         descriptor.fetchLimit = 1
         return try modelContext.fetch(descriptor).first
+    }
+
+    func setViewedWorkspaceChange(_ snapshot: WorkspaceViewedChange, taskID: UUID) async throws {
+        let task = try requireTask(taskID)
+        var snapshots = task.viewedWorkspaceChanges
+        snapshots.removeAll { $0.repository == snapshot.repository && $0.path == snapshot.path }
+        snapshots.append(snapshot)
+        task.viewedWorkspaceChanges = snapshots
+        try await saveTaskContext(operation: "BoardTaskManager.setViewedWorkspaceChange", taskID: taskID)
     }
 
     fileprivate func isRepositoryAttached(_ record: RepositoryWorktreeRecord, to taskID: UUID) throws -> Bool {
@@ -3497,17 +3508,32 @@ final class WorkspaceManager {
     }
 
     func changes(for taskID: UUID) async throws -> WorkspaceChangeInventory {
-        guard taskManager != nil else {
+        guard let taskManager else {
             throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.")
         }
         StationAIDiagnostics.record("workspace.changes.read.started", fields: ["taskID": taskID.uuidString])
-        let inventory = try await WorkspaceChangeScanner.inventory(workspaceRoots: roots(for: taskID))
+        let task = try taskManager.taskModel(taskID)
+        let branchFrom = Dictionary(task.repositoryWorktrees.map { (URL(fileURLWithPath: $0.worktreePath, isDirectory: true).standardizedFileURL.path, $0.branchFrom) }) { existing, _ in existing }
+        let inventory = try await WorkspaceChangeScanner.inventory(workspaceRoots: roots(for: taskID), branchFromByRepository: branchFrom, viewedChanges: task.viewedWorkspaceChanges)
         StationAIDiagnostics.record("workspace.changes.read.succeeded", fields: [
             "taskID": taskID.uuidString,
-            "stagedCount": String(inventory.staged.count),
-            "workingCount": String(inventory.working.count)
+            "unviewedCount": String(inventory.unviewed.count),
+            "viewedCount": String(inventory.viewed.count)
         ])
         return inventory
+    }
+
+    func markViewed(for taskID: UUID, repository: String, path: String) async throws {
+        guard let taskManager else {
+            throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.")
+        }
+        let task = try taskManager.taskModel(taskID)
+        let inventory = try await changes(for: taskID)
+        guard inventory.unviewed.contains(where: { $0.repository == URL(fileURLWithPath: repository).standardizedFileURL.path && $0.path == path }) else {
+            throw BridgeCommandError(code: "not_found", message: "The file isn't currently an unviewed change.")
+        }
+        let snapshot = try await WorkspaceChangeScanner.captureViewedChange(workspaceRoots: task.workspaceRootPaths, repositoryPath: repository, relativePath: path)
+        try await taskManager.setViewedWorkspaceChange(snapshot, taskID: taskID)
     }
 
     func diff(
@@ -3516,12 +3542,17 @@ final class WorkspaceManager {
         path: String,
         group: String
     ) async throws -> WorkspaceFileDiff {
-        guard taskManager != nil else {
+        guard let taskManager else {
             throw BridgeCommandError(code: "internal_error", message: "Task manager is unavailable.")
         }
         guard let changeGroup = WorkspaceChangeGroup(rawValue: group) else {
-            throw BridgeCommandError(code: "invalid_argument", message: "Change group must be 'staged' or 'working'.")
+            throw BridgeCommandError(code: "invalid_argument", message: "Change group must be 'unviewed' or 'viewed'.")
         }
+        let task = try taskManager.taskModel(taskID)
+        let normalizedRepository = URL(fileURLWithPath: repository, isDirectory: true).standardizedFileURL.path
+        let branchFrom = task.repositoryWorktrees.first {
+            URL(fileURLWithPath: $0.worktreePath, isDirectory: true).standardizedFileURL.path == normalizedRepository
+        }?.branchFrom ?? "HEAD"
         StationAIDiagnostics.record("workspace.diff.read.started", fields: [
             "taskID": taskID.uuidString,
             "repositoryPath": repository,
@@ -3532,7 +3563,9 @@ final class WorkspaceManager {
             workspaceRoots: roots(for: taskID),
             repositoryPath: repository,
             relativePath: path,
-            group: changeGroup
+            group: changeGroup,
+            branchFrom: branchFrom,
+            viewedChanges: task.viewedWorkspaceChanges
         )
         StationAIDiagnostics.record("workspace.diff.read.succeeded", fields: [
             "taskID": taskID.uuidString,
@@ -3571,6 +3604,11 @@ final class ConversationManager {
     private let preferences: UserDefaults
     private var dispatchingQueuedMessages = false
     private static var dispatchingQueuedTaskIDs = Set<UUID>()
+    /// Bumped whenever a turn changes what a task's conversation shows (its
+    /// transcript or its queue). The turn's own stream reaches only the caller
+    /// that started it; any other window follows these instead.
+    private(set) static var visibleRevisions: [UUID: Int] = [:]
+    private static func bumpVisibleRevision(_ taskID: UUID) { visibleRevisions[taskID, default: 0] += 1 }
     private static var pendingQueuedTaskDispatchIDs = Set<UUID>()
     private var activeSendTaskIDs = Set<UUID>()
     // ConversationManager is lightweight and some entry points construct one per send.
@@ -4593,17 +4631,8 @@ final class ConversationManager {
         }
         let task = try tasks.conversationSubject(taskID)
         guard let threadID = task.activeConversationID else { return false }
-        let client = client(for: task)
-        // A turn owned by this process records its own steered input; a turn owned
-        // by another process records it when that owner services the mailbox.
-        let ownsTurn = client.isTurnActive(threadID: threadID)
-        let accepted = try await client.steerActiveTurn(threadID: threadID, text: normalizedText, imageDataURLs: imageDataURLs)
-        if accepted, ownsTurn, task.conversationProvider == .claude {
-            recordClaudeMessage(taskID: taskID, ConversationMessage(
-                id: UUID().uuidString.lowercased(), role: .user, text: normalizedText, imageDataURLs: imageDataURLs, provider: .claude
-            ))
-        }
-        return accepted
+        // The running turn records and streams the steered input itself.
+        return try await client(for: task).steerActiveTurn(threadID: threadID, text: normalizedText, imageDataURLs: imageDataURLs)
     }
 
     func answerUserInput(taskID: UUID, requestID: String, threadID: String, answers: [String: [String]]) throws -> Bool {
@@ -4637,6 +4666,11 @@ final class ConversationManager {
         return (reply, stillQueued, stillQueued ? nil : try await history(taskID: taskID))
     }
 
+    /// The question persisted for this conversation, readable without its provider.
+    func savedUserInputRequest(taskID: UUID) throws -> ConversationUserInputRequest? {
+        try transcripts.read(taskID).pendingUserInputRequest
+    }
+
     func queuedMessages(taskID: UUID) throws -> [QueuedConversationMessage] {
         try tasks.queuedConversationMessages(taskID: taskID)
     }
@@ -4646,6 +4680,7 @@ final class ConversationManager {
     }
 
     func queueMessage(taskID: UUID, text: String, imageDataURLs: [String] = [], asyncQuestionItemID: String? = nil) throws -> QueuedConversationMessage {
+        defer { Self.bumpVisibleRevision(taskID) }
         return try tasks.enqueueConversationMessage(
             taskID: taskID,
             text: text, imageDataURLs: imageDataURLs, asyncQuestionItemID: asyncQuestionItemID
@@ -4677,6 +4712,7 @@ final class ConversationManager {
     }
 
     func removeQueuedMessage(taskID: UUID, messageID: UUID) throws {
+        defer { Self.bumpVisibleRevision(taskID) }
         try tasks.removeQueuedMessage(taskID: taskID, messageID: messageID)
     }
 
@@ -4740,6 +4776,12 @@ final class ConversationManager {
         hideSensitiveRecoveryPrompt: Bool = false,
         hideInternalOutcomeReminder: Bool = false
     ) async throws -> ConversationHistory {
+        let streamUpdate = onUpdate
+        let onUpdate: (ConversationUpdate) -> Void = { update in
+            if update.type == "queue_changed" || update.type == "steered_message" { Self.bumpVisibleRevision(taskID) }
+            streamUpdate(update)
+        }
+        defer { Self.bumpVisibleRevision(taskID) }
         let task = try tasks.conversationSubject(taskID)
         guard contextPageIDs.isEmpty || task.isStandaloneChat else {
             throw BridgeCommandError(
@@ -4815,7 +4857,13 @@ final class ConversationManager {
                         onUserInput: onUserInput
                     )
                     let hasPendingUserInput = (try? self.transcripts.read(taskID).pendingUserInputRequest) != nil
-                    for reminderNumber in 1...2 where self.lastReportedTurnOutcomeByTaskID[taskID] == nil && !hasPendingUserInput {
+                    // A standalone chat is told never to report a task outcome, so this
+                    // condition could never be satisfied for it: reminding would spend two
+                    // extra provider turns per message and bury the user's next message in a
+                    // private reminder turn that answers nobody.
+                    let remindsAboutOutcome = !isStandaloneChat
+                    for reminderNumber in 1...2 where remindsAboutOutcome
+                        && self.lastReportedTurnOutcomeByTaskID[taskID] == nil && !hasPendingUserInput {
                         let reminder = """
                         \(Self.privateOutcomeReminderMarker)
 
@@ -6291,13 +6339,19 @@ final class StationAIBridgeRuntime {
 
         // Turn state lives in this process's memory, so reading it needs no store.
         if request.command == "conversation.runtime" || request.command == "conversation.runtime.subscribe" {
+            let runtimeScope: String?
+            #if DEBUG
+            runtimeScope = request.dataDirectory
+            #else
+            runtimeScope = nil
+            #endif
             do {
                 let result: BridgeValue
                 if request.command == "conversation.runtime" {
-                    result = try Self.value(ConversationRuntimeSnapshot.current())
+                    result = try Self.value(ConversationRuntimeSnapshot.current(dataDirectory: runtimeScope))
                 } else {
                     // Streams the daemon's turn state to a window until it disconnects.
-                    for await snapshot in ConversationRuntimeSnapshot.changes() {
+                    for await snapshot in ConversationRuntimeSnapshot.changes(dataDirectory: runtimeScope) {
                         if Task.isCancelled { break }
                         eventHandler(BridgeEvent(requestID: request.id, type: "runtime_state", payload: try Self.value(snapshot)))
                     }
@@ -6351,9 +6405,11 @@ final class StationAIBridgeRuntime {
             // A window's requests run goals against one long-lived Codex client
             // that observes goal turns, as the window's own client used to.
             let guiRuntime = request.arguments["__guiRuntime"]?.bool == true
+            // The caller's Codex home, so a window and the CLI read the same threads.
+            let callerCodexHome = request.arguments["__codexHome"]?.string
             func conversationClients(codexHome: String? = nil, goalFeatureEnabled: Bool = false) -> ConversationClients {
                 ConversationClients(
-                    codex: CodexAppServerClient.sharedClient(executableOverride: codexExecutable, codexHomeOverride: codexHome, goalFeatureEnabled: goalFeatureEnabled, goalRuntimeEnabled: guiRuntime, dataDirectory: dataDirectory),
+                    codex: CodexAppServerClient.sharedClient(executableOverride: codexExecutable, codexHomeOverride: codexHome ?? callerCodexHome, goalFeatureEnabled: goalFeatureEnabled, goalRuntimeEnabled: guiRuntime, dataDirectory: dataDirectory),
                     claude: ClaudeCodeClient.sharedPrimaryClient(executableOverride: claudeExecutable, dataDirectory: dataDirectory)
                 )
             }
@@ -6372,7 +6428,7 @@ final class StationAIBridgeRuntime {
                 let conversations = ConversationManager(tasks: taskManager, clients: ConversationClients(codex: CodexAppServerClient(), claude: ClaudeCodeClient()), settingsManager: settings)
                 result = try Self.value(await conversations.searchArchive(
                     query: request.requiredString("query"),
-                    codexHomePath: request.arguments["codexHome"]?.string
+                    codexHomePath: request.arguments["codexHome"]?.string ?? callerCodexHome
                 ))
             case "task.create":
                 let title = try request.requiredString("title")
@@ -6563,6 +6619,13 @@ final class StationAIBridgeRuntime {
                 result = try Self.value(await workspaces.setRoots(roots, for: request.requiredUUID("taskID")))
             case "task.changes.list":
                 result = try Self.value(await workspaces.changes(for: request.requiredUUID("taskID")))
+            case "task.changes.mark-viewed":
+                try await workspaces.markViewed(
+                    for: request.requiredUUID("taskID"),
+                    repository: request.requiredString("repository"),
+                    path: request.requiredString("path")
+                )
+                result = .object(["viewed": .boolean(true)])
             case "task.changes.diff":
                 result = try Self.value(await workspaces.diff(
                     for: request.requiredUUID("taskID"),
@@ -6671,8 +6734,15 @@ final class StationAIBridgeRuntime {
                 let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
                 result = .array(try await conversations.providerCapabilities(taskID: request.requiredUUID("taskID")).map { try Self.value($0) })
             case "conversation.goal":
-                let clients = conversationClients(codexHome: request.arguments["__codexHome"]?.string, goalFeatureEnabled: !guiRuntime)
-                defer { if !guiRuntime { clients.codex.shutdown() } }
+                var clients = conversationClients(goalFeatureEnabled: !guiRuntime)
+                // Codex allows one writer per thread: use the client that already has it open.
+                var ownsClient = !guiRuntime
+                if let threadID = try? taskManager.taskModel(request.requiredUUID("taskID")).codexThreadID,
+                   let owner = CodexAppServerClient.sharedClient(loading: threadID, compatibleWith: clients.codex), owner !== clients.codex {
+                    clients = ConversationClients(codex: owner, claude: clients.claude)
+                    ownsClient = false
+                }
+                defer { if ownsClient { clients.codex.shutdown() } }
                 let conversations = ConversationManager(tasks: taskManager, clients: clients, settingsManager: settings, preferences: preferences)
                 let goal = try await conversations.goal(
                     taskID: request.requiredUUID("taskID"),

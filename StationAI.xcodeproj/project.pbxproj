@@ -337,6 +337,7 @@
 				"$(SRCROOT)/scripts/build-bridge.sh",
 				"$(SRCROOT)/scripts/app-profile.sh",
 				"$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)",
+				"$(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)",
 				"$(SRCROOT)/StationAI/Bridge/BridgeContract.swift",
 				"$(SRCROOT)/StationAI/Bridge/BridgeSocket.swift",
 				"$(SRCROOT)/StationAI/Bridge/DaemonMain.swift",

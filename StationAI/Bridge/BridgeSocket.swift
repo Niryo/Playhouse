@@ -40,6 +40,29 @@ private func makeUnixAddress(path: String) throws -> sockaddr_un {
 /// (`Process`/`Pipe` readability handlers) into Swift concurrency.
 final class BridgeSocketConnection {
     private let descriptor: Int32
+    /// Releasing the descriptor number lets the process hand it to guarded file state, so
+    /// a write arriving afterwards would not merely fail — it would raise EXC_GUARD and
+    /// take the daemon down. Background work that outlives its request still holds the
+    /// request's event sink, so such late writes do happen.
+    ///
+    /// `close()` therefore ends the conversation without releasing the number: it marks
+    /// the connection closed and shuts the socket down, and only `deinit` calls
+    /// `Darwin.close`. While any late writer can still reach this object, the object is
+    /// alive and owns its number, so a late write fails as an ordinary EPIPE/ENOTCONN
+    /// instead of landing on an unrelated file. No lock is held across the write itself,
+    /// so a stalled peer can never block `close()`.
+    private let state = NSLock()
+    private var isClosed = false
+
+    private var closedNow: Bool {
+        state.lock()
+        defer { state.unlock() }
+        return isClosed
+    }
+
+    deinit {
+        Darwin.close(descriptor)
+    }
 
     fileprivate init(descriptor: Int32) {
         self.descriptor = descriptor
@@ -68,6 +91,7 @@ final class BridgeSocketConnection {
     }
 
     func write(_ data: Data) throws {
+        guard !closedNow else { throw BridgeSocketError.connectionClosed }
         try data.withUnsafeBytes { rawBuffer in
             guard var pointer = rawBuffer.baseAddress else { return }
             var remaining = rawBuffer.count
@@ -122,12 +146,20 @@ final class BridgeSocketConnection {
     }
 
     func close() {
-        Darwin.close(descriptor)
+        state.lock()
+        let wasClosed = isClosed
+        isClosed = true
+        state.unlock()
+        guard !wasClosed else { return }
+        // Ends the connection for the peer (it sees EOF) and frees anyone blocked on it,
+        // without releasing the descriptor number; `deinit` does that.
+        _ = Darwin.shutdown(descriptor, SHUT_RDWR)
     }
 
     /// Wakes any thread blocked reading this connection, which a bare `close()`
     /// does not reliably do.
     func shutdown() {
+        guard !closedNow else { return }
         _ = Darwin.shutdown(descriptor, SHUT_RDWR)
     }
 }
@@ -151,6 +183,14 @@ final class BridgeSocketListener {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
+        // Never unlink a socket a daemon is still accepting on. A spawner that only
+        // thought nothing was listening (a connect that failed transiently, or a
+        // sandboxed caller whose own bind is going to fail) would otherwise leave
+        // that daemon alive but unreachable for every later caller.
+        if let live = try? BridgeSocketConnection.connect(to: path) {
+            live.close()
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EADDRINUSE))
+        }
         unlink(path) // best-effort; ENOENT is fine, any other failure surfaces at bind()
         let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
@@ -244,10 +284,13 @@ enum BridgeDaemonLauncher {
         process.environment = environment
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
-        // Keep the daemon's own startup diagnostics beside its socket.
+        // Keep the daemon's own diagnostics beside its socket, appending so one
+        // daemon's start doesn't erase what its predecessors reported.
         let logPath = socketPath + ".log"
-        FileManager.default.createFile(atPath: logPath, contents: nil, attributes: [.posixPermissions: 0o600])
-        process.standardError = FileHandle(forWritingAtPath: logPath) ?? FileHandle.nullDevice
+        let logDescriptor = Darwin.open(logPath, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0o600)
+        process.standardError = logDescriptor >= 0
+            ? FileHandle(fileDescriptor: logDescriptor, closeOnDealloc: true)
+            : FileHandle.nullDevice
         try process.run()
 
         // `run()` only means fork/exec happened, not that the daemon has bound

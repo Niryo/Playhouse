@@ -93,6 +93,8 @@ private struct CodeBlockCardView: View {
                 .padding(.vertical, 10)
         }
         .background(WorkspaceTheme.inputBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        // Keeps the language label and copy action identifiable inside the identified card.
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -190,7 +192,18 @@ private struct ResponseCommentHoverCard: View {
 
 private final class CommentTrackingTextView: NSTextView {
     var hoverTrackingOwner: AnyObject?
+    /// The whole message this block belongs to; copying a fully selected block copies it all.
+    var wholeMessageText: String?
     private var hoverTrackingArea: NSTrackingArea?
+
+    override func copy(_ sender: Any?) {
+        guard let wholeMessageText, selectedRange() == NSRange(location: 0, length: string.utf16.count) else {
+            super.copy(sender)
+            return
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(wholeMessageText, forType: .string)
+    }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -258,6 +271,13 @@ struct TaskConversationView: View {
     let onBack: () -> Void
 
     @State private var draft = ""
+    /// Steers this window has shown but the turn's stream hasn't echoed yet, and
+    /// the reverse. The turn streams every steer, including this window's own,
+    /// but a reopened window no longer reads that stream, so it shows its own.
+    @State private var unechoedLocalSteers: [String] = []
+    @State private var unconfirmedStreamedSteers: [String] = []
+    /// This window's own sends whose turn stream it is reading right now.
+    @State private var followedTurnStreams = 0
     @State private var composerHeight: CGFloat = 28
     @State private var draftAutosaveTask: Task<Void, Never>?
     @State private var draftNeedsAutosave = false
@@ -285,8 +305,24 @@ struct TaskConversationView: View {
     @State private var isSwitchingProvider = false
     @State private var providerNotice: String?
     @State private var messages: [ConversationMessage] = []
-    @State private var visibleConversationMessageCount = 40
+    // Oldest message currently rendered in the transcript. The transcript keeps a
+    // window that starts here and runs to the newest message; opening a
+    // conversation starts the window at the latest user turn.
+    @State private var oldestRenderedMessageID: String?
+    @State private var isRevealingOlderConversationMessages = false
+    /// Set once the transcript has settled at or above the top of its rendered
+    /// window, which is what makes the next upward scroll reveal older
+    /// messages. Position has to be observed, never assumed, or a layout pass
+    /// taken before the newest turn is pinned reveals a batch on open.
+    @State private var isOlderConversationRevealArmed = false
+    /// True from the start of a history load until the newest turn has been
+    /// pinned, so load-time scroll requests cannot follow the bottom past it.
+    @State private var isLatestConversationTurnPinPending = true
     @State private var hasPresentedLatestConversation = false
+    /// Natural height of the rendered transcript, before the filler that keeps
+    /// the newest turn pinnable to the top of the viewport.
+    @State private var conversationContentHeight: CGFloat = 0
+    @State private var lastScrolledUserMessageID: String?
     @State private var annotations: [ConversationAnnotation] = []
     @State private var annotationSelection: AnnotationSelection?
     @State private var currentTextSelection: AnnotationSelection?
@@ -300,7 +336,8 @@ struct TaskConversationView: View {
     @State private var subagentHistory: ConversationHistory?
     @State private var isLoadingSubagent = false
     @State private var subagentError: String?
-    @State private var changeInventory = WorkspaceChangeInventory(staged: [], working: [])
+    @State private var changeInventory = WorkspaceChangeInventory(unviewed: [], viewed: [])
+    @State private var isViewedSectionExpanded = false
     @State private var isLoadingChanges = false
     @State private var changesNeedRefresh = false
     @State private var changeWatcher: WorkspaceChangeWatcher?
@@ -323,6 +360,10 @@ struct TaskConversationView: View {
     @State private var queuedMessages: [QueuedConversationMessage] = []
     @State private var isSubmittingLiveMessage = false
     @State private var userInputRequest: ConversationUserInputRequest?
+    // The live snapshot can still carry a request this window just answered.
+    @State private var answeredUserInputRequestIDs: Set<String> = []
+    // Safe replies this window streamed for secret recovery turns, which history hides.
+    @State private var streamedRecoveryReplies: [String: String] = [:]
     @State private var userInputAnswers: [String: [String]] = [:]
     @State private var userInputOther: [String: String] = [:]
     @State private var userInputOtherSelected: Set<String> = []
@@ -422,27 +463,161 @@ struct TaskConversationView: View {
 
     private var conversationMessages: [ConversationMessage] {
         let completedProgressIDs = progressMessageIDs
+        // Read on every layout pass and every scroll sample, so the common case
+        // of nothing collapsed must not copy the transcript.
+        guard !completedProgressIDs.isEmpty else { return messages }
         return messages.filter { !completedProgressIDs.contains($0.id) }
     }
 
-    private static let initialVisibleConversationMessageCount = 40
     private static let olderConversationMessageBatchSize = 40
+    /// How far the transcript must be dragged past the oldest rendered message
+    /// before the next older batch is revealed.
+    private static let olderConversationRevealThreshold: CGFloat = 24
+    /// Corrective scroll passes after the first one, in nanoseconds. A
+    /// `LazyVStack` row that was not realized when the scroll began is placed
+    /// from an estimate, so the position has to be reapplied once it exists.
+    private static let scrollSettleDelays: [UInt64] = [50_000_000]
 
+    /// First message of the newest user turn. Opening a conversation renders
+    /// this message and everything after it, so the latest question sits at the
+    /// top of the viewport with its answer below.
+    private var latestConversationTurnStartID: String? {
+        let allMessages = conversationMessages
+        return allMessages.last(where: { $0.role == .user })?.id ?? allMessages.last?.id
+    }
+
+    /// The window runs from `oldestRenderedMessageID` to the newest message.
+    /// A conversation that was empty when it loaded establishes no window of
+    /// its own, so it keeps the newest batch rendered as messages arrive.
     private var renderedConversationMessages: [ConversationMessage] {
         let allMessages = conversationMessages
-        return Array(allMessages.suffix(visibleConversationMessageCount))
+        guard let oldestRenderedMessageID,
+              let startIndex = allMessages.firstIndex(where: { $0.id == oldestRenderedMessageID }) else {
+            return Array(allMessages.suffix(Self.olderConversationMessageBatchSize))
+        }
+        return Array(allMessages[startIndex...])
     }
 
     private var hasOlderConversationMessages: Bool {
-        conversationMessages.count > renderedConversationMessages.count
+        // Answered from indices rather than by building the rendered window:
+        // every scroll sample asks this question.
+        let allMessages = conversationMessages
+        guard let oldestRenderedMessageID,
+              let startIndex = allMessages.firstIndex(where: { $0.id == oldestRenderedMessageID }) else {
+            return allMessages.count > Self.olderConversationMessageBatchSize
+        }
+        return startIndex > allMessages.startIndex
     }
 
-    private func revealOlderConversationMessages() {
-        guard hasOlderConversationMessages else { return }
-        visibleConversationMessageCount = min(
-            conversationMessages.count,
-            visibleConversationMessageCount + Self.olderConversationMessageBatchSize
-        )
+    /// Reveals the next older batch, keeping the message that was at the top of
+    /// the viewport in place so the transcript does not jump under the pointer.
+    private func revealOlderConversationMessages(using proxy: ScrollViewProxy) {
+        guard hasOlderConversationMessages, !isRevealingOlderConversationMessages else { return }
+        let allMessages = conversationMessages
+        guard let currentTopID = renderedConversationMessages.first?.id,
+              let currentStartIndex = allMessages.firstIndex(where: { $0.id == currentTopID }) else { return }
+        let newStartIndex = max(0, currentStartIndex - Self.olderConversationMessageBatchSize)
+        guard newStartIndex < currentStartIndex else { return }
+        isRevealingOlderConversationMessages = true
+        isOlderConversationRevealArmed = false
+        oldestRenderedMessageID = allMessages[newStartIndex].id
+        Task { @MainActor in
+            await Task.yield()
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            let restoreAnchor = { proxy.scrollTo(currentTopID, anchor: .top) }
+            withTransaction(transaction, restoreAnchor)
+            // The batch that was just inserted above the anchor is positioned
+            // from estimates until its rows are realized, so the anchor has to
+            // be restored again once they are.
+            for delay in Self.scrollSettleDelays {
+                try? await Task.sleep(nanoseconds: delay)
+                withTransaction(transaction, restoreAnchor)
+            }
+            isRevealingOlderConversationMessages = false
+        }
+    }
+
+    /// Handles a new position for the top of the rendered window, measured from
+    /// the top of the viewport. Dragging it below the threshold means the user
+    /// scrolled past the oldest rendered message, which reveals the next batch.
+    private func handleConversationWindowTop(_ windowTopY: CGFloat, using proxy: ScrollViewProxy) {
+        // This runs for every scroll sample, and publishing state re-renders the
+        // whole transcript, so the armed flag is only ever written when it
+        // actually changes.
+        guard hasOlderConversationMessages, !isRevealingOlderConversationMessages else {
+            if isOlderConversationRevealArmed { isOlderConversationRevealArmed = false }
+            return
+        }
+        let isWithinWindowTop = windowTopY <= Self.olderConversationRevealThreshold
+        guard isOlderConversationRevealArmed else {
+            // Arm only once the window top has settled at or above the top of
+            // the viewport. Position has to be observed, never assumed, or the
+            // layout pass taken before the newest turn is pinned reveals a
+            // batch on open.
+            if isWithinWindowTop { isOlderConversationRevealArmed = true }
+            return
+        }
+        guard !isWithinWindowTop else { return }
+        revealOlderConversationMessages(using: proxy)
+    }
+
+    /// Collapses the transcript to the newest user turn and pins that question
+    /// to the top of the viewport.
+    private func presentLatestConversationTurn(using proxy: ScrollViewProxy) {
+        guard let turnStartID = latestConversationTurnStartID else {
+            // Nothing to pin: an empty conversation renders everything it
+            // receives while it stays open.
+            isLatestConversationTurnPinPending = false
+            return
+        }
+        oldestRenderedMessageID = turnStartID
+        isOlderConversationRevealArmed = false
+        // This pin already puts the newest question at the top, so record it as
+        // the one in view; otherwise the next message count change scrolls to it
+        // a second time as though it had just been sent.
+        lastScrolledUserMessageID = conversationMessages.last(where: { $0.role == .user })?.id
+        Task { @MainActor in
+            await Task.yield()
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            let pin = {
+                // A pending question form renders below the newest turn and
+                // must be fully reachable, Submit included; pinning the turn's
+                // question to the top can leave the form behind the composer.
+                if let request = userInputRequest, request.threadID == task.activeConversationID {
+                    proxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
+                } else {
+                    proxy.scrollTo(turnStartID, anchor: .top)
+                }
+            }
+            withTransaction(transaction, pin)
+            // The rows below the pin are realized by that first scroll; pinning
+            // again lands on their real positions instead of estimates.
+            for delay in Self.scrollSettleDelays {
+                try? await Task.sleep(nanoseconds: delay)
+                withTransaction(transaction, pin)
+            }
+            hasPresentedLatestConversation = true
+            isLatestConversationTurnPinPending = false
+        }
+    }
+
+    /// Timeline anchors resolve against the whole transcript, while the
+    /// transcript renders a window that starts at the newest turn. Clamp an
+    /// anchor that falls above the window to its first rendered message so the
+    /// row still appears instead of disappearing with the messages it follows.
+    ///
+    /// Provider boundaries and goal achievements are state transitions that
+    /// stay meaningful wherever they are shown, so they are clamped. Context
+    /// compaction rows are not: they are positional markers whose meaning comes
+    /// from the two messages they sit between, and they reappear with those
+    /// messages as older batches are revealed.
+    private func renderedAnchorMessageID(for anchorID: String?) -> String? {
+        guard let anchorID else { return nil }
+        let rendered = renderedConversationMessages
+        if rendered.contains(where: { $0.id == anchorID }) { return anchorID }
+        return rendered.first?.id ?? anchorID
     }
 
     private func goalAchievementAnchorMessageID(for entry: GoalAchievementTimelineEntry) -> String? {
@@ -603,12 +778,26 @@ struct TaskConversationView: View {
                 sendMessage(overrideText: "The PR has conflicts. Fix them, commit, and push.")
             }
         }
-        .onChange(of: providerPendingUserInputRequest) { _, request in
-            guard let request, request.threadID == task.activeConversationID, request != userInputRequest else { return }
-            userInputRequest = request
-            userInputAnswers = [:]
-            userInputOther = [:]
-            userInputOtherSelected = []
+        .onChange(of: providerPendingUserInputRequest) { previous, request in
+            // Once the snapshot drops it, a later question may reuse an answered request's ID.
+            if request == nil { answeredUserInputRequestIDs.removeAll() }
+            // A live question can end without an answer here (a rejected private
+            // question, or another window's answer); keep it only if it was saved.
+            if request == nil, let previous, userInputRequest?.id == previous.id {
+                Task { @MainActor in
+                    guard let history = try? await conversationManager.history(taskID: task.id),
+                          userInputRequest?.id == previous.id else { return }
+                    let saved = history.pendingUserInputRequest
+                    userInputRequest = saved?.threadID == task.activeConversationID ? saved : nil
+                }
+            }
+            guard let request, request.threadID == task.activeConversationID, request != userInputRequest,
+                  !answeredUserInputRequestIDs.contains(request.id) else { return }
+            showUserInputRequest(request)
+        }
+        .onChange(of: messages) { _, _ in
+            // History reloads bring back the hidden text for replies this window streamed.
+            if !streamedRecoveryReplies.isEmpty { showStreamedRecoveryReplies() }
         }
         .onChange(of: providerTurnIsActive) { _, isTurnActive in
             if !isTurnActive, task.isStandaloneChat { refreshChatPageStatus() }
@@ -625,6 +814,34 @@ struct TaskConversationView: View {
             isResponding = completedTurnIsVisible
                 ? false
                 : submittedTurnIsPending || (isTurnActive && conversationRuntime.isTurnActive(threadID: taskThreadID))
+            // A turn stopped while this window followed it (not sent from it) can still be continued.
+            if !isTurnActive, !isResponding, conversationRuntime.wasLastTurnInterrupted(threadID: taskThreadID) {
+                hasPausedResponse = true
+            }
+        }
+        .onChange(of: task.pendingSubmittedPrompt == nil) { _, cleared in
+            // The daemon clears the submitted prompt after the turn ends, which can be after
+            // this window saw it end. A turn parked on a question is not over, even while the
+            // runtime snapshot lags, so leave the answer flow to settle it.
+            if cleared, isResponding, !providerTurnIsActive,
+               userInputRequest == nil, providerPendingUserInputRequest == nil,
+               !conversationRuntime.isTurnActive(threadID: task.activeConversationID ?? "") {
+                isResponding = false
+            }
+        }
+        .onChange(of: conversationRuntime.wasLastTurnInterrupted(threadID: task.activeConversationID ?? "")) { _, interrupted in
+            // The daemon can report the stop after this window loaded the settled turn.
+            if interrupted, !isResponding, !providerTurnIsActive { hasPausedResponse = true }
+        }
+        .onChange(of: conversationRuntime.snapshot.conversationRevisions[task.id.uuidString]) { _, _ in
+            // Another caller's turn (a queued follow-up, a CLI send or steer, or
+            // a turn this window started before it was reopened) reaches this
+            // window only through history.
+            guard !isReadOnly else { return }
+            refreshQueuedMessages()
+            // Mid-turn history lags what this window has already shown.
+            guard followedTurnStreams == 0, !providerTurnIsActive else { return }
+            Task { @MainActor in await refreshGoalConversation() }
         }
         .onChange(of: conversationRuntime.snapshot.goal.stateRevision) { _, _ in
             guard conversationRuntime.snapshot.goal.stateThreadID == task.codexThreadID else { return }
@@ -749,8 +966,8 @@ struct TaskConversationView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 15) {
-                        changeSection(title: "Staged Changes", entries: changeInventory.staged)
-                        changeSection(title: "Changes", entries: changeInventory.working)
+                        changeSection(title: "Viewed", entries: changeInventory.viewed)
+                        changeSection(title: "Changes", entries: changeInventory.unviewed)
                     }
                     .padding(.vertical, 12)
                 }
@@ -765,24 +982,42 @@ struct TaskConversationView: View {
         .accessibilityIdentifier("task-sidebar")
     }
 
+    /// A Viewed row always shows the reviewed work from the branch base; only a change made
+    /// after that review is measured from the saved snapshot.
+    private func diffBaselineLabel(_ entry: WorkspaceChangeEntry) -> String {
+        entry.group == .unviewed && entry.hasViewedSnapshot ? "Since last viewed" : "Since branch base"
+    }
+
     private func changeSection(title: String, entries: [WorkspaceChangeEntry]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 7) {
-                Image(systemName: title == "Staged Changes" ? "checkmark.circle.fill" : "circle.dashed")
+                Image(systemName: title == "Viewed" ? "checkmark.circle.fill" : "circle.dashed")
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(title == "Staged Changes" ? .green : .secondary)
+                    .foregroundStyle(title == "Viewed" ? .green : .secondary)
                 Text(title)
                     .font(.system(size: 11, weight: .semibold))
                     .lineLimit(1)
+                    .accessibilityIdentifier(title == "Viewed" ? "viewed-changes-title" : "unviewed-changes-title")
                 Text("\(entries.count)")
                     .font(.system(size: 10, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
+                if title == "Viewed" {
+                    Image(systemName: isViewedSectionExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(.horizontal, 14)
-            .accessibilityIdentifier(title == "Staged Changes" ? "staged-changes-section" : "working-changes-section")
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if title == "Viewed" { isViewedSectionExpanded.toggle() }
+            }
+            .accessibilityIdentifier(title == "Viewed" ? "viewed-changes-section" : "unviewed-changes-section")
 
-            if entries.isEmpty {
+            if title == "Viewed" && !isViewedSectionExpanded {
+                EmptyView()
+            } else if entries.isEmpty {
                 Text("No files")
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
@@ -791,7 +1026,7 @@ struct TaskConversationView: View {
             } else {
                 let groups = repositoryGroups(entries)
                 ForEach(groups, id: \.repository) { repositoryGroup in
-                    if Set(changeInventory.staged.map(\.repository) + changeInventory.working.map(\.repository)).count > 1 {
+                    if Set(changeInventory.unviewed.map(\.repository) + changeInventory.viewed.map(\.repository)).count > 1 {
                         Text(repositoryLabel(repositoryGroup.repository))
                             .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(.secondary)
@@ -802,38 +1037,53 @@ struct TaskConversationView: View {
                             .accessibilityIdentifier("workspace-repository-\(repositoryGroup.repository.hashValue)")
                     }
                     ForEach(repositoryGroup.entries) { entry in
-                        Button {
-                            openDiff(entry)
-                        } label: {
-                            HStack(spacing: 7) {
+                        HStack(spacing: 2) {
+                            Button {
+                                openDiff(entry)
+                            } label: {
+                                HStack(spacing: 7) {
                                 Image(systemName: changeSymbol(for: entry.status))
                                     .font(.system(size: 10, weight: .medium))
                                     .foregroundStyle(changeColor(for: entry.status))
                                     .frame(width: 12)
                                 Text(entry.path)
                                     .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(entry.isUncommitted ? Color.green : Color.primary)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
+                                    .accessibilityIdentifier("workspace-change-name-\(entry.group.rawValue)-\(entry.path)")
+                                    .accessibilityValue(entry.isUncommitted ? "Uncommitted, green" : "Committed, primary")
                                 Spacer(minLength: 0)
                                 Text(statusBadge(for: entry))
                                     .font(.system(size: 9, weight: .medium, design: .monospaced))
                                     .foregroundStyle(changeColor(for: entry.status))
                             }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 5)
-                            .contentShape(Rectangle())
-                            .background(
-                                selectedChange?.id == entry.id
-                                    ? Color.accentColor.opacity(0.15)
-                                    : Color.clear,
-                                in: RoundedRectangle(cornerRadius: 5)
-                            )
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .contentShape(Rectangle())
+                                .background(selectedChange?.id == entry.id ? Color.accentColor.opacity(0.15) : Color.clear, in: RoundedRectangle(cornerRadius: 5))
+                            }
+                            .buttonHoverPointer()
+                            .buttonStyle(.plain)
+                            .help("View \(entry.group.displayName) diff for \(entry.path)")
+                            .accessibilityLabel("\(entry.path), \(entry.status), \(entry.group.displayName)")
+                            .accessibilityIdentifier("workspace-change-\(entry.group.rawValue)-\(entry.path)")
+                            if entry.group == .unviewed {
+                                Button {
+                                    Task { await markViewed(entry) }
+                                } label: {
+                                    Image(systemName: "checkmark.circle")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 20, height: 22)
+                                }
+                                .buttonStyle(.plain)
+                                .buttonHoverPointer()
+                                .help("Mark as viewed")
+                                .accessibilityLabel("Mark \(entry.path) as viewed")
+                                .accessibilityIdentifier("mark-viewed-\(entry.path)")
+                            }
                         }
-                        .buttonHoverPointer()
-                        .buttonStyle(.plain)
-                        .help("View \(entry.group.rawValue) diff for \(entry.path)")
-                        .accessibilityLabel("\(entry.path), \(entry.status), \(entry.group.rawValue)")
-                        .accessibilityIdentifier("workspace-change-\(entry.group.rawValue)-\(entry.path)")
                         .padding(.horizontal, 7)
                     }
                 }
@@ -894,7 +1144,13 @@ struct TaskConversationView: View {
 
                 safetyNotice
 
-                conversation
+                // An agent's conversation covers this one; laying out the hidden
+                // transcript underneath it would only cost time.
+                if selectedSubagent == nil {
+                    conversation
+                } else {
+                    Spacer(minLength: 0)
+                }
 
                 Rectangle()
                     .fill(Color.primary.opacity(0.07))
@@ -912,6 +1168,13 @@ struct TaskConversationView: View {
                 }
             }
             .accessibilityHidden(selectedSubagent != nil)
+            // The final answer folds this turn's activity, agents included, into
+            // Worked for, even while an agent's conversation covers the transcript.
+            .onChange(of: hasCompletedAssistantResponse) { _, hasCompletedResponse in
+                if hasCompletedResponse {
+                    isActivityExpanded = false
+                }
+            }
 
             if isDiffPresented {
                 fileDiffOverlay
@@ -957,7 +1220,7 @@ struct TaskConversationView: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                             .accessibilityIdentifier("workspace-diff-title")
-                        Text("\(repositoryLabel(selectedChange.repository)) · \(selectedChange.group == .staged ? "Staged" : "Working tree")")
+                        Text("\(repositoryLabel(selectedChange.repository)) · \(diffBaselineLabel(selectedChange))")
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                             .accessibilityIdentifier("workspace-diff-source")
@@ -1112,6 +1375,15 @@ struct TaskConversationView: View {
         }
     }
 
+    private func markViewed(_ entry: WorkspaceChangeEntry) async {
+        do {
+            try await workspaceManager.markViewed(for: task.id, repository: entry.repository, path: entry.path)
+            await refreshWorkspaceChanges()
+        } catch {
+            changesError = error.localizedDescription
+        }
+    }
+
     private func refreshWorkspaceChanges() async {
         guard !isLoadingChanges else {
             changesNeedRefresh = true
@@ -1127,7 +1399,7 @@ struct TaskConversationView: View {
                 changeInventory = inventory
                 changesError = nil
                 if let selectedChange {
-                    if let current = (inventory.staged + inventory.working).first(where: { $0.id == selectedChange.id }) {
+                    if let current = (inventory.unviewed + inventory.viewed).first(where: { $0.id == selectedChange.id }) {
                         self.selectedChange = current
                         if isDiffPresented {
                             do {
@@ -1228,7 +1500,8 @@ struct TaskConversationView: View {
     }
 
     private var repositoryBadges: some View {
-        HStack(spacing: 5) {
+        let suggestedRepositoryPaths = suggestedRepositories.map(\.path)
+        return HStack(spacing: 5) {
             ForEach(task.repositoryWorktrees, id: \.repositoryPath) { repository in
                 let name = URL(fileURLWithPath: repository.repositoryPath).lastPathComponent
                 Button {
@@ -1289,7 +1562,8 @@ struct TaskConversationView: View {
             .buttonHoverPointer()
             .buttonStyle(.plain).help("Add a repository").accessibilityLabel("Add repository")
             .accessibilityIdentifier("add-conversation-repository-button")
-            .popover(isPresented: $isShowingRepositoryPicker, arrowEdge: .bottom) { repositoryPicker }
+            // The popover content only refreshes with this view, so key it to the suggestions it lists.
+            .popover(isPresented: $isShowingRepositoryPicker, arrowEdge: .bottom) { repositoryPicker.id(suggestedRepositoryPaths) }
             .disabled(isReadOnly)
         }
     }
@@ -1530,8 +1804,46 @@ struct TaskConversationView: View {
     }
 
     private var conversation: some View {
-        ScrollViewReader { scrollProxy in
+        GeometryReader { viewport in
+            ScrollViewReader { scrollProxy in
             ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    // Scroll runway above the rendered window. It keeps an
+                    // upward drag available even when the latest turn alone is
+                    // shorter than the viewport, and it is replaced by the
+                    // earlier messages as soon as they are revealed.
+                    if hasOlderConversationMessages {
+                        Color.clear
+                            .frame(height: viewport.size.height)
+                            .accessibilityHidden(true)
+                        // Scroll position is only observable from macOS 15 on,
+                        // so older systems keep an explicit control rather than
+                        // an upward drag that cannot be detected.
+                        if #unavailable(macOS 15) {
+                            Button("Load earlier messages") {
+                                revealOlderConversationMessages(using: scrollProxy)
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .buttonHoverPointer()
+                            .help("Load 40 earlier messages.")
+                            .accessibilityIdentifier("conversation-load-older-button")
+                        }
+                    }
+                    // Tracks how far the top of the rendered window sits below
+                    // the top of the viewport, which is how an upward scroll is
+                    // detected.
+                    GeometryReader { geometry in
+                        Color.clear.preference(
+                            key: ConversationTopMarkerPositionKey.self,
+                            value: geometry.frame(in: .named(Self.conversationScrollCoordinateSpace)).minY
+                        )
+                    }
+                    .frame(height: 0)
+
                 VStack(alignment: .leading, spacing: 16) {
                     if messages.isEmpty && activeGoal?.status != "complete" && !isLoadingHistory {
                         VStack(spacing: 0) {
@@ -1548,10 +1860,10 @@ struct TaskConversationView: View {
                                     .font(.system(size: 29, weight: .regular))
                                     .foregroundStyle(Color.accentColor.opacity(0.8))
                                     .accessibilityLabel("Conversation")
-                                Text("Send a message to \(provider.assistantLabel(modelName: selectedModelName)).")
+                                Text("Send a message to \(provider.assistantLabel(modelName: promptModelName)).")
                                     .font(.system(size: 14, weight: .medium))
                                     .foregroundStyle(.secondary)
-                                    .accessibilityLabel("Send a message to \(provider.assistantLabel).")
+                                    .accessibilityLabel("Send a message to \(provider.assistantLabel(modelName: promptModelName)).")
                                     .accessibilityIdentifier("model-prompt")
                             }
                             Spacer(minLength: 28)
@@ -1562,7 +1874,10 @@ struct TaskConversationView: View {
                         .accessibilityElement(children: .contain)
                         .accessibilityIdentifier("empty-conversation")
                     } else if !messages.isEmpty {
-                        LazyVStack(alignment: .leading, spacing: 16) {
+                        // A plain stack: a LazyVStack of these AppKit-backed rows could keep
+                        // re-estimating its rows after a send and never finish layout. At most
+                        // a recent window of messages renders, and older batches load on demand.
+                        VStack(alignment: .leading, spacing: 16) {
                             ForEach(goalAchievementTimelineEntries.filter {
                                 goalAchievementAnchorMessageID(for: $0) == nil
                             }) { entry in
@@ -1571,15 +1886,6 @@ struct TaskConversationView: View {
                             }
                             ForEach(providerBoundaries.filter { $0.afterMessageID == nil }) { boundary in
                                 providerBoundaryRow(boundary)
-                            }
-                            if hasOlderConversationMessages {
-                                Color.clear
-                                    .frame(height: 1)
-                                    .onAppear {
-                                        guard hasPresentedLatestConversation else { return }
-                                        revealOlderConversationMessages()
-                                    }
-                                    .accessibilityIdentifier("conversation-load-older-anchor")
                             }
                             ForEach(renderedConversationMessages) { message in
                                 if let page = standaloneChatPageSeparator(before: message) {
@@ -1591,11 +1897,13 @@ struct TaskConversationView: View {
                                 }
                                 messageBubble(message)
                                     .id(message.id)
-                                ForEach(providerBoundaries.filter { boundaryAnchorID(for: $0) == message.id }) { boundary in
+                                ForEach(providerBoundaries.filter {
+                                    renderedAnchorMessageID(for: boundaryAnchorID(for: $0)) == message.id
+                                }) { boundary in
                                     providerBoundaryRow(boundary)
                                 }
                                 ForEach(goalAchievementTimelineEntries.filter {
-                                    goalAchievementAnchorMessageID(for: $0) == message.id
+                                    renderedAnchorMessageID(for: goalAchievementAnchorMessageID(for: $0)) == message.id
                                 }) { entry in
                                     goalAchievementTimelineRow(entry)
                                         .id(entry.id)
@@ -1657,32 +1965,86 @@ struct TaskConversationView: View {
                 .padding(.vertical, 24)
                 .frame(maxWidth: 820)
                 .frame(maxWidth: .infinity)
+                .background {
+                    GeometryReader { geometry in
+                        Color.clear.preference(
+                            key: ConversationScrollContentHeightKey.self,
+                            value: geometry.size.height
+                        )
+                    }
+                }
+
+                // Filler below the rendered window. Together with the runway
+                // above it, this is what lets a turn that is shorter than the
+                // viewport still be scrolled to the top.
+                if hasOlderConversationMessages {
+                    Color.clear
+                        .frame(height: max(0, viewport.size.height - conversationContentHeight))
+                        .accessibilityHidden(true)
+                }
+                }
             }
+            .coordinateSpace(name: Self.conversationScrollCoordinateSpace)
             .scrollIndicators(.visible)
             .accessibilityIdentifier("conversation-scroll-view")
             .accessibilityValue("Showing latest \(renderedConversationMessages.count) of \(conversationMessages.count) messages")
+            .onPreferenceChange(ConversationTopMarkerPositionKey.self) { markerY in
+                // Exactly one source drives the reveal: the scroll observer
+                // where it exists, this marker where it does not.
+                if #unavailable(macOS 15) {
+                    handleConversationWindowTop(markerY, using: scrollProxy)
+                }
+            }
+            .modifier(ConversationScrollOffsetObserver { offsetY in
+                // The runway occupies everything above the rendered window, so
+                // the distance from the viewport top to the window top is what
+                // is left of it.
+                handleConversationWindowTop(
+                    hasOlderConversationMessages ? viewport.size.height - offsetY : -offsetY,
+                    using: scrollProxy
+                )
+            })
+            .onPreferenceChange(ConversationScrollContentHeightKey.self) { height in
+                // Only "shorter than the viewport?" is ever asked of this value,
+                // and a LazyVStack keeps revising its measured height as rows
+                // realize while scrolling. Publishing each revision re-renders
+                // the whole transcript, so cap it once the content overflows.
+                let clamped = min(height, viewport.size.height + 1)
+                if clamped != conversationContentHeight { conversationContentHeight = clamped }
+            }
+            .onChange(of: isLoadingHistory) { _, isLoading in
+                // Every completed history load reopens on the newest turn,
+                // including reloads that leave the messages unchanged.
+                guard !isLoading else { return }
+                presentLatestConversationTurn(using: scrollProxy)
+            }
             .onChange(of: messages.count) { _, _ in
-                scrollToLatest(using: scrollProxy)
+                scrollToLatestUserMessage(using: scrollProxy, viewportHeight: viewport.size.height)
             }
             .onChange(of: messages.map(\.text)) { _, _ in
-                scrollToLatest(using: scrollProxy)
-            }
-            .onChange(of: hasCompletedAssistantResponse) { _, hasCompletedResponse in
-                if hasCompletedResponse && activities.isEmpty {
-                    isActivityExpanded = false
+                if !hasPresentedLatestConversation {
+                    scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
                 }
             }
             .onChange(of: activities) { _, _ in
-                if isResponding { scrollToLatest(using: scrollProxy) }
+                if isResponding && !hasPresentedLatestConversation {
+                    scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
+                }
             }
             .onChange(of: isResponding) { _, _ in
-                scrollToLatest(using: scrollProxy)
+                if !hasPresentedLatestConversation {
+                    scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
+                }
             }
             .onChange(of: activeGoal?.status) { _, status in
-                if status == "complete" { scrollToLatest(using: scrollProxy) }
+                if status == "complete" && !hasPresentedLatestConversation {
+                    scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
+                }
             }
             .onChange(of: goalAchievementTimelineEntries.count) { _, _ in
-                scrollToLatest(using: scrollProxy)
+                if !hasPresentedLatestConversation {
+                    scrollToLatest(using: scrollProxy, viewportHeight: viewport.size.height)
+                }
             }
             .onChange(of: userInputRequest?.id) { _, requestID in
                 // The question form sits below the latest message; bring it into view
@@ -1695,8 +2057,11 @@ struct TaskConversationView: View {
                     }
                 }
             }
+            }
         }
     }
+
+    private static let conversationScrollCoordinateSpace = "conversation-transcript-scroll"
 
     private var emptyConversationRepositoryTitle: String {
         var repositoryNames = task.repositoryWorktrees.map {
@@ -1753,14 +2118,6 @@ struct TaskConversationView: View {
             .accessibilityHint("Shows Codex progress messages and completed activity details.")
             .accessibilityIdentifier("codex-activity-disclosure")
 
-            // Keep active child rows in the materialized activity container so
-            // accessibility can discover them even when the conversation
-            // timeline is still settling its scroll position.
-            if isDisplayingActiveResponse || !activeSubagents.isEmpty {
-                ForEach(activities.filter(\.isSubagent)) { activity in
-                    subagentTimelineRow(activity)
-                }
-            }
 
             Divider()
                 .opacity(0.32)
@@ -1828,17 +2185,24 @@ struct TaskConversationView: View {
     }
 
     private func subagentTimelineRow(_ activity: ConversationActivity) -> some View {
-        Button {
-            openSubagent(activity)
-        } label: {
-            HStack(alignment: .top, spacing: 10) {
+        // The icon sits beside the button, not in its label, because a macOS
+        // button folds its label into one accessible element and the icon must
+        // stay a distinct image.
+        HStack(alignment: .top, spacing: 10) {
+            VStack(spacing: 0) {
+                Color.clear.frame(width: 20, height: 5).accessibilityHidden(true)
                 Image("SubagentIcon")
                     .resizable()
                     .interpolation(.high)
                     .scaledToFit()
                     .frame(width: 20, height: 20)
-                    .accessibilityElement()
+                    .contentShape(Rectangle())
+                    .onTapGesture { openSubagent(activity) }
                     .accessibilityLabel("\(activity.title) agent icon")
+            }
+            Button {
+                openSubagent(activity)
+            } label: {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("\(activity.title) \(activity.timelineStatus)")
                         .font(.system(size: 14, weight: .medium))
@@ -1861,14 +2225,16 @@ struct TaskConversationView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
+                .contentShape(Rectangle())
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 5)
             }
-            .contentShape(Rectangle())
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 5)
+            .buttonHoverPointer()
+            .help("Open the read-only conversation for this agent")
+            .buttonStyle(.plain)
         }
-        .buttonHoverPointer()
-        .help("Open the read-only conversation for this agent")
-        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("\(activity.title) \(activity.timelineStatus)")
         .accessibilityValue([activity.detail, activity.durationLabel()].compactMap { $0 }.joined(separator: "\n"))
         .accessibilityIdentifier("codex-subagent-row-\(activity.childThreadID ?? activity.id)")
@@ -2083,6 +2449,7 @@ struct TaskConversationView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(WorkspaceTheme.windowBackground)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("subagent-conversation-panel")
     }
 
@@ -2283,10 +2650,18 @@ struct TaskConversationView: View {
             : "Response from \((message.provider ?? provider).displayName)"
         let responseAnnotations = responseAnnotationReferences(for: message)
         return VStack(alignment: .leading, spacing: 6) {
-            Text(assistantLabel(for: message))
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("assistant-provider-\(message.id)")
+            HStack(spacing: 6) {
+                if let createdAt = message.createdAt {
+                    Text(createdAt, format: .dateTime.hour().minute())
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .accessibilityIdentifier("message-time-\(message.id)")
+                }
+                Text(assistantLabel(for: message))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("assistant-provider-\(message.id)")
+            }
 
             ForEach(Array(message.imageDataURLs.enumerated()), id: \.offset) { index, dataURL in
                 if let image = Self.image(fromDataURL: dataURL) {
@@ -2305,12 +2680,6 @@ struct TaskConversationView: View {
                     .accessibilityElement(children: .contain)
                     .accessibilityLabel(accessibilityText)
                     .accessibilityIdentifier("assistant-message-\(message.id)")
-            }
-            if let createdAt = message.createdAt {
-                Text(createdAt, format: .dateTime.hour().minute())
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .accessibilityIdentifier("message-time-\(message.id)")
             }
         }
         .frame(maxWidth: 620, alignment: .leading)
@@ -2515,7 +2884,7 @@ struct TaskConversationView: View {
             ForEach(blocks) { block in
                 switch block.kind {
                 case .heading(let level):
-                    selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations)
+                    selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations, wholeMessageText: markdown)
                         .font(.system(size: level == 1 ? 19 : level == 2 ? 17 : 15, weight: .semibold))
                         .accessibilityIdentifier("assistant-markdown-heading-\(block.id)")
                 case .listItem:
@@ -2527,24 +2896,27 @@ struct TaskConversationView: View {
                     // what actually guarantees pixel alignment instead of a guessed padding value.
                     HStack(alignment: .top, spacing: 7) {
                         markerText("•")
-                        selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations)
+                        selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations, wholeMessageText: markdown)
                             .accessibilityIdentifier("assistant-markdown-list-content-\(block.id)")
                     }
                     .accessibilityElement(children: .combine)
+                    // The text views inside do not contribute to a combined label.
+                    .accessibilityLabel(String(Self.markdownAttributedText(block.text).characters))
                     .accessibilityIdentifier("assistant-markdown-list-item-\(block.id)")
                 case .orderedListItem(let number):
                     HStack(alignment: .top, spacing: 7) {
                         markerText("\(number).")
-                        selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations)
+                        selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations, wholeMessageText: markdown)
                             .accessibilityIdentifier("assistant-markdown-ordered-list-content-\(block.id)")
                     }
                     .accessibilityElement(children: .combine)
+                    .accessibilityLabel("\(number). " + String(Self.markdownAttributedText(block.text).characters))
                     .accessibilityIdentifier("assistant-markdown-ordered-list-item-\(block.id)")
                 case .codeBlock(let language):
                     CodeBlockCardView(blockID: block.id, code: block.text, language: language, font: block.font)
                         .accessibilityIdentifier("assistant-markdown-code-block-\(block.id)")
                 case .paragraph:
-                    selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations)
+                    selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations, wholeMessageText: markdown)
                         .accessibilityIdentifier("assistant-markdown-paragraph-\(block.id)")
                         .padding(.bottom, 5)
                 }
@@ -2556,7 +2928,8 @@ struct TaskConversationView: View {
     private func selectableAnnotationText(
         _ block: AssistantMarkdownBlock,
         messageID: String?,
-        responseAnnotations: [ResponseAnnotationReference] = []
+        responseAnnotations: [ResponseAnnotationReference] = [],
+        wholeMessageText: String? = nil
     ) -> some View {
         if let messageID {
             SelectableAnnotationText(
@@ -2569,7 +2942,8 @@ struct TaskConversationView: View {
                     currentTextSelection = text.isEmpty ? nil : AnnotationSelection(messageID: messageID, blockID: block.id, range: range, text: text, bounds: bounds)
                 },
                 formattedText: Self.markdownNSAttributedString(block.text, baseFont: block.font),
-                font: block.font
+                font: block.font,
+                wholeMessageText: wholeMessageText
             )
                 .fixedSize(horizontal: false, vertical: true)
                 .overlay(alignment: .topLeading) { selectionHint(messageID: messageID, blockID: block.id) }
@@ -2933,7 +3307,7 @@ struct TaskConversationView: View {
                     }
                     .padding(.horizontal, 14).padding(.vertical, 10)
                     .background(Color.primary.opacity(0.10), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1) }
+                    .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1).allowsHitTesting(false) }
                     .accessibilityElement(children: .contain)
                     .accessibilityValue(conversationRuntime.snapshot.goal.turnStartedThreadID == task.codexThreadID ? "Work started" : (conversationRuntime.isTurnActive(threadID: task.codexThreadID ?? "") ? "Working" : "Waiting"))
                     .accessibilityIdentifier("active-goal-progress-row")
@@ -3135,11 +3509,15 @@ struct TaskConversationView: View {
                                 .font(.system(size: 14, weight: .medium))
                                 .foregroundStyle(Color.accentColor)
                                 .accessibilityIdentifier("selected-model-effort")
-                            EffortStepSlider(selection: $pickerEffort, choices: pickerEffortChoices)
-                                // The native slider knob is translucent on macOS 26, so it is drawn by EffortStepSlider
-                                // and the native Slider serves only as the accessibility representation.
-                                .accessibilityRepresentation {
-                                    if pickerEffortChoices.count > 1 {
+                            if pickerEffortChoices.count > 1 {
+                                // The native slider knob is translucent on macOS 26, so it is drawn by
+                                // EffortStepSlider; an undrawn native slider laid over it takes the
+                                // pointer and keyboard, and a SwiftUI Slider represents it to accessibility.
+                                EffortStepSlider(selection: $pickerEffort, choices: pickerEffortChoices)
+                                    .overlay {
+                                        EffortAccessibilitySlider(selection: $pickerEffort, choices: pickerEffortChoices)
+                                    }
+                                    .accessibilityRepresentation {
                                         Slider(value: Binding(
                                             get: { Double(pickerEffortChoices.firstIndex(of: pickerEffort) ?? 0) },
                                             set: { pickerEffort = pickerEffortChoices[min(max(Int($0.rounded()), 0), pickerEffortChoices.count - 1)] }
@@ -3147,22 +3525,27 @@ struct TaskConversationView: View {
                                         .accessibilityLabel("Model effort")
                                         .accessibilityValue(pickerEffort.title)
                                         .accessibilityIdentifier("model-effort-slider")
-                                        .focusEffectDisabled()
-                                    } else {
+                                    }
+                            } else {
+                                EffortStepSlider(selection: $pickerEffort, choices: pickerEffortChoices)
+                                    .accessibilityRepresentation {
                                         Text(pickerEffort.title)
                                             .accessibilityElement()
                                             .accessibilityLabel("Model effort")
                                             .accessibilityValue(pickerEffort.title)
                                             .accessibilityIdentifier("model-effort-slider")
                                     }
-                                }
+                            }
                         }
                         .padding(.horizontal, 18)
                         .padding(.vertical, 13)
                         .frame(width: 320)
                     }
 
-                    if isDisplayingActiveResponse {
+                    // A turn still finishing after its final answer can still be stopped; one
+                    // that is only waiting on a question keeps the composer's send control.
+                    if isDisplayingActiveResponse
+                        || (isResponding && providerTurnIsActive && userInputRequest == nil && providerPendingUserInputRequest == nil) {
                         Button(action: pauseResponse) {
                             Image(systemName: "stop.fill")
                                 .font(.system(size: 11, weight: .bold))
@@ -3316,6 +3699,8 @@ struct TaskConversationView: View {
         }
         isResponding = true
         errorMessage = nil
+        // A recovery turn streams its redacted reply before history hides it.
+        var streamedRecoveryFinals: [String] = []
         do {
             let accepted = try await conversationManager.answerUserInput(
                 taskID: task.id,
@@ -3323,11 +3708,11 @@ struct TaskConversationView: View {
                 answers: answers,
                 modelID: selectedModelID.isEmpty ? nil : selectedModelID,
                 onUpdate: { update in
+                    if update.type == "assistant_final", let text = update.text, !text.isEmpty {
+                        streamedRecoveryFinals.append(text)
+                    }
                     guard update.type == "user_input", let nextRequest = update.userInputRequest else { return }
-                    userInputRequest = nextRequest
-                    userInputAnswers = [:]
-                    userInputOther = [:]
-                    userInputOtherSelected = []
+                    showUserInputRequest(nextRequest)
                 }
             )
             guard accepted else {
@@ -3335,11 +3720,19 @@ struct TaskConversationView: View {
                 errorMessage = "\(provider.displayName) couldn't accept those answers. Please check the responses and try again."
                 return
             }
+            answeredUserInputRequestIDs.insert(request.id)
             userInputRequest = nil
             userInputAnswers = [:]
             userInputOther = [:]
             userInputOtherSelected = []
             await loadConversation()
+            // This window keeps showing the safe reply it streamed; a reload shows it hidden.
+            if let finalText = streamedRecoveryFinals.last,
+               let index = messages.lastIndex(where: { $0.role == .assistant }),
+               messages[index].text == Self.hiddenRecoveryReplyText {
+                streamedRecoveryReplies[messages[index].id] = finalText
+                showStreamedRecoveryReplies()
+            }
         } catch {
             isResponding = conversationRuntime.isTurnActive(threadID: request.threadID)
             errorMessage = error.localizedDescription
@@ -3348,6 +3741,11 @@ struct TaskConversationView: View {
 
     private func loadConversation() async {
         isLoadingHistory = true
+        hasPresentedLatestConversation = false
+        isLatestConversationTurnPinPending = true
+        isOlderConversationRevealArmed = false
+        conversationContentHeight = 0
+        oldestRenderedMessageID = nil
         errorMessage = nil
         let draftAtLoadStart = draft
         defer { isLoadingHistory = false }
@@ -3360,18 +3758,22 @@ struct TaskConversationView: View {
                 onActionRequest: { actionNotice = approvalNotice }
             )
             messages = history.messages
+            // Resolve the window as soon as the messages land. The assignment
+            // at the end of the load repeats it once progress collapsing has
+            // settled which rows the transcript renders.
+            oldestRenderedMessageID = latestConversationTurnStartID
             let savedUserInputRequest = history.pendingUserInputRequest?.threadID == task.activeConversationID
                 ? history.pendingUserInputRequest
                 : nil
             let currentProviderRequest = providerPendingUserInputRequest
             let liveUserInputRequest = currentProviderRequest?.threadID == task.activeConversationID
+                && !answeredUserInputRequestIDs.contains(currentProviderRequest?.id ?? "")
                 ? currentProviderRequest
                 : nil
             // A history read can finish after the provider has raised a question
             // but before that request has been persisted. Keep the live request
             // visible instead of letting that older snapshot clear it.
             userInputRequest = savedUserInputRequest ?? liveUserInputRequest
-            visibleConversationMessageCount = Self.initialVisibleConversationMessageCount
             restoreAnnotations(from: history.messages)
             answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
             activities = history.activities
@@ -3400,8 +3802,12 @@ struct TaskConversationView: View {
                 }
             }
             goalStatusUpdatedAt = .now
+            // Autosave pauses during a turn, so the saved draft can be text that
+            // was since steered or queued; neither belongs back in the composer.
+            let queuedTexts = Set(((try? conversationManager.queuedMessages(taskID: task.id)) ?? []).map(\.text))
             let promptWasSent = task.savedPrompt.map { prompt in
                 history.messages.contains { $0.role == .user && $0.text == prompt }
+                    || queuedTexts.contains(prompt.trimmingCharacters(in: .whitespacesAndNewlines))
             } ?? false
             let hasPendingSubmittedPrompt = task.pendingSubmittedPrompt != nil
             if hasPendingSubmittedPrompt,
@@ -3456,8 +3862,17 @@ struct TaskConversationView: View {
                         && (!isResponding || $0.turnID != activeTurnID)
                 }
                 .compactMap(\.turnID))
+            // Open on the newest turn. Progress-message collapsing above changes
+            // which rows the transcript renders, so resolve the window start here.
+            oldestRenderedMessageID = latestConversationTurnStartID
         } catch {
             errorMessage = error.localizedDescription
+            // History failed, but an unanswered question stays answerable.
+            let saved = try? conversationManager.savedUserInputRequest(taskID: task.id)
+            if userInputRequest == nil, let request = saved ?? providerPendingUserInputRequest,
+               request.threadID == task.activeConversationID, !answeredUserInputRequestIDs.contains(request.id) {
+                showUserInputRequest(request)
+            }
         }
     }
 
@@ -3504,6 +3919,14 @@ struct TaskConversationView: View {
         } catch {
             // Keep the last known model available when an offline or unauthenticated app-server cannot list models.
         }
+    }
+
+    /// The prompt names only models the provider lists; Claude's "Default" is a
+    /// placeholder, not a model, and an unlisted ID isn't a name.
+    private var promptModelName: String? {
+        if !selectedModelID.isEmpty, !modelOptions.contains(where: { $0.id == selectedModelID }) { return nil }
+        let name = selectedModelName
+        return provider == .claude && name == provider.defaultModelName ? nil : name
     }
 
     private var selectedModelName: String {
@@ -3570,7 +3993,8 @@ struct TaskConversationView: View {
         let freeformText = (overrideText ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
         let pendingAnnotations = annotations.filter(\.pending)
         let usesComposerDraft = overrideText == nil
-        guard (!freeformText.isEmpty || (usesComposerDraft && !pendingImages.isEmpty) || !pendingAnnotations.isEmpty), !isResponding, !isLoadingHistory, userInputRequest == nil else { return }
+        // An empty Goal still goes to the bridge, which explains the length rule.
+        guard (!freeformText.isEmpty || (usesComposerDraft && (!pendingImages.isEmpty || isEnteringGoal)) || !pendingAnnotations.isEmpty), !isResponding, !isLoadingHistory, userInputRequest == nil else { return }
         let annotationPrompt: String
         if pendingAnnotations.isEmpty {
             annotationPrompt = freeformText
@@ -3639,6 +4063,8 @@ struct TaskConversationView: View {
         if usesComposerDraft { draft = "" }
         let imageDataURLs = usesComposerDraft ? pendingImages.map(\.dataURL) : []
         if usesComposerDraft { pendingImages = [] }
+        // Question IDs can repeat across turns.
+        answeredUserInputRequestIDs.removeAll()
         hasPausedResponse = false
         isPausingResponse = false
         errorMessage = nil
@@ -3679,6 +4105,8 @@ struct TaskConversationView: View {
                 }
                 return
             }
+            followedTurnStreams += 1
+            defer { followedTurnStreams -= 1 }
             do {
                 _ = try await conversationManager.setEffort(taskID: task.id, effort: selectedEffort)
                 _ = try await conversationManager.send(taskID: task.id, text: text, imageDataURLs: imageDataURLs, mode: conversationMode, modelID: selectedModelID.isEmpty ? nil : selectedModelID, statusBeforeSubmission: statusBeforeSubmission, contextPageIDs: annotationPageIDs, onTurnStarting: {
@@ -3794,7 +4222,13 @@ struct TaskConversationView: View {
                     case "queue_changed":
                         refreshQueuedMessages()
                     case "steered_message":
-                        messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: update.message ?? "", imageDataURLs: update.imageDataURLs ?? []))
+                        let steered = update.message ?? ""
+                        if let index = unechoedLocalSteers.firstIndex(of: steered) {
+                            unechoedLocalSteers.remove(at: index)
+                        } else {
+                            unconfirmedStreamedSteers.append(steered)
+                            messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: steered, imageDataURLs: update.imageDataURLs ?? []))
+                        }
                         if let message = update.message, draft == message { draft = "" }
                     case "action_notice":
                         actionNotice = update.message
@@ -3802,10 +4236,7 @@ struct TaskConversationView: View {
                         break
                     }
                 }, onUserInput: { request in
-                    userInputRequest = request
-                    userInputAnswers = [:]
-                    userInputOther = [:]
-                    userInputOtherSelected = []
+                    showUserInputRequest(request)
                 })
                 if messages.first(where: { $0.id == assistantMessageID })?.text.isEmpty == true {
                     messages.removeAll { $0.id == assistantMessageID }
@@ -4055,7 +4486,7 @@ struct TaskConversationView: View {
                     errorMessage = nil
                     return
                 }
-                messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: outcome.message))
+                showLocalSteer(outcome.message)
                 refreshQueuedMessages()
                 errorMessage = nil
             } catch {
@@ -4086,7 +4517,7 @@ struct TaskConversationView: View {
                     errorMessage = nil
                     return
                 }
-                messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: text, imageDataURLs: imageDataURLs))
+                showLocalSteer(text, imageDataURLs: imageDataURLs)
                 draft = ""
                 pendingImages.removeAll()
                 errorMessage = nil
@@ -4101,10 +4532,7 @@ struct TaskConversationView: View {
         Task { @MainActor in
             do {
                 let retried = try await conversationManager.retryQueuedMessage(taskID: task.id, messageID: message.id, onUserInput: { request in
-                    userInputRequest = request
-                    userInputAnswers = [:]
-                    userInputOther = [:]
-                    userInputOtherSelected = []
+                    showUserInputRequest(request)
                 })
                 guard retried else {
                     throw BridgeCommandError(code: "operation_failed", message: "The queued follow-up still needs your attention.")
@@ -4238,7 +4666,8 @@ struct TaskConversationView: View {
         if isResponding { onBack(); return }
         let hasStartedRepository = task.repositoryWorktrees.contains { !$0.isPending }
         let hasDraft = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        if isNewTask, !hasStartedRepository, task.contextFolderPaths.isEmpty,
+        // Folder-only context is not work in progress: an otherwise empty new task is discarded.
+        if isNewTask, !hasStartedRepository,
            pendingImages.isEmpty, messages.isEmpty, activities.isEmpty,
            !hasDraft, !isLoadingHistory {
             Task { @MainActor in
@@ -4264,6 +4693,33 @@ struct TaskConversationView: View {
             return
         }
         Task { @MainActor in _ = await saveDraftAndGenerateTitle(status: nil, then: onBack) }
+    }
+
+    private static let hiddenRecoveryReplyText = "[Response to private answer hidden]"
+
+    private func showStreamedRecoveryReplies() {
+        for index in messages.indices where messages[index].text == Self.hiddenRecoveryReplyText {
+            if let text = streamedRecoveryReplies[messages[index].id] { messages[index].text = text }
+        }
+    }
+
+    /// Shows a question; the same question can arrive again, so keep its answers.
+    private func showUserInputRequest(_ request: ConversationUserInputRequest) {
+        let isNewQuestion = request.id != userInputRequest?.id
+        userInputRequest = request
+        guard isNewQuestion else { return }
+        userInputAnswers = [:]
+        userInputOther = [:]
+        userInputOtherSelected = []
+    }
+
+    private func showLocalSteer(_ text: String, imageDataURLs: [String] = []) {
+        if let index = unconfirmedStreamedSteers.firstIndex(of: text) {
+            unconfirmedStreamedSteers.remove(at: index)
+            return
+        }
+        unechoedLocalSteers.append(text)
+        messages.append(ConversationMessage(id: UUID().uuidString, role: .user, text: text, imageDataURLs: imageDataURLs))
     }
 
     private func scheduleDraftAutosave(_ value: String) {
@@ -4593,31 +5049,119 @@ struct TaskConversationView: View {
         }
     }
 
-    private func scrollToLatest(using proxy: ScrollViewProxy) {
+    private func scrollToLatest(using proxy: ScrollViewProxy, viewportHeight: CGFloat) {
         guard !messages.isEmpty || !activities.isEmpty || activeGoal?.status == "complete" else { return }
+        // A load in progress owns the scroll position: following the bottom now
+        // would scroll past the question the transcript is about to pin.
+        if isLatestConversationTurnPinPending {
+            presentLatestConversationTurn(using: proxy)
+            return
+        }
+        // While the newest turn still fits the viewport, keep its question
+        // pinned to the top instead of following the bottom into the filler
+        // that makes that pin reachable.
+        if let turnStartID = latestConversationTurnStartID,
+           oldestRenderedMessageID == turnStartID,
+           conversationContentHeight > 0,
+           conversationContentHeight <= viewportHeight {
+            presentLatestConversationTurn(using: proxy)
+            return
+        }
         // Scroll to the real latest row. A synthetic target after LazyVStack can
         // be positioned using its estimated content height before the lazy rows
         // have settled, leaving the viewport in the blank space below the chat.
-        // Defer until the state-driven content update has had a layout pass, and
-        // read the latest row then: a history reload can replace the messages
-        // between this call and the scroll. Scroll again once lazy rows settle.
+        let latestMessageID = renderedConversationMessages.last?.id
+        // Defer until the state-driven content update has had a layout pass.
+        let shouldAnimate = hasPresentedLatestConversation
         Task { @MainActor in
-            for delay in [0, 250] {
-                if delay > 0 { try? await Task.sleep(for: .milliseconds(delay)) } else { await Task.yield() }
-                hasPresentedLatestConversation = true
-                let latestMessageID = renderedConversationMessages.last?.id
-                withAnimation(.easeOut(duration: 0.2)) {
-                    // A pending question renders below the latest message.
-                    if let latestMessageID, userInputRequest == nil {
-                        proxy.scrollTo(latestMessageID, anchor: .bottom)
-                    } else {
-                        proxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
-                    }
+            await Task.yield()
+            // Record the question this presentation lands on, so a newly sent
+            // one is told apart from the one already in view.
+            lastScrolledUserMessageID = renderedConversationMessages.last(where: { $0.role == .user })?.id
+            let scroll = {
+                // A pending question renders below the latest message.
+                if let latestMessageID, userInputRequest == nil {
+                    proxy.scrollTo(latestMessageID, anchor: .bottom)
+                } else {
+                    proxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
                 }
+            }
+            if shouldAnimate {
+                withAnimation(.easeOut(duration: 0.2), scroll)
+            } else {
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction, scroll)
+            }
+            // A LazyVStack places rows it has not realized yet from estimated
+            // heights, so the first scroll can stop short of the real last row.
+            // Scrolling again after it has been realized lands on it.
+            var settleTransaction = Transaction()
+            settleTransaction.disablesAnimations = true
+            for delay in Self.scrollSettleDelays {
+                try? await Task.sleep(nanoseconds: delay)
+                withTransaction(settleTransaction, scroll)
+            }
+            hasPresentedLatestConversation = true
+        }
+    }
+
+    /// After the conversation is already settled, a newly sent question should land at the
+    /// top of the viewport and stay there while its answer streams in below — mirroring how
+    /// ChatGPT/Claude.ai keep your question in view instead of auto-scrolling to chase the
+    /// growing answer all the way to the bottom.
+    private func scrollToLatestUserMessage(using proxy: ScrollViewProxy, viewportHeight: CGFloat) {
+        guard hasPresentedLatestConversation else {
+            scrollToLatest(using: proxy, viewportHeight: viewportHeight)
+            return
+        }
+        guard let latestUserMessage = renderedConversationMessages.last(where: { $0.role == .user }),
+              latestUserMessage.id != lastScrolledUserMessageID else { return }
+        lastScrolledUserMessageID = latestUserMessage.id
+        Task { @MainActor in
+            await Task.yield()
+            withAnimation(.easeOut(duration: 0.2)) {
+                proxy.scrollTo(latestUserMessage.id, anchor: .top)
             }
         }
     }
 }
+
+/// Reports the transcript's scroll offset where the platform supports it. The
+/// preference-based marker stays as the fallback for macOS 14.
+private struct ConversationScrollOffsetObserver: ViewModifier {
+    let onOffsetChange: (CGFloat) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.onScrollGeometryChange(for: CGFloat.self) { geometry in
+                geometry.contentOffset.y
+            } action: { _, offsetY in
+                onOffsetChange(offsetY)
+            }
+        } else {
+            content
+        }
+    }
+}
+
+private struct ConversationTopMarkerPositionKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private struct ConversationScrollContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 
 // The native text view owns wrapping and document sizing. SwiftUI only receives
 // a bounded viewport height; it never asks a multiline TextField for its ideal size.
@@ -4731,7 +5275,9 @@ private final class ChatEditorScrollView: NSScrollView {
         textLayoutNeeded = true
         layoutRequestGeneration += 1
         let generation = layoutRequestGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+        // Let NSTextView finish its edit/layout pass, then update the viewport
+        // before another typing burst can reach the next wrapped line.
+        DispatchQueue.main.async { [weak self] in
             guard let self, self.layoutRequestGeneration == generation else { return }
             self.needsLayout = true
             self.layoutSubtreeIfNeeded()
@@ -4765,14 +5311,19 @@ private final class ChatEditorScrollView: NSScrollView {
         editor.setFrameSize(NSSize(width: width, height: editor.frame.height))
         let font = editor.font ?? NSFont.systemFont(ofSize: 14)
         let inset = editor.textContainerInset
-        let textWidth = max(1, width - inset.width * 2)
-        let measured = (editor.string as NSString).boundingRect(
-            with: NSSize(width: textWidth, height: CGFloat.greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: font]
-        )
+        let laidOutTextHeight: CGFloat
+        if let layoutManager = editor.layoutManager, let textContainer = editor.textContainer {
+            // Measure with the same TextKit container that wraps the live editor.
+            // A separate boundingRect calculation ignores line-fragment padding,
+            // so it can report one fewer line exactly as text crosses a wrap.
+            layoutManager.ensureLayout(for: textContainer)
+            let usedRect = layoutManager.usedRect(for: textContainer)
+            laidOutTextHeight = max(usedRect.maxY, layoutManager.extraLineFragmentRect.maxY)
+        } else {
+            laidOutTextHeight = 0
+        }
         let lineHeight = editor.layoutManager?.defaultLineHeight(for: font) ?? font.pointSize * 1.2
-        let contentHeight = ceil(max(lineHeight, measured.height) + inset.height * 2)
+        let contentHeight = ceil(max(lineHeight, laidOutTextHeight) + inset.height * 2)
         let documentHeight = max(28, contentHeight)
         editor.setFrameSize(NSSize(width: width, height: documentHeight))
         documentHeightDidChange(documentHeight)
@@ -4850,6 +5401,7 @@ private struct SelectableAnnotationText: NSViewRepresentable {
     let onSelection: (NSRange, String, CGRect) -> Void
     var formattedText: NSAttributedString? = nil
     var font = NSFont.systemFont(ofSize: 16)
+    var wholeMessageText: String? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -4882,6 +5434,7 @@ private struct SelectableAnnotationText: NSViewRepresentable {
     }
 
     func updateNSView(_ view: NSTextView, context: Context) {
+        (view as? CommentTrackingTextView)?.wholeMessageText = wholeMessageText
         context.coordinator.onSelection = onSelection
         context.coordinator.responseCommentSourcePrefix = responseCommentSourcePrefix
         context.coordinator.anchorView = view
@@ -5172,6 +5725,52 @@ private struct SelectableAnnotationText: NSViewRepresentable {
 }
 
 /// A discrete effort slider whose knob is an opaque white disc, so it stays solid over any track or popover background.
+/// An undrawn native slider over the drawn effort track, so pointer clicks,
+/// drags, and arrow keys behave exactly as a macOS slider's do.
+private struct EffortAccessibilitySlider: NSViewRepresentable {
+    @Binding var selection: ConversationEffort
+    let choices: [ConversationEffort]
+
+    final class InputSlider: NSSlider {
+        // EffortStepSlider draws the control; this one only takes input.
+        override func draw(_ dirtyRect: NSRect) {}
+        // Clicking the effort track lets the arrow keys step it, as with the
+        // visible slider, regardless of the Full Keyboard Access setting.
+        override var acceptsFirstResponder: Bool { true }
+        override func mouseDown(with event: NSEvent) {
+            window?.makeFirstResponder(self)
+            super.mouseDown(with: event)
+        }
+    }
+
+    final class Coordinator: NSObject {
+        var parent: EffortAccessibilitySlider
+        init(_ parent: EffortAccessibilitySlider) { self.parent = parent }
+        @objc func changed(_ sender: NSSlider) {
+            let index = min(max(Int(sender.doubleValue.rounded()), 0), parent.choices.count - 1)
+            parent.selection = parent.choices[index]
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> InputSlider {
+        let slider = InputSlider(value: 0, minValue: 0, maxValue: 1, target: context.coordinator, action: #selector(Coordinator.changed(_:)))
+        slider.allowsTickMarkValuesOnly = true
+        slider.focusRingType = .none
+        // The SwiftUI representation around it is what accessibility reads.
+        slider.setAccessibilityElement(false)
+        return slider
+    }
+
+    func updateNSView(_ slider: InputSlider, context: Context) {
+        context.coordinator.parent = self
+        slider.maxValue = Double(choices.count - 1)
+        slider.numberOfTickMarks = choices.count
+        slider.doubleValue = Double(choices.firstIndex(of: selection) ?? 0)
+    }
+}
+
 private struct EffortStepSlider: View {
     @Binding var selection: ConversationEffort
     let choices: [ConversationEffort]

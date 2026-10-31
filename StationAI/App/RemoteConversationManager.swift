@@ -43,6 +43,7 @@ struct RemoteConversationManager {
         try store.cachedModels(taskID: taskID, provider: provider)
     }
     func queuedMessages(taskID: UUID) throws -> [QueuedConversationMessage] { try store.queuedMessages(taskID: taskID) }
+    func savedUserInputRequest(taskID: UUID) throws -> ConversationUserInputRequest? { try store.savedUserInputRequest(taskID: taskID) }
     func answeredAsyncQuestionIDs(taskID: UUID) throws -> [String] { try store.answeredAsyncQuestionIDs(taskID: taskID) }
     func queueMessage(taskID: UUID, text: String) throws -> QueuedConversationMessage {
         try store.queueMessage(taskID: taskID, text: text)

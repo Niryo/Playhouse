@@ -101,6 +101,7 @@ final class BoardTask {
     var draftImageDataURLsData: Data?
     var conversationActivityDurationsData: Data?
     var answeredAsyncQuestionIDsData: Data?
+    var viewedWorkspaceChangesData: Data?
     /// Legacy marker from when the standalone chat was a hidden board task. Nothing reads it
     /// for behavior; it exists so `migrateLegacyStandaloneChatTasks()` can find those rows and
     /// convert them to `StandaloneChat`. The original column name is preserved so the migration
@@ -151,6 +152,7 @@ final class BoardTask {
         draftImageDataURLsData = nil
         conversationActivityDurationsData = nil
         answeredAsyncQuestionIDsData = nil
+        viewedWorkspaceChangesData = nil
     }
 }
 

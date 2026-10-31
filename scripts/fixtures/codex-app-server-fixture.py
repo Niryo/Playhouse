@@ -503,6 +503,17 @@ def main():
                 THREAD_ID = requested
                 TURN_ID, answers = isolation_turns[requested]
                 saw_turn = True
+        # A long-lived app-server never resumes a loaded thread, so the one-shot resume
+        # failure also fails the next history read.
+        if message.get("method") in ("thread/read", "thread/turns/list", "thread/items/list"):
+            history_error = Path(str(sys.argv[0]) + ".resume-error")
+            if history_error.is_file():
+                history_error.unlink(missing_ok=True)
+                write({"jsonrpc": "2.0", "id": message["id"], "error": {
+                    "code": -32010,
+                    "message": "Fixture thread resume failed after receiving fixture-secret.",
+                }})
+                return
         if message.get("method") == "initialized":
             return
         if "method" in message and "id" not in message:
@@ -1396,7 +1407,7 @@ def main():
                 active = Path(str(sys.argv[0]) + ".turn-active")
                 release = Path(str(sys.argv[0]) + ".turn-release")
                 active.write_text("The progress report fixture turn is active.\n", encoding="utf-8")
-                deadline = time.monotonic() + 30
+                deadline = time.monotonic() + 90
                 while not release.exists() and time.monotonic() < deadline:
                     drain_pending_stdin()
                     time.sleep(0.02)

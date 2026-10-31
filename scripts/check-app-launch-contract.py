@@ -59,7 +59,8 @@ try:
     env['STATIONAI_DATA_DIRECTORY'] = str(Path.home() / 'Library/Application Support/StationAI')
     result = subprocess.run(['bash', str(root / 'scripts/stationai.sh'), 'task', 'list'], env=env, capture_output=True, text=True, timeout=15)
     assert result.returncode == 2 and not result.stdout and 'isolated temporary' in result.stderr, result.stderr
-    assert (diagnostics.read_bytes() if diagnostics.exists() else None) == diagnostics_before, 'Rejected launch reached bridge diagnostics'
+    diagnostics_after = diagnostics.read_bytes() if diagnostics.exists() else None
+    assert diagnostics_after == diagnostics_before, 'Rejected launch reached bridge diagnostics: ' + (diagnostics_after or b'')[len(diagnostics_before or b''):].decode('utf-8', 'replace')[-1500:]
     assert snapshots == {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in data.glob('*.store*') if p.is_file()}, 'Rejected launch changed the task store'
 finally:
     shutil.rmtree(copy)

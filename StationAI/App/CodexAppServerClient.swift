@@ -21,6 +21,13 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     nonisolated static let modelID = "gpt-6-luna"
     private static var processActiveThreadIDs = Set<String>()
     private static var activeClientsByThreadID: [String: CodexAppServerClient] = [:]
+    /// The client whose turn owns this thread, if it serves the same data
+    /// directory as this client. Thread IDs are only unique within one Codex
+    /// home, so a client for another isolated store never counts as the owner.
+    private func activeClient(forThread threadID: String) -> CodexAppServerClient? {
+        guard let owner = Self.activeClientsByThreadID[threadID], owner.runtimeScope == runtimeScope else { return nil }
+        return owner
+    }
     private var startingThreadIDs = Set<String>()
     @Published private(set) var isTurnActive = false
     @Published private(set) var activeThreadID: String?
@@ -69,7 +76,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         }
     }
 
-    private let outputQueue = DispatchQueue(label: "com.stationai.codex.stdout")
+    private var outputPump: ProviderOutputPump?
     private var stdoutBuffer = Data()
     private var process: Process?
     private var inputPipe: Pipe?
@@ -163,6 +170,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     /// a different client instance's concurrently-resolved directory can never
     /// leak into this one's child process environment.
     private let dataDirectoryOverride: String?
+    /// The data directory this client serves (debug/test isolation); nil in production.
+    var runtimeScope: String? { dataDirectoryOverride.map { URL(fileURLWithPath: $0).standardizedFileURL.path } }
     private var turnWaiters: [String: CheckedContinuation<Void, Error>] = [:]
     private var completedTurns: [String: Result<Void, Error>] = [:]
     private var rejectedTurnKeys = Set<String>()
@@ -348,11 +357,11 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     }
 
     func interruptActiveTurn(threadID expectedThreadID: String) async throws -> Bool {
-        if let owner = Self.activeClientsByThreadID[expectedThreadID], owner !== self {
+        if let owner = activeClient(forThread: expectedThreadID), owner !== self {
             return try await owner.interruptActiveTurn(threadID: expectedThreadID)
         }
         guard let turnID = activeTurnID(for: expectedThreadID) else {
-            guard Self.activeClientsByThreadID[expectedThreadID] == nil else { return false }
+            guard activeClient(forThread: expectedThreadID) == nil else { return false }
             return try await ConversationSteerMailbox.requestInterrupt(threadID: expectedThreadID)
         }
         let threadID = expectedThreadID
@@ -369,7 +378,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     }
 
     func getGoal(threadID: String, workspace: ConversationWorkspaceContext) async throws -> CodexThreadGoal? {
-        try await resumeThreadIfNeeded(id: threadID, workspace: workspace)
+        try await resumeThreadIfNeeded(id: threadID, workspace: workspace, reusingLoadedThread: true)
         let response = try await request(method: "thread/goal/get", params: ["threadId": threadID])
         guard let value = response["goal"] as? [String: Any] else { return nil }
         return Self.decodeGoal(value)
@@ -386,7 +395,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             isTurnActive = false
             Self.activeClientsByThreadID[threadID] = self
         }
-        try await resumeThreadIfNeeded(id: threadID, workspace: workspace)
+        try await resumeThreadIfNeeded(id: threadID, workspace: workspace, reusingLoadedThread: true)
         var params: [String: Any] = ["threadId": threadID]
         if let objective { params["objective"] = objective }
         if let status { params["status"] = status }
@@ -400,7 +409,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     }
 
     func clearGoal(threadID: String, workspace: ConversationWorkspaceContext) async throws {
-        try await resumeThreadIfNeeded(id: threadID, workspace: workspace)
+        try await resumeThreadIfNeeded(id: threadID, workspace: workspace, reusingLoadedThread: true)
         _ = try await request(method: "thread/goal/clear", params: ["threadId": threadID])
     }
 
@@ -505,11 +514,14 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     func steerActiveTurn(threadID expectedThreadID: String, text: String, imageDataURLs: [String] = []) async throws -> Bool {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty || !imageDataURLs.isEmpty else { throw StationAIManagerError.invalidMessage }
-        guard let target = Self.activeClientsByThreadID[expectedThreadID] else {
+        guard let target = activeClient(forThread: expectedThreadID) else {
             return try await ConversationSteerMailbox.requestSteer(threadID: expectedThreadID, text: normalized, imageDataURLs: imageDataURLs)
         }
         guard let turnID = target.activeTurnID(for: expectedThreadID) else { return false }
-        return try await target.sendSteerRequest(threadID: expectedThreadID, turnID: turnID, text: normalized, imageDataURLs: imageDataURLs)
+        let accepted = try await target.sendSteerRequest(threadID: expectedThreadID, turnID: turnID, text: normalized, imageDataURLs: imageDataURLs)
+        // The turn's own stream shows the steer, whoever sent it.
+        if accepted { target.turnContexts[expectedThreadID]?.onSteer(normalized, imageDataURLs) }
+        return accepted
     }
 
     private func sendSteerRequest(threadID: String, turnID: String, text: String, imageDataURLs: [String] = []) async throws -> Bool {
@@ -579,6 +591,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         let context = TurnContext(onDelta: onDelta, onFinal: onFinalMessage, onProgress: onProgressMessage,
                                   onSteer: onSteerMessage, onActivity: onActivity, onDiff: onDiff, onAction: onActionRequest)
         turnContexts[threadID] = context
+        // A new turn supersedes a stop another client recorded for this thread.
+        for client in Self.allSharedClients { client.interruptedThreadIDs.remove(threadID) }
         interruptedThreadIDs.remove(threadID)
         userInputContexts[threadID] = UserInputContext(mode: mode, handler: onUserInput)
         defer {
@@ -699,7 +713,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             "questionCount": String(answers.count),
             "answerCount": String(answers.values.reduce(0) { $0 + $1.count })
         ])
-        if let owner = Self.activeClientsByThreadID[threadID], owner !== self {
+        if let owner = activeClient(forThread: threadID), owner !== self {
             return owner.answerUserInput(requestID: requestID, threadID: threadID, answers: answers)
         }
         guard let pending = pendingUserInputs[threadID], pending.request.id == requestID else { return false }
@@ -753,7 +767,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     }
 
     func rejectUserInput(requestID: String, threadID: String, message: String) {
-        if let owner = Self.activeClientsByThreadID[threadID], owner !== self {
+        if let owner = activeClient(forThread: threadID), owner !== self {
             owner.rejectUserInput(requestID: requestID, threadID: threadID, message: message)
             return
         }
@@ -823,8 +837,23 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     /// Every client this process has created through `sharedClient`.
     static var allSharedClients: [CodexAppServerClient] { Array(sharedClients.values) }
 
+    /// The running shared client that already has this thread open, if any.
+    /// Codex allows one writer per thread, so another app-server can't open it.
+    /// The running client that already holds this thread open, limited to
+    /// clients that share `reference`'s executable, Codex home and data
+    /// directory: a thread ID only identifies a thread within one Codex home,
+    /// and a client for another home cannot answer for it.
+    static func sharedClient(loading threadID: String, compatibleWith reference: CodexAppServerClient) -> CodexAppServerClient? {
+        sharedClients.values.first {
+            $0.resumedThreadParameters[threadID] != nil && $0.process?.isRunning == true
+                && $0.codexExecutableOverride == reference.codexExecutableOverride
+                && $0.codexHomeOverride == reference.codexHomeOverride
+                && $0.dataDirectoryOverride == reference.dataDirectoryOverride
+        }
+    }
+
     func activeTurnOwnerProcessID(threadID: String) -> Int32? {
-        if let target = Self.activeClientsByThreadID[threadID],
+        if let target = activeClient(forThread: threadID),
            target.isTurnActive(threadID: threadID) {
             return Int32(ProcessInfo.processInfo.processIdentifier)
         }
@@ -917,7 +946,9 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         if goalFeatureEnabled || goalRuntimeEnabled {
             arguments += ["-c", "features.goals=true"]
         }
-        child.arguments = arguments
+        let command = ConversationProviderFixture.launchCommand(executable: executablePath, arguments: arguments)
+        child.executableURL = URL(fileURLWithPath: command.executable)
+        child.arguments = command.arguments
         child.currentDirectoryURL = workspaceURL
         child.standardInput = stdin
         child.standardOutput = stdout
@@ -926,7 +957,11 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         var environment = StationAIProcessEnvironment.current
         environment["PATH"] = Self.expandedSearchPath(environment["PATH"])
         ConversationProcessEnvironment.forwardStationAIBridgeEnvironment(&environment, dataDirectoryOverride: dataDirectoryOverride)
-        if let codexHomeOverride { environment["CODEX_HOME"] = codexHomeOverride }
+        if let codexHomeOverride {
+            // Codex refuses to start with a home that doesn't exist yet.
+            try? FileManager.default.createDirectory(atPath: codexHomeOverride, withIntermediateDirectories: true)
+            environment["CODEX_HOME"] = codexHomeOverride
+        }
         child.environment = environment
 
         process = child
@@ -938,36 +973,40 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         // The provider's output and exit are handled outside the request that
         // launched it; keep that request's environment and diagnostics routing.
         let requestContext = StationAIRequestContext.capture()
-        let stdoutQueue = outputQueue
-        stdout.fileHandleForReading.readabilityHandler = { [weak self, weak child] handle in
-            stdoutQueue.async { [weak self, weak child] in
-                let data = handle.availableData
-                guard !data.isEmpty else { return }
-                let consumed = DispatchSemaphore(value: 0)
-                Task { @MainActor [weak self, weak child] in
-                    await requestContext.run { await self?.consumeOutput(data, from: child) }
-                    consumed.signal()
+        let pump = ProviderOutputPump(label: "codex") { [weak self, weak child] item in
+            await requestContext.run {
+                switch item {
+                case .output(let data): await self?.consumeOutput(data, from: child)
+                case .exit(let terminated): self?.processDidTerminate(terminated)
                 }
-                consumed.wait()
             }
         }
-        stderr.fileHandleForReading.readabilityHandler = { handle in
-            _ = handle.availableData
+        outputPump = pump
+        stdout.fileHandleForReading.readabilityHandler = { [weak child] handle in
+            pump.pushReading {
+                // At EOF this fires continuously with empty data; an empty read
+                // while the child still runs is a spurious wakeup.
+                let data = handle.availableData
+                guard !data.isEmpty else {
+                    if child?.isRunning != true { handle.readabilityHandler = nil }
+                    return nil
+                }
+                return .output(data)
+            }
         }
-        child.terminationHandler = { [weak self, weak child] terminatedProcess in
+        stderr.fileHandleForReading.readabilityHandler = { [weak child] handle in
+            if handle.availableData.isEmpty, child?.isRunning != true { handle.readabilityHandler = nil }
+        }
+        child.terminationHandler = { terminatedProcess in
             // Output the child wrote before exiting must be handled before its
             // exit: a question or final message followed by a quick exit would
-            // otherwise be reported as a crash that lost it. The serial output
-            // queue orders this behind every read already in flight.
-            stdoutQueue.async { [weak self, weak child] in
-                let remaining = Self.readAvailableBytes(from: stdout.fileHandleForReading.fileDescriptor)
-                Task { @MainActor [weak self, weak child] in
-                    await requestContext.run {
-                        if !remaining.isEmpty { await self?.consumeOutput(remaining, from: child) }
-                        self?.processDidTerminate(terminatedProcess)
-                    }
-                }
+            // otherwise be reported as a crash that lost it.
+            pump.pushReading {
+                stdout.fileHandleForReading.readabilityHandler = nil
+                let remaining = ProviderOutputPump.readAvailableBytes(from: stdout.fileHandleForReading.fileDescriptor)
+                return remaining.isEmpty ? nil : .output(remaining)
             }
+            pump.push(.exit(terminatedProcess))
         }
 
         do {
@@ -994,12 +1033,17 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         modelID: String = CodexAppServerClient.modelID,
         developerInstructions: String? = nil,
         sensitiveUserInputAnswerValues: [String] = [],
-        sensitiveConversation: Bool = false
+        sensitiveConversation: Bool = false,
+        reusingLoadedThread: Bool = false
     ) async throws {
         let currentParameters = ResumeParameters(
             modelID: modelID, cwd: workspace.cwd.path, roots: workspace.roots.map(\.path), developerInstructions: developerInstructions
         )
-        if resumedThreadParameters[threadID] == currentParameters, process?.isRunning == true, initialized {
+        // Goal reads and writes don't change how the thread runs, so any loaded
+        // copy serves them. Resuming again would also fail for a thread started
+        // in this process that has no rollout yet.
+        if let loaded = resumedThreadParameters[threadID], reusingLoadedThread || loaded == currentParameters,
+           process?.isRunning == true, initialized {
             return
         }
 
@@ -1668,19 +1712,6 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
 
     /// Everything already in the pipe, without waiting for more: a descendant
     /// of the child can keep the write end open after the child itself exits.
-    nonisolated private static func readAvailableBytes(from descriptor: Int32) -> Data {
-        var collected = Data()
-        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-        while true {
-            var pollDescriptor = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
-            guard poll(&pollDescriptor, 1, 0) > 0, pollDescriptor.revents & Int16(POLLIN) != 0 else { break }
-            let count = read(descriptor, &buffer, buffer.count)
-            guard count > 0 else { break }
-            collected.append(buffer, count: count)
-        }
-        return collected
-    }
-
     private func processDidTerminate(_ terminatedProcess: Process) {
         guard process === terminatedProcess else { return }
 
@@ -1889,13 +1920,27 @@ enum TaskThreadDeveloperInstructions {
 
             """ : ""
             return escalation + """
-            This is a standalone, repo/worktree-free chat (not a task on the board) — do not call task progress, task outcome, or repository commands here. The conversation is split behind the scenes into titled "pages" so your live context stays small while the full history stays searchable.
+            You are the assistant inside StationAI's standalone chat.
+
+            StationAI is a native macOS task board for coordinating AI coding agents. Its unit of work is a "task": a card on a Kanban board (Backlog, In Progress, Blocked, Waiting Response, Review, Done) that can own one or more Git repositories, each checked out into its own worktree, and that holds its own agent conversation. The user manages that board through this app.
+            When the user talks about tasks, the board, backlog, worktrees, repositories, or "create a task", they always mean StationAI — this app, on this machine. Never use any other task, todo, or issue tool for that, even if one is available to you: anything you create elsewhere is invisible to the user. Use the StationAI CLI below, and if a request cannot be done with it, say so plainly instead of substituting another tool.
+
+            Manage the board with:
+              \(quotedExecutable) task list
+              \(quotedExecutable) task get <task-id>
+              \(quotedExecutable) task create --title "<title>" [--repo <repository-path>...] [--provider <codex|claude>]
+              \(quotedExecutable) task move <task-id> <Backlog|In Progress|Blocked|Waiting Response|Review|Done>
+              \(quotedExecutable) task rename <task-id> --title "<title>"
+              \(quotedExecutable) workspace repos list
+            A task created with no repository is a plain card; add repositories only when the user asks for work in a specific repo. Creating a task does not start it — the user runs it from the board. Report back the real task ID the CLI returned, and if a command fails, show the user what it said rather than claiming success.
+
+            This chat itself is not a task: it has no board status, no repository and no worktree, so task progress, task outcome and repository commands do not apply to this conversation. The conversation is split behind the scenes into titled "pages" so your live context stays small while the full history stays searchable.
             - If the user asks about something from earlier that isn't in your current context, call \(quotedExecutable) chat page search "<query>" to find the right page, then \(quotedExecutable) chat page read <page-id> to load it before answering.
             - At the end of every single turn, with no exceptions, decide whether the user's message continued the current topic or started a new, unrelated one, and run exactly one of these as a real command (never just write it as text in your reply):
               \(quotedExecutable) chat page close-turn \(id) --continues true
               \(quotedExecutable) chat page close-turn \(id) --continues false --new-title "<short title for the new topic>"
               This single command both records your classification and files this turn under the right page — do not call "chat page new" separately for this; close-turn creates the new page itself when needed.
-            - Also end your user-facing answer with one short, visible line: "Page: <current page title> (continued)" or "Page: <new page title> (new topic)". For a continuing page, get its title from `chat status`; for a new page, use the title from your close-turn command. This lets the user see which page received the turn.
+              StationAI shows the page title to the user as a separator in the transcript, so never write the page name, "Page: ...", or any other page bookkeeping into your visible answer.
             """
         }
         return """
