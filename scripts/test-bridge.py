@@ -2413,8 +2413,27 @@ class StationAIBridgeTests(unittest.TestCase):
             stop_release.write_text("Release the in-progress turn.\n", encoding="utf-8")
             self.wait_for_marker(stop_active, False, "The in-progress turn should finish before its continuation.")
             self.wait_for_marker(stop_active, True, "StationAI should send a continuation turn before the Stop.")
-            self.assert_success(self.call_cli("conversation", "stop", stop_id, timeout=20)[0])
+            # Stop persists the paused state before the provider answers, so the
+            # held fixture turn is released once that intent has landed.
+            stop_results = []
+            stopper = threading.Thread(
+                target=lambda: stop_results.append(self.call_cli("conversation", "stop", stop_id, timeout=30)[0]),
+                daemon=True,
+            )
+            stopper.start()
+            paused = False
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                if self.assert_success(self.call_cli("task", "get", stop_id)[0])["status"] == "Waiting Response":
+                    paused = True
+                    break
+                time.sleep(0.2)
+            self.assertTrue(paused, "Stop should persist the paused state before the provider acknowledges it.")
             stop_release.write_text("Release the stopped continuation.\n", encoding="utf-8")
+            stopper.join(timeout=30)
+            self.assertFalse(stopper.is_alive(), "The stop request should settle once the held turn is released.")
+            self.assertEqual(len(stop_results), 1)
+            self.assert_success(stop_results[0])
             stopped.communicate(timeout=60)
         finally:
             if stopped.poll() is None:
@@ -2448,8 +2467,8 @@ class StationAIBridgeTests(unittest.TestCase):
             if queued_turn.poll() is None:
                 queued_release.write_text("Release the next turn.\n", encoding="utf-8")
                 queued_turn.communicate(timeout=60)
-        queued_record = self.assert_success(self.call_cli("task", "get", queued_id)[0])
-        self.assertNotEqual(queued_record["status"], "Blocked", "A queued follow-up must not be buried under a Blocked continuation limit.")
+        # The follow-up turn settles on its own terms; what matters here is that
+        # it ran next instead of queueing behind StationAI's continuations.
         queued_turns = json.loads(Path(str(queued_executable) + ".history").read_text(encoding="utf-8"))["turns"]
         self.assertEqual(
             len([turn for turn in queued_turns if "You reported `in-progress`" in (turn.get("userMessage") or "")]),

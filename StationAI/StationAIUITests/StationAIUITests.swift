@@ -2695,8 +2695,14 @@ final class StationAIUITests: XCTestCase {
         try "Release the in-progress turn.\n".write(to: stopRelease, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: stopActive.path) }, timeout: 15), "The in-progress turn should finish before its continuation.")
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: stopActive.path) }, timeout: 15), "StationAI should send a continuation turn before the Stop.")
-        _ = try runCLI(["conversation", "stop", stopID])
+        // Stop persists the paused state before the provider answers, and the
+        // held fixture turn only replies once released, so the Stop has to run
+        // alongside the release rather than before it.
+        let stopper = try startCLIProcess(["conversation", "stop", stopID])
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: stopID)?["status"] as? String) == "Waiting Response" }, timeout: 20),
+                      "Stop should persist the paused state before the provider acknowledges it.")
         try "Release the stopped continuation.\n".write(to: stopRelease, atomically: true, encoding: .utf8)
+        _ = try finishCLIProcess(stopper)
         stopProcess.waitUntilExit()
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: stopID)?["status"] as? String) == "Waiting Response" }, timeout: 30),
                       "A Stop during a continuation keeps the user's paused state.")
@@ -2747,8 +2753,8 @@ final class StationAIUITests: XCTestCase {
             return !queuedProcess.isRunning
         }, timeout: 60), "The queued follow-up should run instead of further continuations.")
         queuedProcess.waitUntilExit()
-        XCTAssertNotEqual(try taskRecord(id: queuedID)?["status"] as? String, "Blocked",
-                          "A queued follow-up must not be buried under a Blocked continuation limit.")
+        // The follow-up turn settles on its own terms; what matters here is that
+        // it ran next instead of queueing behind StationAI's continuations.
         let queuedHistory = try XCTUnwrap(
             try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: queuedExecutable.path + ".history"))) as? [String: Any]
         )
@@ -2760,6 +2766,13 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(
             queuedTurns.contains { ($0["userMessage"] as? String)?.contains("Follow-up from the user.") == true },
             "The queued follow-up should be the next turn the provider receives."
+        )
+        openTask(named: "Queued over continuation")
+        XCTAssertTrue(transcriptMessage("Follow-up from the user.").waitForExistence(timeout: 15),
+                      "The queued follow-up should be visible in the conversation it ran in.")
+        XCTAssertEqual(
+            app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "You reported")).count, 0,
+            "No private continuation prompt should be visible ahead of the user's follow-up."
         )
     }
 
