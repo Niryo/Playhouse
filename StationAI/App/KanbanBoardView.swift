@@ -33,6 +33,8 @@ struct KanbanBoardView: View {
     @State private var mergedPullRequestCheckTimerScheduled = false
     @State private var lastMergedPullRequestCheckAt: Date?
     @State private var taskAwaitingUnmergedConfirmation: UUID?
+    @State private var syncingReviewTaskIDs = Set<UUID>()
+    @State private var attemptedReviewSyncSignatures: [UUID: String] = [:]
     @State private var pullRequestError: String?
     @State private var doneMoveError: String?
     @State private var isShowingBoardSearch = false
@@ -783,6 +785,7 @@ struct KanbanBoardView: View {
                         else { mergedReviewTaskIDs.remove(id) }
                         if states.contains(where: \.requiresConflictResolution) { conflictedReviewTaskIDs.insert(id) }
                         else { conflictedReviewTaskIDs.remove(id) }
+                        syncReviewChangesIfNeeded(for: id, states: states)
                     } else if let error {
                         mergedReviewTaskIDs.remove(id)
                         conflictedReviewTaskIDs.remove(id)
@@ -792,6 +795,43 @@ struct KanbanBoardView: View {
             }
             mergedReviewTaskIDs.formIntersection(reviewIDs)
             conflictedReviewTaskIDs.formIntersection(reviewIDs)
+        }
+    }
+
+    /// A reviewed task must not hold local-only pull request changes. When a
+    /// probe finds the local and remote heads diverged on a mergeable PR, sync
+    /// (commit, merge remote PR commits, push) through the shared bridge command.
+    /// Each head pairing is attempted once, so a repository the sync cannot act
+    /// on (for example, one with no publishing remote) keeps its conflict action
+    /// without a retry loop; the daemon moves the task to Blocked when a sync fails.
+    private func syncReviewChangesIfNeeded(for id: UUID, states: [PullRequestReviewState]) {
+        let needsSync = states.contains { state in
+            !state.merged && !state.hasConflicts && state.headRefOid != nil && state.headRefOid != state.localHeadOid
+        }
+        guard needsSync else { return }
+        let signature = states
+            .map { "\($0.number):\($0.headRefOid ?? "-"):\($0.localHeadOid ?? "-")" }
+            .sorted()
+            .joined(separator: "|")
+        guard attemptedReviewSyncSignatures[id] != signature, !syncingReviewTaskIDs.contains(id) else { return }
+        attemptedReviewSyncSignatures[id] = signature
+        syncingReviewTaskIDs.insert(id)
+        Task { @MainActor in
+            defer { syncingReviewTaskIDs.remove(id) }
+            do {
+                let outcome = try await remoteConversations.syncPullRequestChanges(taskID: id)
+                if outcome.skipped != nil {
+                    // An active turn owns the worktree; let a later probe retry.
+                    attemptedReviewSyncSignatures.removeValue(forKey: id)
+                    return
+                }
+                guard outcome.records.contains(where: { $0.action.hasSuffix("pushed") }) else { return }
+                lastMergedPullRequestCheckAt = nil
+                checkReviewPullRequests()
+            } catch {
+                attemptedReviewSyncSignatures.removeValue(forKey: id)
+                pullRequestError = error.localizedDescription
+            }
         }
     }
 
@@ -1399,8 +1439,8 @@ private struct TaskCardView: View {
     private func workingDuration(at date: Date) -> String {
         let activeInterval = task.inProgressStartedAt.map { max(0, date.timeIntervalSince($0)) } ?? 0
         let activeText = Self.shortDuration(activeInterval)
-        guard task.totalInProgressSeconds > 0 else { return "Working for \(activeText)" }
-        return "Working for \(activeText) (\(Self.shortDuration(task.totalInProgressSeconds + activeInterval)) total)"
+        guard task.totalInProgressSeconds > 0 else { return activeText }
+        return "\(activeText) (\(Self.shortDuration(task.totalInProgressSeconds + activeInterval)) total)"
     }
 
     private static func shortDuration(_ seconds: TimeInterval) -> String {

@@ -1790,6 +1790,173 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ !resolveButton.exists }, timeout: 10), "The action should disappear after GitHub confirms the pushed head.")
     }
 
+    // case-contract: test_review_sync_pushes_unpushed_changes_on_completion | A completed turn outcome on a task with a PR-linked repository and a configured remote commits local work, merges new remote pull request commits, and pushes the branch before the task reaches Review, so the reviewed worktree holds no local-only changes. A linked repository without a publishing remote is left untouched and still reaches Review. When the sync cannot complete, the task moves to Blocked with the sync failure message instead of resting in Review, and a later successful sync pushes the stranded commits and returns the task to Review. While a provider turn holds the task's worktree, the sync command skips it untouched and reports turn-active.
+    func test_review_sync_pushes_unpushed_changes_on_completion() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [123]).merging(Self.prCheckCooldownEnvironment) { $1 }
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Review sync push UI", "--repo", fixture.primary.path,
+            "--merge-target", "\(fixture.primary.path)=main",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Review sync push UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Review sync push UI")
+        element("back-to-board-button").click()
+        XCTAssertTrue(waitUntil({ element("task-card-\(taskID)").exists }, timeout: 10))
+        XCTAssertTrue(terminateAppAndWait(app))
+        try seedTaskPullRequest(taskID: taskID, number: 123, url: "https://github.com/stationai-test/fixture/pull/123")
+
+        let record = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String), isDirectory: true)
+        let branch = try XCTUnwrap(record["branch"] as? String)
+        let remote = runDirectory.appendingPathComponent("review-sync-push-origin.git", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: remote.path), "Each UI case should use a fresh owned bare remote.")
+        try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+        _ = try runGitOutput(remote, "init", "--bare")
+        try runGit(fixture.primary, "remote", "add", "origin", remote.path)
+        defer { try? runGit(fixture.primary, "remote", "remove", "origin") }
+        try runGit(worktree, "push", "--set-upstream", "origin", branch)
+
+        // A reviewer commit on the remote PR branch the local branch has not seen.
+        let clone = runDirectory.appendingPathComponent("review-sync-push-clone", isDirectory: true)
+        _ = try runGitOutput(runDirectory, "clone", "--branch", branch, remote.path, clone.path)
+        try "Remote reviewer commit.\n".write(to: clone.appendingPathComponent("remote-side.txt"), atomically: true, encoding: .utf8)
+        try runGit(clone, "add", "remote-side.txt")
+        try runGit(clone, "commit", "-m", "Remote PR commit")
+        try runGit(clone, "push", "origin", branch)
+        let reviewerHead = try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)")
+
+        // Local uncommitted work the completed turn leaves behind.
+        try "Local turn output.\n".write(to: worktree.appendingPathComponent("local-side.txt"), atomically: true, encoding: .utf8)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        openTask(named: "Review sync push UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Review sync push UI", whileTurnHeld: {
+            // While the provider turn owns the worktree, the sync skips it untouched.
+            let skipped = try self.runCLI(["task", "pr", "sync", taskID])
+            let result = try XCTUnwrap(skipped["result"] as? [String: Any])
+            XCTAssertEqual(result["skipped"] as? String, "turn-active")
+            XCTAssertEqual((result["records"] as? [Any])?.isEmpty, true)
+        })
+        assertTaskVisible("Review sync push UI", inColumn: "Review")
+        XCTAssertEqual(try runGitOutput(worktree, "status", "--porcelain", "--untracked-files=all"), "", "A reviewed worktree must hold no local-only changes.")
+        let localHead = try runGitOutput(worktree, "rev-parse", "HEAD")
+        XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)"), localHead)
+        XCTAssertNotEqual(localHead, reviewerHead, "The sync should push a merge of the reviewer commit and the local work.")
+        XCTAssertEqual(
+            try String(contentsOf: worktree.appendingPathComponent("remote-side.txt"), encoding: .utf8),
+            "Remote reviewer commit.\n"
+        )
+        XCTAssertEqual(try runGitOutput(remote, "show", "refs/heads/\(branch):local-side.txt"), "Local turn output.")
+
+        // A sync the daemon cannot complete blocks the task instead of resting in Review.
+        try runGit(fixture.primary, "remote", "set-url", "origin", runDirectory.appendingPathComponent("missing-remote.git").path)
+        try "Unpushable local change.\n".write(to: worktree.appendingPathComponent("local-side.txt"), atomically: true, encoding: .utf8)
+        openTask(named: "Review sync push UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Review sync push UI", expectedFinalStatus: "Blocked")
+        assertTaskVisible("Review sync push UI", inColumn: "Blocked")
+        let blockedMessage = try taskRecord(id: taskID)?["statusMessage"] as? String
+        XCTAssertTrue((blockedMessage ?? "").contains("couldn't sync this task's changes with its pull request"), blockedMessage ?? "nil")
+
+        // A later successful sync pushes the stranded commit and returns the task to Review.
+        try runGit(fixture.primary, "remote", "set-url", "origin", remote.path)
+        _ = try runCLI(["task", "pr", "sync", taskID])
+        assertTaskVisible("Review sync push UI", inColumn: "Review")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
+        XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)"), try runGitOutput(worktree, "rev-parse", "HEAD"))
+    }
+
+    // case-contract: test_review_sync_resolves_conflicts_with_provider_or_blocks | When the remote pull request branch conflicts with local task commits, the review sync merges the remote branch and instructs the task's provider to resolve every conflict; if conflicts remain after the provider turn, the sync fails, the task moves to Blocked with the sync failure message, the merge stays in progress for manual resolution, and the remote branch is unchanged. A rerun with the conflicts staged commits the resolution, pushes the merged branch, and returns the task to Review. The board triggers the same sync automatically when a mergeable pull request's remote head diverges from the local head.
+    func test_review_sync_resolves_conflicts_with_provider_or_blocks() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        var ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [123]).merging(Self.prCheckCooldownEnvironment) { $1 }
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Review sync conflict UI", "--repo", fixture.primary.path,
+            "--merge-target", "\(fixture.primary.path)=main",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Review sync conflict UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Review sync conflict UI")
+        element("back-to-board-button").click()
+        XCTAssertTrue(waitUntil({ element("task-card-\(taskID)").exists }, timeout: 10))
+        XCTAssertTrue(terminateAppAndWait(app))
+        try seedTaskPullRequest(taskID: taskID, number: 123, url: "https://github.com/stationai-test/fixture/pull/123")
+
+        let record = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String), isDirectory: true)
+        let branch = try XCTUnwrap(record["branch"] as? String)
+        let remote = runDirectory.appendingPathComponent("review-sync-conflict-origin.git", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: remote.path), "Each UI case should use a fresh owned bare remote.")
+        try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+        _ = try runGitOutput(remote, "init", "--bare")
+        try runGit(fixture.primary, "remote", "add", "origin", remote.path)
+        defer { try? runGit(fixture.primary, "remote", "remove", "origin") }
+        try runGit(worktree, "push", "--set-upstream", "origin", branch)
+        try runGit(worktree, "push", "origin", "HEAD:refs/heads/pr-123")
+        ghEnvironment["STATIONAI_E2E_GH_REMOTE_REPOSITORY"] = remote.path
+
+        // The board pushes a diverged local head automatically, with no conflict action.
+        try "Local unpushed change.\n".write(to: worktree.appendingPathComponent("review-sync-local.txt"), atomically: true, encoding: .utf8)
+        try runGit(worktree, "add", "review-sync-local.txt")
+        try runGit(worktree, "commit", "-m", "Local unpushed commit")
+        let localHead = try runGitOutput(worktree, "rev-parse", "HEAD")
+        XCTAssertNotEqual(try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)"), localHead)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        XCTAssertTrue(element("task-card-\(taskID)").waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({
+            (try? self.runGitOutput(remote, "rev-parse", "refs/heads/\(branch)")) == localHead
+        }, timeout: 30), "The board should push the diverged local head automatically.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
+        // Once the PR head reports the pushed commit, no conflict action remains.
+        try runGit(worktree, "push", "origin", "HEAD:refs/heads/pr-123")
+        Thread.sleep(forTimeInterval: Self.prCheckCooldown + 0.1)
+        activateOtherAppThenReturn()
+        let resolveButton = element("task-resolve-pr-conflicts-\(taskID)")
+        XCTAssertTrue(waitUntil({ !resolveButton.exists }, timeout: 10), "A synced PR should not keep the conflict action.")
+        XCTAssertTrue(terminateAppAndWait(app))
+
+        // Conflicting local and remote PR commits: the provider turn resolves nothing,
+        // so the sync fails closed and the task blocks instead of resting in Review.
+        let conflictPath = "review-sync-conflict.txt"
+        try "base version\n".write(to: worktree.appendingPathComponent(conflictPath), atomically: true, encoding: .utf8)
+        try runGit(worktree, "add", conflictPath)
+        try runGit(worktree, "commit", "-m", "Base for sync conflict")
+        try runGit(worktree, "push", "origin", branch)
+        try runGit(worktree, "push", "origin", "HEAD:refs/heads/pr-123")
+        let clone = runDirectory.appendingPathComponent("review-sync-conflict-clone", isDirectory: true)
+        _ = try runGitOutput(runDirectory, "clone", "--branch", branch, remote.path, clone.path)
+        try "remote version\n".write(to: clone.appendingPathComponent(conflictPath), atomically: true, encoding: .utf8)
+        try runGit(clone, "add", conflictPath)
+        try runGit(clone, "commit", "-m", "Remote conflicting commit")
+        try runGit(clone, "push", "origin", branch)
+        try runGit(clone, "push", "origin", "HEAD:refs/heads/pr-123")
+        let remoteHead = try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)")
+        try "local version\n".write(to: worktree.appendingPathComponent(conflictPath), atomically: true, encoding: .utf8)
+        try runGit(worktree, "add", conflictPath)
+        try runGit(worktree, "commit", "-m", "Local conflicting commit")
+
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: taskID)?["status"] as? String) == "Blocked"
+        }, timeout: 30), "An unresolvable sync conflict should move the task to Blocked.")
+        assertTaskVisible("Review sync conflict UI", inColumn: "Blocked")
+        let blockedMessage = try taskRecord(id: taskID)?["statusMessage"] as? String
+        XCTAssertTrue((blockedMessage ?? "").contains("couldn't sync this task's changes with its pull request"), blockedMessage ?? "nil")
+        XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)"), remoteHead, "A failed sync must leave the remote branch unchanged.")
+        XCTAssertEqual(try runGitOutput(worktree, "diff", "--name-only", "--diff-filter=U"), conflictPath, "The merge should stay in progress for manual resolution.")
+
+        // Staging the resolution lets the shared sync command finish the merge,
+        // push the merged branch, and return the task to Review.
+        try "resolved local and remote versions\n".write(to: worktree.appendingPathComponent(conflictPath), atomically: true, encoding: .utf8)
+        try runGit(worktree, "add", conflictPath)
+        _ = try runCLI(["task", "pr", "sync", taskID])
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
+        assertTaskVisible("Review sync conflict UI", inColumn: "Review")
+        XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)"), try runGitOutput(worktree, "rev-parse", "HEAD"))
+        XCTAssertEqual(try runGitOutput(remote, "show", "refs/heads/\(branch):\(conflictPath)"), "resolved local and remote versions")
+    }
+
     // case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done changes only task status and preserves dirty worktree files, branch, and target commit without committing or merging.
     func test_task_done_preserves_dirty_worktree() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
@@ -9960,7 +10127,9 @@ final class StationAIUITests: XCTestCase {
     private func completeCurrentTaskWithFixtureAnswers(
         taskTitle: String,
         prompt: String = "Complete this task.",
-        reportCompletedOutcome: Bool = true
+        reportCompletedOutcome: Bool = true,
+        expectedFinalStatus: String? = nil,
+        whileTurnHeld: (() throws -> Void)? = nil
     ) throws {
         let taskID = try taskID(named: taskTitle)
         let executablePath = try XCTUnwrap(codexFixtureExecutable, "The task fixture has no Codex executable.")
@@ -9985,6 +10154,7 @@ final class StationAIUITests: XCTestCase {
         typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: active.path) }, timeout: 10), "The fixture should hold after receiving answers so the task outcome can be reported.")
+        try whileTurnHeld?()
         if reportCompletedOutcome {
             XCTAssertTrue(waitUntil({
                 (try? self.taskRecord(id: taskID)?["status"] as? String) == "In Progress"
@@ -10001,7 +10171,7 @@ final class StationAIUITests: XCTestCase {
             )
         ).firstMatch
         XCTAssertTrue(answer.waitForExistence(timeout: 10))
-        let expectedStatus = reportCompletedOutcome ? "Review" : "Waiting Response"
+        let expectedStatus = expectedFinalStatus ?? (reportCompletedOutcome ? "Review" : "Waiting Response")
         XCTAssertTrue(waitUntil({
             (try? self.taskRecord(id: taskID)?["status"] as? String) == expectedStatus
         }, timeout: 10), "The completed turn should settle in \(expectedStatus).")
