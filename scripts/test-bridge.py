@@ -22,6 +22,12 @@ import unittest
 import uuid
 from pathlib import Path
 
+# A Claude Code session launched by the StationAI app itself exports this for
+# its own host app's daemon. If it survives into this harness's environment,
+# `stationai-cli` prefers it over any --service-name override and every case
+# silently talks to the host app's daemon instead of the isolated e2e build,
+# which then rejects the isolated data directory in setUp.
+os.environ.pop("STATIONAI_BRIDGE_SOCKET_PATH", None)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--cli", required=True, type=Path)
@@ -4462,7 +4468,7 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(failure_items[failed_target_record["id"]]["state"], "needsAction")
         self.assertEqual(failure_items[later_record["id"]]["state"], "queued", "A failed targeted send must not drain later queued messages.")
 
-    # case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a composer or transcript attachment opens the original image in a large viewer, which can be closed to return to the conversation.
+    # case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a composer attachment, a user transcript attachment, or an agent-published assistant image opens the original image in a large viewer, which can be closed to return to the conversation; a published assistant image preserves the original file bytes.
     def test_conversation_sends_image_attachments(self):
         task_id = self.create_task(title="Image conversation") ["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -4563,6 +4569,11 @@ class StationAIBridgeTests(unittest.TestCase):
         )
         self.assertEqual(saved_agent_image["id"], published_message["id"])
         self.assertEqual(saved_agent_image["imageDataURLs"], published_message["imageDataURLs"])
+        self.assertEqual(
+            base64.b64decode(saved_agent_image["imageDataURLs"][0].split(",", 1)[1]),
+            image.read_bytes(),
+            "The assistant image the viewer opens must keep the original published file bytes.",
+        )
         thread_instructions = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["threadStartDeveloperInstructions"]
         self.assertIn("conversation present-image", thread_instructions)
         jpeg = self.data_directory / "agent-image.jpg"

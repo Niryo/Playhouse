@@ -6162,7 +6162,7 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(steerRequests[2]["input"] as? [[String: String]], [["type": "text", "text": rowSteeringText]])
     }
 
-    // case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a composer or transcript attachment opens the original image in a large viewer, which can be closed to return to the conversation.
+    // case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a composer attachment, a user transcript attachment, or an agent-published assistant image opens the original image in a large viewer, which can be closed to return to the conversation; a published assistant image preserves the original file bytes.
 
     func test_conversation_sends_image_attachments() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
@@ -6276,7 +6276,12 @@ final class StationAIUITests: XCTestCase {
         XCTAssertEqual(refreshedUserMessages.first?["imageDataURLs"] as? [String], [pickedImage], "A fresh XPC history read should retain the earlier image after a later turn.")
 
         let agentCaption = "Agent generated screenshot"
-        let agentImage = try runCLI(["conversation", "present-image", try taskID(named: "Image conversation"), "--image", image.path, "--caption", agentCaption])["result"] as? [String: Any]
+        // A wide image makes the viewer's width depend on the sheet's own width, so the
+        // size assertion below pins the large viewer instead of the fitted square height.
+        let wideAgentImage = dataDirectory.appendingPathComponent("agent-wide-image.png")
+        let wideBitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1600, pixelsHigh: 400, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        try wideBitmap.representation(using: .png, properties: [:])!.write(to: wideAgentImage)
+        let agentImage = try runCLI(["conversation", "present-image", try taskID(named: "Image conversation"), "--image", wideAgentImage.path, "--caption", agentCaption])["result"] as? [String: Any]
         XCTAssertEqual(agentImage?["role"] as? String, "assistant")
         XCTAssertEqual(agentImage?["text"] as? String, agentCaption)
         XCTAssertEqual((agentImage?["imageDataURLs"] as? [String])?.first?.hasPrefix("data:image/png;base64,"), true)
@@ -6292,6 +6297,18 @@ final class StationAIUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ self.transcriptContains(agentCaption) }, timeout: 10), "The agent image caption should appear as an assistant message after reopening.")
         XCTAssertTrue(element("chat-image-\(agentImageID)-0").waitForExistence(timeout: 10), "The specific agent-published image should render in its assistant message after reopening.")
         XCTAssertTrue(element("chat-image-\(agentJPEGID)-0").waitForExistence(timeout: 10), "The specific agent-published JPEG should render in its assistant message after reopening.")
+        let agentThumbnail = app.buttons["chat-image-\(agentImageID)-0"]
+        XCTAssertTrue(agentThumbnail.waitForExistence(timeout: 5), "An agent-published assistant image should be clickable.")
+        let agentThumbnailFrame = agentThumbnail.frame
+        agentThumbnail.click()
+        let agentFullSizeImage = element("chat-image-full-size")
+        XCTAssertTrue(agentFullSizeImage.waitForExistence(timeout: 5), "Clicking an agent-published assistant image should open it in the large viewer.")
+        XCTAssertGreaterThan(agentFullSizeImage.frame.width, agentThumbnailFrame.width, "The viewer should display the assistant image larger than its transcript thumbnail.")
+        // The 520pt assistant thumbnail would still be beaten by a 600pt-wide sheet, so pin
+        // the floor above what the smaller sheet can produce.
+        XCTAssertGreaterThan(agentFullSizeImage.frame.width, 800, "The full-size viewer must stay large enough to be a real preview, not a slightly bigger thumbnail.")
+        element("close-chat-image-viewer").click()
+        XCTAssertFalse(element("chat-image-full-size").exists, "Closing the assistant image viewer should return to the conversation.")
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
         try FileManager.default.removeItem(at: URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history"))
