@@ -1399,8 +1399,8 @@ private struct TaskCardView: View {
     private func workingDuration(at date: Date) -> String {
         let activeInterval = task.inProgressStartedAt.map { max(0, date.timeIntervalSince($0)) } ?? 0
         let activeText = Self.shortDuration(activeInterval)
-        guard task.totalInProgressSeconds > 0 else { return "Working for \(activeText)" }
-        return "Working for \(activeText) (\(Self.shortDuration(task.totalInProgressSeconds + activeInterval)) total)"
+        guard task.totalInProgressSeconds > 0 else { return activeText }
+        return "\(activeText) (\(Self.shortDuration(task.totalInProgressSeconds + activeInterval)) total)"
     }
 
     private static func shortDuration(_ seconds: TimeInterval) -> String {
