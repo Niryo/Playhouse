@@ -109,7 +109,7 @@ enum StationAICLI {
                 ])
             case "pr":
                 guard tail.count >= 2 else {
-                    throw CLIError.usage("Use: stationai task pr create|conflicts|status|verify|resolve <task-id> [action]")
+                    throw CLIError.usage("Use: stationai task pr create|conflicts|status|verify|resolve|sync <task-id> [action]")
                 }
                 switch tail[0] {
                 case "create" where tail.count == 2:
@@ -122,8 +122,10 @@ enum StationAICLI {
                     return BridgeRequest(command: "task.pr.verify", arguments: ["taskID": .string(tail[1])])
                 case "resolve" where tail.count == 3:
                     return BridgeRequest(command: "task.pr.resolve", arguments: ["taskID": .string(tail[1]), "action": .string(tail[2])])
+                case "sync" where tail.count == 2:
+                    return BridgeRequest(command: "task.pr.sync", arguments: ["taskID": .string(tail[1])])
                 default:
-                    throw CLIError.usage("Use: stationai task pr create|conflicts|status|verify|resolve <task-id> [resolve-and-push|resolve-only|keep]")
+                    throw CLIError.usage("Use: stationai task pr create|conflicts|status|verify|resolve|sync <task-id> [resolve-and-push|resolve-only|keep]")
                 }
             case "progress":
                 guard let action = tail.first else { throw CLIError.usage("Use: stationai task progress publish|custom|clear <task-id> ...") }
@@ -574,6 +576,7 @@ enum StationAICLI {
       stationai task pr create <task-id>
       stationai task pr status <task-id>
       stationai task pr verify <task-id>
+      stationai task pr sync <task-id>
       stationai task progress publish <task-id> --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail <text>]
       stationai task progress custom <task-id> --label <label> [--detail <text>]
       stationai task progress clear <task-id>
