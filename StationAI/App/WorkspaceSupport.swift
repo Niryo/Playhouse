@@ -594,11 +594,7 @@ enum StationAIAppIdentity {
     }
 
     static var isTestBundle: Bool {
-        #if DEBUG
-        return applicationIdentifier.contains(".e2e.")
-        #else
-        return false
-        #endif
+        BridgeContract.isTestBundle(applicationIdentifier)
     }
 
     static var worktreeKey: String? {
@@ -1086,12 +1082,21 @@ enum StationAIProcessRunner {
 }
 
 enum StationAIBackgroundOperation {
+    /// Runs synchronous, possibly slow work (git, `gh`) off the main actor.
+    /// `Task.detached` drops task-local values, so without restoring the
+    /// calling request's environment and diagnostics scope here, this work
+    /// would see the daemon's own bare process environment instead of its
+    /// caller's (for example a worktree-relative `PATH` override, or a test
+    /// harness's `STATIONAI_E2E_*` fixture overrides).
     static func run<Value: Sendable>(
         priority: TaskPriority = .utility,
         _ operation: @escaping @Sendable () throws -> Value
     ) async throws -> Value {
-        try await Task.detached(priority: priority) {
-            try operation()
+        let requestContext = await StationAIRequestContext.capture()
+        return try await Task.detached(priority: priority) {
+            try await requestContext.run {
+                try operation()
+            }
         }.value
     }
 }

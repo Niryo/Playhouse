@@ -25,8 +25,17 @@ enum StationAICLI {
         configuredRequest.dataDirectory = dataDirectory
         configuredRequest.defaultsSuite = defaultsSuite
         configuredRequest.worktreeDirectory = ProcessInfo.processInfo.environment["STATIONAI_E2E_WORKTREE_DIRECTORY"]
+        // Same identity lookup as BridgeClient.applicationIdentifier(): this CLI
+        // lives at `<App>.app/Contents/MacOS/stationai-cli`, so `Bundle.main`
+        // already resolves to the app's own Info.plist.
+        let applicationIdentifier = Bundle.main.infoDictionary?["StationAIApplicationBundleIdentifier"] as? String
+            ?? Bundle.main.bundleIdentifier ?? ""
+        let forwardableNames = BridgeContract.environmentNamesToForward(
+            applicationIdentifier: applicationIdentifier,
+            from: ProcessInfo.processInfo.environment
+        )
         configuredRequest.environment = ProcessInfo.processInfo.environment
-            .filter { BridgeContract.sessionEnvironmentNames.contains($0.key) }
+            .filter { forwardableNames.contains($0.key) }
         if let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"] {
             configuredRequest.arguments["__codexHome"] = .string(codexHome)
         }
