@@ -17,6 +17,20 @@ private func measuredTextHeight(for attributedText: NSAttributedString, width: C
     return layoutManager.usedRect(for: container).height
 }
 
+@Observable
+private final class ComposerDraftModel {
+    var text = ""
+    @ObservationIgnored var autosaveTask: Task<Void, Never>?
+}
+
+/// Evaluates `content` in its own body, so Observation attributes the composer's draft reads to
+/// this view rather than to the enclosing `TaskConversationView`.
+private struct ComposerDraftScope<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+
+    var body: some View { content() }
+}
+
 private struct AssistantMarkdownBlock: Identifiable {
     enum Kind {
         case heading(Int)
@@ -263,14 +277,21 @@ struct TaskConversationView: View {
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage(WorkspaceSettings.defaultParentFolderKey, store: WorkspaceSettings.preferencesStore) private var defaultParentFolderPath = ""
 
-    let task: BoardTask
+    let task: any ConversationSubject
     var isNewTask = false
     var isReadOnly = false
     var conflictResolutionRequested = false
     var onConflictResolutionChecked: (Bool) -> Void = { _ in }
     let onBack: () -> Void
 
-    @State private var draft = ""
+    /// The draft lives in an observable model, so a keystroke re-renders only views that read it
+    /// (the composer inside `ComposerDraftScope`), not the whole transcript. Read `draft` (or
+    /// `isSendDisabled`) during body evaluation only inside that scope; handlers may read it freely.
+    @State private var composerDraft = ComposerDraftModel()
+    private var draft: String {
+        get { composerDraft.text }
+        nonmutating set { composerDraft.text = newValue }
+    }
     /// Steers this window has shown but the turn's stream hasn't echoed yet, and
     /// the reverse. The turn streams every steer, including this window's own,
     /// but a reopened window no longer reads that stream, so it shows its own.
@@ -279,12 +300,16 @@ struct TaskConversationView: View {
     /// This window's own sends whose turn stream it is reading right now.
     @State private var followedTurnStreams = 0
     @State private var composerHeight: CGFloat = 28
-    @State private var draftAutosaveTask: Task<Void, Never>?
+    private var draftAutosaveTask: Task<Void, Never>? {
+        get { composerDraft.autosaveTask }
+        nonmutating set { composerDraft.autosaveTask = newValue }
+    }
     @State private var draftNeedsAutosave = false
     @State private var pendingImages: [PendingImage] = []
     @State private var isShowingImagePicker = false
     @State private var selectedChatImage: NSImage?
     @State private var isGeneratingTitle = false
+    @State private var chatPagesByTurnID: [String: StandaloneChatPage] = [:]
     @State private var conversationMode: ConversationMode = .code
     @State private var isEnteringGoal = false
     @State private var activeGoal: CodexThreadGoal?
@@ -392,7 +417,9 @@ struct TaskConversationView: View {
     }
 
     private var isRepositoryRootConfigured: Bool {
-        WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) != nil
+        // Standalone chat has no repository/worktree of its own, so it must never require the
+        // app's global repository-root setting to be configured before sending.
+        task.isStandaloneChat || WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath) != nil
     }
 
     private var canPauseResponse: Bool {
@@ -681,15 +708,24 @@ struct TaskConversationView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            taskSidebar
+        Group {
+            if task.isStandaloneChat {
+                // The standalone chat sidebar reuses only the conversation transcript/composer,
+                // not the repo-specific "Changes" sidebar a real task's worktree needs.
+                conversationPanel
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                HStack(spacing: 0) {
+                    taskSidebar
 
-            Rectangle()
-                .fill(Color.primary.opacity(0.08))
-                .frame(width: 1)
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.08))
+                        .frame(width: 1)
 
-            conversationPanel
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    conversationPanel
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
         }
         .background(WorkspaceTheme.windowBackground)
         .onAppear {
@@ -735,7 +771,9 @@ struct TaskConversationView: View {
                         .accessibilityIdentifier("chat-image-full-size")
                 }
                 .padding(16)
-                .frame(minWidth: 600, minHeight: 420)
+                // Stay within the window's own 980x640 content minimum so the sheet
+                // can never outgrow its host window and push Close out of reach.
+                .frame(minWidth: 900, minHeight: 600)
             }
         }
         .fileImporter(isPresented: $isShowingImagePicker, allowedContentTypes: [.image], allowsMultipleSelection: true) { result in
@@ -756,6 +794,7 @@ struct TaskConversationView: View {
                 refreshQueuedMessages()
                 await loadModels()
             }
+            if task.isStandaloneChat { refreshChatPageStatus() }
             if isNewTask {
                 await Task.yield()
                 isComposerFocused = true
@@ -787,6 +826,7 @@ struct TaskConversationView: View {
             if !streamedRecoveryReplies.isEmpty { showStreamedRecoveryReplies() }
         }
         .onChange(of: providerTurnIsActive) { _, isTurnActive in
+            if !isTurnActive, task.isStandaloneChat { refreshChatPageStatus() }
             if !isTurnActive, !isReadOnly {
                 refreshQueuedMessages()
             }
@@ -1150,7 +1190,7 @@ struct TaskConversationView: View {
                         .padding(.vertical, 18)
                         .accessibilityIdentifier("archived-conversation-read-only")
                 } else {
-                    composer
+                    ComposerDraftScope { composer }
                 }
             }
             .accessibilityHidden(selectedSubagent != nil)
@@ -1451,24 +1491,29 @@ struct TaskConversationView: View {
 
                     Spacer(minLength: 8)
 
-                    repositoryBadges
+                    if !task.isStandaloneChat {
+                        repositoryBadges
+                    }
                 }
 
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(task.status.accent)
-                        .frame(width: 6, height: 6)
-                    Text(task.status.rawValue)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
+                if !task.isStandaloneChat {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(task.status.accent)
+                            .frame(width: 6, height: 6)
+                        Text(task.status.rawValue)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    if let statusMessage = task.statusMessage, !statusMessage.isEmpty {
+                        Text(statusMessage)
+                            .font(.system(size: 10))
+                            .foregroundStyle(task.status == .blocked ? Color.red : Color.secondary)
+                            .lineLimit(3)
+                            .accessibilityIdentifier("task-status-message")
+                    }
                 }
-                if let statusMessage = task.statusMessage, !statusMessage.isEmpty {
-                    Text(statusMessage)
-                        .font(.system(size: 10))
-                        .foregroundStyle(task.status == .blocked ? Color.red : Color.secondary)
-                        .lineLimit(3)
-                        .accessibilityIdentifier("task-status-message")
-                }
+
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -1869,6 +1914,10 @@ struct TaskConversationView: View {
                                 providerBoundaryRow(boundary)
                             }
                             ForEach(renderedConversationMessages) { message in
+                                if let page = standaloneChatPageSeparator(before: message) {
+                                    standaloneChatPageSeparator(page)
+                                        .id("chat-page-separator-\(page.id)-\(message.id)")
+                                }
                                 if shouldShowActivityDisclosure, message.id == activityDisclosureAnchorID {
                                     activityList
                                 }
@@ -2642,9 +2691,15 @@ struct TaskConversationView: View {
 
             ForEach(Array(message.imageDataURLs.enumerated()), id: \.offset) { index, dataURL in
                 if let image = Self.image(fromDataURL: dataURL) {
-                    Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 520, maxHeight: 420)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
+                    Button { selectedChatImage = image } label: {
+                        Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: 520, maxHeight: 420)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Open attached image")
+                    .accessibilityIdentifier("chat-image-\(message.id)-\(index)")
+                    .buttonHoverPointer()
+                    .help("Open image at full size")
                 }
             }
             if !displayText.isEmpty {
@@ -2719,10 +2774,37 @@ struct TaskConversationView: View {
             ?? AttributedString(markdown)
     }
 
+    /// Every transcript body re-evaluation re-renders each assistant block, so parsed Markdown is
+    /// memoized by its exact inputs instead of being re-parsed for an unchanged block.
+    /// Bounded because a streaming block adds a key for every partial text it passes through.
+    private static let markdownPlainTextCache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 500
+        return cache
+    }()
+    private static let markdownNSAttributedStringCache: NSCache<NSString, NSAttributedString> = {
+        let cache = NSCache<NSString, NSAttributedString>()
+        cache.countLimit = 500
+        return cache
+    }()
+
+    private static func markdownPlainText(_ markdown: String) -> String {
+        if let cached = markdownPlainTextCache.object(forKey: markdown as NSString) {
+            return cached as String
+        }
+        let text = String(Self.markdownAttributedText(markdown).characters)
+        markdownPlainTextCache.setObject(text as NSString, forKey: markdown as NSString)
+        return text
+    }
+
     /// Bridges Markdown-parsed text to `NSAttributedString`, resizing inline code/bold/italic
     /// runs to `baseFont`'s point size (preserving their monospace/bold/italic traits) instead of
     /// the parser's own default-size font, so inline formatting matches the surrounding body text.
     private static func markdownNSAttributedString(_ markdown: String, baseFont: NSFont) -> NSAttributedString {
+        let cacheKey = "\(baseFont.fontName)|\(baseFont.pointSize)|\(markdown)" as NSString
+        if let cached = markdownNSAttributedStringCache.object(forKey: cacheKey) {
+            return cached
+        }
         var attributed = Self.markdownAttributedText(markdown)
         for run in attributed.runs {
             guard let intent = run.inlinePresentationIntent else { continue }
@@ -2737,7 +2819,9 @@ struct TaskConversationView: View {
                 }
             }
         }
-        return NSAttributedString(attributed)
+        let result = NSAttributedString(attributed)
+        markdownNSAttributedStringCache.setObject(result, forKey: cacheKey)
+        return result
     }
 
     private static func displayableAssistantText(_ text: String) -> String {
@@ -2878,7 +2962,7 @@ struct TaskConversationView: View {
                     }
                     .accessibilityElement(children: .combine)
                     // The text views inside do not contribute to a combined label.
-                    .accessibilityLabel(String(Self.markdownAttributedText(block.text).characters))
+                    .accessibilityLabel(Self.markdownPlainText(block.text))
                     .accessibilityIdentifier("assistant-markdown-list-item-\(block.id)")
                 case .orderedListItem(let number):
                     HStack(alignment: .top, spacing: 7) {
@@ -2887,7 +2971,7 @@ struct TaskConversationView: View {
                             .accessibilityIdentifier("assistant-markdown-ordered-list-content-\(block.id)")
                     }
                     .accessibilityElement(children: .combine)
-                    .accessibilityLabel("\(number). " + String(Self.markdownAttributedText(block.text).characters))
+                    .accessibilityLabel("\(number). " + Self.markdownPlainText(block.text))
                     .accessibilityIdentifier("assistant-markdown-ordered-list-item-\(block.id)")
                 case .codeBlock(let language):
                     CodeBlockCardView(blockID: block.id, code: block.text, language: language, font: block.font)
@@ -2910,7 +2994,7 @@ struct TaskConversationView: View {
     ) -> some View {
         if let messageID {
             SelectableAnnotationText(
-                text: String(Self.markdownAttributedText(block.text).characters),
+                text: Self.markdownPlainText(block.text),
                 annotations: annotations.filter { $0.messageID == messageID && $0.blockID == block.id },
                 responseAnnotations: responseAnnotations,
                 responseCommentSourcePrefix: "\(messageID):\(block.id)",
@@ -3295,7 +3379,7 @@ struct TaskConversationView: View {
                     }
                 }
                 NativeChatEditor(
-                    text: $draft,
+                    text: $composerDraft.text,
                     height: $composerHeight,
                     isFocused: Binding(get: { isComposerFocused }, set: { isComposerFocused = $0 }),
                     isEnabled: !isReadOnly,
@@ -3728,9 +3812,12 @@ struct TaskConversationView: View {
         defer { isLoadingHistory = false }
 
         do {
-            let history = try await conversationManager.history(taskID: task.id) {
-                actionNotice = approvalNotice
-            }
+            // Standalone chat rotates one session per page, so the transcript asks for the
+            // earlier pages to be restored from the local archive alongside the live session.
+            let history = try await conversationManager.history(
+                taskID: task.id,
+                onActionRequest: { actionNotice = approvalNotice }
+            )
             messages = history.messages
             // Resolve the window as soon as the messages land. The assignment
             // at the end of the load repeats it once progress collapsing has
@@ -3986,6 +4073,9 @@ struct TaskConversationView: View {
                 .filter { !$0.isEmpty }.joined(separator: "\n\n")
         }
         let text = annotationPrompt
+        // An annotation can point at text from an earlier page; that page travels with this
+        // turn so the agent sees the quoted context without reloading the whole chat.
+        let annotationPageIDs = standaloneChatPageIDs(for: pendingAnnotations)
         let resolutionAttempt = conflictResolutionAttempt
         if usesComposerDraft && pendingAnnotations.isEmpty && text == "/plan" {
             activatePlanMode()
@@ -4080,7 +4170,7 @@ struct TaskConversationView: View {
             defer { followedTurnStreams -= 1 }
             do {
                 _ = try await conversationManager.setEffort(taskID: task.id, effort: selectedEffort)
-                _ = try await conversationManager.send(taskID: task.id, text: text, imageDataURLs: imageDataURLs, mode: conversationMode, modelID: selectedModelID.isEmpty ? nil : selectedModelID, statusBeforeSubmission: statusBeforeSubmission, onTurnStarting: {
+                _ = try await conversationManager.send(taskID: task.id, text: text, imageDataURLs: imageDataURLs, mode: conversationMode, modelID: selectedModelID.isEmpty ? nil : selectedModelID, statusBeforeSubmission: statusBeforeSubmission, contextPageIDs: annotationPageIDs, onTurnStarting: {
                     isResponding = true
                 }, onUpdate: { update in
                     switch update.type {
@@ -4141,6 +4231,8 @@ struct TaskConversationView: View {
                         } else {
                             activities.append(activity)
                         }
+                    case "chat_page_updated":
+                        refreshChatPageStatus()
                     case "diff":
                         break
                     case "history", "completed":
@@ -4336,9 +4428,10 @@ struct TaskConversationView: View {
 
     private func refreshGoalConversation() async {
         do {
-            let history = try await conversationManager.history(taskID: task.id) {
-                actionNotice = approvalNotice
-            }
+            let history = try await conversationManager.history(
+                taskID: task.id,
+                onActionRequest: { actionNotice = approvalNotice }
+            )
             messages = history.messages
             activities = history.activities
             providerBoundaries = history.providerBoundaries
@@ -4370,6 +4463,54 @@ struct TaskConversationView: View {
     private func refreshQueuedMessages() {
         queuedMessages = (try? conversationManager.queuedMessages(taskID: task.id)) ?? []
         answeredAsyncQuestionIDs = Set((try? conversationManager.answeredAsyncQuestionIDs(taskID: task.id)) ?? [])
+    }
+
+    private func refreshChatPageStatus() {
+        guard let chatManager = try? StandaloneChatManager(dataDirectory: ProcessInfo.processInfo.environment["PLAYHOUSE_DATA_DIRECTORY"]) else {
+            chatPagesByTurnID = [:]
+            return
+        }
+        chatPagesByTurnID = (try? chatManager.pageAssignmentsByTurnID()) ?? [:]
+    }
+
+    private func standaloneChatPageSeparator(before message: ConversationMessage) -> StandaloneChatPage? {
+        guard task.isStandaloneChat,
+              let turnID = message.turnID,
+              let page = chatPagesByTurnID[turnID],
+              let messageIndex = messages.firstIndex(where: { $0.id == message.id }) else { return nil }
+        let previousTurnID = messages[..<messageIndex].last(where: { $0.turnID != nil })?.turnID
+        guard previousTurnID.flatMap({ chatPagesByTurnID[$0]?.id }) != page.id else { return nil }
+        return page
+    }
+
+    /// Pages that the pending annotations quote from, excluding the page this turn already runs
+    /// in. Only standalone chat has pages, so task conversations always send an empty list.
+    private func standaloneChatPageIDs(for pendingAnnotations: [ConversationAnnotation]) -> [String] {
+        guard task.isStandaloneChat, !pendingAnnotations.isEmpty else { return [] }
+        let activePageID = messages.last(where: { $0.turnID != nil })?.turnID.flatMap { chatPagesByTurnID[$0]?.id }
+        var pageIDs: [String] = []
+        for annotation in pendingAnnotations {
+            guard let turnID = messages.first(where: { $0.id == annotation.messageID })?.turnID,
+                  let pageID = chatPagesByTurnID[turnID]?.id,
+                  pageID != activePageID, !pageIDs.contains(pageID) else { continue }
+            pageIDs.append(pageID)
+        }
+        return pageIDs
+    }
+
+    private func standaloneChatPageSeparator(_ page: StandaloneChatPage) -> some View {
+        HStack(spacing: 12) {
+            Rectangle().fill(Color.primary.opacity(0.13)).frame(height: 1)
+            Text(page.title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .accessibilityIdentifier("chat-page-separator")
+            Rectangle().fill(Color.primary.opacity(0.13)).frame(height: 1)
+        }
+        .padding(.vertical, 5)
+        .accessibilityElement(children: .contain)
     }
 
     private func queueDraftForAfterTurn() {
@@ -5368,7 +5509,15 @@ private struct SelectableAnnotationText: NSViewRepresentable {
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextView, context: Context) -> CGSize? {
         let width = max(40, proposal.width ?? 500)
         guard let renderedText = nsView.textStorage else { return nil }
-        let contentHeight = measuredTextHeight(for: renderedText, width: width)
+        // Laying the text out again is the costliest part of a transcript re-render, and its
+        // result only changes with the width or with the text, which `update` replaces.
+        let contentHeight: CGFloat
+        if let measured = context.coordinator.measuredHeight, measured.width == width {
+            contentHeight = measured.height
+        } else {
+            contentHeight = measuredTextHeight(for: renderedText, width: width)
+            context.coordinator.measuredHeight = (width, contentHeight)
+        }
         return CGSize(width: width, height: ceil(contentHeight) + 2 * nsView.textContainerInset.height + 2)
     }
 
@@ -5411,6 +5560,7 @@ private struct SelectableAnnotationText: NSViewRepresentable {
         view.textColor = textColor
         view.backgroundColor = .clear
         view.textStorage?.setAttributedString(value)
+        coordinator.measuredHeight = nil
         view.setSelectedRange(NSRange(location: 0, length: 0))
         coordinator.responseCommentContentDidChange()
     }
@@ -5449,6 +5599,7 @@ private struct SelectableAnnotationText: NSViewRepresentable {
         var responseCommentSourcePrefix: String
         weak var anchorView: NSTextView?
         var renderedKey = ""
+        var measuredHeight: (width: CGFloat, height: CGFloat)?
         private var responseCommentPopover: NSPopover?
         private var activeResponseCommentID: String?
         private var pendingResponseCommentSourceID: String?

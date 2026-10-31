@@ -94,9 +94,17 @@ enum PlayhouseBridgeDaemonMain {
     }
 
     /// This request's environment: the daemon's own, with the caller's session
-    /// values (its `PATH`, for instance) in place of the daemon's.
+    /// values (its `PATH`, for instance) in place of the daemon's. Note that the
+    /// caller (the CLI or the GUI app) already trimmed `request.environment` down
+    /// to the names it itself considered forwardable before this ever arrived —
+    /// see `BridgeContract.environmentNamesToForward`.
     static func environment(for request: BridgeRequest) -> [String: String] {
-        let callerSession = (request.environment ?? [:]).filter { BridgeContract.sessionEnvironmentNames.contains($0.key) }
+        let callerEnvironment = request.environment ?? [:]
+        let allowed = BridgeContract.environmentNamesToForward(
+            applicationIdentifier: PlayhouseAppIdentity.applicationIdentifier,
+            from: callerEnvironment
+        )
+        let callerSession = callerEnvironment.filter { allowed.contains($0.key) }
         return ProcessInfo.processInfo.environment.merging(callerSession) { _, caller in caller }
     }
 

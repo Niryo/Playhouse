@@ -22,6 +22,10 @@ import unittest
 import uuid
 from pathlib import Path
 
+# A CLI run inside a Playhouse conversation inherits the host app's bridge
+# socket; every harness subprocess must reach the daemon derived from this
+# run's service name instead.
+os.environ.pop("PLAYHOUSE_BRIDGE_SOCKET_PATH", None)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--cli", required=True, type=Path)
@@ -32,6 +36,8 @@ parser.add_argument("--legacy-store-seeder", required=True, type=Path)
 parser.add_argument("--case", action="append", default=[], dest="selected_cases")
 arguments = parser.parse_args()
 CONTRACT_PATH = Path(__file__).resolve().parent.parent / "Playhouse/BridgeTests/BridgeTestContracts.json"
+# Mirrors TurnOutcome.maxContinuations: private continuation/nudge turns per request.
+MAX_OUTCOME_CONTINUATIONS = 5
 
 
 class GitConfigReadBarrier:
@@ -700,7 +706,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             task = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         return task
 
-    def complete_fixture_turn(self, task_id, executable_name="codex-fixture", message="Complete this task."):
+    def complete_fixture_turn(self, task_id, executable_name="codex-fixture", message="Complete this task.", expected_status="Review"):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / executable_name
         hold_marker = Path(str(executable) + ".hold-release")
@@ -745,8 +751,82 @@ class PlayhouseBridgeTests(unittest.TestCase):
             hold_marker.unlink(missing_ok=True)
         result = self.assert_success(response)
         current, _ = self.call_cli("task", "get", task_id)
-        self.assertEqual(self.assert_success(current)["status"], "Review")
+        self.assertEqual(self.assert_success(current)["status"], expected_status)
         return result
+
+    def complete_standalone_chat_fixture_turn(self, chat_task_id, message, continues=True, new_title=None, executable_name="codex-fixture-chat", skip_close_turn=False):
+        """Drive one real provider turn on the hidden standalone chat task, simulating the
+        agent's mandatory `chat page close-turn` tool call instead of `task outcome`.
+        `skip_close_turn=True` simulates an agent that forgets to classify the turn, so the
+        missed-signal compliance tracking can be exercised."""
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / executable_name
+        hold_marker = Path(str(executable) + ".hold-release")
+        hold_marker.touch()
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        command = ["conversation", "send", chat_task_id, "--message", message]
+        active = Path(str(executable) + ".turn-active")
+        release = Path(str(executable) + ".turn-release")
+        active.unlink(missing_ok=True)
+        release.unlink(missing_ok=True)
+        process = self.start_cli(*command, extra_environment=environment)
+        try:
+            deadline = time.monotonic() + 90
+            close_turn_count = 0
+            while process.poll() is None and time.monotonic() < deadline:
+                if active.exists() and not release.exists():
+                    if not skip_close_turn:
+                        close_turn_args = [
+                            "chat", "page", "close-turn", chat_task_id,
+                            "--continues", "true" if continues else "false",
+                        ]
+                        if new_title:
+                            close_turn_args += ["--new-title", new_title]
+                        response, _ = self.call_cli(*close_turn_args, extra_environment=environment)
+                        self.assert_success(response)
+                        close_turn_count += 1
+                    release.write_text("Release the completed fixture turn.\n", encoding="utf-8")
+                time.sleep(0.02)
+            if not skip_close_turn:
+                self.assertGreater(close_turn_count, 0, "The fixture should hold the turn until its chat page close-turn signal.")
+            response, _ = self.finish_cli(process, command)
+        finally:
+            if process.poll() is None:
+                release.write_text("Release the fixture turn.\n", encoding="utf-8")
+                process.communicate(timeout=20)
+            active.unlink(missing_ok=True)
+            release.unlink(missing_ok=True)
+            hold_marker.unlink(missing_ok=True)
+        return self.assert_success(response)
+
+    def seed_legacy_standalone_chat_task(self, session_id="legacy-chat-session"):
+        """Recreate a standalone chat stored as a hidden board task, as before the split."""
+        repository_root = Path(__file__).resolve().parent.parent
+        executable = self.data_directory / "seed-legacy-standalone-chat-task"
+        subprocess.run(
+            [
+                # Self-contained: it declares the pre-split BoardTask itself, so compiling it
+                # against the current models would redeclare the entity.
+                "xcrun", "swiftc", "-parse-as-library", "-swift-version", "5", "-O",
+                str(repository_root / "scripts" / "seed-legacy-standalone-chat-task.swift"),
+                "-o", str(executable),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        result = subprocess.run(
+            [str(executable), str(self.data_directory), session_id],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip().splitlines()[-1]
 
     def seed_done_task_pull_request(self, task_id, number=123, repository_index=0):
         repository_root = Path(__file__).resolve().parent.parent
@@ -755,6 +835,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             [
                 "xcrun", "swiftc", "-module-name", "Playhouse",
                 str(repository_root / "Playhouse" / "App" / "BoardTask.swift"),
+                str(repository_root / "Playhouse" / "App" / "ConversationSubject.swift"),
                 str(repository_root / "scripts" / "seed-task-pr-link.swift"),
                 "-o", str(executable),
             ],
@@ -774,6 +855,12 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         self.assertIn(f"Seeded linked PR #{number}", result.stdout)
         return seeded_url
+
+    def wait_for_marker(self, marker, present, message, timeout=10):
+        deadline = time.monotonic() + timeout
+        while marker.exists() != present and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(marker.exists(), present, message)
 
     def start_progress_fixture_turn(self, task_id, fixture_name, answers=()):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -852,6 +939,648 @@ class PlayhouseBridgeTests(unittest.TestCase):
             expected_status=expected_status,
         )
         return response
+
+    # case-contract: test_standalone_chat_legacy_hidden_task_migrates | A standalone chat left in the store as a hidden board task is converted once into its own model: it keeps its ID so the existing conversation transcript stays attached, keeps its provider session, carries its in-flight turn state across with the status message and progress report that explain it, is removed from the board so it never lists or resolves as a task, and reopening the chat returns that same migrated chat rather than creating a second one.
+    def test_standalone_chat_legacy_hidden_task_migrates(self):
+        # The seeded row is a real hidden board task, exactly as the old design stored it.
+        # Reading the board is itself a migration trigger, so the first read already asserts
+        # the converted state rather than the pre-migration one.
+        legacy_id = self.seed_legacy_standalone_chat_task(session_id="legacy-chat-session")
+
+        opened = self.assert_success(self.call_cli("chat", "open")[0])
+        self.assertEqual(
+            opened["id"], legacy_id,
+            "The migrated chat must keep its ID so its existing transcript stays attached.",
+        )
+        self.assertEqual(opened["claudeSessionID"], "legacy-chat-session", "The chat's provider session must survive migration.")
+        # The turn state must arrive with its explanation, not just the raw status.
+        self.assertEqual(opened["status"], "In Progress")
+        self.assertEqual(opened["statusMessage"], "Carried from the legacy chat task.")
+        self.assertEqual(opened["progressType"], "searching")
+        self.assertEqual(opened["progressLabel"], "Searching")
+        self.assertEqual(opened["progressDetail"], "Looking into volcanoes")
+        self.assertEqual(opened["repositoryWorktrees"], [])
+
+        self.assertEqual(
+            self.assert_success(self.call_cli("task", "list")[0])["tasks"], [],
+            "The migrated chat must no longer be a board task.",
+        )
+        response, _ = self.call_cli("task", "get", legacy_id, expected_status=3)
+        self.assert_failure(response, "not_found")
+
+        reopened = self.assert_success(self.call_cli("chat", "open")[0])
+        self.assertEqual(reopened["id"], legacy_id, "Migration must run once, not create a second chat.")
+
+    # case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, and the Changes sidebar. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state. A chat turn never triggers the private task-outcome reminders, because the chat is told not to report an outcome; its developer instructions teach it that task language means Playhouse's own board and give it the Playhouse task CLI, and they never ask it to write the page title into its visible answer.
+    def test_standalone_chat_separate_model_and_pages_round_trip(self):
+        opened = self.assert_success(self.call_cli("chat", "open")[0])
+        self.assertEqual(opened["title"], "Chat")
+        self.assertEqual(opened["repositoryWorktrees"], [])
+        self.assertEqual(opened["workspaceRoots"], [])
+        chat_task_id = opened["id"]
+
+        reopened = self.assert_success(self.call_cli("chat", "open")[0])
+        self.assertEqual(reopened["id"], chat_task_id, "Opening chat twice must reuse the same chat.")
+
+        tasks = self.assert_success(self.call_cli("task", "list")[0])["tasks"]
+        self.assertFalse(
+            any(task["id"] == chat_task_id for task in tasks),
+            "The standalone chat must never appear in board.list/task.list.",
+        )
+        # The chat is its own model, not a task, so task commands cannot reach it at all.
+        # This is the separation itself, not a filter that could be forgotten somewhere.
+        response, _ = self.call_cli("task", "get", chat_task_id, expected_status=3)
+        self.assert_failure(response, "not_found")
+        response, _ = self.call_cli("task", "move", chat_task_id, "Done", expected_status=3)
+        self.assert_failure(response, "not_found")
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        self.assertIsNone(self.assert_success(self.call_cli("settings", "get")[0])["defaultParentFolder"])
+
+        kyoto = self.assert_success(self.call_cli("chat", "page", "new", "--title", "Trip to Kyoto")[0])["page"]
+        self.assertEqual(kyoto["title"], "Trip to Kyoto")
+        self.assertEqual(kyoto["messageCount"], 0)
+
+        continued = self.assert_success(
+            self.call_cli("chat", "page", "close-turn", chat_task_id, "--continues", "true")[0]
+        )["page"]
+        self.assertEqual(continued["id"], kyoto["id"], "Continuing must append to the already-active page.")
+
+        recipes = self.assert_success(
+            self.call_cli(
+                "chat", "page", "close-turn", chat_task_id,
+                "--continues", "false", "--new-title", "Dinner recipes",
+            )[0]
+        )["page"]
+        self.assertNotEqual(recipes["id"], kyoto["id"], "A topic change must start a new page.")
+        self.assertEqual(recipes["title"], "Dinner recipes")
+
+        self.call_cli(
+            "chat", "page", "close-turn", chat_task_id, "--continues", "false",
+            expected_status=2,
+        )
+
+        page_listing = self.assert_success(self.call_cli("chat", "page", "list")[0])
+        pages = page_listing["pages"]
+        self.assertEqual({page["id"] for page in pages}, {kyoto["id"], recipes["id"]})
+        archive_directory = self.data_directory / "StandaloneChat-Pages"
+        self.assertEqual(page_listing["archiveDirectory"], str(archive_directory))
+        self.assertEqual(
+            {path.stem for path in archive_directory.glob("*.json")},
+            {kyoto["id"], recipes["id"]},
+            "Every page should have a separate JSON file with its page ID as the filename.",
+        )
+        # Recreate the pre-archive database state: pages exist, but the one-time
+        # export migration marker does not. The next manager open must backfill.
+        with sqlite3.connect(self.data_directory / "StandaloneChat-v1.sqlite") as connection:
+            connection.execute("DELETE FROM chat_archive_migrations WHERE version = 1")
+        (archive_directory / f"{kyoto['id']}.json").unlink()
+        self.assert_success(self.call_cli("chat", "page", "list")[0])
+        self.assertTrue((archive_directory / f"{kyoto['id']}.json").is_file(), "Opening a pre-archive database should backfill missing page files once.")
+        for page in pages:
+            archive = json.loads((archive_directory / f"{page['id']}.json").read_text(encoding="utf-8"))
+            self.assertEqual(archive["page"]["title"], page["title"])
+            self.assertEqual(archive["messages"], [])
+
+        matches = self.assert_success(self.call_cli("chat", "page", "search", "Kyoto")[0])["matches"]
+        self.assertTrue(
+            any(match["page"]["id"] == kyoto["id"] for match in matches),
+            "Searching the old page's title should find it even after a newer page is active.",
+        )
+
+        read_back = self.assert_success(self.call_cli("chat", "page", "read", kyoto["id"])[0])
+        self.assertEqual(read_back["page"]["id"], kyoto["id"])
+        self.assertEqual(read_back["messages"], [])
+
+        # A real provider turn that continues the active page ("Dinner recipes") must persist
+        # both the user's message and the assistant's reply into that page, not just bookkeeping.
+        self.complete_standalone_chat_fixture_turn(chat_task_id, "What's a good side dish?", continues=True, executable_name="codex-fixture-chat-unique-turns-hold-release")
+        recipes_archive_path = archive_directory / f"{recipes['id']}.json"
+        recipes_archive = json.loads(recipes_archive_path.read_text(encoding="utf-8"))
+        self.assertEqual(recipes_archive["page"]["title"], "Dinner recipes")
+        self.assertTrue(any(message["text"] == "What's a good side dish?" for message in recipes_archive["messages"]))
+        recipes_messages = self.assert_success(self.call_cli("chat", "page", "read", recipes["id"])[0])["messages"]
+        self.assertTrue(
+            any(message["role"] == "user" and message["text"] == "What's a good side dish?" for message in recipes_messages),
+            "The user's message should be persisted on the page the agent's close-turn call selected.",
+        )
+        self.assertTrue(
+            any(message["role"] == "assistant" and message["text"] for message in recipes_messages),
+            "The assistant's reply should also be persisted on that page.",
+        )
+        # A send moves the chat's own turn state away from Backlog. That state used to belong to
+        # a hidden BoardTask, which is how the chat leaked onto the visible Kanban board; it now
+        # lives on the chat's own model, so no status value can put it in a board column.
+        chat_turn_state = self.assert_success(self.call_cli("chat", "open")[0])["status"]
+        self.assertIn(chat_turn_state, ["In Progress", "Waiting Response"], "A completed send should move the chat's own turn state.")
+        self.assertEqual(
+            self.assert_success(self.call_cli("task", "list")[0])["tasks"], [],
+            "The standalone chat must stay absent from task/board listing in every turn state.",
+        )
+        # The chat is told never to report a task outcome, so chasing one with private
+        # reminders can only spend extra provider turns and bury the user's next message in
+        # a reminder turn that answers nobody.
+        chat_fixture_history = json.loads(
+            Path(str(self.data_directory / "codex-fixture-chat-unique-turns-hold-release") + ".history").read_text(encoding="utf-8")
+        )
+        self.assertTrue(chat_fixture_history.get("turns"), "The chat fixture should have recorded its turns.")
+        self.assertFalse(
+            any("outcome reminder" in (turn.get("userMessage") or "").lower() for turn in chat_fixture_history["turns"]),
+            "A standalone chat turn must not trigger the private task-outcome reminders.",
+        )
+        # The chat must know it is Playhouse's own chat and own the board through the CLI,
+        # instead of reaching for an unrelated task tool that the user can never see.
+        chat_instructions = chat_fixture_history.get("threadStartDeveloperInstructions") or ""
+        self.assertIn("task create", chat_instructions, "The chat must be taught the Playhouse task CLI.")
+        self.assertIn("they always mean Playhouse", chat_instructions)
+        # Page titles reach the user as transcript separators, parsed from close-turn.
+        # Assert the prohibition positively too: pinning only the old wording would let the
+        # instruction come back phrased differently.
+        self.assertIn("never write the page name", chat_instructions)
+        self.assertNotIn("Page: <current page title>", chat_instructions)
+        recipes_read = self.assert_success(self.call_cli("chat", "page", "read", recipes["id"])[0])
+        self.assertEqual(recipes_read["filePath"], str(recipes_archive_path))
+        recipes_archive = json.loads(Path(recipes_read["filePath"]).read_text(encoding="utf-8"))
+        self.assertEqual(recipes_archive["page"]["title"], "Dinner recipes")
+        self.assertEqual(
+            [message["text"] for message in recipes_archive["messages"]],
+            [message["text"] for message in recipes_messages],
+            "The per-page file should contain the current persisted transcript.",
+        )
+        self.assertEqual(
+            self.assert_success(self.call_cli("chat", "page", "read", kyoto["id"])[0])["messages"], [],
+            "Messages from the recipes turn must not leak onto an unrelated page.",
+        )
+
+        # The compliant turn above must be reflected as compliant in chat status.
+        status = self.assert_success(self.call_cli("chat", "status")[0])
+        self.assertFalse(status["missedPreviousPageSignal"], "A turn that called close-turn must not be flagged as missed.")
+        self.assertEqual(status["activePage"]["id"], recipes["id"])
+
+        # Standalone chat can never gain a repository/worktree, regardless of who tries.
+        self.assert_failure(
+            self.call_cli("task", "repository", "add", chat_task_id, "--repo", str(self.primary), expected_status=2)[0],
+            "invalid_argument",
+        )
+
+        # The primary agent omits close-turn; the cheap, background Codex fallback must
+        # classify the distinct topic and move that turn onto a titled page.
+        classifier_executable = self.data_directory / "codex-fixture-chat-unique-turns-hold-release"
+        classifier_hold = Path(str(classifier_executable) + ".hold-classifier")
+        classifier_active = Path(str(classifier_executable) + ".classifier-active")
+        classifier_release = Path(str(classifier_executable) + ".classifier-release")
+        classifier_active.unlink(missing_ok=True)
+        classifier_release.unlink(missing_ok=True)
+        classifier_hold.touch()
+        self.complete_standalone_chat_fixture_turn(
+            chat_task_id,
+            "Tell me about Saturn's rings",
+            skip_close_turn=True,
+            executable_name="codex-fixture-chat-unique-turns-hold-release",
+        )
+        classifier_command = ("chat", "status")
+        classifier_process = self.start_cli(
+            *classifier_command,
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not classifier_active.exists():
+            time.sleep(0.02)
+        self.assertTrue(classifier_active.exists(), "The fixture should hold the fallback after the primary send returns.")
+
+        followup_command = ("conversation", "send", chat_task_id, "--message", "One more thought about Saturn")
+        followup_turn_hold = Path(str(classifier_executable) + ".hold-release")
+        followup_turn_active = Path(str(classifier_executable) + ".turn-active")
+        followup_turn_release = Path(str(classifier_executable) + ".turn-release")
+        followup_turn_active.unlink(missing_ok=True)
+        followup_turn_release.unlink(missing_ok=True)
+        followup_turn_hold.touch()
+        followup_process = self.start_cli(
+            *followup_command,
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )
+        try:
+            time.sleep(0.2)
+            self.assertIsNone(followup_process.poll(), "A follow-up turn must wait until the pending page decision finishes.")
+            pending_history = json.loads(Path(str(classifier_executable) + ".history").read_text(encoding="utf-8"))
+            self.assertFalse(
+                any((turn.get("userMessage") or "").startswith("One more thought about Saturn") for turn in pending_history.get("turns", [])),
+                "The next provider turn must not overtake the held page classification.",
+            )
+        finally:
+            classifier_release.write_text("Release classifier.\n", encoding="utf-8")
+        classifier_response, _ = self.finish_cli(classifier_process, classifier_command)
+        fallback_status = self.assert_success(classifier_response)
+        fallback_archive_path = archive_directory / f"{fallback_status['activePage']['id']}.json"
+        fallback_archive = json.loads(fallback_archive_path.read_text(encoding="utf-8"))
+        self.assertEqual(fallback_archive["page"]["title"], "Saturn Rings")
+        self.assertTrue(any(message["text"] == "Tell me about Saturn's rings" for message in fallback_archive["messages"]))
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not followup_turn_active.exists():
+            time.sleep(0.02)
+        self.assertTrue(followup_turn_active.exists(), "The queued follow-up should reach the fixture after classification resolves.")
+        # Queuing is a conversation action, so it must resolve the chat and not look for a
+        # board task. The turn is held active here, which is exactly when a follow-up queues.
+        queued_in_chat = self.assert_success(
+            self.call_cli("conversation", "queue", chat_task_id, "--message", "Queue this for after the chat turn.")[0]
+        )
+        self.assertEqual(queued_in_chat["text"], "Queue this for after the chat turn.")
+        self.assertEqual(queued_in_chat["taskID"], chat_task_id)
+        self.assert_success(self.call_cli("conversation", "queue-remove", chat_task_id, queued_in_chat["id"])[0])
+        # Selecting the provider the chat already uses is a no-op that must return the chat.
+        unchanged_provider = self.assert_success(
+            self.call_cli("conversation", "provider", chat_task_id, "set", "codex")[0]
+        )
+        self.assertEqual(unchanged_provider["id"], chat_task_id)
+        self.assertEqual(unchanged_provider["conversationProvider"], "codex")
+        followup_turn_release.write_text("Release follow-up turn.\n", encoding="utf-8")
+        followup_response, _ = self.finish_cli(followup_process, followup_command)
+        followup_turn_hold.unlink(missing_ok=True)
+        followup_turn_active.unlink(missing_ok=True)
+        followup_turn_release.unlink(missing_ok=True)
+        self.assert_success(followup_response)
+        followup_status = self.assert_success(self.call_cli(
+            "chat", "status",
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )[0])
+        self.assertFalse(followup_status["missedPreviousPageSignal"])
+        self.assertEqual(followup_status["activePage"]["title"], "Saturn Rings")
+
+        self.assertFalse(fallback_status["missedPreviousPageSignal"], "The background fallback should clear the missed-signal warning after applying its classification.")
+        self.assertEqual(fallback_status["activePage"]["title"], "Saturn Rings", "The fallback title should appear as soon as its result is persisted.")
+        classifier_history = json.loads(Path(str(classifier_executable) + ".history").read_text(encoding="utf-8"))
+        classifier_turns = classifier_history.get("turns", [])
+        classifier_turns = [turn for turn in classifier_turns if (turn.get("userMessage") or "").startswith("Classify the latest user message for Playhouse's continuous chat page index.")]
+        self.assertEqual(len(classifier_turns), 3, "The fallback should reject one malformed result, retry, and classify the held follow-up.")
+        classifier_turn = classifier_turns[-1]
+        self.assertEqual(classifier_turn.get("modelID"), "gpt-6-luna", "The Codex fallback should use Luna.")
+        self.assertEqual(classifier_turn.get("reasoningEffort"), "low", "The fallback must use low effort.")
+        self.assertIn("Saturn Rings", self.assert_success(self.call_cli("chat", "page", "list")[0])["pages"][0]["title"])
+        fallback_read = self.assert_success(self.call_cli("chat", "page", "read", fallback_status["activePage"]["id"])[0])
+        fallback_archive = json.loads(Path(fallback_read["filePath"]).read_text(encoding="utf-8"))
+        self.assertEqual(fallback_archive["page"]["title"], "Saturn Rings")
+        missed_messages = fallback_read["messages"]
+        self.assertEqual([message["text"] for message in fallback_archive["messages"]], [message["text"] for message in missed_messages])
+        self.assertTrue(
+            any(message["role"] == "user" and message["text"] == "Tell me about Saturn's rings" for message in missed_messages),
+            "The fallback-classified turn's messages must be moved onto its new page.",
+        )
+        self.assertFalse(
+            any(message["role"] == "user" and message["text"] == "Tell me about Saturn's rings"
+                for message in self.assert_success(self.call_cli("chat", "page", "read", recipes["id"])[0])["messages"]),
+            "The fallback-classified turn must not remain duplicated on the prior page.",
+        )
+
+        # Compliance resumes once the agent calls close-turn again on a later turn.
+        self.complete_standalone_chat_fixture_turn(
+            chat_task_id, "Thanks, that's all for now.", continues=True,
+            executable_name="codex-fixture-chat-unique-turns-hold-release",
+        )
+        recovered_status = self.assert_success(self.call_cli(
+            "chat", "status",
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )[0])
+        self.assertFalse(recovered_status["missedPreviousPageSignal"], "Compliance should clear once close-turn is called again.")
+        recovered_messages = self.assert_success(self.call_cli("chat", "page", "read", fallback_status["activePage"]["id"])[0])["messages"]
+        ordered = [message["text"] for message in recovered_messages]
+        self.assertEqual(ordered, [
+            "Tell me about Saturn's rings", "Answers received: Blue / fixture-secret.",
+            "One more thought about Saturn", "Answers received: Blue / fixture-secret.",
+            "Thanks, that's all for now.", "Answers received: Blue / fixture-secret.",
+        ], "After fallback moves a turn, a later append must follow it in transcript order.")
+
+        # Codex answers visible history from its own thread, and page sessions rotate, so the
+        # transcript must restore earlier pages from the local archive instead of losing them.
+        visible = self.assert_success(self.call_cli(
+            "conversation", "history", chat_task_id,
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )[0])
+        visible_texts = [message["text"] for message in visible["messages"]]
+        self.assertTrue(
+            any(text.endswith("What's a good side dish?") for text in visible_texts),
+            "An earlier Codex page must stay visible after its page session rotated.",
+        )
+        self.assertTrue(
+            any(text.endswith("Thanks, that's all for now.") for text in visible_texts),
+            "The live Codex page must stay visible alongside the restored earlier pages.",
+        )
+        # A chat page only belongs to the standalone chat, never to a board task.
+        board_task = self.create_task("Context page rejection")
+        self.assert_failure(self.call_cli(
+            "conversation", "send", board_task["id"], "--message", "Hello",
+            "--context-page", fallback_status["activePage"]["id"], expected_status=2,
+        )[0], "invalid_argument")
+
+        # An explicit page start while the fallback is in flight supersedes its
+        # eventual Neptune classification without moving the old turn.
+        neptune_classifier_hold = Path(str(classifier_executable) + ".hold-neptune-classifier")
+        neptune_classifier_hold.touch()
+        self.complete_standalone_chat_fixture_turn(
+            chat_task_id, "Tell me about Neptune", skip_close_turn=True,
+            executable_name="codex-fixture-chat-unique-turns-hold-release",
+        )
+        classifier_process = self.start_cli(
+            "chat", "status",
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not classifier_active.exists():
+            time.sleep(0.02)
+        self.assertTrue(classifier_active.exists(), "The second fallback should be held before the explicit page start.")
+        explicit_page = self.assert_success(self.call_cli("chat", "page", "new", "--title", "Explicit topic")[0])["page"]
+        self.assertEqual(self.assert_success(self.call_cli("chat", "page", "list")[0])["pages"][0]["id"], explicit_page["id"])
+        classifier_release.write_text("Release classifier.\n", encoding="utf-8")
+        classifier_response, _ = self.finish_cli(classifier_process, ("chat", "status"))
+        self.assert_success(classifier_response)
+        final_status = self.assert_success(self.call_cli(
+            "chat", "status",
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )[0])
+        self.assertFalse(final_status["missedPreviousPageSignal"], "Explicit page creation should clear the missed-signal warning.")
+        self.assertEqual(final_status["activePage"]["id"], explicit_page["id"], "A stale classifier must not replace an explicit page start.")
+        self.assertEqual(final_status["activePage"]["title"], "Explicit topic")
+        explicit_messages = self.assert_success(self.call_cli("chat", "page", "read", explicit_page["id"])[0])["messages"]
+        self.assertEqual(explicit_messages, [], "The missed turn remains archived on its original page.")
+        old_page_messages = self.assert_success(self.call_cli("chat", "page", "read", fallback_status["activePage"]["id"])[0])["messages"]
+        self.assertTrue(any(message["text"] == "Tell me about Neptune" for message in old_page_messages))
+        self.assertTrue(any(message["role"] == "assistant" for message in old_page_messages[-1:]))
+
+        # Exhausted helper retries keep the pending turn authoritative and prevent
+        # a later provider turn from overtaking it. Once the helper is healthy, retry.
+        classifier_failure = Path(str(classifier_executable) + ".fail-classifier")
+        classifier_failure.touch()
+        self.complete_standalone_chat_fixture_turn(
+            chat_task_id, "Tell me about Mars", skip_close_turn=True,
+            executable_name="codex-fixture-chat-unique-turns-hold-release",
+        )
+        failed_status = self.assert_success(self.call_cli(
+            "chat", "status",
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )[0])
+        self.assertTrue(failed_status["missedPreviousPageSignal"], "An invalid fallback response must leave the page decision pending.")
+        blocked_response, _ = self.call_cli(
+            "conversation", "send", chat_task_id, "--message", "Do not overtake Mars",
+            expected_status=1,
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )
+        self.assert_failure(blocked_response, "operation_failed")
+        blocked_history = json.loads(Path(str(classifier_executable) + ".history").read_text(encoding="utf-8"))
+        self.assertFalse(
+            any((turn.get("userMessage") or "") == "Do not overtake Mars" for turn in blocked_history.get("turns", [])),
+            "An unresolved page decision must prevent the rejected prompt from reaching Codex.",
+        )
+        classifier_failure.unlink()
+        recovered_status = self.assert_success(self.call_cli(
+            "chat", "status",
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )[0])
+        self.assertFalse(recovered_status["missedPreviousPageSignal"])
+        self.assertEqual(recovered_status["activePage"]["title"], "Mars")
+        self.complete_standalone_chat_fixture_turn(
+            chat_task_id, "Another thought about Mars", continues=True,
+            executable_name="codex-fixture-chat-unique-turns-hold-release",
+        )
+        recovered_messages = self.assert_success(self.call_cli("chat", "page", "read", recovered_status["activePage"]["id"])[0])["messages"]
+        self.assertFalse(any(message["text"] == "Do not overtake Mars" for message in recovered_messages))
+        self.assertIn("Another thought about Mars", [message["text"] for message in recovered_messages])
+
+    # case-contract: test_standalone_chat_page_sessions_isolate_context | Each standalone chat page is its own provider session: the first turn of a page starts a fresh session carrying the system prompt plus only that page's own turns, later turns on that page resume it without repeating the page context, and a different page never shares it, so an earlier page's turns never reach a later page. An annotation that quotes an earlier page carries just that page into the current turn, and rotating sessions still leaves every page's messages visible in the transcript.
+    def test_standalone_chat_page_sessions_isolate_context(self):
+        self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        executable = self.data_directory / "claude-fixture-chat-page-sessions"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        chat_id = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["id"]
+        history_path = Path(str(executable) + ".history")
+
+        def wait_for_page(title):
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+                if not status["missedPreviousPageSignal"] and status["activePage"]["title"] == title:
+                    return status
+                time.sleep(0.1)
+            self.fail(f"The chat never settled on page {title!r}.")
+
+        def send(message, *extra):
+            self.assert_success(self.call_cli(
+                "conversation", "send", chat_id, "--message", message, *extra, extra_environment=environment
+            )[0])
+
+        def answer_turns():
+            turns = json.loads(history_path.read_text(encoding="utf-8"))["turns"]
+            return [
+                turn for turn in turns
+                if not (turn.get("userText") or "").startswith("Classify the latest user message")
+            ]
+
+        def turn_for(message):
+            matches = [turn for turn in answer_turns() if (turn.get("userText") or "").endswith(message)]
+            self.assertTrue(matches, f"The fixture never received a turn ending with {message!r}.")
+            return matches[-1]
+
+        send("Tell me about volcanoes")
+        volcanoes = wait_for_page("Volcanoes")["activePage"]
+        send("Tell me about Saturn's rings")
+        saturn = wait_for_page("Saturn Rings")["activePage"]
+        self.assertNotEqual(saturn["id"], volcanoes["id"])
+        send("One more thought about Saturn")
+        wait_for_page("Saturn Rings")
+
+        first = turn_for("Tell me about volcanoes")
+        second = turn_for("Tell me about Saturn's rings")
+        third = turn_for("One more thought about Saturn")
+        # The turn that opens a page still answers in the page it was sent into; only once the
+        # classifier moves it does the next turn get that new page's own session.
+        self.assertEqual(first["sessionID"], second["sessionID"], "One page answers in one session.")
+        self.assertNotEqual(
+            third["sessionID"], first["sessionID"],
+            "A different page must never share another page's provider session.",
+        )
+        for turn in (first, third):
+            self.assertFalse(turn["resumed"], "A page's first turn starts that page's own session.")
+            instructions = turn["arguments"][turn["arguments"].index("--append-system-prompt") + 1]
+            self.assertIn(
+                "chat page close-turn", instructions,
+                "Every page session must carry the standalone chat system prompt.",
+            )
+        self.assertTrue(second["resumed"], "A turn sent into an existing page resumes its session.")
+        self.assertIn(
+            "Tell me about Saturn's rings", third["userText"],
+            "A fresh page session is seeded with its own page's turns.",
+        )
+        self.assertNotIn(
+            "Tell me about volcanoes", third["userText"],
+            "An earlier page must never be sent as context for a later page.",
+        )
+        self.assertNotIn("Tell me about volcanoes", second["userText"])
+
+        # A later turn on the same page resumes its session without repeating the page block.
+        send("Another thought about Mars")
+        wait_for_page("Saturn Rings")
+        fourth = turn_for("Another thought about Mars")
+        self.assertEqual(fourth["sessionID"], third["sessionID"], "The same page keeps one session.")
+        self.assertTrue(fourth["resumed"], "A continuing turn resumes the page's session.")
+        self.assertNotIn(
+            "<playhouse-handoff-context>", fourth["userText"],
+            "A resumed page session already holds its page, so it must not repeat the context block.",
+        )
+
+        # An annotation that quotes an earlier page carries only that page into this turn.
+        send("What did we say before?", "--context-page", volcanoes["id"])
+        wait_for_page("Saturn Rings")
+        annotated = turn_for("What did we say before?")
+        self.assertIn(
+            "Tell me about volcanoes", annotated["userText"],
+            "A page referenced by an annotation travels with the turn that quotes it.",
+        )
+
+        # Rotating sessions must not hide earlier pages from the visible transcript.
+        visible = self.assert_success(self.call_cli("conversation", "history", chat_id, extra_environment=environment)[0])
+        texts = [message["text"] for message in visible["messages"]]
+        self.assertTrue(any(text.endswith("Tell me about volcanoes") for text in texts))
+        self.assertTrue(any(text.endswith("One more thought about Saturn") for text in texts))
+
+    # case-contract: test_standalone_chat_claude_fallback_classifier | When a standalone chat uses Claude, a missed page signal invokes the Haiku helper at low effort; a malformed result is rejected and retried, an unrelated later question and its assistant reply move to a new titled page, the UI keeps page evaluation visually quiet without blocking the primary answer, updates the transcript separator when classification completes, and holds a following send until the decision resolves, and appends the related follow-up in chronological order. The Claude-specific model and effort arguments are verified through the real CLI/XPC path. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes.
+    def test_standalone_chat_claude_fallback_classifier(self):
+        self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        executable = self.data_directory / "claude-fixture-chat-page-fallback"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        chat = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])
+        chat_id = chat["id"]
+        first = self.assert_success(self.call_cli("chat", "page", "new", "--title", "General chat", extra_environment=environment)[0])["page"]
+
+        def wait_for_page(title):
+            deadline = time.monotonic() + 30
+            status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+            while time.monotonic() < deadline:
+                if not status["missedPreviousPageSignal"] and status["activePage"]["title"] == title:
+                    return status
+                time.sleep(0.1)
+                status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+            self.fail(f"Claude fallback did not resolve the active page as {title!r}: {status!r}")
+
+        classifier_hold = Path(str(executable) + ".hold-classifier")
+        classifier_active = Path(str(executable) + ".classifier-active")
+        classifier_release = Path(str(executable) + ".classifier-release")
+        classifier_active.unlink(missing_ok=True)
+        classifier_release.unlink(missing_ok=True)
+        classifier_hold.touch()
+        self.assert_success(self.call_cli(
+            "conversation", "send", chat_id, "--message", "Tell me about volcanoes", extra_environment=environment
+        )[0])
+        classifier_command = ("chat", "status")
+        classifier_process = self.start_cli(*classifier_command, extra_environment=environment)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not classifier_active.exists():
+            time.sleep(0.02)
+        self.assertTrue(classifier_active.exists(), "Claude send should return while Haiku classification is held in the background.")
+        queued_turn = ("conversation", "send", chat_id, "--message", "Tell me about Saturn's rings")
+        queued_process = self.start_cli(*queued_turn, extra_environment=environment)
+        try:
+            time.sleep(0.2)
+            self.assertIsNone(queued_process.poll(), "Claude should hold a subsequent turn behind pending page resolution.")
+            pending_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+            self.assertFalse(
+                any((turn.get("userText") or "").startswith("Tell me about Saturn's rings") for turn in pending_history.get("turns", [])),
+                "A queued Claude turn must not reach its provider before the page decision is persisted.",
+            )
+        finally:
+            classifier_release.write_text("Release classifier.\n", encoding="utf-8")
+        classifier_response, _ = self.finish_cli(classifier_process, classifier_command)
+        classifier_status = self.assert_success(classifier_response)
+        self.assertFalse(classifier_status["missedPreviousPageSignal"])
+        queued_result, _ = self.finish_cli(queued_process, queued_turn)
+        self.assert_success(queued_result)
+        second_status = wait_for_page("Saturn Rings")
+        self.assertNotEqual(second_status["activePage"]["id"], first["id"], "An unrelated turn should start a Claude-classified page.")
+        self.assertEqual(self.assert_success(self.call_cli("chat", "page", "list", extra_environment=environment)[0])["pages"][1]["title"], "Volcanoes")
+        self.assert_success(self.call_cli(
+            "conversation", "send", chat_id, "--message", "One more thought about Saturn", extra_environment=environment
+        )[0])
+        third_status = wait_for_page("Saturn Rings")
+        self.assertEqual(third_status["activePage"]["id"], second_status["activePage"]["id"], "The related follow-up should continue the Saturn page.")
+        first_messages = self.assert_success(self.call_cli("chat", "page", "read", first["id"], extra_environment=environment)[0])["messages"]
+        second_messages = self.assert_success(self.call_cli("chat", "page", "read", third_status["activePage"]["id"], extra_environment=environment)[0])["messages"]
+        self.assertEqual(
+            [message["text"] for message in second_messages],
+            ["Tell me about Saturn's rings", "OK.", "One more thought about Saturn", "OK."],
+            "A later appended turn must follow messages moved by the Claude fallback.",
+        )
+        self.assertTrue(any(message["text"] == "Tell me about volcanoes" for message in first_messages))
+        self.assertTrue(any(message["text"] == "Tell me about Saturn's rings" for message in second_messages))
+        self.assertFalse(any(message["text"] == "Tell me about Saturn's rings" for message in first_messages))
+        history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        classification_turns = [turn for turn in history["turns"] if (turn.get("userText") or "").startswith("Classify the latest user message for Playhouse's continuous chat page index.")]
+        self.assertEqual(len(classification_turns), 4, "The fallback should retry one malformed result and classify a later follow-up.")
+        for turn in classification_turns:
+            self.assertEqual(turn["effort"], "low", "Claude fallback must set low effort.")
+            self.assertEqual(turn["arguments"][turn["arguments"].index("--model") + 1], "haiku", "Claude fallback must use Haiku.")
+
+        classifier_hold.touch()
+        self.assert_success(self.call_cli(
+            "conversation", "send", chat_id, "--message", "Tell me about Neptune", extra_environment=environment
+        )[0])
+        classifier_process = self.start_cli("chat", "status", extra_environment=environment)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not classifier_active.exists():
+            time.sleep(0.02)
+        self.assertTrue(classifier_active.exists(), "The Claude fallback should be pending when the explicit page starts.")
+        explicit_page = self.assert_success(self.call_cli(
+            "chat", "page", "new", "--title", "Explicit topic", extra_environment=environment
+        )[0])["page"]
+        self.assertEqual(self.assert_success(self.call_cli("chat", "page", "list", extra_environment=environment)[0])["pages"][0]["id"], explicit_page["id"])
+        classifier_release.write_text("Release classifier.\n", encoding="utf-8")
+        classifier_response, _ = self.finish_cli(classifier_process, ("chat", "status"))
+        self.assert_success(classifier_response)
+        final_status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+        self.assertFalse(final_status["missedPreviousPageSignal"], "Explicit page creation should clear the missed-signal warning.")
+        self.assertEqual(final_status["activePage"]["id"], explicit_page["id"])
+        self.assertEqual(final_status["activePage"]["title"], "Explicit topic")
+        self.assertEqual(self.assert_success(self.call_cli("chat", "page", "read", explicit_page["id"], extra_environment=environment)[0])["messages"], [])
+        old_page_messages = self.assert_success(self.call_cli("chat", "page", "read", second_status["activePage"]["id"], extra_environment=environment)[0])["messages"]
+        self.assertTrue(any(message["text"] == "Tell me about Neptune" for message in old_page_messages))
+        self.assertTrue(any(message["role"] == "assistant" and message["text"] == "OK." for message in old_page_messages))
+
+        classifier_failure = Path(str(executable) + ".fail-classifier")
+        classifier_failure.touch()
+        self.assert_success(self.call_cli(
+            "conversation", "send", chat_id, "--message", "Tell me about Mars", extra_environment=environment
+        )[0])
+        failed_status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+        self.assertTrue(failed_status["missedPreviousPageSignal"], "Invalid Haiku responses must leave the classification pending.")
+        blocked_response, _ = self.call_cli(
+            "conversation", "send", chat_id, "--message", "Do not overtake Mars",
+            expected_status=1, extra_environment=environment,
+        )
+        self.assert_failure(blocked_response, "operation_failed")
+        blocked_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        self.assertFalse(
+            any((turn.get("userText") or "") == "Do not overtake Mars" for turn in blocked_history.get("turns", [])),
+            "An unresolved page decision must prevent the rejected prompt from reaching Claude.",
+        )
+        classifier_failure.unlink()
+        recovered_status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+        self.assertFalse(recovered_status["missedPreviousPageSignal"])
+        self.assertEqual(recovered_status["activePage"]["title"], "Mars")
+        self.assert_success(self.call_cli(
+            "conversation", "send", chat_id, "--message", "Another thought about Mars", extra_environment=environment
+        )[0])
+        recovered_messages = self.assert_success(self.call_cli(
+            "chat", "page", "read", recovered_status["activePage"]["id"], extra_environment=environment
+        )[0])["messages"]
+        self.assertFalse(any(message["text"] == "Do not overtake Mars" for message in recovered_messages))
+        self.assertIn("Another thought about Mars", [message["text"] for message in recovered_messages])
 
     # case-contract: test_service_reports_bridge_version | Playhouse opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, uses the same foreground artwork for the Dock AppIcon on a solid #2C2F36 background, and the bridge reports API version 1.
     def test_service_reports_bridge_version(self):
@@ -1641,24 +2370,14 @@ class PlayhouseBridgeTests(unittest.TestCase):
         gh_state = gh_directory / "state"
         gh_calls = gh_directory / "calls"
         gh_state.write_text("123=merged\n456=unmerged\n", encoding="utf-8")
-        gh_fixture = gh_directory / "gh-fixture.sh"
-        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh_fixture)
-        gh_fixture.chmod(0o755)
-        # The daemon keeps only session variables (BridgeContract.sessionEnvironmentNames)
-        # from its caller, so this fixture's state travels baked into the executable the
-        # bridge finds on PATH, the same way test_review_pr_conflicts_probe_and_verify
-        # does. The UI suite still passes these as environment to the app process itself.
         gh = gh_directory / "gh"
-        gh.write_text(
-            "#!/bin/sh\n"
-            f"PLAYHOUSE_E2E_GH_STATE_PATH={shlex.quote(str(gh_state))}\n"
-            f"PLAYHOUSE_E2E_GH_CALL_LOG={shlex.quote(str(gh_calls))}\n"
-            "export PLAYHOUSE_E2E_GH_STATE_PATH PLAYHOUSE_E2E_GH_CALL_LOG\n"
-            f"exec {shlex.quote(str(gh_fixture))} \"$@\"\n",
-            encoding="utf-8",
-        )
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
         gh.chmod(0o755)
-        gh_environment = {"PATH": f"{gh_directory}:{os.environ.get('PATH', '')}"}
+        gh_environment = {
+            "PATH": f"{gh_directory}:{os.environ.get('PATH', '')}",
+            "PLAYHOUSE_E2E_GH_STATE_PATH": str(gh_state),
+            "PLAYHOUSE_E2E_GH_CALL_LOG": str(gh_calls),
+        }
         linked = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(linked["repositoryWorktrees"][0]["pullRequestURL"], pr_url)
         self.assertEqual(linked["repositoryWorktrees"][1]["pullRequestURL"], second_pr_url)
@@ -1953,6 +2672,162 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_failure(invalid, "invalid_argument")
         self.run_git(self.primary, "remote", "remove", "origin")
 
+    # case-contract: test_review_sync_pushes_unpushed_changes_on_completion | A completed turn outcome on a task with a PR-linked repository and a configured remote commits local work, merges new remote pull request commits, and pushes the branch before the task reaches Review, so the reviewed worktree holds no local-only changes. A linked repository without a publishing remote is left untouched and still reaches Review. When the sync cannot complete, the task moves to Blocked with the sync failure message instead of resting in Review, and a later successful sync pushes the stranded commits and returns the task to Review. While a provider turn holds the task's worktree, the sync command skips it untouched and reports turn-active.
+    def test_review_sync_pushes_unpushed_changes_on_completion(self):
+        task = self.create_repo_task("Review sync push", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
+        record = task["repositoryWorktrees"][0]
+        worktree = Path(record["worktreePath"])
+        branch = record["branch"]
+        self.seed_done_task_pull_request(task["id"], number=123)
+
+        # Without a publishing remote, the sync has nothing to act on and Review is untouched.
+        no_remote, _ = self.call_cli("task", "pr", "sync", task["id"])
+        no_remote_result = self.assert_success(no_remote)
+        self.assertEqual([item["action"] for item in no_remote_result["records"]], ["no-remote"])
+        self.assertEqual(no_remote_result["status"], "Review")
+
+        # While a provider turn owns the worktree, the sync skips instead of mutating it.
+        process, _, active, release = self.start_progress_fixture_turn(task["id"], "codex-fixture-review-sync-hold-release")
+        try:
+            skipped, _ = self.call_cli("task", "pr", "sync", task["id"])
+            skipped_result = self.assert_success(skipped)
+            self.assertEqual(skipped_result.get("skipped"), "turn-active")
+            self.assertEqual(skipped_result["records"], [])
+            outcome, _ = self.call_cli("task", "outcome", task["id"], "completed")
+            self.assertEqual(self.assert_success(outcome)["outcome"], "completed")
+            release.write_text("Release the active turn.\n", encoding="utf-8")
+            process.communicate(timeout=30)
+            self.assertEqual(process.returncode, 0)
+        finally:
+            if process.poll() is None:
+                release.write_text("Release the active turn.\n", encoding="utf-8")
+                process.communicate(timeout=20)
+            active.unlink(missing_ok=True)
+            release.unlink(missing_ok=True)
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review")
+
+        remote = self.data_directory / "review-sync-origin.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+        self.run_git(self.primary, "remote", "add", "origin", str(remote))
+        self.run_git(worktree, "push", "--set-upstream", "origin", branch)
+
+        # A reviewer commit on the remote PR branch the local branch has not seen.
+        clone = self.data_directory / "review-sync-clone"
+        subprocess.run(["git", "clone", "--branch", branch, str(remote), str(clone)], check=True, capture_output=True, text=True)
+        (clone / "remote-side.txt").write_text("Remote reviewer commit.\n", encoding="utf-8")
+        self.run_git(clone, "add", "remote-side.txt")
+        self.run_git(clone, "commit", "-m", "Remote PR commit")
+        self.run_git(clone, "push", "origin", branch)
+        reviewer_head = self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip()
+
+        # Local uncommitted work the completed turn leaves behind.
+        (worktree / "local-side.txt").write_text("Local turn output.\n", encoding="utf-8")
+        self.complete_fixture_turn(task["id"], executable_name="codex-fixture-review-sync")
+        self.assertEqual(self.run_git(worktree, "status", "--porcelain", "--untracked-files=all").strip(), "")
+        local_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        self.assertEqual(self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip(), local_head)
+        self.assertNotEqual(local_head, reviewer_head, "The sync should push a merge of the reviewer commit and the local work.")
+        self.assertEqual((worktree / "remote-side.txt").read_text(encoding="utf-8"), "Remote reviewer commit.\n")
+        pushed_local_side = subprocess.run(
+            ["git", "--git-dir", str(remote), "show", f"refs/heads/{branch}:local-side.txt"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        self.assertEqual(pushed_local_side, "Local turn output.\n")
+
+        # A sync the daemon cannot complete blocks the task instead of resting in Review.
+        self.run_git(self.primary, "remote", "set-url", "origin", str(self.data_directory / "missing-remote.git"))
+        (worktree / "local-side.txt").write_text("Unpushable local change.\n", encoding="utf-8")
+        self.complete_fixture_turn(task["id"], executable_name="codex-fixture-review-sync", expected_status="Blocked")
+        blocked = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertIn("couldn't sync this task's changes with its pull request", blocked.get("statusMessage") or "")
+
+        # A later successful sync pushes the stranded commit and returns the task to Review.
+        self.run_git(self.primary, "remote", "set-url", "origin", str(remote))
+        healed, _ = self.call_cli("task", "pr", "sync", task["id"])
+        healed_result = self.assert_success(healed)
+        self.assertEqual([item["action"] for item in healed_result["records"]], ["pushed"])
+        self.assertEqual(healed_result["status"], "Review")
+        healed_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        self.assertEqual(self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip(), healed_head)
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review")
+        self.run_git(self.primary, "remote", "remove", "origin")
+
+    # case-contract: test_review_sync_resolves_conflicts_with_provider_or_blocks | When the remote pull request branch conflicts with local task commits, the review sync merges the remote branch and instructs the task's provider to resolve every conflict; if conflicts remain after the provider turn, the sync fails, the task moves to Blocked with the sync failure message, the merge stays in progress for manual resolution, and the remote branch is unchanged. A rerun with the conflicts staged commits the resolution, pushes the merged branch, and returns the task to Review. The board triggers the same sync automatically when a mergeable pull request's remote head diverges from the local head.
+    def test_review_sync_resolves_conflicts_with_provider_or_blocks(self):
+        task = self.create_repo_task("Review sync conflicts", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
+        record = task["repositoryWorktrees"][0]
+        worktree = Path(record["worktreePath"])
+        branch = record["branch"]
+        self.seed_done_task_pull_request(task["id"], number=123)
+        remote = self.data_directory / "review-sync-conflict-origin.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+        self.run_git(self.primary, "remote", "add", "origin", str(remote))
+        conflict_path = "review-sync-conflict.txt"
+        (worktree / conflict_path).write_text("base version\n", encoding="utf-8")
+        self.run_git(worktree, "add", conflict_path)
+        self.run_git(worktree, "commit", "-m", "Base for sync conflict")
+        self.run_git(worktree, "push", "--set-upstream", "origin", branch)
+
+        clone = self.data_directory / "review-sync-conflict-clone"
+        subprocess.run(["git", "clone", "--branch", branch, str(remote), str(clone)], check=True, capture_output=True, text=True)
+        (clone / conflict_path).write_text("remote version\n", encoding="utf-8")
+        self.run_git(clone, "add", conflict_path)
+        self.run_git(clone, "commit", "-m", "Remote conflicting commit")
+        self.run_git(clone, "push", "origin", branch)
+        remote_head = self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip()
+        (worktree / conflict_path).write_text("local version\n", encoding="utf-8")
+        self.run_git(worktree, "add", conflict_path)
+        self.run_git(worktree, "commit", "-m", "Local conflicting commit")
+        local_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+
+        # The provider fixture turn runs but resolves nothing, so the sync fails closed.
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-review-conflicts"
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        failed, _ = self.call_cli("task", "pr", "sync", task["id"], extra_environment=environment, expected_status=1)
+        self.assert_failure(failed, "operation_failed")
+        self.assertIn("couldn't resolve every merge conflict", failed["error"]["message"])
+        blocked = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(blocked["status"], "Blocked")
+        self.assertIn("couldn't sync this task's changes with its pull request", blocked.get("statusMessage") or "")
+        self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), local_head)
+        merge_in_progress = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "--verify", "MERGE_HEAD"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(merge_in_progress.returncode, 0, "The failed sync should leave its merge in progress for manual resolution.")
+        self.assertEqual(self.run_git(worktree, "diff", "--name-only", "--diff-filter=U").strip(), conflict_path)
+        self.assertEqual(self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip(), remote_head, "A failed sync must leave the remote branch unchanged.")
+
+        # Staging the resolution lets a rerun commit the merge, push, and restore Review.
+        resolved_content = "resolved local and remote versions\n"
+        (worktree / conflict_path).write_text(resolved_content, encoding="utf-8")
+        self.run_git(worktree, "add", conflict_path)
+        healed, _ = self.call_cli("task", "pr", "sync", task["id"], extra_environment=environment)
+        healed_result = self.assert_success(healed)
+        self.assertEqual([item["action"] for item in healed_result["records"]], ["pushed"])
+        self.assertEqual(healed_result["status"], "Review")
+        self.assertEqual(self.run_git(worktree, "status", "--porcelain", "--untracked-files=all").strip(), "")
+        finished_merge = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "--verify", "MERGE_HEAD"],
+            check=False, capture_output=True, text=True,
+        )
+        self.assertEqual(finished_merge.returncode, 128, "The rerun should finish the merge it resumed.")
+        healed_head = self.run_git(worktree, "rev-parse", "HEAD").strip()
+        self.assertEqual(self.run_git(remote, "rev-parse", f"refs/heads/{branch}").strip(), healed_head)
+        pushed_content = subprocess.run(
+            ["git", "--git-dir", str(remote), "show", f"refs/heads/{branch}:{conflict_path}"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        self.assertEqual(pushed_content, resolved_content)
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review")
+        self.run_git(self.primary, "remote", "remove", "origin")
+
     # case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC fresh reads confirm saved PR data; the UI shows active and archived PR links and an active task's Create PR button. Hovering the outer padded edge of each control triggers its hover feedback.
     def test_done_archive_displays_existing_pull_request_link(self):
         task = self.create_repo_task("Archived linked PR", [self.primary], materialize=True)
@@ -2048,7 +2923,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(waiting["status"], "Waiting Response")
         self.assertEqual(self.assert_success(self.call_cli("task", "get", blocked_id)[0])["status"], "Blocked")
 
-    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to two private follow-up requests to report one; a completed report during either reminder moves the task to Review, a waiting-response report during a reminder stops retries and leaves the task in Waiting Response, and no report after both reminders falls back to Waiting Response. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. Private reminder prompts, replies, and turn-scoped activities remain absent from Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those reminders also retains the latest ordinary-turn diff while keeping reminder-only replies hidden.
+    # case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. Private nudge prompts, replies, and turn-scoped activities remain absent from Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while keeping nudge-only replies hidden.
     def test_task_progress_reports_publish_persist_and_clear(self):
         task_id = self.create_task("Progress reports", roots=[self.primary])["id"]
         response, _ = self.call_cli("task", "progress", "publish", task_id, "--type", "building", expected_status=1)
@@ -2159,10 +3034,10 @@ class PlayhouseBridgeTests(unittest.TestCase):
                 while not active_marker.exists() and time.monotonic() < deadline:
                     time.sleep(0.02)
                 self.assertTrue(active_marker.exists(), "The no-outcome fixture turn should become active.")
-                for reminder_index in range(3):
-                    self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress", "The fallback status should be deferred until both reminders finish.")
-                    release_marker.write_text(f"Release turn {reminder_index + 1}.\n", encoding="utf-8")
-                    if reminder_index < 2:
+                for nudge_index in range(MAX_OUTCOME_CONTINUATIONS + 1):
+                    self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress", "The fallback status should be deferred until every nudge finishes.")
+                    release_marker.write_text(f"Release turn {nudge_index + 1}.\n", encoding="utf-8")
+                    if nudge_index < MAX_OUTCOME_CONTINUATIONS:
                         deadline = time.monotonic() + 10
                         while active_marker.exists() and time.monotonic() < deadline:
                             time.sleep(0.02)
@@ -2170,18 +3045,19 @@ class PlayhouseBridgeTests(unittest.TestCase):
                         deadline = time.monotonic() + 10
                         while not active_marker.exists() and time.monotonic() < deadline:
                             time.sleep(0.02)
-                        self.assertTrue(active_marker.exists(), "Playhouse should send the next private outcome reminder.")
-                omitted_stdout, omitted_stderr = omitted_follow_up.communicate(timeout=20)
+                        self.assertTrue(active_marker.exists(), "Playhouse should send the next private status nudge.")
+                omitted_stdout, omitted_stderr = omitted_follow_up.communicate(timeout=30)
                 self.assertEqual(omitted_follow_up.returncode, 0, f"No-outcome fixture conversation failed: {omitted_stdout}; {omitted_stderr}")
-                omitted_record, _ = self.call_cli("task", "get", task_id)
-                self.assertEqual(self.assert_success(omitted_record)["status"], "Waiting Response")
+                omitted_record = self.assert_success(self.call_cli("task", "get", task_id)[0])
+                self.assertEqual(omitted_record["status"], "Blocked", "Unanswered nudges never asked the user anything, so the task is Blocked rather than Waiting Response.")
+                self.assertIn("nudges went unanswered", omitted_record.get("statusMessage") or "")
                 visible_history, _ = self.call_cli(
                     "conversation", "history", task_id,
                     extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)},
                 )
                 visible_history_record = self.assert_success(visible_history)
                 visible_messages = visible_history_record["messages"]
-                self.assertFalse(any("previous request finished" in item.get("text", "") for item in visible_messages), "Private reminder text must not appear in conversation history.")
+                self.assertFalse(any("ended without reporting a task outcome" in item.get("text", "") for item in visible_messages), "Private reminder text must not appear in conversation history.")
                 self.assertFalse(any("Fixture internal reminder reply." in item.get("text", "") for item in visible_messages), "Private reminder replies must not appear in conversation history.")
                 self.assertIn("ordinary-turn-diff-after-reminders", visible_history_record["diff"]["unifiedDiff"], "Private reminders must not replace the latest ordinary-turn diff.")
             finally:
@@ -2248,7 +3124,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
                     waiting_follow_up.communicate(timeout=20)
             # A model can write its outcome command as answer text instead of running
             # it. The echo is hidden, and it counts only when it names this task.
-            for echoed_task_id, expected_status in [(str(uuid.uuid4()).upper(), "Waiting Response"), (task_id, "Review")]:
+            for echoed_task_id, expected_status in [(str(uuid.uuid4()).upper(), "Blocked"), (task_id, "Review")]:
                 echoed_turn = subprocess.Popen(
                     [str(self.cli), "conversation", "send", task_id, "--message", f"Echo the outcome command for {echoed_task_id}."],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment,
@@ -2258,7 +3134,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
                     while not active_marker.exists() and time.monotonic() < deadline:
                         time.sleep(0.02)
                     self.assertTrue(active_marker.exists(), "The echoed-outcome fixture turn should become active.")
-                    held_turns = 3 if expected_status == "Waiting Response" else 1
+                    held_turns = MAX_OUTCOME_CONTINUATIONS + 1 if expected_status == "Blocked" else 1
                     for held_turn_index in range(held_turns):
                         release_marker.write_text(f"Release echoed turn {held_turn_index + 1}.\n", encoding="utf-8")
                         if held_turn_index < held_turns - 1:
@@ -2282,7 +3158,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
                     self.assertFalse(any("task outcome" in message["text"] for message in echoed_history["messages"]), "A fresh history read must hide the echoed outcome command.")
                     self.assertFalse(any(item.get("text") == "[Playhouse private outcome reminder hidden]" for item in echoed_history["messages"]), "A later Codex history refresh must omit earlier private reminders.")
                     self.assertFalse(any(item.get("text") == "[Playhouse private outcome response hidden]" for item in echoed_history["messages"]), "A later Codex history refresh must omit earlier private reminder replies.")
-                    self.assertFalse(any("previous request finished without reporting" in item.get("text", "") or "Fixture internal reminder reply." in item.get("text", "") for item in echoed_history["messages"]), "Later history refreshes must not reveal prior reminder prompts or replies.")
+                    self.assertFalse(any("ended without reporting a task outcome" in item.get("text", "") or "Fixture internal reminder reply." in item.get("text", "") for item in echoed_history["messages"]), "Later history refreshes must not reveal prior reminder prompts or replies.")
                     self.assertFalse(any(item.get("id", "").startswith("item_private_reminder_activity_") for item in echoed_history.get("activities", [])), "Later ordinary Codex history must omit activities owned by private reminders.")
                 finally:
                     if echoed_turn.poll() is None:
@@ -2291,10 +3167,11 @@ class PlayhouseBridgeTests(unittest.TestCase):
             turn_data = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
             self.assertEqual(turn_data["threadStartCount"], 1)
             self.assertGreaterEqual(turn_data["threadResumeCount"], 1)
-            self.assertEqual(len(turn_data["turns"]), 13)
-            reminder_turns = [turn for turn in turn_data["turns"] if "previous request finished without reporting" in turn.get("userMessage", "")]
-            self.assertEqual(len(reminder_turns), 6, "Only the missing-outcome sends should receive private reminders.")
-            self.assertTrue(all("task outcome" in turn["userMessage"] and ("reminder 1 of 2" in turn["userMessage"] or "reminder 2 of 2" in turn["userMessage"]) for turn in reminder_turns), "Each hidden request should explicitly direct the agent to report an outcome.")
+            self.assertEqual(len(turn_data["turns"]), 19)
+            nudge_turns = [turn for turn in turn_data["turns"] if "ended without reporting a task outcome" in turn.get("userMessage", "")]
+            self.assertEqual(len(nudge_turns), 2 * MAX_OUTCOME_CONTINUATIONS + 2, "Only the missing-outcome sends should receive private status nudges.")
+            self.assertTrue(all("task outcome" in turn["userMessage"] and f"of {MAX_OUTCOME_CONTINUATIONS}" in turn["userMessage"] for turn in nudge_turns), "Each hidden request should explicitly direct the agent to report an outcome.")
+            self.assertTrue(all("`in-progress`" in turn["userMessage"] for turn in nudge_turns), "A nudge must offer in-progress alongside completed and waiting-response.")
             self.assertTrue(all(turn["developerInstructions"] is None for turn in turn_data["turns"]), "Thread-scoped task instructions should not be repeated in turn requests.")
             instructions = turn_data["threadStartDeveloperInstructions"]
             self.assertIn(str(self.cli), instructions)
@@ -2305,7 +3182,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
             self.assertIn("CLI/XPC 3/8", instructions)
             self.assertIn("under 80 characters", instructions)
             self.assertIn("task outcome", instructions)
-            self.assertIn("up to two private follow-up messages", instructions)
+            self.assertIn("<completed|in-progress|waiting-response>", instructions)
+            self.assertIn("Never end a turn mid-work without an outcome", instructions)
+            self.assertIn("privately nudges you to report your current status", instructions)
             self.assertIn("waiting-response", instructions)
             self.assertIn("final CLI action", instructions)
             self.assertIn("Active task worktrees for edits", instructions)
@@ -2323,6 +3202,170 @@ class PlayhouseBridgeTests(unittest.TestCase):
                 turn.communicate(timeout=20)
             active_marker.unlink(missing_ok=True)
             release_marker.unlink(missing_ok=True)
+
+    # case-contract: test_task_outcome_in_progress_drives_continuations_until_blocked | An in-progress outcome is accepted during an active turn, leaves the task In Progress, and makes Playhouse send a private continuation turn that names the in-progress report; a completed report during that continuation stops the loop at Review. When every turn reports in-progress, Playhouse sends exactly five continuation turns, keeps the task In Progress throughout, and then marks it Blocked with a continuation-limit reason instead of Waiting Response, since the user was never asked anything. Continuation prompts and replies stay out of the visible conversation history. The user taking the work back ends Playhouse's private driving: stopping a continuation keeps the Stop's Waiting Response with no failure reason, and a queued follow-up runs next instead of being buried under further continuations.
+    def test_task_outcome_in_progress_drives_continuations_until_blocked(self):
+        task_id = self.create_task("Continue in progress", roots=[self.primary])["id"]
+        process, executable, active, release = self.start_progress_fixture_turn(
+            task_id, "codex-fixture-in-progress-continuation-hold-release"
+        )
+        try:
+            reported = self.assert_success(self.call_cli("task", "outcome", task_id, "in-progress")[0])
+            self.assertEqual(reported["outcome"], "in-progress")
+            self.assertEqual(reported["taskStatus"], "In Progress", "The outcome is staged until the turn completes.")
+            release.write_text("Release the in-progress turn.\n", encoding="utf-8")
+            self.wait_for_marker(active, False, "The in-progress turn should finish before its continuation.")
+            self.wait_for_marker(active, True, "Playhouse should send a continuation turn after an in-progress report.")
+            self.assertEqual(
+                self.assert_success(self.call_cli("task", "get", task_id)[0])["status"],
+                "In Progress",
+                "The task stays In Progress while Playhouse drives the continuation.",
+            )
+            self.assertEqual(self.assert_success(self.call_cli("task", "outcome", task_id, "completed")[0])["outcome"], "completed")
+            release.write_text("Release the continuation turn.\n", encoding="utf-8")
+            stdout, stderr = process.communicate(timeout=30)
+            self.assertEqual(process.returncode, 0, f"Continuation fixture conversation failed: {stdout}; {stderr}")
+            self.assertEqual(
+                self.assert_success(self.call_cli("task", "get", task_id)[0])["status"],
+                "Review",
+                "A completed report during a continuation stops the loop at Review.",
+            )
+        finally:
+            if process.poll() is None:
+                release.write_text("Release the continuation turn.\n", encoding="utf-8")
+                process.communicate(timeout=30)
+        continuations = [
+            turn for turn in json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
+            if "You reported `in-progress`" in (turn.get("userMessage") or "")
+        ]
+        self.assertEqual(len(continuations), 1, "One in-progress report earns exactly one continuation turn.")
+        self.assertIn(f"of {MAX_OUTCOME_CONTINUATIONS}", continuations[0]["userMessage"])
+
+        capped_id = self.create_task("Never settles", roots=[self.primary])["id"]
+        capped, capped_executable, capped_active, capped_release = self.start_progress_fixture_turn(
+            capped_id, "codex-fixture-in-progress-cap-hold-release"
+        )
+        try:
+            for index in range(MAX_OUTCOME_CONTINUATIONS + 1):
+                self.assertEqual(
+                    self.assert_success(self.call_cli("task", "get", capped_id)[0])["status"],
+                    "In Progress",
+                    "Every continuation keeps the task In Progress until the limit is reached.",
+                )
+                self.assertEqual(self.assert_success(self.call_cli("task", "outcome", capped_id, "in-progress")[0])["outcome"], "in-progress")
+                capped_release.write_text(f"Release turn {index + 1}.\n", encoding="utf-8")
+                if index < MAX_OUTCOME_CONTINUATIONS:
+                    self.wait_for_marker(capped_active, False, "The fixture should finish the current continuation turn.")
+                    self.wait_for_marker(capped_active, True, "Playhouse should send the next continuation turn.")
+            capped_stdout, capped_stderr = capped.communicate(timeout=60)
+            self.assertEqual(capped.returncode, 0, f"Capped continuation conversation failed: {capped_stdout}; {capped_stderr}")
+            capped_record = self.assert_success(self.call_cli("task", "get", capped_id)[0])
+            self.assertEqual(capped_record["status"], "Blocked", "Running out of continuations is Blocked, not Waiting Response.")
+            self.assertIn("continuation turns", capped_record.get("statusMessage") or "")
+        finally:
+            if capped.poll() is None:
+                capped_release.write_text("Release the capped turn.\n", encoding="utf-8")
+                capped.communicate(timeout=60)
+        capped_turns = json.loads(Path(str(capped_executable) + ".history").read_text(encoding="utf-8"))["turns"]
+        self.assertEqual(
+            len([turn for turn in capped_turns if "You reported `in-progress`" in (turn.get("userMessage") or "")]),
+            MAX_OUTCOME_CONTINUATIONS,
+            "Playhouse stops driving the work after the continuation limit.",
+        )
+        # Stopping a private continuation is the user taking the work back, not a
+        # Playhouse failure, so the Stop's own paused state must survive.
+        stop_id = self.create_task("Stopped mid continuation", roots=[self.primary])["id"]
+        stopped, stop_executable, stop_active, stop_release = self.start_progress_fixture_turn(
+            stop_id, "codex-fixture-in-progress-stop-hold-release"
+        )
+        try:
+            self.assertEqual(self.assert_success(self.call_cli("task", "outcome", stop_id, "in-progress")[0])["outcome"], "in-progress")
+            stop_release.write_text("Release the in-progress turn.\n", encoding="utf-8")
+            self.wait_for_marker(stop_active, False, "The in-progress turn should finish before its continuation.")
+            self.wait_for_marker(stop_active, True, "Playhouse should send a continuation turn before the Stop.")
+            # Stop persists the paused state before the provider answers, so the
+            # held fixture turn is released once that intent has landed.
+            stop_results = []
+            stopper = threading.Thread(
+                target=lambda: stop_results.append(self.call_cli("conversation", "stop", stop_id, timeout=30)[0]),
+                daemon=True,
+            )
+            stopper.start()
+            paused = False
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                if self.assert_success(self.call_cli("task", "get", stop_id)[0])["status"] == "Waiting Response":
+                    paused = True
+                    break
+                time.sleep(0.2)
+            self.assertTrue(paused, "Stop should persist the paused state before the provider acknowledges it.")
+            stop_release.write_text("Release the stopped continuation.\n", encoding="utf-8")
+            stopper.join(timeout=30)
+            self.assertFalse(stopper.is_alive(), "The stop request should settle once the held turn is released.")
+            self.assertEqual(len(stop_results), 1)
+            self.assert_success(stop_results[0])
+            stopped.communicate(timeout=60)
+        finally:
+            if stopped.poll() is None:
+                stop_release.write_text("Release the stopped continuation.\n", encoding="utf-8")
+                stopped.communicate(timeout=60)
+        stop_record = self.assert_success(self.call_cli("task", "get", stop_id)[0])
+        self.assertEqual(stop_record["status"], "Waiting Response", "A Stop during a continuation keeps the user's paused state.")
+        self.assertIsNone(stop_record.get("statusMessage"), "A user-requested Stop must not be reported as a Playhouse failure.")
+        stop_turns = json.loads(Path(str(stop_executable) + ".history").read_text(encoding="utf-8"))["turns"]
+        self.assertEqual(
+            len([turn for turn in stop_turns if "You reported `in-progress`" in (turn.get("userMessage") or "")]),
+            1,
+            "Playhouse must stop driving the work once the user stops it.",
+        )
+
+        # A queued follow-up is also the user taking over: the loop steps aside so
+        # their message runs next instead of waiting behind private turns.
+        queued_id = self.create_task("Queued over continuation", roots=[self.primary])["id"]
+        queued_turn, queued_executable, _, queued_release = self.start_progress_fixture_turn(
+            queued_id, "codex-fixture-in-progress-queue-hold-release"
+        )
+        try:
+            self.assertEqual(self.assert_success(self.call_cli("task", "outcome", queued_id, "in-progress")[0])["outcome"], "in-progress")
+            self.assert_success(self.call_cli("conversation", "queue", queued_id, "--message", "Follow-up from the user.")[0])
+            deadline = time.monotonic() + 60
+            while queued_turn.poll() is None and time.monotonic() < deadline:
+                queued_release.write_text("Release the next turn.\n", encoding="utf-8")
+                time.sleep(0.05)
+            queued_turn.communicate(timeout=60)
+        finally:
+            if queued_turn.poll() is None:
+                queued_release.write_text("Release the next turn.\n", encoding="utf-8")
+                queued_turn.communicate(timeout=60)
+        # The follow-up turn settles on its own terms; what matters here is that
+        # it ran next instead of queueing behind Playhouse's continuations.
+        queued_turns = json.loads(Path(str(queued_executable) + ".history").read_text(encoding="utf-8"))["turns"]
+        self.assertEqual(
+            len([turn for turn in queued_turns if "You reported `in-progress`" in (turn.get("userMessage") or "")]),
+            0,
+            "A queued follow-up must take precedence over Playhouse's private continuation.",
+        )
+        self.assertTrue(
+            any("Follow-up from the user." in (turn.get("userMessage") or "") for turn in queued_turns),
+            "The queued follow-up should be the next turn the provider receives.",
+        )
+
+        capped_history = self.assert_success(self.call_cli(
+            "conversation", "history", capped_id,
+            extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(capped_executable)},
+        )[0])
+        self.assertFalse(
+            any("You reported `in-progress`" in message.get("text", "") for message in capped_history["messages"]),
+            "Private continuation prompts must not appear in conversation history.",
+        )
+        self.assertFalse(
+            any(
+                hidden in message.get("text", "")
+                for message in capped_history["messages"]
+                for hidden in ("Fixture internal reminder reply.", "private outcome reminder hidden", "private outcome response hidden")
+            ),
+            "Private continuation replies must not appear in conversation history.",
+        )
 
     # case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; a staged completed outcome is discarded if its turn fails, leaving the task Blocked. The task card removes the report while lifecycle states remain Blocked or In Progress. A blocking structured question appears inline and moves the task to Waiting Response; its answer resumes the active turn in In Progress, and the answered turn finishes in Waiting Response. First-thread instructions distinguish source repository paths from active task worktree paths, allow read-only inspection without attaching a repo, and reserve repository add APIs for changes that need a worktree.
     def test_task_progress_reports_clear_on_failed_turns_and_questions(self):
@@ -3504,7 +4547,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIn("Done tasks are closed", done_switch["error"]["message"])
         self.assertEqual(self.assert_success(self.call_cli("task", "get", done_task["id"])[0])["conversationProvider"], "codex")
 
-    # case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its Playhouse progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn without an outcome ends in Waiting Response. The fixture records both private reminder attempts for each unreported turn; fresh history hides reminder prompts and replies completely. Switching to Codex hands off the whole Claude answer, excludes answered-turn commentary and private reminder prompts and replies including their redacted placeholders, and hands off only the last commentary from the turn that recorded no answer. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
+    # case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its Playhouse progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn that leaves every status nudge unanswered ends in Blocked. The fixture records all five private nudge attempts for each unreported turn; fresh history hides nudge prompts and replies completely. Switching to Codex hands off the whole Claude answer, excludes answered-turn commentary and private nudge prompts and replies including their redacted placeholders, and hands off only the last commentary from the turn that recorded no answer. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
     def test_claude_answer_stays_final_around_outcome_report(self):
         story = "BISCUIT-7 waited by the gate every evening. One night the boy finally came home."
         story_answer = story + "\n\nThe story is above."
@@ -3539,7 +4582,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         sent, events = self.call_cli("conversation", "send", task_id, "--message", "Please inspect the workspace.", extra_environment=fixtures)
         self.assert_success(sent)
         self.assertEqual([event["payload"]["text"] for event in events if event["type"] == "assistant_final"], ["Inspection done: the workspace is ready."])
-        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Blocked",
+                         "This fixture leaves every nudge unanswered, so the turn settles in Blocked.")
 
         sent, events = self.call_cli("conversation", "send", task_id, "--message", "Start the checks.", extra_environment=fixtures)
         self.assert_success(sent)
@@ -3554,7 +4598,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             ("commentary", "Starting the checks."),
             ("commentary", "Checks are running; results will follow."),
         ], "A fresh history read keeps the story as one final answer and the pre-tool text as commentary.")
-        self.assertFalse(any("Playhouse internal outcome reminder:" in message["text"] for message in history["messages"]))
+        self.assertFalse(any("Playhouse internal outcome nudge:" in message["text"] for message in history["messages"]))
         self.assertFalse(any("private outcome reminder hidden" in message["text"] for message in history["messages"]))
         self.assertFalse(any("private outcome response hidden" in message["text"] for message in history["messages"]))
 
@@ -3570,7 +4614,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertNotIn("I'll inspect the workspace first.", handoff, "Commentary of an answered turn stays with the provider that produced it.")
         self.assertIn("Claude: Checks are running; results will follow.", handoff, "A turn without an answer hands off its last commentary.")
         self.assertNotIn("Starting the checks.", handoff, "Only the unanswered turn's last commentary is handed off.")
-        self.assertNotIn("Playhouse internal outcome reminder:", handoff, "Private outcome reminders must not cross provider boundaries.")
+        self.assertNotIn("Playhouse internal outcome nudge:", handoff, "Private outcome reminders must not cross provider boundaries.")
         self.assertNotIn("[Playhouse private outcome reminder hidden]", handoff, "Redacted reminder prompts must not cross provider boundaries.")
         self.assertNotIn("private outcome response hidden", handoff, "Redacted reminder replies must not enter handoff context.")
         self.assertTrue(handoff.endswith("Continue the story."))
@@ -3632,7 +4676,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
         recovered_turn = next(
             turn for turn in reversed(json.loads(fixture_history_path.read_text(encoding="utf-8"))["turns"])
-            if "playhouse internal outcome reminder:" not in turn.get("userText", "").lower()
+            if "playhouse internal outcome nudge:" not in turn.get("userText", "").lower()
         )
         self.assertFalse(recovered_turn["resumed"], "A missing native session should be replaced by a fresh Claude session.")
         prompt = recovered_turn["userText"]
@@ -3747,7 +4791,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         history, _ = self.call_cli("conversation", "history", task["id"], extra_environment=fixture_environment)
         user_messages = [
             message for message in self.assert_success(history)["messages"]
-            if message["role"] == "user" and "playhouse internal outcome reminder:" not in message["text"].lower()
+            if message["role"] == "user" and "playhouse internal outcome nudge:" not in message["text"].lower()
         ]
         self.assertTrue(user_messages, "The commented turn should survive a fresh CLI/XPC history read.")
         self.assertEqual(user_messages[-1]["text"], prompt)
@@ -4208,7 +5252,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         saved_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
         self.assertEqual(
             [turn["userMessage"] for turn in saved_history["messages"]
-             if "playhouse internal outcome reminder:" not in (turn["userMessage"] or "").lower()],
+             if "playhouse internal outcome nudge:" not in (turn["userMessage"] or "").lower()],
             [first_prompt, second_prompt],
             "Both sequential turns should persist in the same Codex thread history.",
         )
@@ -4218,14 +5262,14 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertGreaterEqual([event["method"] for event in thread_events].count("thread/resume"), 1)
         self.assertTrue(all(event["threadID"] == thread_id for event in saved_history["events"]))
         visible_turns = [turn for turn in saved_history["messages"]
-                         if "playhouse internal outcome reminder:" not in (turn["userMessage"] or "").lower()]
+                         if "playhouse internal outcome nudge:" not in (turn["userMessage"] or "").lower()]
         self.assertTrue(all(turn["threadID"] == thread_id for turn in visible_turns))
         turn_ids = [turn["turnID"] for turn in visible_turns]
         self.assertEqual(len(turn_ids), 2)
         self.assertEqual(len(set(turn_ids)), 2, "Each serialized send should have its own Codex turn ID.")
         self.assertEqual(
             [event["turnID"] for event in saved_history["events"]
-             if event["method"] == "turn/start" and "playhouse internal outcome reminder:" not in (event.get("userMessage") or "").lower()],
+             if event["method"] == "turn/start" and "playhouse internal outcome nudge:" not in (event.get("userMessage") or "").lower()],
             turn_ids,
         )
         completed = self.assert_success(self.call_cli("task", "get", task_id)[0])
@@ -4472,7 +5516,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(failure_items[failed_target_record["id"]]["state"], "needsAction")
         self.assertEqual(failure_items[later_record["id"]]["state"], "queued", "A failed targeted send must not drain later queued messages.")
 
-    # case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a composer or transcript attachment opens the original image in a large viewer, which can be closed to return to the conversation.
+    # case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a composer attachment, a user transcript attachment, or an agent-published assistant image opens the original image in a large viewer, which can be closed to return to the conversation; a published assistant image preserves the original file bytes.
     def test_conversation_sends_image_attachments(self):
         task_id = self.create_task(title="Image conversation") ["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -4573,6 +5617,11 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         self.assertEqual(saved_agent_image["id"], published_message["id"])
         self.assertEqual(saved_agent_image["imageDataURLs"], published_message["imageDataURLs"])
+        self.assertEqual(
+            base64.b64decode(saved_agent_image["imageDataURLs"][0].split(",", 1)[1]),
+            image.read_bytes(),
+            "The assistant image the viewer opens must keep the original published file bytes.",
+        )
         thread_instructions = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["threadStartDeveloperInstructions"]
         self.assertIn("conversation present-image", thread_instructions)
         jpeg = self.data_directory / "agent-image.jpg"
@@ -5142,7 +6191,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(continued_messages[-2]["text"], "Continue the implementation.")
         fixture_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
         turn_modes = [turn["conversationMode"] for turn in fixture_history["turns"]
-                      if "playhouse internal outcome reminder:" not in (turn["userMessage"] or "").lower()]
+                      if "playhouse internal outcome nudge:" not in (turn["userMessage"] or "").lower()]
         self.assertEqual(turn_modes, ["plan", "plan", "default", "default"], "Follow-up planning remains in Plan mode until implementation starts, and later implementation turns remain in Code mode.")
         history, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         reloaded_messages = self.assert_success(history)["messages"]
@@ -5523,7 +6572,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_failure(retry, "invalid_transition")
         self.assertIsNone(json.loads(destination.read_text()).get("pendingUserInputRequest"))
 
-    # case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode remain in the conversation and move the task to Waiting Response while unanswered; leaving and reopening the conversation preserves the pending question, keyed answers resume the provider turn in In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome. A parallel conversation retains its own question and thread; the original conversation receives and answers a second question in its original Plan mode, and completing either conversation preserves the other pending request.
+    # case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode remain in the conversation and move the task to Waiting Response while unanswered; leaving and reopening the conversation preserves the pending question, keyed answers resume the provider turn in In Progress, and the answered turn reports no outcome, so Playhouse drives a private status nudge; when that private turn cannot complete, the task settles in Blocked naming that reason instead of Waiting Response. A parallel conversation retains its own question and thread; the original conversation receives and answers a second question in its original Plan mode, and completing either conversation preserves the other pending request.
     def test_codex_questions_can_be_answered_over_cli_xpc(self):
         task_id = self.create_task("Codex questions", roots=[self.primary])["id"]
         other_id = self.create_task("Parallel Codex questions", roots=[self.secondary])["id"]
@@ -5540,8 +6589,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         # then read the durable result through the real bundled CLI/XPC.
         root = Path(__file__).resolve().parent.parent
         probe = self.data_directory / "codex-question-ownership-probe"
-        core = ["BoardTask", "WorkspaceSupport", "WorkspaceChanges", "CodexAppServerClient",
-                "ConversationModel", "ClaudeCodeClient", "ConversationTranscriptStore", "BridgeCore"]
+        core = ["BoardTask", "ConversationSubject", "WorkspaceSupport", "WorkspaceChanges", "CodexAppServerClient",
+                "ConversationModel", "ClaudeCodeClient", "ConversationTranscriptStore",
+                "StandaloneChatStore", "BridgeCore"]
         command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone"]
         for framework in ("Foundation", "AppKit", "SwiftUI", "SwiftData", "Combine"):
             command.extend(["-framework", framework])
@@ -5569,9 +6619,13 @@ class PlayhouseBridgeTests(unittest.TestCase):
             saved = history(owner)
             self.assertIsNone(saved.get("pendingUserInputRequest"))
             self.assertTrue(any("Answers received: Blue / fixture-secret." in message["text"] for message in saved["messages"]))
-            self.assertEqual(self.assert_success(self.call_cli("task", "get", owner)[0])["status"], "Waiting Response")
+            settled_record = self.assert_success(self.call_cli("task", "get", owner)[0])
+            self.assertEqual(settled_record["status"], "Blocked",
+                             "The answered turns leave every nudge unanswered, so they settle in Blocked.")
+            self.assertIn("couldn't run the private turn", settled_record.get("statusMessage") or "",
+                          "The Blocked reason must name why Playhouse stopped driving the work.")
         saved, _ = self.call_cli("task", "prompt", task_id, "--text", "A follow-up draft.")
-        self.assertEqual(self.assert_success(saved)["status"], "Waiting Response")
+        self.assertEqual(self.assert_success(saved)["status"], "Blocked")
         self.assertEqual(self.assert_success(saved)["savedPrompt"], "A follow-up draft.")
 
     # case-contract: test_claude_questions_can_be_answered_after_switching_conversations | Claude AskUserQuestion requests are delivered through the control path and move the task to Waiting Response while pending; the UI renders the question inline, preserves it across conversation switching, and sends a later answer to Claude before the turn ends in Waiting Response.
@@ -5603,7 +6657,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(any(message["text"] == "Answer received: Blue." for message in result["messages"]))
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
 
-    # case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome reminders; after the user answers, the next successful turn receives two hidden CLI outcome requests. Questions raised during those reminders are rejected through Claude's control protocol with completed or waiting-response instructions; both the questions and private rejection instructions stay out of the transcript. The task moves to Waiting Response only after both reminders fail to report an outcome.
+    # case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome nudges; after the user answers, the next successful turn receives a hidden CLI status nudge. A question raised during that nudge is rejected through Claude's control protocol with completed, in-progress, and waiting-response instructions, which fails the private turn; both the question and the private rejection instructions stay out of the transcript. Playhouse then stops driving the work and marks the task Blocked naming that reason, rather than spending the remaining nudges.
     def test_claude_outcome_reminder_rejects_user_questions(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-outcome-reminder-question"
@@ -5627,7 +6681,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
                                    extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)})
         pending_history = self.assert_success(pending)
         self.assertIsNotNone(pending_history.get("pendingUserInputRequest"))
-        self.assertFalse(any("Playhouse internal outcome reminder:" in turn.get("userText", "")
+        self.assertFalse(any("Playhouse internal outcome nudge:" in turn.get("userText", "")
                              for turn in json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]))
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress")
         request = questions[0]["payload"]["userInputRequest"]
@@ -5648,12 +6702,12 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(sum(event.get("type") == "user_input" for event in events), 1,
                          "Questions from private Claude reminders must not be emitted as user input.")
         turns = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
-        reminders = [turn for turn in turns if "Playhouse internal outcome reminder:" in turn.get("userText", "")]
-        self.assertEqual(len(reminders), 2, "Claude must receive the second private reminder after the first question is rejected.")
-        self.assertTrue(all("explicitly run the Playhouse CLI task outcome command" in turn["userText"] for turn in reminders))
+        nudges = [turn for turn in turns if "Playhouse internal outcome nudge:" in turn.get("userText", "")]
+        self.assertEqual(len(nudges), 1, "Rejecting the question fails the private turn, so Playhouse stops driving instead of spending every nudge.")
+        self.assertTrue(all("task outcome command" in turn["userText"] for turn in nudges))
         rejections = Path(str(executable) + ".private-reminder-question-rejection").read_text(encoding="utf-8").splitlines()
-        self.assertEqual(len(rejections), 2)
-        self.assertTrue(all("waiting-response" in message and "completed" in message for message in rejections))
+        self.assertEqual(len(rejections), 1)
+        self.assertTrue(all(all(outcome in message for outcome in ("completed", "in-progress", "waiting-response")) for message in rejections))
         history, _ = self.call_cli(
             "conversation", "history", task_id,
             extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)},
@@ -5662,9 +6716,12 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIsNone(safe_history.get("pendingUserInputRequest"))
         serialized_history = json.dumps(safe_history)
         self.assertNotIn("Which color should I use?", serialized_history)
-        self.assertNotIn("This is a private Playhouse outcome reminder.", serialized_history,
+        self.assertNotIn("This is a private Playhouse status nudge.", serialized_history,
                          "Claude's private rejection instructions must not enter persisted conversation history.")
-        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
+        settled = self.assert_success(self.call_cli("task", "get", task_id)[0])
+        self.assertEqual(settled["status"], "Blocked")
+        self.assertIn("couldn't run the private turn", settled.get("statusMessage") or "",
+                      "The Blocked reason must name why Playhouse stopped driving the work.")
 
     # case-contract: test_claude_empty_question_request_is_rejected | Claude AskUserQuestion requests with no questions are rejected through the control protocol, fail the turn, and mark the task Blocked; the UI shows the blocked task and its intervention indicator.
     def test_claude_empty_question_request_is_rejected(self):
@@ -5771,7 +6828,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         resumed, _ = self.call_cli("conversation", "history", task_id)
         self.assertIsNone(self.assert_success(resumed).get("pendingUserInputRequest"))
 
-    # case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early. A status-only completion update is not shown as an agent result; the summary-bearing notification is persisted as one normal assistant message in the parent conversation, appears in the visible transcript, and survives fresh CLI/XPC history reads and app reopening without duplication. A failed background agent remains inspectable as a failed activity, and its error summary is not added as an assistant result. When a background agent's notification wakes the parent after its result, the turn stays open through that resumed work, including when the last agent finishes while the woken parent is still streaming, and ends only with the parent's next result, keeping its final answer and both agent reports.
+    # case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early. A status-only completion update is not shown as an agent result; the summary-bearing notification is persisted as one normal assistant message in the parent conversation, appears in the visible transcript, and survives fresh CLI/XPC history reads and app reopening without duplication. A failed background agent remains inspectable as a failed activity, and its error summary is not added as an assistant result. When a background agent's notification wakes the parent after its result, the turn stays open through that resumed work, including when the last agent finishes while the woken parent is still streaming, and ends only with the parent's next result, keeping its final answer and both agent reports. A failed agent whose notification the running turn already consumed ends the send promptly instead of waiting for a wake. The system prompt Playhouse appends for Claude lets it run shell commands and agents in the foreground or background, forbids only processes detached with & or nohup, says it can end its response while background work runs instead of waiting and must report the outcome only after the background results, and no longer tells it to sleep, keep shell commands in the foreground, or keep its turn open for work it started.
     def test_claude_background_agent_keeps_turn_open_until_resolved(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-background-agent"
@@ -5863,16 +6920,33 @@ class PlayhouseBridgeTests(unittest.TestCase):
         fresh_history = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
         fresh_reports = [message for message in fresh_history["messages"] if message.get("phase") == "subagent_report"]
         self.assertEqual(fresh_reports, reports, "Fresh XPC reads should preserve one stable result message without duplication.")
+        launch_arguments = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"][0]["arguments"]
+        system_prompt = launch_arguments[launch_arguments.index("--append-system-prompt") + 1]
+        for guidance in [
+            "Never detach a process with & or nohup",
+            "in the foreground or with the Bash tool's run_in_background",
+            "run Agent/Task calls in the foreground or in the background",
+            "you can end your response instead of waiting",
+            "Report the task outcome only after you have handled every background result",
+        ]:
+            self.assertIn(guidance, system_prompt, "Claude should be told how Playhouse handles background agents.")
+        for contradiction in ["including long sleeps", "never end your turn while work you started is still running", "Never background a shell command"]:
+            self.assertNotIn(contradiction, system_prompt, "Claude must not be told to block on background agents it launched.")
 
         failed_task_response, _ = self.call_cli(
             "task", "create", "--title", "Claude failed background agent", "--root", self.primary, "--provider", "claude"
         )
         failed_task_id = self.assert_success(failed_task_response)["id"]
+        failed_started = time.monotonic()
         failed_send, _ = self.call_cli(
             "conversation", "send", failed_task_id, "--message", "Launch a background agent failure case.",
             extra_environment=env,
         )
         self.assert_success(failed_send)
+        self.assertLess(
+            time.monotonic() - failed_started, 10,
+            "A notification the running turn already consumed must not hold the turn open for a wake that never comes.",
+        )
         failed_history = self.assert_success(self.call_cli("conversation", "history", failed_task_id, extra_environment=env)[0])
         failed_activity = next(a for a in failed_history["activities"] if a["childThreadID"] == "toolu_background_agent")
         self.assertEqual(failed_activity["status"], "failed")
@@ -5929,6 +7003,108 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(
             any(activity["id"] == "toolu_wake_read" for activity in wake_history["activities"]),
             "Tool work the woken parent ran should be recorded in the turn.",
+        )
+
+    # case-contract: test_claude_background_shell_keeps_turn_open_through_wake | A Claude Bash call launched with run_in_background stays an in-progress activity after its launch confirmation and keeps the turn open after Claude's result while the shell runs, and still after the shell's notification empties the background task list, until the parent turn Claude Code wakes to deliver that notification sends its own result. The woken turn's answer is the final answer, the outcome it reports moves the task to Review without private outcome reminders, and the shell's completion resolves its activity with the command status without becoming an agent report. When the shell finishes before Claude's first result, so the woken turn starts before that result arrives, the turn waits for both results.
+    def test_claude_background_shell_keeps_turn_open_through_wake(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / "claude-fixture-background-shell"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        created, _ = self.call_cli(
+            "task", "create", "--title", "Claude background shell", "--root", self.primary, "--provider", "claude"
+        )
+        task_id = self.assert_success(created)["id"]
+        stage = {name: Path(f"{executable}.background-shell-{name}") for name in [
+            "running-pause", "running-ready", "running-release", "wake-pause", "wake-ready", "wake-release",
+            "second-result-pause", "second-result-ready", "second-result-release",
+        ]}
+        stage["running-pause"].write_text("Pause while the shell runs.\n", encoding="utf-8")
+        stage["wake-pause"].write_text("Pause between the shell's notification and the woken turn.\n", encoding="utf-8")
+
+        def wait_for(path):
+            deadline = time.monotonic() + 20
+            while not path.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(path.exists(), f"The fixture should reach {path.name}.")
+            # Give a premature settle time to end the send before asserting it is open.
+            time.sleep(0.5)
+
+        command = ("conversation", "send", task_id, "--message", "Launch a background shell for this turn.")
+        process = self.start_cli(*command, extra_environment=env)
+        try:
+            wait_for(stage["running-ready"])
+            self.assertIsNone(process.poll(), "The send must stay open while a background shell runs after Claude's result.")
+            running = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+            shell = next(a for a in running["activities"] if a["id"] == "toolu_background_shell")
+            self.assertEqual(shell["status"], "inProgress", "The launch confirmation must not resolve a background shell.")
+            stage["running-release"].write_text("Finish the shell.\n", encoding="utf-8")
+            wait_for(stage["wake-ready"])
+            self.assertIsNone(
+                process.poll(),
+                "The send must stay open after the shell's notification until Claude's woken turn reports its result.",
+            )
+            self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress")
+            stage["wake-release"].write_text("Start the woken turn.\n", encoding="utf-8")
+            response, events = self.finish_cli(process, command, timeout=60)
+        finally:
+            stage["running-release"].write_text("Release after failure.\n", encoding="utf-8")
+            stage["wake-release"].write_text("Release after failure.\n", encoding="utf-8")
+            if process.poll() is None:
+                process.communicate(timeout=30)
+        self.assert_success(response)
+        self.assertEqual([e["payload"]["text"] for e in events if e["type"] == "assistant_final"], ["SHELL HANDLED"])
+        self.assertEqual(
+            self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Review",
+            "The outcome Claude reports in its woken turn should be honored.",
+        )
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        shell = next(a for a in history["activities"] if a["id"] == "toolu_background_shell")
+        self.assertEqual(shell["status"], "completed")
+        self.assertEqual(shell["backgroundTaskID"], "bgshell-fixture-1")
+        self.assertIn("completed (exit code 0)", shell["detail"])
+        self.assertIsNone(shell.get("backgroundTaskSummary"), "A shell's status line is not an agent result.")
+        self.assertFalse(any(m.get("phase") == "subagent_report" for m in history["messages"]))
+        self.assertEqual(
+            [m["text"] for m in history["messages"] if m["role"] == "assistant"][-1], "SHELL HANDLED",
+            "The woken turn's answer should be the turn's last assistant message.",
+        )
+
+        early_created, _ = self.call_cli(
+            "task", "create", "--title", "Claude early background shell", "--root", self.primary, "--provider", "claude"
+        )
+        early_id = self.assert_success(early_created)["id"]
+        for name in ("running-pause", "wake-pause"):
+            stage[name].unlink()
+        stage["second-result-pause"].write_text("Pause between the first and the woken turn's results.\n", encoding="utf-8")
+        early_command = ("conversation", "send", early_id, "--message", "Launch a background shell that finishes early.")
+        process = self.start_cli(*early_command, extra_environment=env)
+        try:
+            wait_for(stage["second-result-ready"])
+            self.assertIsNone(
+                process.poll(),
+                "The first turn's result must not end the send while the woken turn that started before it is unfinished.",
+            )
+            stage["second-result-release"].write_text("Send the woken turn's result.\n", encoding="utf-8")
+            early, early_events = self.finish_cli(process, early_command, timeout=60)
+        finally:
+            stage["second-result-release"].write_text("Release after failure.\n", encoding="utf-8")
+            if process.poll() is None:
+                process.communicate(timeout=30)
+        self.assert_success(early)
+        self.assertEqual(
+            [e["payload"]["text"] for e in early_events if e["type"] == "assistant_final"], ["SHELL HANDLED"],
+            "When the woken turn starts before Claude's first result, the turn must wait for both results.",
+        )
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", early_id)[0])["status"], "Review")
+        recorded = json.loads(Path(f"{executable}.history").read_text(encoding="utf-8"))["turns"]
+        self.assertFalse(
+            any("previous request finished without reporting" in (t.get("userText") or "") for t in recorded),
+            "An outcome reported in the woken turn must not trigger private outcome reminders.",
         )
 
     # case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, Playhouse returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics.
@@ -6147,7 +7323,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Waiting Response")
 
-    # case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation, and keep the task In Progress through fresh CLI/XPC history reconciliation after provider exit until answered. Free-text questions expose a selectable Other choice, select it when text is entered, keep it exclusive of listed answers, and deliver the free-text answer through CLI/XPC and visible UI. Answering resumes the provider turn without outcome reminders while its own pending question is still being resolved; the resumed turn returns to Waiting Response once the pending question clears, and the recovered secret answer stays redacted everywhere.
+    # case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation, and keep the task In Progress through fresh CLI/XPC history reconciliation after provider exit until answered. Free-text questions expose a selectable Other choice, select it when text is entered, keep it exclusive of listed answers, and deliver the free-text answer through CLI/XPC and visible UI. Answering resumes the provider turn without status nudges while its own pending question is still being resolved; the resumed turn returns to Waiting Response once the pending question clears, and the recovered secret answer stays redacted everywhere.
     def test_codex_nonblocking_question_keeps_task_in_progress(self):
         task_id = self.create_task("Non-blocking question", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -6196,7 +7372,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         task, _ = self.call_cli("task", "get", task_id)
         self.assertEqual(self.assert_success(task)["status"], "Waiting Response")
         fixture_turns = json.loads(provider_history)["turns"]
-        reminders = [turn for turn in fixture_turns if "Playhouse internal outcome reminder:" in turn.get("userMessage", "")]
+        reminders = [turn for turn in fixture_turns if "Playhouse internal outcome nudge:" in turn.get("userMessage", "")]
         self.assertEqual(len(reminders), 0, "A pending question still being resolved during the recovered turn must suppress private outcome reminders.")
         self.assertFalse(any(event.get("type") == "user_input" for event in events), "Questions from private reminders must not be emitted as user input.")
 

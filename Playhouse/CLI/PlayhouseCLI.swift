@@ -25,8 +25,17 @@ enum PlayhouseCLI {
         configuredRequest.dataDirectory = dataDirectory
         configuredRequest.defaultsSuite = defaultsSuite
         configuredRequest.worktreeDirectory = ProcessInfo.processInfo.environment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"]
+        // Same identity lookup as BridgeClient.applicationIdentifier(): this CLI
+        // lives at `<App>.app/Contents/MacOS/playhouse-cli`, so `Bundle.main`
+        // already resolves to the app's own Info.plist.
+        let applicationIdentifier = Bundle.main.infoDictionary?["PlayhouseApplicationBundleIdentifier"] as? String
+            ?? Bundle.main.bundleIdentifier ?? ""
+        let forwardableNames = BridgeContract.environmentNamesToForward(
+            applicationIdentifier: applicationIdentifier,
+            from: ProcessInfo.processInfo.environment
+        )
         configuredRequest.environment = ProcessInfo.processInfo.environment
-            .filter { BridgeContract.sessionEnvironmentNames.contains($0.key) }
+            .filter { forwardableNames.contains($0.key) }
         if let codexHome = ProcessInfo.processInfo.environment["CODEX_HOME"] {
             configuredRequest.arguments["__codexHome"] = .string(codexHome)
         }
@@ -109,7 +118,7 @@ enum PlayhouseCLI {
                 ])
             case "pr":
                 guard tail.count >= 2 else {
-                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve <task-id> [action]")
+                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync <task-id> [action]")
                 }
                 switch tail[0] {
                 case "create" where tail.count == 2:
@@ -122,8 +131,10 @@ enum PlayhouseCLI {
                     return BridgeRequest(command: "task.pr.verify", arguments: ["taskID": .string(tail[1])])
                 case "resolve" where tail.count == 3:
                     return BridgeRequest(command: "task.pr.resolve", arguments: ["taskID": .string(tail[1]), "action": .string(tail[2])])
+                case "sync" where tail.count == 2:
+                    return BridgeRequest(command: "task.pr.sync", arguments: ["taskID": .string(tail[1])])
                 default:
-                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve <task-id> [resolve-and-push|resolve-only|keep]")
+                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync <task-id> [resolve-and-push|resolve-only|keep]")
                 }
             case "progress":
                 guard let action = tail.first else { throw CLIError.usage("Use: playhouse task progress publish|custom|clear <task-id> ...") }
@@ -155,7 +166,7 @@ enum PlayhouseCLI {
                 }
             case "outcome":
                 guard tail.count == 2 else {
-                    throw CLIError.usage("Use: playhouse task outcome <task-id> <completed|waiting-response>")
+                    throw CLIError.usage("Use: playhouse task outcome <task-id> <completed|in-progress|waiting-response>")
                 }
                 return BridgeRequest(command: "task.outcome", arguments: [
                     "taskID": .string(tail[0]), "outcome": .string(tail[1])
@@ -300,6 +311,52 @@ enum PlayhouseCLI {
                 }
             default:
                 throw CLIError.usage("Unknown task operation '\(operation)'.")
+            }
+        case "chat":
+            if rest == ["open"] {
+                return BridgeRequest(command: "chat.open")
+            }
+            if rest == ["status"] {
+                return BridgeRequest(command: "chat.status")
+            }
+            guard rest.first == "page", rest.count >= 2 else {
+                throw CLIError.usage("Use: playhouse chat open or playhouse chat page list|search|read|new|close-turn ...")
+            }
+            let tail = Array(rest.dropFirst(2))
+            switch rest[1] {
+            case "list":
+                let flags = try parseFlags(tail, valueFlags: ["--limit"])
+                var arguments: [String: BridgeValue] = [:]
+                if let limit = flags["--limit"]?.first { arguments["limit"] = .string(limit) }
+                return BridgeRequest(command: "chat.page.list", arguments: arguments)
+            case "search":
+                let query = try firstPositional(tail)
+                return BridgeRequest(command: "chat.page.search", arguments: ["query": .string(query)])
+            case "read":
+                let id = try firstPositional(tail)
+                return BridgeRequest(command: "chat.page.read", arguments: ["pageID": .string(id)])
+            case "new":
+                let flags = try parseFlags(tail, valueFlags: ["--title"])
+                let title = try requiredFlag("--title", flags: flags).first!
+                return BridgeRequest(command: "chat.page.new", arguments: ["title": .string(title)])
+            case "close-turn":
+                guard let chatID = tail.first else {
+                    throw CLIError.usage("Use: playhouse chat page close-turn <chat-id> --continues <true|false> [--new-title <title>]")
+                }
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--continues", "--new-title", "--summary-hint"])
+                let continuesValue = try requiredFlag("--continues", flags: flags).first!
+                guard continuesValue == "true" || continuesValue == "false" else {
+                    throw CLIError.usage("Use --continues true or --continues false.")
+                }
+                var arguments: [String: BridgeValue] = [
+                    "chatID": .string(chatID),
+                    "continues": .boolean(continuesValue == "true"),
+                ]
+                if let newTitle = flags["--new-title"]?.first { arguments["newTitle"] = .string(newTitle) }
+                if let summaryHint = flags["--summary-hint"]?.first { arguments["summaryHint"] = .string(summaryHint) }
+                return BridgeRequest(command: "chat.page.close-turn", arguments: arguments)
+            default:
+                throw CLIError.usage("Unknown chat page operation '\(rest[1])'.")
             }
         case "workspace":
             if rest == ["repos", "list"] {
@@ -464,7 +521,7 @@ enum PlayhouseCLI {
                     "answers": .object(answers.mapValues { .array($0.map(BridgeValue.string)) })
                 ])
             case "send":
-                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode", "--model", "--answer", "--image"])
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--message", "--mode", "--model", "--answer", "--image", "--context-page"])
                 var answers: [String: [String]] = [:]
                 for pair in flags["--answer"] ?? [] {
                     guard let separator = pair.firstIndex(of: "="), separator != pair.startIndex else {
@@ -493,6 +550,10 @@ enum PlayhouseCLI {
                 ]
                 // Without --model, the task's provider chooses its default model.
                 if let model = flags["--model"]?.first { sendArguments["model"] = .string(model) }
+                // Standalone chat only: pages an annotation points at, carried for this turn.
+                if let contextPages = flags["--context-page"] {
+                    sendArguments["contextPages"] = .array(contextPages.map(BridgeValue.string))
+                }
                 return BridgeRequest(command: "conversation.send", arguments: sendArguments)
             default: throw CLIError.usage("Unknown conversation operation '\(operation)'.")
             }
@@ -574,10 +635,11 @@ enum PlayhouseCLI {
       playhouse task pr create <task-id>
       playhouse task pr status <task-id>
       playhouse task pr verify <task-id>
+      playhouse task pr sync <task-id>
       playhouse task progress publish <task-id> --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail <text>]
       playhouse task progress custom <task-id> --label <label> [--detail <text>]
       playhouse task progress clear <task-id>
-      playhouse task outcome <task-id> <completed|waiting-response>
+      playhouse task outcome <task-id> <completed|in-progress|waiting-response>
       playhouse task rename <task-id> --title <title>
       playhouse task repository add <task-id> --repo <path>
       playhouse task repository add-batch <task-id> --repo <path> [--repo <path>...]
@@ -592,6 +654,13 @@ enum PlayhouseCLI {
       playhouse task changes mark-viewed <task-id> --repository <path> --path <relative-path>
       playhouse task delete <task-id>
       playhouse task delete-check <task-id>
+      playhouse chat open
+      playhouse chat status
+      playhouse chat page list [--limit <n>]
+      playhouse chat page search <query>
+      playhouse chat page read <page-id>
+      playhouse chat page new --title <title>
+      playhouse chat page close-turn <chat-id> --continues <true|false> [--new-title <title>] [--summary-hint <text>]
       playhouse workspace suggest --parent <path>
       playhouse workspace repos list
       playhouse settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>
@@ -618,7 +687,7 @@ enum PlayhouseCLI {
       playhouse conversation stop <task-id>
       playhouse conversation provider <task-id> [set <codex|claude>|capabilities]
       playhouse conversation goal <task-id> <get|set|pause|resume|clear> [--text <objective>]
-      playhouse conversation send <task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...]
+      playhouse conversation send <task-id> --message <text> [--image <path>]... [--mode <default|plan>] [--model <model-id>] [--answer <question-id>=<answer>...] [--context-page <page-id>]...
 
     Results are JSON. Conversation send emits JSON event lines followed by a final response.
     Conversation commands use the task's provider; tasks without one use Codex.

@@ -218,7 +218,12 @@ enum ConversationHandoff {
     static let closeTag = "</playhouse-handoff-context>"
     private static let characterLimit = 40_000
 
-    static func context(for provider: ConversationProvider, messages: [ConversationMessage]) -> String? {
+    static let defaultPreamble = "This Playhouse task continued with another assistant while you were not active. These are the visible turns you have not seen, provided as context. Tool history and hidden reasoning are not included; inspect the workspace for the current state of files."
+    /// Standalone chat pages are separate conversations, so their context block says so instead
+    /// of describing a provider handoff.
+    static let chatPagePreamble = "Earlier turns of this standalone chat, provided as context. This chat is split into pages and each page is its own conversation: only the pages below are in scope for this turn."
+
+    static func context(for provider: ConversationProvider, messages: [ConversationMessage], preamble: String? = nil) -> String? {
         // A turn whose answer was only recorded as commentary still hands off its
         // last commentary, so a misclassified answer is never silently dropped.
         let answeredTurns = Set(messages.compactMap { $0.role == .assistant && $0.phase != "commentary" ? $0.turnID : nil })
@@ -241,7 +246,7 @@ enum ConversationHandoff {
         }
         return """
         \(openTag)
-        This Playhouse task continued with another assistant while you were not active. These are the visible turns you have not seen, provided as context. Tool history and hidden reasoning are not included; inspect the workspace for the current state of files.
+        \(preamble ?? defaultPreamble)
 
         \(transcript)
         \(closeTag)

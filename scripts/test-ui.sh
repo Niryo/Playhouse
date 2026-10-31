@@ -78,6 +78,7 @@ codex_fixtures=(
   title-success title-failure title-success-wait title-archive-ui hold
   hold-interrupt hold-reject-interrupt
   progress-hold-release progress-hold-release-failed progress-hold-release-interrupted unique-turns-progress-hold-release
+  in-progress-continuation-hold-release in-progress-cap-hold-release in-progress-stop-hold-release in-progress-queue-hold-release
   progress-question progress-user-question success-wait store-write-success-wait concurrent-serial-success-wait restart-question restart-question-no-secret unassociated-restart-question
   status-transition-ui nonblocking-slow nonblocking-restart-question async-question async-question-queued subagent context-compaction tool-activity long-history-success markdown steer-queue-serial-success-wait
 )
@@ -185,8 +186,13 @@ source_bundle_identifier="$("${repository_root}/scripts/app-profile.sh" "${repos
 task_pr_seeder="${fixture_root}/seed-task-pr-link"
 xcrun swiftc -module-name Playhouse \
   "${repository_root}/Playhouse/App/BoardTask.swift" \
+  "${repository_root}/Playhouse/App/ConversationSubject.swift" \
   "${repository_root}/scripts/seed-task-pr-link.swift" \
   -o "${task_pr_seeder}"
+legacy_chat_seeder="${fixture_root}/seed-legacy-standalone-chat-task"
+xcrun swiftc -parse-as-library -swift-version 5 -O \
+  "${repository_root}/scripts/seed-legacy-standalone-chat-task.swift" \
+  -o "${legacy_chat_seeder}"
 legacy_store_seeder="${fixture_root}/seed-legacy-task-store"
 xcrun swiftc -parse-as-library -swift-version 5 -O \
   "${repository_root}/scripts/seed-legacy-task-store.swift" \

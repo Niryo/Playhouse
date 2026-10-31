@@ -89,8 +89,12 @@ final class DaemonClient: @unchecked Sendable {
         request.dataDirectory = configuration.dataDirectory
         request.defaultsSuite = configuration.defaultsSuite
         request.worktreeDirectory = configuration.worktreeDirectory
+        let forwardableNames = BridgeContract.environmentNamesToForward(
+            applicationIdentifier: PlayhouseAppIdentity.applicationIdentifier,
+            from: ProcessInfo.processInfo.environment
+        )
         request.environment = ProcessInfo.processInfo.environment
-            .filter { BridgeContract.sessionEnvironmentNames.contains($0.key) }
+            .filter { forwardableNames.contains($0.key) }
         return request
     }
 

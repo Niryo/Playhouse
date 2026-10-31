@@ -16,7 +16,7 @@ struct SeedTaskPullRequestLink {
 
         let dataDirectory = URL(fileURLWithPath: arguments[0], isDirectory: true)
         let storeURL = dataDirectory.appendingPathComponent("Playhouse-v2.store")
-        let schema = Schema([BoardTask.self])
+        let schema = Schema([BoardTask.self, StandaloneChat.self])
         let configuration = ModelConfiguration(
             "Playhouse",
             schema: schema,

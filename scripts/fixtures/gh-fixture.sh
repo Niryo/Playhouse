@@ -8,8 +8,15 @@
 #   PLAYHOUSE_E2E_GH_STARTED_DIRECTORY   with EXPECTED_IDS, full probes must all start
 #   PLAYHOUSE_E2E_GH_EXPECTED_IDS        before any answers (parallel-probe check)
 #   PLAYHOUSE_E2E_GH_REMOTE_REPOSITORY   bare repo whose refs/heads/pr-<n> is the PR head
-if [ -z "${PLAYHOUSE_E2E_GH_STATE_PATH:-}" ] || [ -z "${PLAYHOUSE_E2E_GH_CALL_LOG:-}" ]; then
-  echo 'gh fixture requires PLAYHOUSE_E2E_GH_STATE_PATH and PLAYHOUSE_E2E_GH_CALL_LOG' >&2
+# The bridge daemon forwards only session environment variables to the
+# processes it runs for a CLI request, so a CLI-driven probe cannot deliver the
+# PLAYHOUSE_E2E_GH_* configuration. Default to files beside this script; an
+# app-process caller (the UI suite) still overrides them through its own env.
+script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+: "${PLAYHOUSE_E2E_GH_STATE_PATH:=$script_directory/state}"
+: "${PLAYHOUSE_E2E_GH_CALL_LOG:=$script_directory/calls}"
+if [ ! -f "$PLAYHOUSE_E2E_GH_STATE_PATH" ]; then
+  echo 'gh fixture requires a state file (PLAYHOUSE_E2E_GH_STATE_PATH or `state` beside the script)' >&2
   exit 2
 fi
 if [ "$1" != pr ] || [ "$2" != view ] || { [ "$3" != 123 ] && [ "$3" != 456 ]; } || [ "$4" != --json ]; then

@@ -21,6 +21,7 @@ The daemon accepts a versioned, length-prefixed JSON request over its socket, st
 | `task roots get <task-id>` | Read ordered task roots |
 | `task roots set <task-id> --root <path> [--root <path>...]` | Replace ordered task roots |
 | `task delete <task-id>` | Delete a task |
+| `task pr sync <task-id>` | Push every local change on the task's PR-linked branches: commit local work, merge new remote pull request commits (conflicts are resolved by the task's provider), and push. The same sync runs automatically before a completed turn reaches Review and when the board detects a diverged pull request head, so a reviewed task never holds local-only changes; on failure the task moves to Blocked with the sync error, and a successful rerun returns it to Review |
 | `workspace suggest --parent <path>` | Find Git repository roots below a parent folder |
 | `workspace repos list` | Return the configured repository root and its discovered Git repositories |
 | `settings get` | Read the default parent folder and saved repository defaults |

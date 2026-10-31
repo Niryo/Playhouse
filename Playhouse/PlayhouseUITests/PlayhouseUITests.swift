@@ -289,6 +289,8 @@ private final class RepositoryAllocationLockBarrier {
 
 final class PlayhouseUITests: XCTestCase {
     private static var suiteAbortReason: String?
+    /// Mirrors TurnOutcome.maxContinuations: private continuation/nudge turns per request.
+    private static let maxOutcomeContinuations = 5
 
     private var app: XCUIApplication!
     private var fixture: WorkspaceFixture!
@@ -1790,6 +1792,173 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ !resolveButton.exists }, timeout: 10), "The action should disappear after GitHub confirms the pushed head.")
     }
 
+    // case-contract: test_review_sync_pushes_unpushed_changes_on_completion | A completed turn outcome on a task with a PR-linked repository and a configured remote commits local work, merges new remote pull request commits, and pushes the branch before the task reaches Review, so the reviewed worktree holds no local-only changes. A linked repository without a publishing remote is left untouched and still reaches Review. When the sync cannot complete, the task moves to Blocked with the sync failure message instead of resting in Review, and a later successful sync pushes the stranded commits and returns the task to Review. While a provider turn holds the task's worktree, the sync command skips it untouched and reports turn-active.
+    func test_review_sync_pushes_unpushed_changes_on_completion() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [123]).merging(Self.prCheckCooldownEnvironment) { $1 }
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Review sync push UI", "--repo", fixture.primary.path,
+            "--merge-target", "\(fixture.primary.path)=main",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Review sync push UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Review sync push UI")
+        element("back-to-board-button").click()
+        XCTAssertTrue(waitUntil({ element("task-card-\(taskID)").exists }, timeout: 10))
+        XCTAssertTrue(terminateAppAndWait(app))
+        try seedTaskPullRequest(taskID: taskID, number: 123, url: "https://github.com/playhouse-test/fixture/pull/123")
+
+        let record = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String), isDirectory: true)
+        let branch = try XCTUnwrap(record["branch"] as? String)
+        let remote = runDirectory.appendingPathComponent("review-sync-push-origin.git", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: remote.path), "Each UI case should use a fresh owned bare remote.")
+        try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+        _ = try runGitOutput(remote, "init", "--bare")
+        try runGit(fixture.primary, "remote", "add", "origin", remote.path)
+        defer { try? runGit(fixture.primary, "remote", "remove", "origin") }
+        try runGit(worktree, "push", "--set-upstream", "origin", branch)
+
+        // A reviewer commit on the remote PR branch the local branch has not seen.
+        let clone = runDirectory.appendingPathComponent("review-sync-push-clone", isDirectory: true)
+        _ = try runGitOutput(runDirectory, "clone", "--branch", branch, remote.path, clone.path)
+        try "Remote reviewer commit.\n".write(to: clone.appendingPathComponent("remote-side.txt"), atomically: true, encoding: .utf8)
+        try runGit(clone, "add", "remote-side.txt")
+        try runGit(clone, "commit", "-m", "Remote PR commit")
+        try runGit(clone, "push", "origin", branch)
+        let reviewerHead = try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)")
+
+        // Local uncommitted work the completed turn leaves behind.
+        try "Local turn output.\n".write(to: worktree.appendingPathComponent("local-side.txt"), atomically: true, encoding: .utf8)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        openTask(named: "Review sync push UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Review sync push UI", whileTurnHeld: {
+            // While the provider turn owns the worktree, the sync skips it untouched.
+            let skipped = try self.runCLI(["task", "pr", "sync", taskID])
+            let result = try XCTUnwrap(skipped["result"] as? [String: Any])
+            XCTAssertEqual(result["skipped"] as? String, "turn-active")
+            XCTAssertEqual((result["records"] as? [Any])?.isEmpty, true)
+        })
+        assertTaskVisible("Review sync push UI", inColumn: "Review")
+        XCTAssertEqual(try runGitOutput(worktree, "status", "--porcelain", "--untracked-files=all"), "", "A reviewed worktree must hold no local-only changes.")
+        let localHead = try runGitOutput(worktree, "rev-parse", "HEAD")
+        XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)"), localHead)
+        XCTAssertNotEqual(localHead, reviewerHead, "The sync should push a merge of the reviewer commit and the local work.")
+        XCTAssertEqual(
+            try String(contentsOf: worktree.appendingPathComponent("remote-side.txt"), encoding: .utf8),
+            "Remote reviewer commit.\n"
+        )
+        XCTAssertEqual(try runGitOutput(remote, "show", "refs/heads/\(branch):local-side.txt"), "Local turn output.")
+
+        // A sync the daemon cannot complete blocks the task instead of resting in Review.
+        try runGit(fixture.primary, "remote", "set-url", "origin", runDirectory.appendingPathComponent("missing-remote.git").path)
+        try "Unpushable local change.\n".write(to: worktree.appendingPathComponent("local-side.txt"), atomically: true, encoding: .utf8)
+        openTask(named: "Review sync push UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Review sync push UI", expectedFinalStatus: "Blocked")
+        assertTaskVisible("Review sync push UI", inColumn: "Blocked")
+        let blockedMessage = try taskRecord(id: taskID)?["statusMessage"] as? String
+        XCTAssertTrue((blockedMessage ?? "").contains("couldn't sync this task's changes with its pull request"), blockedMessage ?? "nil")
+
+        // A later successful sync pushes the stranded commit and returns the task to Review.
+        try runGit(fixture.primary, "remote", "set-url", "origin", remote.path)
+        _ = try runCLI(["task", "pr", "sync", taskID])
+        assertTaskVisible("Review sync push UI", inColumn: "Review")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
+        XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)"), try runGitOutput(worktree, "rev-parse", "HEAD"))
+    }
+
+    // case-contract: test_review_sync_resolves_conflicts_with_provider_or_blocks | When the remote pull request branch conflicts with local task commits, the review sync merges the remote branch and instructs the task's provider to resolve every conflict; if conflicts remain after the provider turn, the sync fails, the task moves to Blocked with the sync failure message, the merge stays in progress for manual resolution, and the remote branch is unchanged. A rerun with the conflicts staged commits the resolution, pushes the merged branch, and returns the task to Review. The board triggers the same sync automatically when a mergeable pull request's remote head diverges from the local head.
+    func test_review_sync_resolves_conflicts_with_provider_or_blocks() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        var ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [123]).merging(Self.prCheckCooldownEnvironment) { $1 }
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Review sync conflict UI", "--repo", fixture.primary.path,
+            "--merge-target", "\(fixture.primary.path)=main",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        openTask(named: "Review sync conflict UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Review sync conflict UI")
+        element("back-to-board-button").click()
+        XCTAssertTrue(waitUntil({ element("task-card-\(taskID)").exists }, timeout: 10))
+        XCTAssertTrue(terminateAppAndWait(app))
+        try seedTaskPullRequest(taskID: taskID, number: 123, url: "https://github.com/playhouse-test/fixture/pull/123")
+
+        let record = try XCTUnwrap((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String), isDirectory: true)
+        let branch = try XCTUnwrap(record["branch"] as? String)
+        let remote = runDirectory.appendingPathComponent("review-sync-conflict-origin.git", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: remote.path), "Each UI case should use a fresh owned bare remote.")
+        try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+        _ = try runGitOutput(remote, "init", "--bare")
+        try runGit(fixture.primary, "remote", "add", "origin", remote.path)
+        defer { try? runGit(fixture.primary, "remote", "remove", "origin") }
+        try runGit(worktree, "push", "--set-upstream", "origin", branch)
+        try runGit(worktree, "push", "origin", "HEAD:refs/heads/pr-123")
+        ghEnvironment["PLAYHOUSE_E2E_GH_REMOTE_REPOSITORY"] = remote.path
+
+        // The board pushes a diverged local head automatically, with no conflict action.
+        try "Local unpushed change.\n".write(to: worktree.appendingPathComponent("review-sync-local.txt"), atomically: true, encoding: .utf8)
+        try runGit(worktree, "add", "review-sync-local.txt")
+        try runGit(worktree, "commit", "-m", "Local unpushed commit")
+        let localHead = try runGitOutput(worktree, "rev-parse", "HEAD")
+        XCTAssertNotEqual(try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)"), localHead)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        XCTAssertTrue(element("task-card-\(taskID)").waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({
+            (try? self.runGitOutput(remote, "rev-parse", "refs/heads/\(branch)")) == localHead
+        }, timeout: 30), "The board should push the diverged local head automatically.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
+        // Once the PR head reports the pushed commit, no conflict action remains.
+        try runGit(worktree, "push", "origin", "HEAD:refs/heads/pr-123")
+        Thread.sleep(forTimeInterval: Self.prCheckCooldown + 0.1)
+        activateOtherAppThenReturn()
+        let resolveButton = element("task-resolve-pr-conflicts-\(taskID)")
+        XCTAssertTrue(waitUntil({ !resolveButton.exists }, timeout: 10), "A synced PR should not keep the conflict action.")
+        XCTAssertTrue(terminateAppAndWait(app))
+
+        // Conflicting local and remote PR commits: the provider turn resolves nothing,
+        // so the sync fails closed and the task blocks instead of resting in Review.
+        let conflictPath = "review-sync-conflict.txt"
+        try "base version\n".write(to: worktree.appendingPathComponent(conflictPath), atomically: true, encoding: .utf8)
+        try runGit(worktree, "add", conflictPath)
+        try runGit(worktree, "commit", "-m", "Base for sync conflict")
+        try runGit(worktree, "push", "origin", branch)
+        try runGit(worktree, "push", "origin", "HEAD:refs/heads/pr-123")
+        let clone = runDirectory.appendingPathComponent("review-sync-conflict-clone", isDirectory: true)
+        _ = try runGitOutput(runDirectory, "clone", "--branch", branch, remote.path, clone.path)
+        try "remote version\n".write(to: clone.appendingPathComponent(conflictPath), atomically: true, encoding: .utf8)
+        try runGit(clone, "add", conflictPath)
+        try runGit(clone, "commit", "-m", "Remote conflicting commit")
+        try runGit(clone, "push", "origin", branch)
+        try runGit(clone, "push", "origin", "HEAD:refs/heads/pr-123")
+        let remoteHead = try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)")
+        try "local version\n".write(to: worktree.appendingPathComponent(conflictPath), atomically: true, encoding: .utf8)
+        try runGit(worktree, "add", conflictPath)
+        try runGit(worktree, "commit", "-m", "Local conflicting commit")
+
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: taskID)?["status"] as? String) == "Blocked"
+        }, timeout: 30), "An unresolvable sync conflict should move the task to Blocked.")
+        assertTaskVisible("Review sync conflict UI", inColumn: "Blocked")
+        let blockedMessage = try taskRecord(id: taskID)?["statusMessage"] as? String
+        XCTAssertTrue((blockedMessage ?? "").contains("couldn't sync this task's changes with its pull request"), blockedMessage ?? "nil")
+        XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)"), remoteHead, "A failed sync must leave the remote branch unchanged.")
+        XCTAssertEqual(try runGitOutput(worktree, "diff", "--name-only", "--diff-filter=U"), conflictPath, "The merge should stay in progress for manual resolution.")
+
+        // Staging the resolution lets the shared sync command finish the merge,
+        // push the merged branch, and return the task to Review.
+        try "resolved local and remote versions\n".write(to: worktree.appendingPathComponent(conflictPath), atomically: true, encoding: .utf8)
+        try runGit(worktree, "add", conflictPath)
+        _ = try runCLI(["task", "pr", "sync", taskID])
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Review")
+        assertTaskVisible("Review sync conflict UI", inColumn: "Review")
+        XCTAssertEqual(try runGitOutput(remote, "rev-parse", "refs/heads/\(branch)"), try runGitOutput(worktree, "rev-parse", "HEAD"))
+        XCTAssertEqual(try runGitOutput(remote, "show", "refs/heads/\(branch):\(conflictPath)"), "resolved local and remote versions")
+    }
+
     // case-contract: test_task_done_preserves_dirty_worktree | Moving a reviewed task to Done changes only task status and preserves dirty worktree files, branch, and target commit without committing or merging.
     func test_task_done_preserves_dirty_worktree() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
@@ -2194,15 +2363,14 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
         assertTaskVisible("Waiting layout", inColumn: "Waiting Response")
 
+        // This task exists for board layout, so it settles explicitly rather than
+        // depending on the status-nudge fallback that other cases own.
+        XCTAssertEqual(
+            (try runCLI(["task", "outcome", activeTaskID, "waiting-response"])["result"] as? [String: Any])?["outcome"] as? String,
+            "waiting-response"
+        )
         try "Release the active turn.\n".write(to: activeTurn.releaseMarker, atomically: true, encoding: .utf8)
-        // The fixture also holds the private outcome reminders that follow; release each one.
-        XCTAssertTrue(waitUntil({
-            if FileManager.default.fileExists(atPath: activeTurn.activeMarker.path),
-               !FileManager.default.fileExists(atPath: activeTurn.releaseMarker.path) {
-                try? "Release the reminder turn.\n".write(to: activeTurn.releaseMarker, atomically: true, encoding: .utf8)
-            }
-            return !activeTurn.process.isRunning
-        }, timeout: 30), "The In Progress fixture conversation should finish after its reminders.")
+        XCTAssertTrue(waitUntil({ !activeTurn.process.isRunning }, timeout: 30), "The In Progress fixture conversation should finish once released.")
         activeTurn.process.waitUntilExit()
         let activeOutput = String(data: activeTurn.stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let activeError = String(data: activeTurn.stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
@@ -2224,7 +2392,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ lowestTask.exists && lowestTask.isHittable }, timeout: 10), "Vertical board scrolling should make lower backlog tasks reachable.")
     }
 
-    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to two private follow-up requests to report one; a completed report during either reminder moves the task to Review, a waiting-response report during a reminder stops retries and leaves the task in Waiting Response, and no report after both reminders falls back to Waiting Response. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. Private reminder prompts, replies, and turn-scoped activities remain absent from Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those reminders also retains the latest ordinary-turn diff while keeping reminder-only replies hidden.
+    // case-contract: test_task_progress_reports_publish_persist_and_clear | The CLI publishes standard and custom progress only during an active task turn, persists each report across fresh CLI/XPC connections, rejects invalid reports, and clears explicitly. During an active turn the CLI accepts completed, in-progress, and waiting-response outcomes, rejects invalid or inactive outcomes, and persists the selected status; provider processes started from the CLI/XPC service or the app's composer inherit that app's bridge service name and store directory, and an outcome reported with exactly that inherited environment reaches the task. A successful turn without an outcome receives up to five private status nudges that each offer in-progress alongside completed and waiting-response; a completed report during a nudge moves the task to Review, a waiting-response report during a nudge stops the loop and leaves the task in Waiting Response, and no report after every nudge marks the task Blocked rather than Waiting Response, since the user was never asked anything. The board shows progress details and places completed tasks in Review and waiting outcomes in Waiting Response. New threads receive hidden progress and outcome instructions at thread start, and existing threads receive them on resume; turn requests do not repeat the instructions. Those instructions require updates at phase changes, around substantial tools, and at least every 30 seconds during long work. Only an explicit completed outcome reaches Review. When a final answer ends with the outcome command written as text instead of run, the final answer, fresh history, and transcript hide that command, and it counts as the turn's outcome only when it names this task. Private nudge prompts, replies, and turn-scoped activities remain absent from Codex history and the visible transcript, including after later ordinary turns. Fresh Codex history after those nudges also retains the latest ordinary-turn diff while keeping nudge-only replies hidden.
     func test_task_progress_reports_publish_persist_and_clear() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Progress reports", roots: [fixture.primary.path])
@@ -2344,12 +2512,12 @@ final class PlayhouseUITests: XCTestCase {
         omittedProcess.standardError = omittedStderr
         try omittedProcess.run()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The no-outcome turn should resume the existing fixture thread.")
-        for reminderIndex in 0...2 {
-            XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress", "Waiting Response should be deferred until both private reminders finish.")
-            try "Release turn \(reminderIndex + 1).\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
-            if reminderIndex < 2 {
+        for nudgeIndex in 0...Self.maxOutcomeContinuations {
+            XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress", "The fallback status should be deferred until every private nudge finishes.")
+            try "Release turn \(nudgeIndex + 1).\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+            if nudgeIndex < Self.maxOutcomeContinuations {
                 XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The fixture should finish the current unreported turn.")
-                XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "Playhouse should send the next private outcome reminder.")
+                XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "Playhouse should send the next private status nudge.")
             }
         }
         omittedProcess.waitUntilExit()
@@ -2358,8 +2526,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(omittedProcess.terminationStatus, 0, "The no-outcome fixture conversation should finish successfully: \(omittedOutput) \(omittedError)")
 
         let finished = try XCTUnwrap(taskRecord(id: taskID))
-        XCTAssertEqual(finished["status"] as? String, "Waiting Response", "After two private reminders without an outcome, the task should fall back to Waiting Response.")
-        assertTaskVisible("Progress reports", inColumn: "Waiting Response")
+        XCTAssertEqual(finished["status"] as? String, "Blocked", "Unanswered nudges never asked the user anything, so the task is Blocked rather than Waiting Response.")
+        XCTAssertTrue((finished["statusMessage"] as? String)?.contains("nudges went unanswered") == true, "The Blocked reason should say the nudges went unanswered.")
+        assertTaskVisible("Progress reports", inColumn: "Blocked")
         assertCLIError(try runCLI(["task", "progress", "publish", taskID, "--type", "testing"], expectedStatus: 1), code: "invalid_transition")
         assertCLIError(try runCLI(["task", "outcome", taskID, "completed"], expectedStatus: 1), code: "invalid_transition")
         XCTAssertNil(finished["progressLabel"], "Turn completion should clear the last live report.")
@@ -2403,8 +2572,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
         assertTaskVisible("Progress reports", inColumn: "Review")
         openTask(named: "Progress reports")
-        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Playhouse internal outcome reminder:")).count, 0, "The private reminder prompt must not appear in the visible transcript.")
-        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "previous request finished without reporting")).count, 0, "Private reminder text must stay hidden while the task is visible.")
+        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Playhouse internal outcome nudge:")).count, 0, "The private reminder prompt must not appear in the visible transcript.")
+        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "ended without reporting a task outcome")).count, 0, "Private reminder text must stay hidden while the task is visible.")
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Playhouse private outcome reminder hidden")).count, 0, "Private reminder prompts should not be rendered in the transcript.")
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Playhouse private outcome response hidden")).count, 0, "Private reminder replies should not be rendered in the transcript.")
         let waitingReminderProcess = Process()
@@ -2432,13 +2601,14 @@ final class PlayhouseUITests: XCTestCase {
         let turnData = try Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
         let turn = try XCTUnwrap(try JSONSerialization.jsonObject(with: turnData) as? [String: Any])
         let hiddenTurns = try XCTUnwrap(turn["turns"] as? [[String: Any]])
-        XCTAssertEqual(hiddenTurns.count, 9, "The omitted outcome should trigger two reminders; reported outcomes should stop after one reminder.")
-        let reminderTurns = hiddenTurns.filter { ($0["userMessage"] as? String)?.contains("previous request finished without reporting") == true }
-        XCTAssertEqual(reminderTurns.count, 4, "Only the missing-outcome sends should receive private reminders.")
-        XCTAssertTrue(reminderTurns.allSatisfy { ($0["userMessage"] as? String)?.contains("task outcome") == true }, "Each reminder should explicitly direct the agent to report an outcome.")
+        XCTAssertEqual(hiddenTurns.count, 12, "The omitted outcome should exhaust every nudge; reported outcomes should stop after one nudge.")
+        let nudgeTurns = hiddenTurns.filter { ($0["userMessage"] as? String)?.contains("ended without reporting a task outcome") == true }
+        XCTAssertEqual(nudgeTurns.count, Self.maxOutcomeContinuations + 2, "Only the missing-outcome sends should receive private status nudges.")
+        XCTAssertTrue(nudgeTurns.allSatisfy { ($0["userMessage"] as? String)?.contains("task outcome") == true }, "Each nudge should explicitly direct the agent to report an outcome.")
+        XCTAssertTrue(nudgeTurns.allSatisfy { ($0["userMessage"] as? String)?.contains("`in-progress`") == true }, "A nudge must offer in-progress alongside completed and waiting-response.")
         let visibleHistory = try runCLI(["conversation", "history", taskID])
         let visibleMessages = try XCTUnwrap((visibleHistory["result"] as? [String: Any])?["messages"] as? [[String: Any]])
-        XCTAssertFalse(visibleMessages.contains { ($0["text"] as? String)?.contains("previous request finished") == true }, "Private reminder text must not appear in conversation history.")
+        XCTAssertFalse(visibleMessages.contains { ($0["text"] as? String)?.contains("ended without reporting a task outcome") == true }, "Private nudge text must not appear in conversation history.")
         let instructions = try XCTUnwrap(turn["threadStartDeveloperInstructions"] as? String)
         XCTAssertTrue(instructions.contains(cliURL.path))
         XCTAssertTrue(instructions.contains("task progress publish"))
@@ -2449,13 +2619,14 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(instructions.contains("CLI/XPC 3/8"))
         XCTAssertTrue(instructions.contains("under 80 characters"))
         XCTAssertTrue(instructions.contains("task outcome"))
-        XCTAssertTrue(instructions.contains("up to two private follow-up messages"))
+        XCTAssertTrue(instructions.contains("<completed|in-progress|waiting-response>"))
+        XCTAssertTrue(instructions.contains("Never end a turn mid-work without an outcome"))
         XCTAssertTrue(instructions.contains("waiting-response"))
         XCTAssertTrue(instructions.contains("final CLI action"))
         XCTAssertEqual(turn["threadStartCount"] as? Int, 1, "The follow-up should reuse the thread created with progress instructions.")
         XCTAssertGreaterThanOrEqual(turn["threadResumeCount"] as? Int ?? 0, 1)
         let turns = try XCTUnwrap(turn["turns"] as? [[String: Any]])
-        XCTAssertEqual(turns.count, 9)
+        XCTAssertEqual(turns.count, 12)
         XCTAssertTrue(turns.allSatisfy { $0["developerInstructions"] == nil || $0["developerInstructions"] is NSNull }, "Thread-scoped task instructions should not be repeated in turn requests.")
         let resumeInstructions = try XCTUnwrap(turn["threadResumeDeveloperInstructions"] as? [Any])
         XCTAssertFalse(resumeInstructions.isEmpty, "Resumed task threads should receive updated task instructions.")
@@ -2485,7 +2656,7 @@ final class PlayhouseUITests: XCTestCase {
         try "Release the composer turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 15), "An outcome reported with the provider's inherited environment should move the app-started turn to Review.")
         openTask(named: "Progress reports")
-        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "previous request finished without reporting")).count, 0, "A later composer history refresh must keep earlier private reminder prompts hidden.")
+        XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "ended without reporting a task outcome")).count, 0, "A later composer history refresh must keep earlier private reminder prompts hidden.")
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Playhouse private outcome reminder hidden")).count, 0, "Earlier private reminders should stay absent after a normal composer turn.")
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Playhouse private outcome response hidden")).count, 0, "Earlier private reminder replies should stay absent after a normal composer turn.")
         let laterHistory = try runCLI(["conversation", "history", taskID])
@@ -2495,18 +2666,18 @@ final class PlayhouseUITests: XCTestCase {
         // A model can write its outcome command as answer text instead of running
         // it. The echo is hidden, and it counts only when it names this task.
         let echoedAnswers = app.groups.matching(NSPredicate(format: "label == %@", "Fixture answer with an echoed outcome."))
-        for (turnIndex, (echoedTaskID, expectedColumn)) in [(UUID().uuidString, "Waiting Response"), (taskID, "Review")].enumerated() {
+        for (turnIndex, (echoedTaskID, expectedColumn)) in [(UUID().uuidString, "Blocked"), (taskID, "Review")].enumerated() {
             XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15), "The composer should accept the echoed-outcome turn.")
             composer.click()
             composer.typeText("Echo the outcome command for \(echoedTaskID).")
             element("send-message-button").click()
             XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 15), "The echoed-outcome turn should hold the fixture turn open.")
-            let heldTurns = turnIndex == 0 ? 3 : 1
+            let heldTurns = turnIndex == 0 ? Self.maxOutcomeContinuations + 1 : 1
             for heldTurnIndex in 0..<heldTurns {
                 try "Release echoed turn \(heldTurnIndex + 1).\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
                 if heldTurnIndex < heldTurns - 1 {
-                    XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The current echoed turn should finish before a private reminder.")
-                    XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "Playhouse should send a private reminder for an unreported echoed outcome.")
+                    XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The current echoed turn should finish before a private nudge.")
+                    XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "Playhouse should send a private nudge for an unreported echoed outcome.")
                 }
             }
             XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == expectedColumn }, timeout: 15), "An echoed outcome for \(echoedTaskID) should leave the task in \(expectedColumn).")
@@ -2515,6 +2686,261 @@ final class PlayhouseUITests: XCTestCase {
         }
         relaunchApp()
         assertTaskVisible("Progress reports", inColumn: "Review")
+    }
+
+    // case-contract: test_task_outcome_in_progress_drives_continuations_until_blocked | An in-progress outcome is accepted during an active turn, leaves the task In Progress, and makes Playhouse send a private continuation turn that names the in-progress report; a completed report during that continuation stops the loop at Review. When every turn reports in-progress, Playhouse sends exactly five continuation turns, keeps the task In Progress throughout, and then marks it Blocked with a continuation-limit reason instead of Waiting Response, since the user was never asked anything. Continuation prompts and replies stay out of the visible conversation history. The user taking the work back ends Playhouse's private driving: stopping a continuation keeps the Stop's Waiting Response with no failure reason, and a queued follow-up runs next instead of being buried under further continuations.
+    func test_task_outcome_in_progress_drives_continuations_until_blocked() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Continue in progress", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Continue in progress")
+        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-in-progress-continuation-hold-release")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
+        codexFixtureExecutable = executable.path
+        let activeMarker = URL(fileURLWithPath: executable.path + ".turn-active")
+        let releaseMarker = URL(fileURLWithPath: executable.path + ".turn-release")
+        try? FileManager.default.removeItem(at: activeMarker)
+        try? FileManager.default.removeItem(at: releaseMarker)
+        var environment = ProcessInfo.processInfo.environment
+        environment["PLAYHOUSE_DATA_DIRECTORY"] = dataDirectory.path
+        environment["CODEX_HOME"] = dataDirectory.appendingPathComponent("codex-home").path
+        environment["PLAYHOUSE_WORKTREE_LABEL"] = "Playhouse UI Test Worktree"
+        environment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
+        environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
+        environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = serviceName
+        environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = executable.path
+
+        let process = Process()
+        process.executableURL = cliURL
+        process.arguments = ["conversation", "send", taskID, "--message", "Work on this task."]
+        process.environment = environment
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        defer {
+            if process.isRunning {
+                try? "Release the turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+                process.waitUntilExit()
+            }
+            try? FileManager.default.removeItem(at: activeMarker)
+            try? FileManager.default.removeItem(at: releaseMarker)
+        }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 15), "The fixture should hold the first turn open.")
+        let reported = try XCTUnwrap(try runCLI(["task", "outcome", taskID, "in-progress"])["result"] as? [String: Any])
+        XCTAssertEqual(reported["outcome"] as? String, "in-progress")
+        XCTAssertEqual(reported["taskStatus"] as? String, "In Progress", "The outcome is staged until the turn completes.")
+        try "Release the in-progress turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 15), "The in-progress turn should finish before its continuation.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 15), "Playhouse should send a continuation turn after an in-progress report.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress", "The task stays In Progress while Playhouse drives the continuation.")
+        assertTaskVisible("Continue in progress", inColumn: "In Progress")
+        XCTAssertEqual((try runCLI(["task", "outcome", taskID, "completed"])["result"] as? [String: Any])?["outcome"] as? String, "completed")
+        try "Release the continuation turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+        process.waitUntilExit()
+        let output = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let errorOutput = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 0, "The continuation conversation should finish successfully: \(output) \(errorOutput)")
+        assertTaskVisible("Continue in progress", inColumn: "Review")
+        let continuationHistory = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
+        )
+        let continuationTurns = try XCTUnwrap(continuationHistory["turns"] as? [[String: Any]])
+            .filter { ($0["userMessage"] as? String)?.contains("You reported `in-progress`") == true }
+        XCTAssertEqual(continuationTurns.count, 1, "One in-progress report earns exactly one continuation turn.")
+        XCTAssertTrue(
+            (continuationTurns[0]["userMessage"] as? String)?.contains("of \(Self.maxOutcomeContinuations)") == true,
+            "The continuation prompt should name the remaining budget."
+        )
+        openTask(named: "Continue in progress")
+        XCTAssertEqual(
+            app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "You reported")).count, 0,
+            "Private continuation prompts must not appear in the visible transcript."
+        )
+        for hidden in ["Fixture internal reminder reply.", "Playhouse private outcome reminder hidden", "Playhouse private outcome response hidden"] {
+            XCTAssertEqual(
+                app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", hidden)).count, 0,
+                "Private continuation replies must not appear in the visible transcript."
+            )
+        }
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+
+        // Every turn reports in-progress, so Playhouse runs out of continuations.
+        try createTaskFixture(title: "Never settles", roots: [fixture.primary.path])
+        let cappedID = try self.taskID(named: "Never settles")
+        let cappedExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-in-progress-cap-hold-release")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: cappedExecutable.path))
+        codexFixtureExecutable = cappedExecutable.path
+        let cappedActive = URL(fileURLWithPath: cappedExecutable.path + ".turn-active")
+        let cappedRelease = URL(fileURLWithPath: cappedExecutable.path + ".turn-release")
+        try? FileManager.default.removeItem(at: cappedActive)
+        try? FileManager.default.removeItem(at: cappedRelease)
+        environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = cappedExecutable.path
+        let cappedProcess = Process()
+        cappedProcess.executableURL = cliURL
+        cappedProcess.arguments = ["conversation", "send", cappedID, "--message", "Work on this task."]
+        cappedProcess.environment = environment
+        let cappedStdout = Pipe()
+        let cappedStderr = Pipe()
+        cappedProcess.standardOutput = cappedStdout
+        cappedProcess.standardError = cappedStderr
+        try cappedProcess.run()
+        defer {
+            if cappedProcess.isRunning {
+                try? "Release the capped turn.\n".write(to: cappedRelease, atomically: true, encoding: .utf8)
+                cappedProcess.waitUntilExit()
+            }
+            try? FileManager.default.removeItem(at: cappedActive)
+            try? FileManager.default.removeItem(at: cappedRelease)
+        }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: cappedActive.path) }, timeout: 15), "The capped fixture should hold its first turn open.")
+        for index in 0...Self.maxOutcomeContinuations {
+            XCTAssertEqual(
+                try taskRecord(id: cappedID)?["status"] as? String, "In Progress",
+                "Every continuation keeps the task In Progress until the limit is reached."
+            )
+            XCTAssertEqual(
+                (try runCLI(["task", "outcome", cappedID, "in-progress"])["result"] as? [String: Any])?["outcome"] as? String,
+                "in-progress"
+            )
+            try "Release turn \(index + 1).\n".write(to: cappedRelease, atomically: true, encoding: .utf8)
+            if index < Self.maxOutcomeContinuations {
+                XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: cappedActive.path) }, timeout: 15), "The fixture should finish the current continuation turn.")
+                XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: cappedActive.path) }, timeout: 15), "Playhouse should send the next continuation turn.")
+            }
+        }
+        cappedProcess.waitUntilExit()
+        let cappedOutput = String(data: cappedStdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let cappedError = String(data: cappedStderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(cappedProcess.terminationStatus, 0, "The capped continuation conversation should finish successfully: \(cappedOutput) \(cappedError)")
+        let cappedRecord = try XCTUnwrap(taskRecord(id: cappedID))
+        XCTAssertEqual(cappedRecord["status"] as? String, "Blocked", "Running out of continuations is Blocked, not Waiting Response.")
+        XCTAssertTrue(
+            (cappedRecord["statusMessage"] as? String)?.contains("continuation turns") == true,
+            "The Blocked reason should name the continuation limit."
+        )
+        assertTaskVisible("Never settles", inColumn: "Blocked")
+        let cappedHistory = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: cappedExecutable.path + ".history"))) as? [String: Any]
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(cappedHistory["turns"] as? [[String: Any]])
+                .filter { ($0["userMessage"] as? String)?.contains("You reported `in-progress`") == true }.count,
+            Self.maxOutcomeContinuations,
+            "Playhouse stops driving the work after the continuation limit."
+        )
+
+        // Stopping a private continuation is the user taking the work back.
+        try createTaskFixture(title: "Stopped mid continuation", roots: [fixture.primary.path])
+        let stopID = try self.taskID(named: "Stopped mid continuation")
+        let stopExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-in-progress-stop-hold-release")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: stopExecutable.path))
+        codexFixtureExecutable = stopExecutable.path
+        let stopActive = URL(fileURLWithPath: stopExecutable.path + ".turn-active")
+        let stopRelease = URL(fileURLWithPath: stopExecutable.path + ".turn-release")
+        try? FileManager.default.removeItem(at: stopActive)
+        try? FileManager.default.removeItem(at: stopRelease)
+        environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = stopExecutable.path
+        let stopProcess = Process()
+        stopProcess.executableURL = cliURL
+        stopProcess.arguments = ["conversation", "send", stopID, "--message", "Work on this task."]
+        stopProcess.environment = environment
+        stopProcess.standardOutput = Pipe()
+        stopProcess.standardError = Pipe()
+        try stopProcess.run()
+        defer {
+            if stopProcess.isRunning {
+                try? "Release the stopped continuation.\n".write(to: stopRelease, atomically: true, encoding: .utf8)
+                stopProcess.waitUntilExit()
+            }
+            try? FileManager.default.removeItem(at: stopActive)
+            try? FileManager.default.removeItem(at: stopRelease)
+        }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: stopActive.path) }, timeout: 15), "The stop fixture should hold its first turn open.")
+        XCTAssertEqual((try runCLI(["task", "outcome", stopID, "in-progress"])["result"] as? [String: Any])?["outcome"] as? String, "in-progress")
+        try "Release the in-progress turn.\n".write(to: stopRelease, atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ !FileManager.default.fileExists(atPath: stopActive.path) }, timeout: 15), "The in-progress turn should finish before its continuation.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: stopActive.path) }, timeout: 15), "Playhouse should send a continuation turn before the Stop.")
+        // Stop persists the paused state before the provider answers, and the
+        // held fixture turn only replies once released, so the Stop has to run
+        // alongside the release rather than before it.
+        let stopper = try startCLIProcess(["conversation", "stop", stopID])
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: stopID)?["status"] as? String) == "Waiting Response" }, timeout: 20),
+                      "Stop should persist the paused state before the provider acknowledges it.")
+        try "Release the stopped continuation.\n".write(to: stopRelease, atomically: true, encoding: .utf8)
+        _ = try finishCLIProcess(stopper)
+        stopProcess.waitUntilExit()
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: stopID)?["status"] as? String) == "Waiting Response" }, timeout: 30),
+                      "A Stop during a continuation keeps the user's paused state.")
+        XCTAssertNil(try taskRecord(id: stopID)?["statusMessage"] as? String,
+                     "A user-requested Stop must not be reported as a Playhouse failure.")
+        assertTaskVisible("Stopped mid continuation", inColumn: "Waiting Response")
+        let stopHistory = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: stopExecutable.path + ".history"))) as? [String: Any]
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(stopHistory["turns"] as? [[String: Any]])
+                .filter { ($0["userMessage"] as? String)?.contains("You reported `in-progress`") == true }.count,
+            1,
+            "Playhouse must stop driving the work once the user stops it."
+        )
+
+        // A queued follow-up is the other way the user takes over.
+        try createTaskFixture(title: "Queued over continuation", roots: [fixture.primary.path])
+        let queuedID = try self.taskID(named: "Queued over continuation")
+        let queuedExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-in-progress-queue-hold-release")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: queuedExecutable.path))
+        codexFixtureExecutable = queuedExecutable.path
+        let queuedActive = URL(fileURLWithPath: queuedExecutable.path + ".turn-active")
+        let queuedRelease = URL(fileURLWithPath: queuedExecutable.path + ".turn-release")
+        try? FileManager.default.removeItem(at: queuedActive)
+        try? FileManager.default.removeItem(at: queuedRelease)
+        environment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = queuedExecutable.path
+        let queuedProcess = Process()
+        queuedProcess.executableURL = cliURL
+        queuedProcess.arguments = ["conversation", "send", queuedID, "--message", "Work on this task."]
+        queuedProcess.environment = environment
+        queuedProcess.standardOutput = Pipe()
+        queuedProcess.standardError = Pipe()
+        try queuedProcess.run()
+        defer {
+            if queuedProcess.isRunning {
+                try? "Release the next turn.\n".write(to: queuedRelease, atomically: true, encoding: .utf8)
+                queuedProcess.waitUntilExit()
+            }
+            try? FileManager.default.removeItem(at: queuedActive)
+            try? FileManager.default.removeItem(at: queuedRelease)
+        }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: queuedActive.path) }, timeout: 15), "The queue fixture should hold its first turn open.")
+        XCTAssertEqual((try runCLI(["task", "outcome", queuedID, "in-progress"])["result"] as? [String: Any])?["outcome"] as? String, "in-progress")
+        _ = try runCLI(["conversation", "queue", queuedID, "--message", "Follow-up from the user."])
+        XCTAssertTrue(waitUntil({
+            try? "Release the next turn.\n".write(to: queuedRelease, atomically: true, encoding: .utf8)
+            return !queuedProcess.isRunning
+        }, timeout: 60), "The queued follow-up should run instead of further continuations.")
+        queuedProcess.waitUntilExit()
+        // The follow-up turn settles on its own terms; what matters here is that
+        // it ran next instead of queueing behind Playhouse's continuations.
+        let queuedHistory = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: queuedExecutable.path + ".history"))) as? [String: Any]
+        )
+        let queuedTurns = try XCTUnwrap(queuedHistory["turns"] as? [[String: Any]])
+        XCTAssertEqual(
+            queuedTurns.filter { ($0["userMessage"] as? String)?.contains("You reported `in-progress`") == true }.count, 0,
+            "A queued follow-up must take precedence over Playhouse's private continuation."
+        )
+        XCTAssertTrue(
+            queuedTurns.contains { ($0["userMessage"] as? String)?.contains("Follow-up from the user.") == true },
+            "The queued follow-up should be the next turn the provider receives."
+        )
+        openTask(named: "Queued over continuation")
+        XCTAssertTrue(transcriptMessage("Follow-up from the user.").waitForExistence(timeout: 15),
+                      "The queued follow-up should be visible in the conversation it ran in.")
+        XCTAssertEqual(
+            app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "You reported")).count, 0,
+            "No private continuation prompt should be visible ahead of the user's follow-up."
+        )
     }
 
     // case-contract: test_task_progress_reports_clear_on_failed_turns_and_questions | Progress reports clear when turns fail or are interrupted and when Codex requests user input; a staged completed outcome is discarded if its turn fails, leaving the task Blocked. The task card removes the report while lifecycle states remain Blocked or In Progress. A blocking structured question appears inline and moves the task to Waiting Response; its answer resumes the active turn in In Progress, and the answered turn finishes in Waiting Response. First-thread instructions distinguish source repository paths from active task worktree paths, allow read-only inspection without attaching a repo, and reserve repository add APIs for changes that need a worktree.
@@ -3713,6 +4139,748 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(try tasksFromBoardList().isEmpty, "A failed create must not leave a persisted task.")
     }
 
+    // case-contract: test_standalone_chat_legacy_hidden_task_migrates | A standalone chat left in the store as a hidden board task is converted once into its own model: it keeps its ID so the existing conversation transcript stays attached, keeps its provider session, carries its in-flight turn state across with the status message and progress report that explain it, is removed from the board so it never lists or resolves as a task, and reopening the chat returns that same migrated chat rather than creating a second one.
+    func test_standalone_chat_legacy_hidden_task_migrates() throws {
+        let legacyID = try seedLegacyStandaloneChatTask()
+        launchApp(defaultParent: fixture.parent.path)
+
+        // The board renders from its own SwiftData query, so this is where a leftover hidden
+        // task would actually surface as a card.
+        XCTAssertFalse(
+            element("task-card-\(legacyID)").waitForExistence(timeout: 3),
+            "A chat migrated off the board must not render as a card."
+        )
+        XCTAssertTrue(try tasksFromBoardList().isEmpty, "The migrated chat must no longer be a board task.")
+        assertCLIError(try runCLI(["task", "get", legacyID], expectedStatus: 3), code: "not_found")
+
+        let opened = try runCLI(["chat", "open"])["result"] as? [String: Any]
+        XCTAssertEqual(
+            opened?["id"] as? String, legacyID,
+            "The migrated chat must keep its ID so its existing transcript stays attached."
+        )
+        XCTAssertEqual(opened?["claudeSessionID"] as? String, "legacy-chat-session", "The chat's provider session must survive migration.")
+        // The turn state must arrive with its explanation, not just the raw status.
+        XCTAssertEqual(opened?["status"] as? String, "In Progress")
+        XCTAssertEqual(opened?["statusMessage"] as? String, "Carried from the legacy chat task.")
+        XCTAssertEqual(opened?["progressType"] as? String, "searching")
+        XCTAssertEqual(opened?["progressLabel"] as? String, "Searching")
+        XCTAssertEqual(opened?["progressDetail"] as? String, "Looking into volcanoes")
+
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10), "The migrated chat should still open in the sidebar.")
+        attachScreenshot(named: "Migrated standalone chat")
+
+        let reopened = try runCLI(["chat", "open"])["result"] as? [String: Any]
+        XCTAssertEqual(reopened?["id"] as? String, legacyID, "Migration must run once, not create a second chat.")
+    }
+
+    // case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, and the Changes sidebar. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state. A chat turn never triggers the private task-outcome reminders, because the chat is told not to report an outcome; its developer instructions teach it that task language means Playhouse's own board and give it the Playhouse task CLI, and they never ask it to write the page title into its visible answer.
+    func test_standalone_chat_separate_model_and_pages_round_trip() throws {
+        let fixtureSource = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureSource.path), "The prepared Codex fixture is missing or not executable.")
+        let chatFixtureExecutable = dataDirectory.appendingPathComponent("codex-fixture-chat-unique-turns-hold-release")
+        try FileManager.default.copyItem(at: fixtureSource, to: chatFixtureExecutable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: chatFixtureExecutable.path)
+        codexFixtureExecutable = chatFixtureExecutable.path
+        launchApp(defaultParent: fixture.parent.path)
+        XCTAssertTrue(element("chat-sidebar-button").exists, "The board header should offer a Chat button next to New Task.")
+        XCTAssertFalse(element("chat-sidebar").exists, "The chat sidebar should be closed by default.")
+
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10), "Clicking Chat should slide in the sidebar.")
+        XCTAssertTrue(element("message-composer").waitForExistence(timeout: 10), "The sidebar should reuse the standard chat composer.")
+        XCTAssertFalse(element("task-status-message").exists, "Standalone chat must not show task status.")
+        XCTAssertFalse(app.staticTexts["Backlog"].exists, "Standalone chat must not show a board status label.")
+        XCTAssertFalse(element("conversation-repository-search").exists, "Standalone chat must not show repository controls.")
+        XCTAssertFalse(element("add-conversation-repository-button").exists, "Standalone chat must not expose Add repository.")
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "conversation-repository-badge-")).count, 0, "Standalone chat must not show repository badges.")
+        XCTAssertFalse(element("workspace-changes-list").exists, "Standalone chat must not mount the task Changes sidebar.")
+        XCTAssertFalse(element("workspace-changes-empty").exists, "Standalone chat must not show task workspace changes.")
+        attachScreenshot(named: "Standalone chat sidebar opened")
+
+        XCTAssertTrue(try tasksFromBoardList().isEmpty, "The standalone chat must never appear on the board.")
+
+        let opened = try runCLI(["chat", "open"])["result"] as? [String: Any]
+        let chatTaskID = try XCTUnwrap(opened?["id"] as? String)
+        XCTAssertEqual(opened?["title"] as? String, "Chat")
+        XCTAssertEqual((opened?["repositoryWorktrees"] as? [Any])?.count, 0)
+
+        // The chat is its own model, not a task, so task commands cannot reach it by ID.
+        assertCLIError(try runCLI(["task", "get", chatTaskID], expectedStatus: 3), code: "not_found")
+        assertCLIError(try runCLI(["task", "move", chatTaskID, "Done"], expectedStatus: 3), code: "not_found")
+
+        let kyoto = try XCTUnwrap(
+            (try runCLI(["chat", "page", "new", "--title", "Trip to Kyoto"])["result"] as? [String: Any])?["page"] as? [String: Any]
+        )
+        let continued = try XCTUnwrap(
+            (try runCLI(["chat", "page", "close-turn", chatTaskID, "--continues", "true"])["result"] as? [String: Any])?["page"] as? [String: Any]
+        )
+        XCTAssertEqual(continued["id"] as? String, kyoto["id"] as? String, "Continuing must append to the already-active page.")
+
+        let recipes = try XCTUnwrap(
+            (try runCLI(["chat", "page", "close-turn", chatTaskID, "--continues", "false", "--new-title", "Dinner recipes"])["result"] as? [String: Any])?["page"] as? [String: Any]
+        )
+        XCTAssertNotEqual(recipes["id"] as? String, kyoto["id"] as? String, "A topic change must start a new page.")
+
+        _ = try runCLI(["chat", "page", "close-turn", chatTaskID, "--continues", "false"], expectedStatus: 2)
+
+        let pageListing = try XCTUnwrap(try runCLI(["chat", "page", "list"])["result"] as? [String: Any])
+        let archiveDirectory = URL(fileURLWithPath: try XCTUnwrap(pageListing["archiveDirectory"] as? String))
+        XCTAssertEqual(archiveDirectory.standardizedFileURL, dataDirectory.appendingPathComponent("StandaloneChat-Pages", isDirectory: true).standardizedFileURL)
+        let kyotoFile = archiveDirectory.appendingPathComponent("\(try XCTUnwrap(kyoto["id"] as? String)).json")
+        let recipesFile = archiveDirectory.appendingPathComponent("\(try XCTUnwrap(recipes["id"] as? String)).json")
+        XCTAssertNotEqual(kyotoFile, recipesFile, "Each page must have its own filesystem file.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: kyotoFile.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recipesFile.path))
+        // Recreate the pre-archive database state so opening the manager proves
+        // it backfills pages that existed before the one-time file migration.
+        var archiveDatabase: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(dataDirectory.appendingPathComponent("StandaloneChat-v1.sqlite").path, &archiveDatabase), SQLITE_OK)
+        guard let archiveDatabase else { XCTFail("Could not open the standalone chat database for migration setup."); return }
+        let markerStatus = sqlite3_exec(archiveDatabase, "DELETE FROM chat_archive_migrations WHERE version = 1;", nil, nil, nil)
+        sqlite3_close(archiveDatabase)
+        XCTAssertEqual(markerStatus, SQLITE_OK, "Could not reset the page archive migration marker.")
+        try FileManager.default.removeItem(at: kyotoFile)
+        _ = try runCLI(["chat", "page", "list"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: kyotoFile.path), "Opening a pre-archive database should backfill missing page files once.")
+        let matches = try XCTUnwrap(
+            (try runCLI(["chat", "page", "search", "Kyoto"])["result"] as? [String: Any])?["matches"] as? [[String: Any]]
+        )
+        XCTAssertTrue(
+            matches.contains { (($0["page"] as? [String: Any])?["id"] as? String) == kyoto["id"] as? String },
+            "Searching the old page's title should find it even after a newer page is active."
+        )
+
+        // Drive one real provider turn and verify the user/assistant text actually lands on
+        // the active page via chat page read, and does not leak onto an unrelated page.
+        try Data().write(to: URL(fileURLWithPath: chatFixtureExecutable.path + ".hold-release"))
+        let holdMarker = URL(fileURLWithPath: chatFixtureExecutable.path + ".hold-release")
+        let activeMarker = URL(fileURLWithPath: chatFixtureExecutable.path + ".turn-active")
+        let releaseMarker = URL(fileURLWithPath: chatFixtureExecutable.path + ".turn-release")
+        try? FileManager.default.removeItem(at: activeMarker)
+        try? FileManager.default.removeItem(at: releaseMarker)
+
+        let sendProcess = Process()
+        sendProcess.executableURL = cliURL
+        sendProcess.arguments = ["conversation", "send", chatTaskID, "--message", "What's a good side dish?"]
+        var sendEnvironment = ProcessInfo.processInfo.environment
+        sendEnvironment["PLAYHOUSE_DATA_DIRECTORY"] = dataDirectory.path
+        sendEnvironment["CODEX_HOME"] = dataDirectory.appendingPathComponent("codex-home").path
+        sendEnvironment["PLAYHOUSE_WORKTREE_LABEL"] = "Playhouse UI Test Worktree"
+        sendEnvironment["PLAYHOUSE_E2E_WORKTREE_DIRECTORY"] = dataDirectory.appendingPathComponent("worktrees").path
+        sendEnvironment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = preferencesSuiteName
+        sendEnvironment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = serviceName
+        sendEnvironment["PLAYHOUSE_E2E_CODEX_EXECUTABLE"] = chatFixtureExecutable.path
+        sendProcess.environment = sendEnvironment
+        let sendStdout = Pipe()
+        let sendStderr = Pipe()
+        sendProcess.standardOutput = sendStdout
+        sendProcess.standardError = sendStderr
+        try sendProcess.run()
+        defer {
+            if sendProcess.isRunning {
+                try? "Release the active turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+                sendProcess.waitUntilExit()
+            }
+            try? FileManager.default.removeItem(at: activeMarker)
+            try? FileManager.default.removeItem(at: releaseMarker)
+        }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The fixture should hold the standalone chat turn open for a close-turn report.")
+        // Queuing is a conversation action, so it must resolve the chat rather than look for a
+        // board task. The turn is held active here, which is exactly when a follow-up queues.
+        let queuedInChat = try XCTUnwrap(
+            try runCLI(["conversation", "queue", chatTaskID, "--message", "Queue this for after the chat turn."])["result"] as? [String: Any]
+        )
+        XCTAssertEqual(queuedInChat["text"] as? String, "Queue this for after the chat turn.")
+        XCTAssertEqual(queuedInChat["taskID"] as? String, chatTaskID)
+        _ = try runCLI(["conversation", "queue-remove", chatTaskID, try XCTUnwrap(queuedInChat["id"] as? String)])
+        // Selecting the provider the chat already uses is a no-op that must return the chat.
+        let unchangedProvider = try XCTUnwrap(
+            try runCLI(["conversation", "provider", chatTaskID, "set", "codex"])["result"] as? [String: Any]
+        )
+        XCTAssertEqual(unchangedProvider["id"] as? String, chatTaskID)
+        XCTAssertEqual(unchangedProvider["conversationProvider"] as? String, "codex")
+        _ = try runCLI(["chat", "page", "close-turn", chatTaskID, "--continues", "true"])
+        try "Release the completed fixture turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+        sendProcess.waitUntilExit()
+        XCTAssertEqual(sendProcess.terminationStatus, 0, "The standalone chat turn should complete successfully.")
+        try? FileManager.default.removeItem(at: holdMarker)
+
+        // A send moves the chat's own turn state away from Backlog (In Progress, then Waiting
+        // Response). That state used to live on a hidden BoardTask, which is how the chat leaked
+        // onto the board: it renders from SwiftUI's own @Query over BoardTask, not the board.list
+        // CLI path that tasksFromBoardList() checks. The chat is no longer a BoardTask at all, so
+        // confirm the rendered board still has no card for it in that state.
+        XCTAssertFalse(
+            element("task-card-\(chatTaskID)").exists,
+            "The standalone chat must never render as a card on the visible Kanban board."
+        )
+
+        // The chat is told never to report a task outcome, so chasing one with private
+        // reminders can only spend extra provider turns and bury the user's next message in
+        // a reminder turn that answers nobody.
+        let chatFixtureHistory = try XCTUnwrap(
+            try JSONSerialization.jsonObject(
+                with: Data(contentsOf: URL(fileURLWithPath: chatFixtureExecutable.path + ".history"))
+            ) as? [String: Any]
+        )
+        let chatFixtureTurns = try XCTUnwrap(chatFixtureHistory["turns"] as? [[String: Any]])
+        XCTAssertFalse(chatFixtureTurns.isEmpty, "The chat fixture should have recorded its turns.")
+        XCTAssertFalse(
+            chatFixtureTurns.contains { (($0["userMessage"] as? String) ?? "").lowercased().contains("outcome reminder") },
+            "A standalone chat turn must not trigger the private task-outcome reminders."
+        )
+        // The chat must know it is Playhouse's own chat and own the board through the CLI,
+        // instead of reaching for an unrelated task tool that the user can never see.
+        let chatInstructions = (chatFixtureHistory["threadStartDeveloperInstructions"] as? String) ?? ""
+        XCTAssertTrue(chatInstructions.contains("task create"), "The chat must be taught the Playhouse task CLI.")
+        XCTAssertTrue(chatInstructions.contains("they always mean Playhouse"))
+        // Page titles reach the user as transcript separators, parsed from close-turn.
+        // Assert the prohibition positively too: pinning only the old wording would let the
+        // instruction come back phrased differently.
+        XCTAssertTrue(chatInstructions.contains("never write the page name"))
+        XCTAssertFalse(chatInstructions.contains("Page: <current page title>"))
+
+        let recipesArchive = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: recipesFile)) as? [String: Any]
+        )
+        XCTAssertEqual((recipesArchive["page"] as? [String: Any])?["title"] as? String, "Dinner recipes")
+        XCTAssertTrue(
+            (recipesArchive["messages"] as? [[String: Any]])?.contains {
+                ($0["role"] as? String) == "user" && ($0["text"] as? String) == "What's a good side dish?"
+            } == true,
+            "The completed user turn should be written to its page file before any later page read."
+        )
+        let recipesMessages = try XCTUnwrap(
+            (try runCLI(["chat", "page", "read", try XCTUnwrap(recipes["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
+        )
+        XCTAssertTrue(
+            recipesMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == "What's a good side dish?" },
+            "The user's message should be persisted on the page the agent's close-turn call selected."
+        )
+        XCTAssertTrue(
+            recipesMessages.contains { ($0["role"] as? String) == "assistant" && !(($0["text"] as? String) ?? "").isEmpty },
+            "The assistant's reply should also be persisted on that page."
+        )
+        let recipesRead = try XCTUnwrap(try runCLI(["chat", "page", "read", try XCTUnwrap(recipes["id"] as? String)])["result"] as? [String: Any])
+        XCTAssertEqual(recipesRead["filePath"] as? String, recipesFile.path)
+        XCTAssertEqual(
+            (recipesArchive["messages"] as? [[String: Any]])?.compactMap { $0["text"] as? String },
+            recipesMessages.compactMap { $0["text"] as? String },
+            "The page file should stay synchronized with its persisted transcript."
+        )
+        let kyotoMessages = try XCTUnwrap(
+            (try runCLI(["chat", "page", "read", try XCTUnwrap(kyoto["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
+        )
+        XCTAssertTrue(kyotoMessages.isEmpty, "Messages from the recipes turn must not leak onto an unrelated page.")
+
+        let compliantStatus = try XCTUnwrap(try runCLI(["chat", "status"])["result"] as? [String: Any])
+        XCTAssertEqual(compliantStatus["missedPreviousPageSignal"] as? Bool, false, "A turn that called close-turn must not be flagged as missed.")
+
+        assertCLIError(
+            try runCLI(["task", "repository", "add", chatTaskID, "--repo", fixture.primary.path], expectedStatus: 2),
+            code: "invalid_argument"
+        )
+        _ = try runCLI(["settings", "clear-parent"])
+        XCTAssertNil((try runCLI(["settings", "get"])["result"] as? [String: Any])?["defaultParentFolder"])
+
+        // Exercise the actual sidebar composer without a default repository root. The
+        // background fallback must update the visible page title after the GUI send returns.
+        try? FileManager.default.removeItem(at: activeMarker)
+        try? FileManager.default.removeItem(at: releaseMarker)
+        let classifierHold = URL(fileURLWithPath: chatFixtureExecutable.path + ".hold-classifier")
+        let classifierActive = URL(fileURLWithPath: chatFixtureExecutable.path + ".classifier-active")
+        let classifierRelease = URL(fileURLWithPath: chatFixtureExecutable.path + ".classifier-release")
+        try Data().write(to: classifierHold)
+        XCTAssertTrue(element("send-message-button").isEnabled, "Standalone chat should send without a configured repository root.")
+        element("message-composer").click()
+        element("message-composer").typeText("Tell me about Saturn's rings")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: classifierActive.path) }, timeout: 15), "The fallback classifier should run after the primary answer and be held independently.")
+        XCTAssertFalse(element("chat-active-page-title").exists, "Page titles should appear in transcript separators, not the header.")
+        XCTAssertFalse(element("chat-missed-page-signal-notice").exists, "Page evaluation should stay visually quiet while pending.")
+        XCTAssertEqual(element("chat-sidebar").descendants(matching: .progressIndicator).count, 0, "Page evaluation should not show a loader in the chat sidebar.")
+        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10), "The primary answer should render before the background classifier is released.")
+        XCTAssertTrue(element("send-message-button").isEnabled, "The background classifier must not keep the composer turn active.")
+        XCTAssertTrue(chatPageSeparatorIsVisible("Dinner recipes"), "The current title should remain in its transcript separator until classification completes.")
+        element("message-composer").click()
+        element("message-composer").typeText("One more thought about Saturn")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ !element("send-message-button").isEnabled }, timeout: 10), "A new send should queue behind the held fallback decision.")
+        try Data("Release classifier.\n".utf8).write(to: classifierRelease)
+        let fallbackReady = waitUntil({
+            guard let status = try? self.runCLI(["chat", "status"])["result"] as? [String: Any],
+                  status["missedPreviousPageSignal"] as? Bool == false,
+                  let page = status["activePage"] as? [String: Any],
+                  page["title"] as? String == "Saturn Rings",
+                  let pageID = page["id"] as? String,
+                  let messages = (try? self.runCLI(["chat", "page", "read", pageID])["result"] as? [String: Any])?["messages"] as? [[String: Any]] else { return false }
+            return self.chatPageSeparatorIsVisible("Saturn Rings")
+                && messages.compactMap { $0["text"] as? String } == [
+                    "Tell me about Saturn's rings", "Answers received: Blue / fixture-secret.",
+                    "One more thought about Saturn", "Answers received: Blue / fixture-secret.",
+                ]
+        }, timeout: 30)
+        XCTAssertTrue(fallbackReady, "The background fallback should update the active page title and clear the missed-signal warning.")
+        XCTAssertFalse(element("chat-active-page-title").exists, "The page title should remain in the transcript, not the header.")
+        XCTAssertFalse(element("chat-missed-page-signal-notice").exists, "The warning should disappear after the fallback persists its result.")
+        let fallbackStatus = try XCTUnwrap(try runCLI(["chat", "status"])["result"] as? [String: Any])
+        let fallbackPage = try XCTUnwrap(fallbackStatus["activePage"] as? [String: Any])
+        let fallbackMessages = try XCTUnwrap(
+            (try runCLI(["chat", "page", "read", try XCTUnwrap(fallbackPage["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
+        )
+        XCTAssertTrue(
+            fallbackMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == "Tell me about Saturn's rings" },
+            "The fallback-classified turn's messages should be moved onto its new page."
+        )
+        XCTAssertTrue(
+            fallbackMessages.contains { ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "Answers received: Blue / fixture-secret." },
+            "The assistant reply must move with its user message onto the new page."
+        )
+        let priorPageMessages = try XCTUnwrap(
+            (try runCLI(["chat", "page", "read", try XCTUnwrap(recipes["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
+        )
+        XCTAssertFalse(
+            priorPageMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == "Tell me about Saturn's rings" },
+            "The fallback-classified turn must not remain duplicated on the prior page."
+        )
+        XCTAssertFalse(priorPageMessages.contains { ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "Answers received: Blue / fixture-secret." })
+
+        // A later turn was queued while the first fallback was held; both turns must
+        // now appear in order on the fallback-selected page.
+        let orderedMessages = try XCTUnwrap(
+            (try runCLI(["chat", "page", "read", try XCTUnwrap(fallbackPage["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
+        )
+        XCTAssertEqual(orderedMessages.map { $0["text"] as? String }, [
+            "Tell me about Saturn's rings", "Answers received: Blue / fixture-secret.",
+            "One more thought about Saturn", "Answers received: Blue / fixture-secret.",
+        ], "A later appended turn must follow the moved messages in chronological order.")
+        let fixtureHistory = try Data(contentsOf: URL(fileURLWithPath: chatFixtureExecutable.path + ".history"))
+        let fixtureTurns = try XCTUnwrap((try JSONSerialization.jsonObject(with: fixtureHistory) as? [String: Any])?["turns"] as? [[String: Any]])
+        let classifierTurns = fixtureTurns.filter { ($0["userMessage"] as? String)?.hasPrefix("Classify the latest user message for Playhouse's continuous chat page index.") == true }
+        XCTAssertEqual(classifierTurns.count, 3, "The fallback should reject one malformed result, retry once, then classify the later turn.")
+        let classifierTurn = try XCTUnwrap(classifierTurns.last)
+        XCTAssertEqual(classifierTurn["modelID"] as? String, "gpt-6-luna", "The Codex fallback should use Luna.")
+        XCTAssertEqual(classifierTurn["reasoningEffort"] as? String, "low", "The background classifier should use low effort.")
+
+        // An explicit page start supersedes a held classifier. Reopen the sidebar
+        // to refresh its persisted status, then ensure the late result stays stale.
+        let priorPageID = try XCTUnwrap(fallbackPage["id"] as? String)
+        try? FileManager.default.removeItem(at: classifierActive)
+        try? FileManager.default.removeItem(at: classifierRelease)
+        try Data().write(to: classifierHold)
+        element("message-composer").click()
+        element("message-composer").typeText("Tell me about Neptune")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: classifierActive.path) }, timeout: 15))
+        let explicitPage = try XCTUnwrap((try runCLI(["chat", "page", "new", "--title", "Explicit topic"])["result"] as? [String: Any])?["page"] as? [String: Any])
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(waitUntil({ !element("chat-sidebar").exists }, timeout: 5))
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Explicit topic") }, timeout: 10))
+        XCTAssertFalse(element("chat-missed-page-signal-notice").exists)
+        try Data("Release classifier.\n".utf8).write(to: classifierRelease)
+        XCTAssertTrue(waitUntil({
+            guard let status = try? self.runCLI(["chat", "status"])["result"] as? [String: Any],
+                  let page = status["activePage"] as? [String: Any] else { return false }
+            return (page["id"] as? String) == (explicitPage["id"] as? String)
+        }, timeout: 30), "The late classifier must not replace the explicit page.")
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Explicit topic") }, timeout: 10))
+        let explicitMessages = try XCTUnwrap((try runCLI(["chat", "page", "read", try XCTUnwrap(explicitPage["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+        XCTAssertTrue(explicitMessages.isEmpty)
+        let oldPageMessages = try XCTUnwrap((try runCLI(["chat", "page", "read", priorPageID])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+        XCTAssertTrue(oldPageMessages.contains { ($0["text"] as? String) == "Tell me about Neptune" })
+        XCTAssertTrue(oldPageMessages.contains { ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "Answers received: Blue / fixture-secret." })
+
+        let classifierFailure = URL(fileURLWithPath: chatFixtureExecutable.path + ".fail-classifier")
+        try Data().write(to: classifierFailure)
+        element("message-composer").click()
+        element("message-composer").typeText("Tell me about Mars")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            (try? self.runCLI(["chat", "status"])["result"] as? [String: Any])?["missedPreviousPageSignal"] as? Bool == true
+        }, timeout: 30), "Malformed helper results should keep the pending decision visible and durable.")
+        XCTAssertFalse(element("chat-active-page-title").exists, "Unresolved classification should not add a page title to the header.")
+        XCTAssertFalse(element("chat-missed-page-signal-notice").exists, "Unresolved classification should remain visually quiet.")
+        XCTAssertEqual(element("chat-sidebar").descendants(matching: .progressIndicator).count, 0, "Unresolved classification should not show a loader.")
+        XCTAssertTrue(waitUntil({ self.element("send-message-button").isEnabled }, timeout: 10))
+        element("message-composer").click()
+        element("message-composer").typeText("Do not overtake Mars")
+        element("send-message-button").click()
+        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 15), "A later send should explain that the prior page decision is still pending.")
+        let failedHistory = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: chatFixtureExecutable.path + ".history"))) as? [String: Any]
+        let failedTurns = try XCTUnwrap(failedHistory?["turns"] as? [[String: Any]])
+        XCTAssertFalse(failedTurns.contains { ($0["userMessage"] as? String) == "Do not overtake Mars" }, "The blocked follow-up must not reach the provider.")
+        try FileManager.default.removeItem(at: classifierFailure)
+        _ = try runCLI(["chat", "status"])
+        let retryStatus = try XCTUnwrap(try runCLI(["chat", "status"])["result"] as? [String: Any])
+        XCTAssertFalse(retryStatus["missedPreviousPageSignal"] as? Bool ?? true)
+        XCTAssertEqual((retryStatus["activePage"] as? [String: Any])?["title"] as? String, "Mars")
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(waitUntil({ !element("chat-sidebar").exists }, timeout: 5))
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Mars") }, timeout: 10))
+        XCTAssertFalse(element("chat-active-page-title").exists, "The resolved title should remain in the transcript, not the header.")
+        XCTAssertFalse(element("chat-missed-page-signal-notice").exists)
+        element("message-composer").click()
+        element("message-composer").typeKey("a", modifierFlags: .command)
+        element("message-composer").typeText("Another thought about Mars")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            guard let status = try? self.runCLI(["chat", "status"])["result"] as? [String: Any],
+                  status["missedPreviousPageSignal"] as? Bool == false,
+                  let page = status["activePage"] as? [String: Any],
+                  page["title"] as? String == "Mars",
+                  let pageID = page["id"] as? String,
+                  let messages = (try? self.runCLI(["chat", "page", "read", pageID])["result"] as? [String: Any])?["messages"] as? [[String: Any]] else { return false }
+            return messages.contains { ($0["text"] as? String) == "Another thought about Mars" }
+        }, timeout: 30), "A new send should work once the pending page decision has recovered.")
+
+        // Page sessions rotate, so earlier pages must stay visible rather than disappearing.
+        XCTAssertTrue(chatPageSeparatorIsVisible("Dinner recipes"), "An earlier page stays visible after its session rotated.")
+        XCTAssertTrue(
+            element("chat-sidebar").staticTexts["What's a good side dish?"].exists,
+            "An earlier page keeps its messages in the chat transcript."
+        )
+        let boardTask = try XCTUnwrap(
+            (try runCLI(["task", "create", "--title", "Context page rejection"])["result"] as? [String: Any])?["id"] as? String
+        )
+        let activePageID = try XCTUnwrap(
+            ((try runCLI(["chat", "status"])["result"] as? [String: Any])?["activePage"] as? [String: Any])?["id"] as? String
+        )
+        assertCLIError(
+            try runCLI(["conversation", "send", boardTask, "--message", "Hello", "--context-page", activePageID], expectedStatus: 2),
+            code: "invalid_argument"
+        )
+
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(waitUntil({ !element("chat-sidebar").exists }, timeout: 5), "Clicking Chat again should slide the sidebar back out.")
+    }
+
+    // case-contract: test_standalone_chat_page_sessions_isolate_context | Each standalone chat page is its own provider session: the first turn of a page starts a fresh session carrying the system prompt plus only that page's own turns, later turns on that page resume it without repeating the page context, and a different page never shares it, so an earlier page's turns never reach a later page. An annotation that quotes an earlier page carries just that page into the current turn, and rotating sessions still leaves every page's messages visible in the transcript.
+    func test_standalone_chat_page_sessions_isolate_context() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-sessions")
+        try FileManager.default.copyItem(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-code-fixture.py"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8).write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
+        )
+        claudeFixtureExecutable = executable.path
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        _ = try runCLI(["settings", "clear-parent"])
+        launchApp(defaultParent: nil)
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        let chatID = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any])?["id"] as? String)
+
+        func waitForPage(_ title: String) throws -> [String: Any] {
+            var active: [String: Any] = [:]
+            let settled = waitUntil({
+                guard let response = try? self.runCLI(["chat", "status"]),
+                      let status = response["result"] as? [String: Any],
+                      let page = status["activePage"] as? [String: Any],
+                      (status["missedPreviousPageSignal"] as? Bool) == false,
+                      page["title"] as? String == title else { return false }
+                active = page
+                return true
+            }, timeout: 30)
+            XCTAssertTrue(settled, "The chat never settled on page \(title).")
+            return active
+        }
+
+        func sendFromSidebar(_ prompt: String) {
+            let composer = element("message-composer")
+            XCTAssertTrue(composer.waitForExistence(timeout: 10))
+            composer.click()
+            composer.typeText(prompt)
+            element("send-message-button").click()
+            XCTAssertTrue(waitUntil({ element("send-message-button").isEnabled }, timeout: 30), "The turn should finish.")
+        }
+
+        func answerTurns() throws -> [[String: Any]] {
+            let data = try Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
+            let history = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let turns = try XCTUnwrap(history["turns"] as? [[String: Any]])
+            return turns.filter { !(($0["userText"] as? String) ?? "").hasPrefix("Classify the latest user message") }
+        }
+
+        func turn(endingWith message: String) throws -> [String: Any] {
+            let match = try answerTurns().last { (($0["userText"] as? String) ?? "").hasSuffix(message) }
+            return try XCTUnwrap(match, "The fixture never received a turn ending with \(message).")
+        }
+
+        sendFromSidebar("Tell me about volcanoes")
+        let volcanoes = try waitForPage("Volcanoes")
+        sendFromSidebar("Tell me about Saturn's rings")
+        _ = try waitForPage("Saturn Rings")
+        sendFromSidebar("One more thought about Saturn")
+        _ = try waitForPage("Saturn Rings")
+
+        let first = try turn(endingWith: "Tell me about volcanoes")
+        let second = try turn(endingWith: "Tell me about Saturn's rings")
+        let third = try turn(endingWith: "One more thought about Saturn")
+        // The turn that opens a page still answers in the page it was sent into; only once the
+        // classifier moves it does the next turn get that new page's own session.
+        XCTAssertEqual(first["sessionID"] as? String, second["sessionID"] as? String, "One page answers in one session.")
+        XCTAssertNotEqual(
+            third["sessionID"] as? String, first["sessionID"] as? String,
+            "A different page must never share another page's provider session."
+        )
+        for pageTurn in [first, third] {
+            XCTAssertEqual(pageTurn["resumed"] as? Bool, false, "A page's first turn starts that page's own session.")
+            let arguments = try XCTUnwrap(pageTurn["arguments"] as? [String])
+            let promptIndex = try XCTUnwrap(arguments.firstIndex(of: "--append-system-prompt"))
+            XCTAssertTrue(
+                arguments[promptIndex + 1].contains("chat page close-turn"),
+                "Every page session must carry the standalone chat system prompt."
+            )
+        }
+        XCTAssertEqual(second["resumed"] as? Bool, true, "A turn sent into an existing page resumes its session.")
+        let thirdText = try XCTUnwrap(third["userText"] as? String)
+        XCTAssertTrue(thirdText.contains("Tell me about Saturn's rings"), "A fresh page session is seeded with its own page's turns.")
+        XCTAssertFalse(thirdText.contains("Tell me about volcanoes"), "An earlier page must never be sent as context for a later page.")
+
+        sendFromSidebar("Another thought about Mars")
+        _ = try waitForPage("Saturn Rings")
+        let fourth = try turn(endingWith: "Another thought about Mars")
+        XCTAssertEqual(fourth["sessionID"] as? String, third["sessionID"] as? String, "The same page keeps one session.")
+        XCTAssertEqual(fourth["resumed"] as? Bool, true, "A continuing turn resumes the page's session.")
+        XCTAssertFalse(
+            try XCTUnwrap(fourth["userText"] as? String).contains("<playhouse-handoff-context>"),
+            "A resumed page session must not repeat its page context."
+        )
+
+        // Commenting on a message from an earlier page must carry that page into this turn.
+        // Driven through the visible select -> Add comment -> send flow, not the CLI flag, so
+        // the composer's own annotation-to-page mapping is what is exercised.
+        let volcanoesID = try XCTUnwrap(volcanoes["id"] as? String)
+        let archived = try XCTUnwrap(
+            (try runCLI(["chat", "page", "read", volcanoesID])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
+        )
+        XCTAssertFalse(archived.isEmpty, "The earlier page should still hold its own turns.")
+        let historyMessages = try XCTUnwrap(
+            (try runCLI(["conversation", "history", chatID])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
+        )
+        let volcanoMessage = try XCTUnwrap(
+            historyMessages.first { ($0["text"] as? String) == "Tell me about volcanoes" },
+            "The earlier page's message should still be in the visible transcript."
+        )
+        let volcanoMessageID = try XCTUnwrap(volcanoMessage["id"] as? String)
+        let volcanoView = element("user-message-\(volcanoMessageID)")
+        XCTAssertTrue(volcanoView.waitForExistence(timeout: 10), "An earlier page's message stays visible after rotation.")
+        volcanoView.click()
+        volcanoView.typeKey("a", modifierFlags: .command)
+        let addComment = app.buttons.matching(NSPredicate(format: "label == %@", "Add comment")).firstMatch
+        XCTAssertTrue(addComment.waitForExistence(timeout: 5), "Selecting transcript text should expose Add comment.")
+        addComment.click()
+        let commentField = element("comment-input-field")
+        XCTAssertTrue(commentField.waitForExistence(timeout: 5))
+        commentField.typeText("What did we say before?")
+        element("add-comment-button").click()
+        XCTAssertTrue(element("send-message-button").isEnabled, "A comment alone should be sendable.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ element("send-message-button").isEnabled }, timeout: 30), "The annotated turn should finish.")
+        _ = try waitForPage("Saturn Rings")
+        let annotated = try XCTUnwrap(
+            try answerTurns().last { (($0["userText"] as? String) ?? "").contains("What did we say before?") },
+            "The annotated turn never reached the provider."
+        )
+        XCTAssertTrue(
+            try XCTUnwrap(annotated["userText"] as? String).contains("Tell me about volcanoes"),
+            "A page quoted by a comment travels with the turn that quotes it."
+        )
+
+        XCTAssertTrue(chatPageSeparatorIsVisible("Volcanoes"), "Rotating sessions must not hide earlier pages.")
+        XCTAssertTrue(chatPageSeparatorIsVisible("Saturn Rings"))
+        XCTAssertTrue(
+            element("chat-sidebar").staticTexts["Tell me about volcanoes"].exists,
+            "Earlier pages stay visible in the chat transcript."
+        )
+        attachScreenshot(named: "Standalone chat pages keep separate sessions")
+    }
+
+    // case-contract: test_standalone_chat_claude_fallback_classifier | When a standalone chat uses Claude, a missed page signal invokes the Haiku helper at low effort; a malformed result is rejected and retried, an unrelated later question and its assistant reply move to a new titled page, the UI keeps page evaluation visually quiet without blocking the primary answer, updates the transcript separator when classification completes, and holds a following send until the decision resolves, and appends the related follow-up in chronological order. The Claude-specific model and effort arguments are verified through the real CLI/XPC path. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes.
+    func test_standalone_chat_claude_fallback_classifier() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-fallback")
+        try FileManager.default.copyItem(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-code-fixture.py"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8).write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
+        )
+        claudeFixtureExecutable = executable.path
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        _ = try runCLI(["settings", "clear-parent"])
+        launchApp(defaultParent: nil)
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        let opened = try XCTUnwrap((try runCLI(["chat", "open"])["result"] as? [String: Any]))
+        XCTAssertNotNil(opened["id"] as? String)
+        XCTAssertEqual(opened["conversationProvider"] as? String, "claude")
+        let firstPage = try XCTUnwrap(
+            (try runCLI(["chat", "page", "new", "--title", "General chat"])["result"] as? [String: Any])?["page"] as? [String: Any]
+        )
+
+        func sendFromSidebar(_ prompt: String, expectedTitle: String) throws {
+            let composer = element("message-composer")
+            XCTAssertTrue(composer.waitForExistence(timeout: 10))
+            XCTAssertTrue(element("send-message-button").isEnabled, "Standalone chat should remain sendable without a repository parent.")
+            let hold = URL(fileURLWithPath: executable.path + ".hold-classifier")
+            let active = URL(fileURLWithPath: executable.path + ".classifier-active")
+            let release = URL(fileURLWithPath: executable.path + ".classifier-release")
+            if prompt == "Tell me about volcanoes" { try Data().write(to: hold) }
+            composer.click()
+            composer.typeText(prompt)
+            element("send-message-button").click()
+            if prompt == "Tell me about volcanoes" {
+                XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: active.path) }, timeout: 15), "The Haiku fallback should remain held after the primary Claude turn finishes.")
+                XCTAssertFalse(element("chat-active-page-title").exists, "Page titles should appear in transcript separators, not the header.")
+                XCTAssertFalse(element("chat-missed-page-signal-notice").exists, "Page evaluation should stay visually quiet while pending.")
+                XCTAssertEqual(element("chat-sidebar").descendants(matching: .progressIndicator).count, 0, "Page evaluation should not show a loader in the chat sidebar.")
+                XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 10), "The primary Claude answer should be visible while fallback classification is pending.")
+                XCTAssertTrue(element("send-message-button").isEnabled, "A background classifier must not block another chat send.")
+                XCTAssertTrue(chatPageSeparatorIsVisible("General chat"))
+                return
+            }
+            if prompt == "Tell me about Saturn's rings" {
+                XCTAssertTrue(waitUntil({ !element("send-message-button").isEnabled }, timeout: 10), "The queued Claude turn should wait for the prior page decision.")
+                try Data("Release classifier.\n".utf8).write(to: release)
+            }
+            XCTAssertTrue(waitUntil({
+                guard self.chatPageSeparatorIsVisible(expectedTitle),
+                      let status = try? self.runCLI(["chat", "status"])["result"] as? [String: Any] else { return false }
+                return status["missedPreviousPageSignal"] as? Bool == false
+            }, timeout: 30), "The Haiku fallback should persist and visibly show the title \(expectedTitle).")
+            XCTAssertFalse(element("chat-missed-page-signal-notice").exists)
+        }
+
+        try sendFromSidebar("Tell me about volcanoes", expectedTitle: "Volcanoes")
+        try sendFromSidebar("Tell me about Saturn's rings", expectedTitle: "Saturn Rings")
+        try sendFromSidebar("One more thought about Saturn", expectedTitle: "Saturn Rings")
+
+        XCTAssertTrue(waitUntil({
+            guard let status = try? self.runCLI(["chat", "status"])["result"] as? [String: Any],
+                  status["missedPreviousPageSignal"] as? Bool == false,
+                  let page = status["activePage"] as? [String: Any],
+                  page["title"] as? String == "Saturn Rings",
+                  let pageID = page["id"] as? String,
+                  let messages = (try? self.runCLI(["chat", "page", "read", pageID])["result"] as? [String: Any])?["messages"] as? [[String: Any]] else { return false }
+            return messages.compactMap { $0["text"] as? String } == [
+                "Tell me about Saturn's rings", "OK.", "One more thought about Saturn", "OK.",
+            ]
+        }, timeout: 30), "The related follow-up must finish on the selected page in transcript order.")
+
+        let status = try XCTUnwrap(try runCLI(["chat", "status"])["result"] as? [String: Any])
+        let activePage = try XCTUnwrap(status["activePage"] as? [String: Any])
+        XCTAssertNotEqual(activePage["id"] as? String, firstPage["id"] as? String)
+        let firstMessages = try XCTUnwrap(
+            (try runCLI(["chat", "page", "read", try XCTUnwrap(firstPage["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
+        )
+        let activeMessages = try XCTUnwrap(
+            (try runCLI(["chat", "page", "read", try XCTUnwrap(activePage["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
+        )
+        XCTAssertTrue(firstMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == "Tell me about volcanoes" })
+        XCTAssertTrue(firstMessages.contains { ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "OK." })
+        XCTAssertEqual(firstMessages.filter { ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "OK." }.count, 1, "The Saturn assistant reply must not remain duplicated on the Volcanoes page.")
+        XCTAssertEqual(activeMessages.map { $0["text"] as? String }, [
+            "Tell me about Saturn's rings", "OK.", "One more thought about Saturn", "OK.",
+        ], "A related turn after fallback must append in chronological order.")
+        XCTAssertFalse(firstMessages.contains { ($0["text"] as? String) == "Tell me about Saturn's rings" })
+        let pages = try XCTUnwrap((try runCLI(["chat", "page", "list"])["result"] as? [String: Any])?["pages"] as? [[String: Any]])
+        XCTAssertEqual(pages.count, 2)
+        XCTAssertEqual(Set(pages.compactMap { $0["title"] as? String }), Set(["Volcanoes", "Saturn Rings"]))
+        let history = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
+        let turns = try XCTUnwrap(history?["turns"] as? [[String: Any]])
+        let classifications = turns.filter { ($0["userText"] as? String)?.hasPrefix("Classify the latest user message for Playhouse's continuous chat page index.") == true }
+        XCTAssertEqual(classifications.count, 4, "The fallback should retry one malformed result and classify a later follow-up.")
+        for turn in classifications {
+            XCTAssertEqual(turn["effort"] as? String, "low")
+            let arguments = try XCTUnwrap(turn["arguments"] as? [String])
+            let modelArgumentIndex = try XCTUnwrap(arguments.firstIndex(of: "--model"))
+            XCTAssertEqual(arguments[modelArgumentIndex + 1], "haiku")
+        }
+
+        let priorPageID = try XCTUnwrap(activePage["id"] as? String)
+        let hold = URL(fileURLWithPath: executable.path + ".hold-classifier")
+        let active = URL(fileURLWithPath: executable.path + ".classifier-active")
+        let release = URL(fileURLWithPath: executable.path + ".classifier-release")
+        try? FileManager.default.removeItem(at: active)
+        try? FileManager.default.removeItem(at: release)
+        try Data().write(to: hold)
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText("Tell me about Neptune")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: active.path) }, timeout: 15))
+        let explicitPage = try XCTUnwrap((try runCLI(["chat", "page", "new", "--title", "Explicit topic"])["result"] as? [String: Any])?["page"] as? [String: Any])
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(waitUntil({ !element("chat-sidebar").exists }, timeout: 5))
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Explicit topic") }, timeout: 10))
+        XCTAssertFalse(element("chat-missed-page-signal-notice").exists)
+        try Data("Release classifier.\n".utf8).write(to: release)
+        XCTAssertTrue(waitUntil({
+            guard let status = try? self.runCLI(["chat", "status"])["result"] as? [String: Any],
+                  let page = status["activePage"] as? [String: Any] else { return false }
+            return (page["id"] as? String) == (explicitPage["id"] as? String)
+        }, timeout: 30))
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Explicit topic") }, timeout: 10))
+        let explicitMessages = try XCTUnwrap((try runCLI(["chat", "page", "read", try XCTUnwrap(explicitPage["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+        XCTAssertTrue(explicitMessages.isEmpty)
+        let oldPageMessages = try XCTUnwrap((try runCLI(["chat", "page", "read", priorPageID])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
+        XCTAssertTrue(oldPageMessages.contains { ($0["text"] as? String) == "Tell me about Neptune" })
+        XCTAssertTrue(oldPageMessages.contains { ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "OK." })
+
+        let classifierFailure = URL(fileURLWithPath: executable.path + ".fail-classifier")
+        try Data().write(to: classifierFailure)
+        composer.click()
+        composer.typeText("Tell me about Mars")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            (try? self.runCLI(["chat", "status"])["result"] as? [String: Any])?["missedPreviousPageSignal"] as? Bool == true
+        }, timeout: 30))
+        XCTAssertTrue(waitUntil({ self.element("send-message-button").isEnabled }, timeout: 10))
+        composer.click()
+        composer.typeText("Do not overtake Mars")
+        element("send-message-button").click()
+        XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 15), "Claude chat should explain when a prior page decision is still unresolved.")
+        let failedHistory = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any]
+        let failedTurns = try XCTUnwrap(failedHistory?["turns"] as? [[String: Any]])
+        XCTAssertFalse(failedTurns.contains { ($0["userText"] as? String) == "Do not overtake Mars" })
+        try FileManager.default.removeItem(at: classifierFailure)
+        _ = try runCLI(["chat", "status"])
+        let retryStatus = try XCTUnwrap(try runCLI(["chat", "status"])["result"] as? [String: Any])
+        XCTAssertFalse(retryStatus["missedPreviousPageSignal"] as? Bool ?? true)
+        XCTAssertEqual((retryStatus["activePage"] as? [String: Any])?["title"] as? String, "Mars")
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(waitUntil({ !element("chat-sidebar").exists }, timeout: 5))
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Mars") }, timeout: 10))
+        XCTAssertFalse(element("chat-missed-page-signal-notice").exists)
+        composer.click()
+        composer.typeKey("a", modifierFlags: .command)
+        composer.typeText("Another thought about Mars")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            guard let status = try? self.runCLI(["chat", "status"])["result"] as? [String: Any],
+                  status["missedPreviousPageSignal"] as? Bool == false,
+                  let page = status["activePage"] as? [String: Any],
+                  page["title"] as? String == "Mars",
+                  let pageID = page["id"] as? String,
+                  let messages = (try? self.runCLI(["chat", "page", "read", pageID])["result"] as? [String: Any])?["messages"] as? [[String: Any]] else { return false }
+            return messages.contains { ($0["text"] as? String) == "Another thought about Mars" }
+        }, timeout: 30))
+    }
+
     // case-contract: test_task_prompt_draft_persists_after_back | Creating a repository task leaves its selected branch pending while the composer automatically saves an unsent prompt as it is typed; clearing the composer clears the stored draft, backing out needs no Save button, and reopening restores the draft without creating a branch or worktree. Blank drafts cannot be stored, and invalid status changes are rejected without mutation. If the title is renamed while delayed title generation is in flight, the late result is skipped, the renamed title persists, and diagnostics record the skip reason without prompt or title text.
     func test_task_prompt_draft_persists_after_back() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-title-success-wait").path
@@ -4695,7 +5863,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(transcriptContains("playhouse-handoff-context"))
     }
 
-    // case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its Playhouse progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn without an outcome ends in Waiting Response. The fixture records both private reminder attempts for each unreported turn; fresh history hides reminder prompts and replies completely. Switching to Codex hands off the whole Claude answer, excludes answered-turn commentary and private reminder prompts and replies including their redacted placeholders, and hands off only the last commentary from the turn that recorded no answer. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
+    // case-contract: test_claude_answer_stays_final_around_outcome_report | Against the Claude Code protocol fixture, the answer Claude writes before running its Playhouse progress and outcome commands and the closing line it adds afterward form one final answer, not commentary, in the streamed final answer, fresh history, and transcript, and the reported outcome moves the task to Review. Text Claude writes before an ordinary tool stays commentary, and a turn that leaves every status nudge unanswered ends in Blocked. The fixture records all five private nudge attempts for each unreported turn; fresh history hides nudge prompts and replies completely. Switching to Codex hands off the whole Claude answer, excludes answered-turn commentary and private nudge prompts and replies including their redacted placeholders, and hands off only the last commentary from the turn that recorded no answer. A new Claude conversation with no explicit model pick dispatches to Sonnet and shows Sonnet as the picker default.
     func test_claude_answer_stays_final_around_outcome_report() throws {
         let claudeExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         let codexExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success")
@@ -4748,7 +5916,7 @@ final class PlayhouseUITests: XCTestCase {
 
         send("Please inspect the workspace.")
         XCTAssertTrue(visibleTexts(containing: "Inspection done: the workspace is ready.").firstMatch.waitForExistence(timeout: 20))
-        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" }, timeout: 10), "A turn without an outcome should wait for the user.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Blocked" }, timeout: 60), "A turn that leaves every status nudge unanswered should settle in Blocked.")
         waitForSettledTurn()
         XCTAssertEqual(visibleTexts(containing: "I'll inspect the workspace first.").count, 0, "Text before an ordinary tool stays collapsed commentary.")
 
@@ -4769,11 +5937,11 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ self.transcriptContains("Answers received: Blue / fixture-secret.") }, timeout: 20), "The Codex turn should complete.")
         let claudeHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: claudeExecutable.path + ".history"))) as? [String: Any])
         let claudeTurns = try XCTUnwrap(claudeHistory["turns"] as? [[String: Any]])
-        let reminderTurns = claudeTurns.filter { (($0["userText"] as? String) ?? "").localizedCaseInsensitiveContains("Playhouse internal outcome reminder:") }
-        XCTAssertEqual(reminderTurns.count, 4, "Both no-outcome turns should receive two private outcome reminders.")
+        let nudgeTurns = claudeTurns.filter { (($0["userText"] as? String) ?? "").localizedCaseInsensitiveContains("Playhouse internal outcome nudge:") }
+        XCTAssertEqual(nudgeTurns.count, 2 * Self.maxOutcomeContinuations, "Both no-outcome turns should receive every private status nudge.")
         let visibleHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
         let visibleMessages = try XCTUnwrap(visibleHistory["messages"] as? [[String: Any]])
-        XCTAssertFalse(visibleMessages.contains { (($0["text"] as? String) ?? "").localizedCaseInsensitiveContains("Playhouse internal outcome reminder:") })
+        XCTAssertFalse(visibleMessages.contains { (($0["text"] as? String) ?? "").localizedCaseInsensitiveContains("Playhouse internal outcome nudge:") })
         XCTAssertFalse(visibleMessages.contains { (($0["text"] as? String) ?? "").localizedCaseInsensitiveContains("private outcome reminder hidden") })
         XCTAssertFalse(visibleMessages.contains { (($0["text"] as? String) ?? "").localizedCaseInsensitiveContains("private outcome response hidden") })
         let codexHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: codexExecutable.path + ".history"))) as? [String: Any])
@@ -4785,7 +5953,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(handoff.contains("I'll inspect the workspace first."), "Commentary of an answered turn stays with the provider that produced it.")
         XCTAssertTrue(handoff.contains("Claude: Checks are running; results will follow."), "A turn without an answer hands off its last commentary.")
         XCTAssertFalse(handoff.contains("Starting the checks."), "Only the unanswered turn's last commentary is handed off.")
-        XCTAssertFalse(handoff.contains("Playhouse internal outcome reminder:"), "Private outcome reminders must not cross provider boundaries.")
+        XCTAssertFalse(handoff.contains("Playhouse internal outcome nudge:"), "Private status nudges must not cross provider boundaries.")
         XCTAssertFalse(handoff.contains("[Playhouse private outcome reminder hidden]"), "Redacted reminder prompts must not cross provider boundaries.")
         XCTAssertFalse(handoff.contains("private outcome response hidden"), "Redacted reminder replies must not enter handoff context.")
         XCTAssertEqual(visibleTexts(containing: "playhouse-handoff-context").count, 0, "The handoff block stays hidden in the transcript.")
@@ -4850,7 +6018,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(transcriptShows("OK.", timeout: 20), "Claude should complete after rebuilding its session from saved history.")
         fixtureHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureHistoryURL)) as? [String: Any])
         fixtureTurns = try XCTUnwrap(fixtureHistory["turns"] as? [[String: Any]])
-        let recoveredTurn = try XCTUnwrap(fixtureTurns.last { !(($0["userText"] as? String ?? "").localizedCaseInsensitiveContains("Playhouse internal outcome reminder:")) })
+        let recoveredTurn = try XCTUnwrap(fixtureTurns.last { !(($0["userText"] as? String ?? "").localizedCaseInsensitiveContains("Playhouse internal outcome nudge:")) })
         XCTAssertFalse(recoveredTurn["resumed"] as? Bool ?? true, "A missing native session should retry as a new Claude session.")
         let recoveryPrompt = try XCTUnwrap(recoveredTurn["userText"] as? String)
         XCTAssertTrue(recoveryPrompt.contains("<playhouse-handoff-context>"))
@@ -5795,7 +6963,7 @@ final class PlayhouseUITests: XCTestCase {
         )
         // Playhouse's private outcome reminders are separate turns, not user messages.
         let persistedPrompts = try XCTUnwrap(savedHistory["messages"] as? [[String: Any]]).compactMap { $0["userMessage"] as? String }
-            .filter { !$0.hasPrefix("Playhouse internal outcome reminder:") }
+            .filter { !$0.hasPrefix("Playhouse internal outcome nudge:") }
         XCTAssertEqual(persistedPrompts, [firstPrompt, secondPrompt], "Both messages should persist in the same local Codex thread history.")
         let threadID = try XCTUnwrap(savedHistory["threadID"] as? String)
         let protocolEvents = try XCTUnwrap(savedHistory["events"] as? [[String: Any]])
@@ -5806,7 +6974,7 @@ final class PlayhouseUITests: XCTestCase {
         let persistedTurns = try XCTUnwrap(savedHistory["messages"] as? [[String: Any]])
         XCTAssertTrue(persistedTurns.allSatisfy { $0["threadID"] as? String == threadID })
         let turnIDs = persistedTurns
-            .filter { ($0["userMessage"] as? String)?.hasPrefix("Playhouse internal outcome reminder:") != true }
+            .filter { ($0["userMessage"] as? String)?.hasPrefix("Playhouse internal outcome nudge:") != true }
             .compactMap { $0["turnID"] as? String }
         XCTAssertEqual(turnIDs.count, 2)
         XCTAssertEqual(Set(turnIDs).count, 2, "Each concurrent send should use a distinct Codex turn ID.")
@@ -6162,7 +7330,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(steerRequests[2]["input"] as? [[String: String]], [["type": "text", "text": rowSteeringText]])
     }
 
-    // case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a composer or transcript attachment opens the original image in a large viewer, which can be closed to return to the conversation.
+    // case-contract: test_conversation_sends_image_attachments | Backlog draft images persist through fresh CLI/XPC reads and reopening the conversation, with the preview restored; saving more than 8 draft images fails with invalid_argument and preserves the existing attachment. The conversation composer also accepts images from the picker and paste, compresses large clipboard images to fit the 10 MB payload limit, sends PNG and JPEG data URLs through CLI/XPC and to Codex using the tagged image URL payload, reads Codex history image URLs, and keeps earlier images visible after a later text turn and history refresh. The provider-neutral conversation present-image API is included in agent instructions, validates and persists agent-produced PNG and JPEG files as assistant messages, and reopening the conversation renders each image visibly. Diagnostics record image MIME and encoded size without storing image payloads. Clicking a composer attachment, a user transcript attachment, or an agent-published assistant image opens the original image in a large viewer, which can be closed to return to the conversation; a published assistant image preserves the original file bytes.
 
     func test_conversation_sends_image_attachments() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
@@ -6276,7 +7444,12 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(refreshedUserMessages.first?["imageDataURLs"] as? [String], [pickedImage], "A fresh XPC history read should retain the earlier image after a later turn.")
 
         let agentCaption = "Agent generated screenshot"
-        let agentImage = try runCLI(["conversation", "present-image", try taskID(named: "Image conversation"), "--image", image.path, "--caption", agentCaption])["result"] as? [String: Any]
+        // A wide image makes the viewer's width depend on the sheet's own width, so the
+        // size assertion below pins the large viewer instead of the fitted square height.
+        let wideAgentImage = dataDirectory.appendingPathComponent("agent-wide-image.png")
+        let wideBitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1600, pixelsHigh: 400, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        try wideBitmap.representation(using: .png, properties: [:])!.write(to: wideAgentImage)
+        let agentImage = try runCLI(["conversation", "present-image", try taskID(named: "Image conversation"), "--image", wideAgentImage.path, "--caption", agentCaption])["result"] as? [String: Any]
         XCTAssertEqual(agentImage?["role"] as? String, "assistant")
         XCTAssertEqual(agentImage?["text"] as? String, agentCaption)
         XCTAssertEqual((agentImage?["imageDataURLs"] as? [String])?.first?.hasPrefix("data:image/png;base64,"), true)
@@ -6292,6 +7465,18 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ self.transcriptContains(agentCaption) }, timeout: 10), "The agent image caption should appear as an assistant message after reopening.")
         XCTAssertTrue(element("chat-image-\(agentImageID)-0").waitForExistence(timeout: 10), "The specific agent-published image should render in its assistant message after reopening.")
         XCTAssertTrue(element("chat-image-\(agentJPEGID)-0").waitForExistence(timeout: 10), "The specific agent-published JPEG should render in its assistant message after reopening.")
+        let agentThumbnail = app.buttons["chat-image-\(agentImageID)-0"]
+        XCTAssertTrue(agentThumbnail.waitForExistence(timeout: 5), "An agent-published assistant image should be clickable.")
+        let agentThumbnailFrame = agentThumbnail.frame
+        agentThumbnail.click()
+        let agentFullSizeImage = element("chat-image-full-size")
+        XCTAssertTrue(agentFullSizeImage.waitForExistence(timeout: 5), "Clicking an agent-published assistant image should open it in the large viewer.")
+        XCTAssertGreaterThan(agentFullSizeImage.frame.width, agentThumbnailFrame.width, "The viewer should display the assistant image larger than its transcript thumbnail.")
+        // The 520pt assistant thumbnail would still be beaten by a 600pt-wide sheet, so pin
+        // the floor above what the smaller sheet can produce.
+        XCTAssertGreaterThan(agentFullSizeImage.frame.width, 800, "The full-size viewer must stay large enough to be a real preview, not a slightly bigger thumbnail.")
+        element("close-chat-image-viewer").click()
+        XCTAssertFalse(element("chat-image-full-size").exists, "Closing the assistant image viewer should return to the conversation.")
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
         try FileManager.default.removeItem(at: URL(fileURLWithPath: try XCTUnwrap(codexFixtureExecutable) + ".history"))
@@ -8141,7 +9326,7 @@ final class PlayhouseUITests: XCTestCase {
         )
     }
 
-    // case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early. A status-only completion update is not shown as an agent result; the summary-bearing notification is persisted as one normal assistant message in the parent conversation, appears in the visible transcript, and survives fresh CLI/XPC history reads and app reopening without duplication. A failed background agent remains inspectable as a failed activity, and its error summary is not added as an assistant result. When a background agent's notification wakes the parent after its result, the turn stays open through that resumed work, including when the last agent finishes while the woken parent is still streaming, and ends only with the parent's next result, keeping its final answer and both agent reports.
+    // case-contract: test_claude_background_agent_keeps_turn_open_until_resolved | A Claude background Agent/Task call renders a live subagent activity that stays in progress through its launch confirmation and intermediate progress, resolves only once its real completion notification arrives, and keeps the turn open until then instead of settling early. A status-only completion update is not shown as an agent result; the summary-bearing notification is persisted as one normal assistant message in the parent conversation, appears in the visible transcript, and survives fresh CLI/XPC history reads and app reopening without duplication. A failed background agent remains inspectable as a failed activity, and its error summary is not added as an assistant result. When a background agent's notification wakes the parent after its result, the turn stays open through that resumed work, including when the last agent finishes while the woken parent is still streaming, and ends only with the parent's next result, keeping its final answer and both agent reports. A failed agent whose notification the running turn already consumed ends the send promptly instead of waiting for a wake. The system prompt Playhouse appends for Claude lets it run shell commands and agents in the foreground or background, forbids only processes detached with & or nohup, says it can end its response while background work runs instead of waiting and must report the outcome only after the background results, and no longer tells it to sleep, keep shell commands in the foreground, or keep its turn open for work it started.
     func test_claude_background_agent_keeps_turn_open_until_resolved() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-background-agent")
         try FileManager.default.copyItem(
@@ -8214,6 +9399,22 @@ final class PlayhouseUITests: XCTestCase {
         let activity = try XCTUnwrap(activities.first { $0["childThreadID"] as? String == "toolu_background_agent" })
         XCTAssertEqual(activity["status"] as? String, "completed")
         XCTAssertEqual(activity["backgroundTaskID"] as? String, "bgtask-fixture-1")
+        let launchHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any])
+        let launchArguments = try XCTUnwrap((launchHistory["turns"] as? [[String: Any]])?.first?["arguments"] as? [String])
+        let systemPromptIndex = try XCTUnwrap(launchArguments.firstIndex(of: "--append-system-prompt"))
+        let systemPrompt = launchArguments[systemPromptIndex + 1]
+        for guidance in [
+            "Never detach a process with & or nohup",
+            "in the foreground or with the Bash tool's run_in_background",
+            "run Agent/Task calls in the foreground or in the background",
+            "you can end your response instead of waiting",
+            "Report the task outcome only after you have handled every background result",
+        ] {
+            XCTAssertTrue(systemPrompt.contains(guidance), "Claude should be told how Playhouse handles background agents: \(guidance)")
+        }
+        for contradiction in ["including long sleeps", "never end your turn while work you started is still running", "Never background a shell command"] {
+            XCTAssertFalse(systemPrompt.contains(contradiction), "Claude must not be told to block on background agents it launched: \(contradiction)")
+        }
 
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
@@ -8233,14 +9434,20 @@ final class PlayhouseUITests: XCTestCase {
         element("message-composer").click()
         element("message-composer").typeText("Launch a background agent failure case.")
         element("send-message-button").click()
+        let failedSentAt = Date()
         XCTAssertTrue(
-            waitUntil({ self.transcriptContains("STARTED") }, timeout: 15),
-            "The parent response should remain visible for a failed agent turn."
+            waitUntil({ self.transcriptContains("The background check failed.") }, timeout: 15),
+            "The parent's answer should remain visible for a failed agent turn."
         )
         element("codex-activity-disclosure").click()
         let failedAgentRow = element("codex-subagent-row-toolu_background_agent")
         XCTAssertTrue(waitUntil({ failedAgentRow.label.contains("failed") }, timeout: 15), failedAgentRow.label)
         XCTAssertFalse(element(reportIdentifier).exists, "A failed agent summary must not appear as a successful assistant result.")
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 20))
+        XCTAssertLessThan(
+            Date().timeIntervalSince(failedSentAt), 10,
+            "A notification the running turn already consumed must not hold the turn open for a wake that never comes."
+        )
         let failedHistory = try XCTUnwrap(try runCLI(
             ["conversation", "history", failedTaskID],
             extraEnvironment: ["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": executable.path]
@@ -8300,6 +9507,109 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(
             wakeMessages.filter { $0["phase"] as? String == "subagent_report" }.compactMap { $0["text"] as? String }.sorted(),
             ["Reviewer A finished.", "Reviewer B finished."]
+        )
+    }
+
+    // case-contract: test_claude_background_shell_keeps_turn_open_through_wake | A Claude Bash call launched with run_in_background stays an in-progress activity after its launch confirmation and keeps the turn open after Claude's result while the shell runs, and still after the shell's notification empties the background task list, until the parent turn Claude Code wakes to deliver that notification sends its own result. The woken turn's answer is the final answer, the outcome it reports moves the task to Review without private outcome reminders, and the shell's completion resolves its activity with the command status without becoming an agent report. When the shell finishes before Claude's first result, so the woken turn starts before that result arrives, the turn waits for both results.
+    func test_claude_background_shell_keeps_turn_open_through_wake() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-background-shell")
+        try FileManager.default.copyItem(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"),
+            atomically: true,
+            encoding: .utf8
+        )
+        claudeFixtureExecutable = executable.path
+        func stage(_ name: String) -> URL { URL(fileURLWithPath: executable.path + ".background-shell-\(name)") }
+        try "Pause while the shell runs.\n".write(to: stage("running-pause"), atomically: true, encoding: .utf8)
+        try "Pause before the woken turn.\n".write(to: stage("wake-pause"), atomically: true, encoding: .utf8)
+        defer {
+            try? "Release.\n".write(to: stage("running-release"), atomically: true, encoding: .utf8)
+            try? "Release.\n".write(to: stage("wake-release"), atomically: true, encoding: .utf8)
+        }
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude background shell", "--root", fixture.primary.path, "--provider", "claude"
+        ]) ["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Claude background shell")
+        element("message-composer").click()
+        element("message-composer").typeText("Launch a background shell for this turn.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: stage("running-ready").path) }, timeout: 15),
+                      "The fixture should pause after Claude's result while the shell runs.")
+        XCTAssertTrue(waitUntil({ self.transcriptContains("SHELL STARTED") }, timeout: 10))
+        XCTAssertTrue(element("pause-response-button").exists, "The turn must stay active while a background shell runs.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+        let claudeEnvironment = ["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": executable.path]
+        let running = try XCTUnwrap(try runCLI(["conversation", "history", taskID], extraEnvironment: claudeEnvironment)["result"] as? [String: Any])
+        let runningShell = try XCTUnwrap((running["activities"] as? [[String: Any]])?.first { $0["id"] as? String == "toolu_background_shell" })
+        XCTAssertEqual(runningShell["status"] as? String, "inProgress", "The launch confirmation must not resolve a background shell.")
+
+        try "Finish the shell.\n".write(to: stage("running-release"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: stage("wake-ready").path) }, timeout: 15),
+                      "The fixture should pause between the shell's notification and the woken turn.")
+        // Settling when the background task list empties would end the turn here;
+        // give that regression time to show.
+        XCTAssertFalse(waitUntil({ !self.element("pause-response-button").exists }, timeout: 2),
+                       "The turn must stay active until the woken turn that delivers the shell's notification reports.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+        XCTAssertFalse(transcriptContains("SHELL HANDLED"))
+
+        try "Start the woken turn.\n".write(to: stage("wake-release"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(waitUntil({ self.transcriptContains("SHELL HANDLED") }, timeout: 15),
+                      "The woken turn's answer should appear as the final answer.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 15),
+                      "The outcome Claude reports in its woken turn should move the task to Review.")
+        let history = try XCTUnwrap(try runCLI(["conversation", "history", taskID], extraEnvironment: claudeEnvironment)["result"] as? [String: Any])
+        let shell = try XCTUnwrap((history["activities"] as? [[String: Any]])?.first { $0["id"] as? String == "toolu_background_shell" })
+        XCTAssertEqual(shell["status"] as? String, "completed")
+        XCTAssertEqual(shell["backgroundTaskID"] as? String, "bgshell-fixture-1")
+        XCTAssertTrue((shell["detail"] as? String ?? "").contains("completed (exit code 0)"))
+        XCTAssertNil(shell["backgroundTaskSummary"] as? String, "A shell's status line is not an agent result.")
+        let messages = history["messages"] as? [[String: Any]] ?? []
+        XCTAssertFalse(messages.contains { $0["phase"] as? String == "subagent_report" })
+        XCTAssertEqual(messages.filter { $0["role"] as? String == "assistant" }.last?["text"] as? String, "SHELL HANDLED")
+
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        try FileManager.default.removeItem(at: stage("running-pause"))
+        try FileManager.default.removeItem(at: stage("wake-pause"))
+        try "Pause between the first and the woken turn's results.\n".write(to: stage("second-result-pause"), atomically: true, encoding: .utf8)
+        defer { try? "Release.\n".write(to: stage("second-result-release"), atomically: true, encoding: .utf8) }
+        let early = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude early background shell", "--root", fixture.primary.path, "--provider", "claude"
+        ]) ["result"] as? [String: Any])
+        let earlyID = try XCTUnwrap(early["id"] as? String)
+        openTask(named: "Claude early background shell")
+        element("message-composer").click()
+        element("message-composer").typeText("Launch a background shell that finishes early.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: stage("second-result-ready").path) }, timeout: 15),
+                      "The fixture should pause between the first result and the woken turn's result.")
+        XCTAssertFalse(waitUntil({ !self.element("pause-response-button").exists }, timeout: 2),
+                       "The first turn's result must not end the turn while the woken turn that started before it is unfinished.")
+        XCTAssertEqual(try taskRecord(id: earlyID)?["status"] as? String, "In Progress")
+        try "Send the woken turn's result.\n".write(to: stage("second-result-release"), atomically: true, encoding: .utf8)
+        let secondResultSentAt = Date()
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: earlyID)?["status"] as? String) == "Review" }, timeout: 20),
+                      "When the woken turn starts before Claude's first result, the turn must wait for both results.")
+        XCTAssertLessThan(Date().timeIntervalSince(secondResultSentAt), 10,
+                          "The woken turn's result should settle the turn without waiting for the wake backstop.")
+        XCTAssertTrue(transcriptContains("SHELL HANDLED"))
+        let earlyHistory = try XCTUnwrap(try runCLI(["conversation", "history", earlyID], extraEnvironment: claudeEnvironment)["result"] as? [String: Any])
+        XCTAssertEqual(
+            (earlyHistory["messages"] as? [[String: Any]] ?? []).filter { $0["role"] as? String == "assistant" }.last?["text"] as? String,
+            "SHELL HANDLED"
+        )
+        let recorded = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))) as? [String: Any])
+        XCTAssertFalse(
+            (recorded["turns"] as? [[String: Any]] ?? []).contains { ($0["userText"] as? String)?.contains("previous request finished without reporting") == true },
+            "An outcome reported in the woken turn must not trigger private outcome reminders."
         )
     }
 
@@ -8627,7 +9937,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
     }
 
-    // case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome reminders; after the user answers, the next successful turn receives two hidden CLI outcome requests. Questions raised during those reminders are rejected through Claude's control protocol with completed or waiting-response instructions; both the questions and private rejection instructions stay out of the transcript. The task moves to Waiting Response only after both reminders fail to report an outcome.
+    // case-contract: test_claude_outcome_reminder_rejects_user_questions | A successful Claude turn with an unanswered AskUserQuestion stays In Progress without outcome nudges; after the user answers, the next successful turn receives a hidden CLI status nudge. A question raised during that nudge is rejected through Claude's control protocol with completed, in-progress, and waiting-response instructions, which fails the private turn; both the question and the private rejection instructions stay out of the transcript. Playhouse then stops driving the work and marks the task Blocked naming that reason, rather than spending the remaining nudges.
 
     func test_claude_outcome_reminder_rejects_user_questions() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-outcome-reminder-question")
@@ -8658,7 +9968,7 @@ final class PlayhouseUITests: XCTestCase {
         let pendingFixtureHistory = try Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
         let pendingTurns = try XCTUnwrap((try JSONSerialization.jsonObject(with: pendingFixtureHistory) as? [String: Any])?["turns"] as? [[String: Any]])
         XCTAssertEqual(pendingTurns.count, 1)
-        XCTAssertFalse(pendingTurns.contains { ($0["userText"] as? String)?.contains("Playhouse internal outcome reminder:") == true }, "A successful turn with a pending question must not receive outcome reminders.")
+        XCTAssertFalse(pendingTurns.contains { ($0["userText"] as? String)?.contains("Playhouse internal outcome nudge:") == true }, "A successful turn with a pending question must not receive outcome nudges.")
         element("ai-question-option-question-1-Blue").click()
         element("submit-ai-answers-button").click()
         // The answered turn already finished, so the answer may arrive as a recovery turn.
@@ -8669,27 +9979,31 @@ final class PlayhouseUITests: XCTestCase {
         element("message-composer").click()
         element("message-composer").typeText("Continue after answering.")
         element("send-message-button").click()
-        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Waiting Response" }, timeout: 20), "Two unanswered private reminders should reach the fallback status.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Blocked" }, timeout: 60), "A failed private nudge should stop Playhouse driving and settle the task in Blocked.")
+        XCTAssertTrue(
+            (try taskRecord(id: taskID)?["statusMessage"] as? String)?.contains("couldn't run the private turn") == true,
+            "The Blocked reason must name why Playhouse stopped driving the work."
+        )
 
         let fixtureTurnsData = try Data(contentsOf: URL(fileURLWithPath: executable.path + ".history"))
         let fixtureHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: fixtureTurnsData) as? [String: Any])
         let turns = try XCTUnwrap(fixtureHistory["turns"] as? [[String: Any]])
-        let reminders = turns.filter { ($0["userText"] as? String)?.contains("Playhouse internal outcome reminder:") == true }
-        XCTAssertEqual(reminders.count, 2, "Claude should receive both private reminder attempts.")
-        XCTAssertTrue(reminders.allSatisfy { ($0["userText"] as? String)?.contains("explicitly run the Playhouse CLI task outcome command") == true })
+        let nudges = turns.filter { ($0["userText"] as? String)?.contains("Playhouse internal outcome nudge:") == true }
+        XCTAssertEqual(nudges.count, 1, "Rejecting the question fails the private turn, so Playhouse stops driving instead of spending every nudge.")
+        XCTAssertTrue(nudges.allSatisfy { ($0["userText"] as? String)?.contains("task outcome command") == true })
         let rejectionText = try String(contentsOfFile: executable.path + ".private-reminder-question-rejection", encoding: .utf8)
         let rejections = rejectionText.split(whereSeparator: \.isNewline)
-        XCTAssertEqual(rejections.count, 2)
-        XCTAssertTrue(rejections.allSatisfy { $0.contains("waiting-response") && $0.contains("completed") })
-        XCTAssertFalse(element("conversation-user-input-request").exists, "Reminder questions must not become visible answer cards.")
+        XCTAssertEqual(rejections.count, 1)
+        XCTAssertTrue(rejections.allSatisfy { $0.contains("completed") && $0.contains("in-progress") && $0.contains("waiting-response") })
+        XCTAssertFalse(element("conversation-user-input-request").exists, "Nudge questions must not become visible answer cards.")
         XCTAssertFalse(app.staticTexts["Which color should I use?"].exists)
         XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(
-            format: "label CONTAINS %@", "This is a private Playhouse outcome reminder."
+            format: "label CONTAINS %@", "This is a private Playhouse status nudge."
         )).firstMatch.exists, "Claude's private rejection instructions must not appear in the visible transcript.")
-        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Playhouse internal outcome reminder:")).firstMatch.exists)
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Playhouse internal outcome nudge:")).firstMatch.exists)
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
-        assertTaskVisible("Claude reminder question", inColumn: "Waiting Response")
+        assertTaskVisible("Claude reminder question", inColumn: "Blocked")
     }
 
     // case-contract: test_pending_question_repair_restores_thread_owner | A misplaced pending question can be repaired through CLI/XPC only into its owning conversation. Repair rejects a wrong owner and a conflicting destination without mutation, backs up both transcripts, preserves request identity and mode, clears only the misplaced source, and is retryable. Fresh history and the visible UI restore the question only on the original task; answering it clears pending state and the safe response survives reopening. Retrying an interrupted repair after the destination question was answered rejects the stale source without resurrecting the question.
@@ -8766,7 +10080,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertNil(afterRetry["pendingUserInputRequest"])
     }
 
-    // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode remain in the conversation and move the task to Waiting Response while unanswered; leaving and reopening the conversation preserves the pending question, keyed answers resume the provider turn in In Progress, and the answered turn returns to Waiting Response without an explicit completed outcome. A parallel conversation retains its own question and thread; the original conversation receives and answers a second question in its original Plan mode, and completing either conversation preserves the other pending request.
+    // case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode remain in the conversation and move the task to Waiting Response while unanswered; leaving and reopening the conversation preserves the pending question, keyed answers resume the provider turn in In Progress, and the answered turn reports no outcome, so Playhouse drives a private status nudge; when that private turn cannot complete, the task settles in Blocked naming that reason instead of Waiting Response. A parallel conversation retains its own question and thread; the original conversation receives and answers a second question in its original Plan mode, and completing either conversation preserves the other pending request.
     func test_codex_questions_can_be_answered_over_cli_xpc() throws {
         let created = try runCLI(["task", "create", "--title", "Codex questions", "--root", fixture.primary.path])
         XCTAssertEqual(created["ok"] as? Bool, true)
@@ -8849,31 +10163,39 @@ final class PlayhouseUITests: XCTestCase {
         typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
 
-        let completionDeadline = Date().addingTimeInterval(10)
+        let completionDeadline = Date().addingTimeInterval(90)
         var completedStatus: String?
         while Date() < completionDeadline {
             completedStatus = try taskRecord(id: taskID)?["status"] as? String
-            if completedStatus == "Waiting Response" { break }
+            if completedStatus == "Blocked" { break }
             Thread.sleep(forTimeInterval: 0.05)
         }
-        XCTAssertEqual(completedStatus, "Waiting Response", "Without an explicit completed outcome, the submitted answer should leave the task in Waiting Response.")
+        XCTAssertEqual(completedStatus, "Blocked", "Without any reported outcome, the submitted answer settles the task in Blocked.")
+        XCTAssertTrue(
+            (try taskRecord(id: taskID)?["statusMessage"] as? String)?.contains("couldn't run the private turn") == true,
+            "The Blocked reason must name why Playhouse stopped driving the work."
+        )
         XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10), "Wait for A's completed provider response before checking B still owns its question.")
         let originalTranscript = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: transcriptDirectory.appendingPathComponent("\(taskID.uppercased()).json"))) as? [String: Any])
         XCTAssertNil(originalTranscript["pendingUserInputRequest"])
         XCTAssertFalse(element("ai-question-form-title").exists)
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
-        assertTaskVisible("Codex questions", inColumn: "Waiting Response")
+        assertTaskVisible("Codex questions", inColumn: "Blocked")
         openTask(named: "Another conversation")
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 5), "Finishing the first task must preserve the parallel question.")
         element("ai-question-option-color-Blue").click()
         typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
-        let parallelDeadline = Date().addingTimeInterval(10)
-        while Date() < parallelDeadline, try taskRecord(id: parallelID)?["status"] as? String != "Waiting Response" {
+        let parallelDeadline = Date().addingTimeInterval(90)
+        while Date() < parallelDeadline, try taskRecord(id: parallelID)?["status"] as? String != "Blocked" {
             Thread.sleep(forTimeInterval: 0.05)
         }
-        XCTAssertEqual(try taskRecord(id: parallelID)?["status"] as? String, "Waiting Response")
+        XCTAssertEqual(try taskRecord(id: parallelID)?["status"] as? String, "Blocked")
+        XCTAssertTrue(
+            (try taskRecord(id: parallelID)?["statusMessage"] as? String)?.contains("couldn't run the private turn") == true,
+            "The parallel conversation records the same Blocked reason."
+        )
         XCTAssertTrue(waitUntil({ !self.element("ai-question-form-title").exists }, timeout: 10))
         let parallelTranscript = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: transcriptDirectory.appendingPathComponent("\(parallelID.uppercased()).json"))) as? [String: Any])
         XCTAssertNil(parallelTranscript["pendingUserInputRequest"])
@@ -8918,7 +10240,7 @@ final class PlayhouseUITests: XCTestCase {
         assertTaskVisible("Empty Codex questions", inColumn: "Waiting Response")
     }
 
-    // case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation, and keep the task In Progress through fresh CLI/XPC history reconciliation after provider exit until answered. Free-text questions expose a selectable Other choice, select it when text is entered, keep it exclusive of listed answers, and deliver the free-text answer through CLI/XPC and visible UI. Answering resumes the provider turn without outcome reminders while its own pending question is still being resolved; the resumed turn returns to Waiting Response once the pending question clears, and the recovered secret answer stays redacted everywhere.
+    // case-contract: test_codex_nonblocking_question_keeps_task_in_progress | Non-blocking structured questions render inline, remain pending after switching to another conversation, and keep the task In Progress through fresh CLI/XPC history reconciliation after provider exit until answered. Free-text questions expose a selectable Other choice, select it when text is entered, keep it exclusive of listed answers, and deliver the free-text answer through CLI/XPC and visible UI. Answering resumes the provider turn without status nudges while its own pending question is still being resolved; the resumed turn returns to Waiting Response once the pending question clears, and the recovered secret answer stays redacted everywhere.
     func test_codex_nonblocking_question_keeps_task_in_progress() throws {
         _ = try runCLI(["task", "create", "--title", "Non-blocking question", "--root", fixture.primary.path])
         _ = try runCLI(["task", "create", "--title", "Another non-blocking conversation", "--root", fixture.primary.path])
@@ -8980,9 +10302,9 @@ final class PlayhouseUITests: XCTestCase {
         let fixtureHistoryData = try Data(contentsOf: URL(fileURLWithPath: fixturePath + ".history"))
         let fixtureHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: fixtureHistoryData) as? [String: Any])
         let fixtureTurns = try XCTUnwrap(fixtureHistory["turns"] as? [[String: Any]])
-        let reminders = fixtureTurns.filter { ($0["userMessage"] as? String)?.contains("Playhouse internal outcome reminder:") == true }
+        let reminders = fixtureTurns.filter { ($0["userMessage"] as? String)?.contains("Playhouse internal outcome nudge:") == true }
         XCTAssertEqual(reminders.count, 0, "A pending question still being resolved during the recovered turn must suppress private outcome reminders.")
-        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Playhouse internal outcome reminder:")).firstMatch.exists)
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Playhouse internal outcome nudge:")).firstMatch.exists)
         XCTAssertFalse(element("conversation-user-input-request").exists)
         element("back-to-board-button").click()
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
@@ -9943,7 +11265,9 @@ final class PlayhouseUITests: XCTestCase {
     private func completeCurrentTaskWithFixtureAnswers(
         taskTitle: String,
         prompt: String = "Complete this task.",
-        reportCompletedOutcome: Bool = true
+        reportCompletedOutcome: Bool = true,
+        expectedFinalStatus: String? = nil,
+        whileTurnHeld: (() throws -> Void)? = nil
     ) throws {
         let taskID = try taskID(named: taskTitle)
         let executablePath = try XCTUnwrap(codexFixtureExecutable, "The task fixture has no Codex executable.")
@@ -9968,6 +11292,7 @@ final class PlayhouseUITests: XCTestCase {
         typeIntoField(element("ai-question-answer-token"), text: "fixture-secret")
         element("submit-ai-answers-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: active.path) }, timeout: 10), "The fixture should hold after receiving answers so the task outcome can be reported.")
+        try whileTurnHeld?()
         if reportCompletedOutcome {
             XCTAssertTrue(waitUntil({
                 (try? self.taskRecord(id: taskID)?["status"] as? String) == "In Progress"
@@ -9984,7 +11309,7 @@ final class PlayhouseUITests: XCTestCase {
             )
         ).firstMatch
         XCTAssertTrue(answer.waitForExistence(timeout: 10))
-        let expectedStatus = reportCompletedOutcome ? "Review" : "Waiting Response"
+        let expectedStatus = expectedFinalStatus ?? (reportCompletedOutcome ? "Review" : "Waiting Response")
         XCTAssertTrue(waitUntil({
             (try? self.taskRecord(id: taskID)?["status"] as? String) == expectedStatus
         }, timeout: 10), "The completed turn should settle in \(expectedStatus).")
@@ -10432,6 +11757,24 @@ final class PlayhouseUITests: XCTestCase {
         return try XCTUnwrap(record["id"] as? String)
     }
 
+    /// Recreates a standalone chat stored as a hidden board task and returns its ID.
+    private func seedLegacyStandaloneChatTask(sessionID: String = "legacy-chat-session") throws -> String {
+        let seeder = WorkspaceFixture.root.appendingPathComponent("seed-legacy-standalone-chat-task")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: seeder.path), "The precompiled legacy chat seeder should be executable.")
+
+        let seed = Process()
+        seed.executableURL = seeder
+        seed.arguments = [dataDirectory.path, sessionID]
+        let seedOutput = Pipe()
+        seed.standardOutput = seedOutput
+        seed.standardError = seedOutput
+        try seed.run()
+        seed.waitUntilExit()
+        let seedText = String(data: seedOutput.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(seed.terminationStatus, 0, "The legacy hidden chat task should be seeded: \(seedText)")
+        return try XCTUnwrap(seedText.split(whereSeparator: \.isNewline).last.map(String.init))
+    }
+
     private func seedTaskPullRequest(taskID: String, number: Int, url: String, repositoryIndex: Int = 0) throws {
         let seeder = WorkspaceFixture.root.appendingPathComponent("seed-task-pr-link")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: seeder.path), "The precompiled SwiftData fixture seeder should be executable.")
@@ -10606,6 +11949,17 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(response["ok"] as? Bool, false, file: file, line: line)
         let error = response["error"] as? [String: Any]
         XCTAssertEqual(error?["code"] as? String, code, file: file, line: line)
+    }
+
+    private func chatPageSeparatorIsVisible(_ title: String) -> Bool {
+        element("chat-sidebar")
+            .descendants(matching: .scrollView)
+            .matching(identifier: "conversation-scroll-view")
+            .firstMatch
+            .staticTexts
+            .matching(identifier: "chat-page-separator")
+            .allElementsBoundByIndex
+            .contains { $0.label == title }
     }
 
     private func element(_ identifier: String) -> XCUIElement {

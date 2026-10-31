@@ -42,9 +42,10 @@ def argument(name):
 def report_command(instructions, marker, replacement=None):
     """Returns the CLI command line Playhouse's instructions give for `marker`."""
     for line in instructions.splitlines():
-        if marker in line:
-            command = line.strip()
-            return command.replace("<completed|waiting-response>", replacement) if replacement else command
+        command = line.strip()
+        # Command lines start with the quoted CLI path; prose may mention the same words.
+        if command.startswith("'") and marker in command:
+            return command.replace("<completed|in-progress|waiting-response>", replacement) if replacement else command
     return None
 
 
@@ -74,10 +75,72 @@ def run_tool(tool_id, name, tool_input, command=None):
 background_result_sent = False
 
 
+def parent_request_started(message_id, woken=False):
+    """Mirrors the real CLI starting a parent model request. A woken turn,
+    which Claude Code starts to deliver a finished background task's
+    notification after the parent's result, first sends `system init`."""
+    if woken:
+        write({"type": "system", "subtype": "init"})
+    write({"type": "stream_event", "parent_tool_use_id": None,
+           "event": {"type": "message_start", "message": {"id": message_id, "role": "assistant"}}})
+
+
+def wait_for_release(name, description):
+    """Pauses at a protocol point when the test created `<fixture>.<name>-pause`."""
+    if not Path(str(sys.argv[0]) + f".{name}-pause").exists():
+        return
+    Path(str(sys.argv[0]) + f".{name}-ready").write_text(f"{description}\n", encoding="utf-8")
+    release = Path(str(sys.argv[0]) + f".{name}-release")
+    deadline = time.monotonic() + 30
+    while not release.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if not release.exists():
+        raise TimeoutError(f"The test did not release the fixture after: {description}")
+
+
 def respond(user_text, instructions, preserve_no_outcome=False):
     global background_result_sent
     commands = []
-    if PENDING_QUESTION_SUCCESS_MARKER in user_text.lower():
+    if user_text.startswith("Classify the latest user message for Playhouse's continuous chat page index."):
+        hold = Path(str(sys.argv[0]) + ".hold-classifier")
+        if hold.exists():
+            hold.unlink(missing_ok=True)
+            active = Path(str(sys.argv[0]) + ".classifier-active")
+            release = Path(str(sys.argv[0]) + ".classifier-release")
+            active.write_text("The fallback classifier is held in the background.\n", encoding="utf-8")
+            deadline = time.monotonic() + 30
+            while not release.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            released = release.exists()
+            active.unlink(missing_ok=True)
+            release.unlink(missing_ok=True)
+            if not released:
+                return commands
+        if Path(str(sys.argv[0]) + ".fail-classifier").exists():
+            text("msg_page_classification", '{"continues":"sometimes","title":null}')
+            return commands
+        history_path = Path(str(sys.argv[0]) + ".history")
+        history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {"turns": []}
+        classifier_attempts = sum(
+            1 for turn in history.get("turns", [])
+            if (turn.get("userText") or "").startswith("Classify the latest user message for Playhouse's continuous chat page index.")
+        )
+        if classifier_attempts == 0:
+            text("msg_page_classification", '{"continues":false,"title":"Ignored extra field","unexpected":true}')
+            return commands
+        if "One more thought about Saturn" in user_text:
+            text("msg_page_classification", '{"continues":true,"title":null}')
+        elif "Neptune" in user_text:
+            text("msg_page_classification", '{"continues":false,"title":"Neptune"}')
+        elif "Another thought about Mars" in user_text:
+            text("msg_page_classification", '{"continues":true,"title":null}')
+        elif "Mars" in user_text:
+            text("msg_page_classification", '{"continues":false,"title":"Mars"}')
+        elif "Saturn's rings" in user_text:
+            text("msg_page_classification", '{"continues":false,"title":"Saturn Rings"}')
+        else:
+            text("msg_page_classification", '{"continues":false,"title":"Volcanoes"}')
+    elif PENDING_QUESTION_SUCCESS_MARKER in user_text.lower():
         question_input = {
             "questions": [{
                 "header": "Color",
@@ -90,7 +153,7 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         write({"type": "control_request", "request_id": "question-request-1", "request": {
             "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
         }})
-    elif "playhouse internal outcome reminder:" in user_text.lower() and "outcome-reminder-question" in Path(sys.argv[0]).name:
+    elif "playhouse internal outcome nudge:" in user_text.lower() and "outcome-reminder-question" in Path(sys.argv[0]).name:
         question_input = {
             "questions": [{
                 "header": "Color",
@@ -103,7 +166,7 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         write({"type": "control_request", "request_id": "question-request-1", "request": {
             "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
         }})
-    elif "playhouse internal outcome reminder:" in user_text.lower() and not preserve_no_outcome:
+    elif "playhouse internal outcome nudge:" in user_text.lower() and not preserve_no_outcome:
         command = report_command(instructions, " task outcome ", "waiting-response")
         if command:
             commands.append({"command": command, "output": run_tool("toolu_outcome_reminder", "Bash", {"command": command}, command)})
@@ -282,8 +345,7 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         ]})
         # The woken parent has only begun streaming when the last agent
         # finishes; no complete assistant message has arrived yet.
-        write({"type": "stream_event", "parent_tool_use_id": None,
-               "event": {"type": "message_start", "message": {"id": "msg_wake_resumed", "role": "assistant"}}})
+        parent_request_started("msg_wake_resumed", woken=True)
         write({"type": "system", "subtype": "task_notification", "task_id": second_task, "run_id": "fixture-run-1",
                "tool_use_id": second_tool, "status": "completed", "output_file": "", "summary": "Reviewer B finished."})
         write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
@@ -299,6 +361,8 @@ def respond(user_text, instructions, preserve_no_outcome=False):
                 raise TimeoutError("The test did not release the woken parent's final answer.")
         text("msg_wake_resumed", "WAKE RESUMED")
         run_tool("toolu_wake_read", "Read", {"file_path": os.path.join(os.getcwd(), "README.md")})
+        # The woken turn's next request carries Reviewer B's queued notification.
+        parent_request_started("msg_wake_final")
         text("msg_wake_final", "WAKE FINAL")
         write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
     elif "background agent" in user_text.lower():
@@ -353,6 +417,57 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
                "tool_use_id": tool_id, "status": terminal_status, "output_file": "", "summary": result_summary})
         write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+        if did_fail:
+            # The running turn's next request carries the notification; no wake follows.
+            parent_request_started("msg_background_failure_seen")
+            text("msg_background_failure_seen", "The background check failed.")
+        else:
+            parent_request_started("msg_background_woken", woken=True)
+            text("msg_background_woken", "BACKGROUND HANDLED")
+            write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+    elif "background shell" in user_text.lower():
+        # Mirrors the real `claude` CLI for a Bash call with run_in_background:
+        # the tool_result only confirms the launch, the shell reports through
+        # the same system task events as an agent, and Claude Code then starts
+        # a woken parent turn to deliver its notification. When the shell
+        # finishes early, that woken turn starts before the first result.
+        tool_id = "toolu_background_shell"
+        task_id = "bgshell-fixture-1"
+        finishes_early = "finishes early" in user_text.lower()
+        assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": "Bash", "input": {
+            "command": "sleep 1; echo SHELL DONE", "description": "Fixture shell", "run_in_background": True,
+        }}])
+        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tool_id, "is_error": False,
+             "content": f"Command running in background with ID: {task_id}."},
+        ]}})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
+            {"task_id": task_id, "run_id": "fixture-run-1", "task_type": "local_bash", "description": "Fixture shell"},
+        ]})
+        write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "description": "Fixture shell", "task_type": "local_bash"})
+        text("msg_shell_started", "SHELL STARTED")
+        if not finishes_early:
+            write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+            wait_for_release("background-shell-running", "Parent result sent while the shell runs.")
+        write({"type": "system", "subtype": "task_updated", "task_id": task_id, "run_id": "fixture-run-1",
+               "patch": {"status": "completed", "end_time": 0}})
+        write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "status": "completed", "output_file": "",
+               "summary": 'Background command "Fixture shell" completed (exit code 0)'})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+        wait_for_release("background-shell-wake", "The shell finished before the parent woke.")
+        parent_request_started("msg_shell_woken", woken=True)
+        text("msg_shell_woken", "SHELL HANDLED")
+        outcome = report_command(instructions, " task outcome ", "completed")
+        if outcome:
+            commands.append({"command": outcome, "output": run_tool("toolu_shell_outcome", "Bash", {"command": outcome}, outcome)})
+        if finishes_early:
+            # The first turn's result arrives only after the woken turn began.
+            write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+            wait_for_release("background-shell-second-result", "The first result arrived; the woken turn's is pending.")
+        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+        background_result_sent = True
     else:
         text("msg_simple", SIMPLE_ANSWER)
     return commands
@@ -420,7 +535,7 @@ def main():
             updated_input = response.get("updatedInput", {})
             answers = updated_input.get("answers", {})
             if response.get("behavior") != "allow" or not isinstance(answers, dict) or not answers:
-                if "playhouse internal outcome reminder:" in turn.get("userText", "").lower():
+                if "playhouse internal outcome nudge:" in turn.get("userText", "").lower():
                     rejection_log = Path(str(sys.argv[0]) + ".private-reminder-question-rejection")
                     with rejection_log.open("a", encoding="utf-8") as stream:
                         stream.write(response.get("message", "") + "\n")
@@ -460,7 +575,7 @@ def main():
             previous_prompt = next((
                 prior.get("userText", "").lower()
                 for prior in reversed(prior_turns)
-                if "playhouse internal outcome reminder:" not in prior.get("userText", "").lower()
+                if "playhouse internal outcome nudge:" not in prior.get("userText", "").lower()
             ), "")
             preserve_no_outcome = any(marker in previous_prompt for marker in ("please inspect the workspace", "start the checks"))
             turn["reportCommands"] = respond(user_text, instructions, preserve_no_outcome=preserve_no_outcome)
@@ -473,7 +588,7 @@ def main():
                 time.sleep(0.1)
                 write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
             elif "structured question" in user_text.lower() or (
-                "playhouse internal outcome reminder:" in user_text.lower()
+                "playhouse internal outcome nudge:" in user_text.lower()
                 and "outcome-reminder-question" in Path(str(sys.argv[0])).name
             ):
                 # Keep the provider turn alive until Playhouse answers or rejects

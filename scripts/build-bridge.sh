@@ -40,12 +40,14 @@ fi
 
 shared_sources=(
   "${repository_root}/Playhouse/App/BoardTask.swift"
+  "${repository_root}/Playhouse/App/ConversationSubject.swift"
   "${repository_root}/Playhouse/App/WorkspaceSupport.swift"
   "${repository_root}/Playhouse/App/WorkspaceChanges.swift"
   "${repository_root}/Playhouse/App/CodexAppServerClient.swift"
   "${repository_root}/Playhouse/App/ConversationModel.swift"
   "${repository_root}/Playhouse/App/ClaudeCodeClient.swift"
   "${repository_root}/Playhouse/App/ConversationTranscriptStore.swift"
+  "${repository_root}/Playhouse/App/StandaloneChatStore.swift"
   "${repository_root}/Playhouse/App/BridgeCore.swift"
   "${repository_root}/Playhouse/Bridge/BridgeContract.swift"
   "${repository_root}/Playhouse/Bridge/BridgeSocket.swift"

@@ -817,7 +817,9 @@ enum LeakedTurnOutcome {
             .split(separator: " ").map { NSRegularExpression.escapedPattern(for: String($0)) }.joined(separator: #"\s+"#)
         return try! NSRegularExpression(pattern:
             #"[\p{So}\x{FE0F}\s`]*\n[\p{So}\x{FE0F}\s`$>]*(?:'[^'\n]*|[^\s'`]*)"# + executable + #"'?\s+"# + subcommand
-            + #"\s+([0-9A-Fa-f-]{36})\s+(completed|waiting-response)[\s`.]*\z"#)
+            + #"\s+([0-9A-Fa-f-]{36})\s+("#
+            + TurnOutcome.allCases.map { NSRegularExpression.escapedPattern(for: $0.rawValue) }.joined(separator: "|")
+            + #")[\s`.]*\z"#)
     }()
 
     static func split(_ text: String) -> (text: String, taskID: UUID?, outcome: String?) {

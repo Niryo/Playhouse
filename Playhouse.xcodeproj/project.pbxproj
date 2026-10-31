@@ -18,6 +18,8 @@
 		A10000000000000000000012 /* ConversationModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* ConversationModel.swift */; };
 		A10000000000000000000013 /* ClaudeCodeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* ClaudeCodeClient.swift */; };
 		A10000000000000000000014 /* ConversationTranscriptStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* ConversationTranscriptStore.swift */; };
+		A10000000000000000000019 /* StandaloneChatStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000019 /* StandaloneChatStore.swift */; };
+		A1000000000000000000001A /* ConversationSubject.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001A /* ConversationSubject.swift */; };
 		A10000000000000000000008 /* WorkspaceSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* WorkspaceSupport.swift */; };
 		A10000000000000000000009 /* BridgeCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000B /* BridgeCore.swift */; };
 		A1000000000000000000000A /* BridgeContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* BridgeContract.swift */; };
@@ -56,6 +58,8 @@
 		A20000000000000000000012 /* ConversationModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationModel.swift; sourceTree = "<group>"; };
 		A20000000000000000000013 /* ClaudeCodeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeCodeClient.swift; sourceTree = "<group>"; };
 		A20000000000000000000014 /* ConversationTranscriptStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTranscriptStore.swift; sourceTree = "<group>"; };
+		A20000000000000000000019 /* StandaloneChatStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StandaloneChatStore.swift; sourceTree = "<group>"; };
+		A2000000000000000000001A /* ConversationSubject.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSubject.swift; sourceTree = "<group>"; };
 		A2000000000000000000000A /* WorkspaceSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSupport.swift; sourceTree = "<group>"; };
 		A2000000000000000000000B /* BridgeCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeCore.swift; sourceTree = "<group>"; };
 		A2000000000000000000000C /* BridgeContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Bridge/BridgeContract.swift; sourceTree = "<group>"; };
@@ -144,6 +148,8 @@
 				A20000000000000000000012 /* ConversationModel.swift */,
 				A20000000000000000000013 /* ClaudeCodeClient.swift */,
 				A20000000000000000000014 /* ConversationTranscriptStore.swift */,
+				A20000000000000000000019 /* StandaloneChatStore.swift */,
+				A2000000000000000000001A /* ConversationSubject.swift */,
 				A2000000000000000000000A /* WorkspaceSupport.swift */,
 				A2000000000000000000000B /* BridgeCore.swift */,
 				A2000000000000000000000C /* BridgeContract.swift */,
@@ -345,6 +351,8 @@
 				"$(SRCROOT)/Playhouse/App/ConversationModel.swift",
 				"$(SRCROOT)/Playhouse/App/ClaudeCodeClient.swift",
 				"$(SRCROOT)/Playhouse/App/ConversationTranscriptStore.swift",
+				"$(SRCROOT)/Playhouse/App/StandaloneChatStore.swift",
+				"$(SRCROOT)/Playhouse/App/ConversationSubject.swift",
 			);
 			name = "Build CLI and bridge daemon";
 			outputPaths = (
@@ -387,6 +395,8 @@
 				A10000000000000000000012 /* ConversationModel.swift in Sources */,
 				A10000000000000000000013 /* ClaudeCodeClient.swift in Sources */,
 				A10000000000000000000014 /* ConversationTranscriptStore.swift in Sources */,
+				A10000000000000000000019 /* StandaloneChatStore.swift in Sources */,
+				A1000000000000000000001A /* ConversationSubject.swift in Sources */,
 				A10000000000000000000008 /* WorkspaceSupport.swift in Sources */,
 				A10000000000000000000009 /* BridgeCore.swift in Sources */,
 				A1000000000000000000000A /* BridgeContract.swift in Sources */,

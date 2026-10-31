@@ -40,6 +40,29 @@ private func makeUnixAddress(path: String) throws -> sockaddr_un {
 /// (`Process`/`Pipe` readability handlers) into Swift concurrency.
 final class BridgeSocketConnection {
     private let descriptor: Int32
+    /// Releasing the descriptor number lets the process hand it to guarded file state, so
+    /// a write arriving afterwards would not merely fail — it would raise EXC_GUARD and
+    /// take the daemon down. Background work that outlives its request still holds the
+    /// request's event sink, so such late writes do happen.
+    ///
+    /// `close()` therefore ends the conversation without releasing the number: it marks
+    /// the connection closed and shuts the socket down, and only `deinit` calls
+    /// `Darwin.close`. While any late writer can still reach this object, the object is
+    /// alive and owns its number, so a late write fails as an ordinary EPIPE/ENOTCONN
+    /// instead of landing on an unrelated file. No lock is held across the write itself,
+    /// so a stalled peer can never block `close()`.
+    private let state = NSLock()
+    private var isClosed = false
+
+    private var closedNow: Bool {
+        state.lock()
+        defer { state.unlock() }
+        return isClosed
+    }
+
+    deinit {
+        Darwin.close(descriptor)
+    }
 
     fileprivate init(descriptor: Int32) {
         self.descriptor = descriptor
@@ -68,6 +91,7 @@ final class BridgeSocketConnection {
     }
 
     func write(_ data: Data) throws {
+        guard !closedNow else { throw BridgeSocketError.connectionClosed }
         try data.withUnsafeBytes { rawBuffer in
             guard var pointer = rawBuffer.baseAddress else { return }
             var remaining = rawBuffer.count
@@ -122,12 +146,20 @@ final class BridgeSocketConnection {
     }
 
     func close() {
-        Darwin.close(descriptor)
+        state.lock()
+        let wasClosed = isClosed
+        isClosed = true
+        state.unlock()
+        guard !wasClosed else { return }
+        // Ends the connection for the peer (it sees EOF) and frees anyone blocked on it,
+        // without releasing the descriptor number; `deinit` does that.
+        _ = Darwin.shutdown(descriptor, SHUT_RDWR)
     }
 
     /// Wakes any thread blocked reading this connection, which a bare `close()`
     /// does not reliably do.
     func shutdown() {
+        guard !closedNow else { return }
         _ = Darwin.shutdown(descriptor, SHUT_RDWR)
     }
 }

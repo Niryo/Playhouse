@@ -24,7 +24,7 @@ struct CodexQuestionOwnershipProbe {
         guard let originalID = UUID(uuidString: arguments[3]), let parallelID = UUID(uuidString: arguments[4]) else {
             throw NSError(domain: "CodexQuestionOwnershipProbe", code: 2)
         }
-        let schema = Schema([BoardTask.self])
+        let schema = Schema([BoardTask.self, StandaloneChat.self])
         let configuration = ModelConfiguration(schema: schema, url: directory.appendingPathComponent("Playhouse-v2.store"))
         let container = try ModelContainer(for: schema, configurations: [configuration])
         let tasks = BoardTaskManager(modelContext: container.mainContext)
@@ -82,7 +82,8 @@ struct CodexQuestionOwnershipProbe {
         _ = try await parallelSend.value
         for id in [originalID, parallelID] {
             try check(try store.read(id).pendingUserInputRequest == nil, "Answered request remained pending.")
-            try check(try tasks.get(id).status == TaskStatus.waitingResponse.rawValue, "Answered task did not settle in Waiting Response.")
+            // The answered turns report no outcome, so their status nudges run out into Blocked.
+            try check(try tasks.get(id).status == TaskStatus.blocked.rawValue, "Answered task did not settle in Blocked.")
         }
         print("{\"sharedClientQuestionOwnership\":true,\"originalQuestions\":2,\"parallelQuestions\":1}")
     }

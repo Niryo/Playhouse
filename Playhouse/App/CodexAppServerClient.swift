@@ -1114,7 +1114,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                 guard let item = entry["item"] as? [String: Any] else { continue }
                 let turnID = entry["turnId"] as? String
                 if item["type"] as? String == "userMessage",
-                   Self.chatMessage(from: entry)?.text.localizedCaseInsensitiveContains("Playhouse internal outcome reminder:") == true,
+                   PrivateOutcomeNudgeMarker.matches(Self.chatMessage(from: entry)?.text ?? ""),
                    let turnID {
                     privateOutcomeReminderTurnIDs.insert(turnID)
                 }
@@ -1907,11 +1907,42 @@ enum TaskThreadDeveloperInstructions {
         taskID: UUID,
         repositories: [RepositoryWorktreeRecord] = [],
         contextFolders: [String] = [],
-        repositoryRootPath: String? = nil
+        repositoryRootPath: String? = nil,
+        isStandaloneChat: Bool = false,
+        missedPreviousPageSignal: Bool = false
     ) -> String {
         let executable = cliExecutableURL().path
         let quotedExecutable = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
         let id = taskID.uuidString
+        if isStandaloneChat {
+            let escalation = missedPreviousPageSignal ? """
+            CRITICAL, READ FIRST: your previous reply did not run the required chat page close-turn command below. Before writing anything else this turn, run it now for your previous reply (use --continues true unless that reply clearly started a new topic), then continue normally and run it again at the end of THIS turn too.
+
+            """ : ""
+            return escalation + """
+            You are the assistant inside Playhouse's standalone chat.
+
+            Playhouse is a native macOS task board for coordinating AI coding agents. Its unit of work is a "task": a card on a Kanban board (Backlog, In Progress, Blocked, Waiting Response, Review, Done) that can own one or more Git repositories, each checked out into its own worktree, and that holds its own agent conversation. The user manages that board through this app.
+            When the user talks about tasks, the board, backlog, worktrees, repositories, or "create a task", they always mean Playhouse — this app, on this machine. Never use any other task, todo, or issue tool for that, even if one is available to you: anything you create elsewhere is invisible to the user. Use the Playhouse CLI below, and if a request cannot be done with it, say so plainly instead of substituting another tool.
+
+            Manage the board with:
+              \(quotedExecutable) task list
+              \(quotedExecutable) task get <task-id>
+              \(quotedExecutable) task create --title "<title>" [--repo <repository-path>...] [--provider <codex|claude>]
+              \(quotedExecutable) task move <task-id> <Backlog|In Progress|Blocked|Waiting Response|Review|Done>
+              \(quotedExecutable) task rename <task-id> --title "<title>"
+              \(quotedExecutable) workspace repos list
+            A task created with no repository is a plain card; add repositories only when the user asks for work in a specific repo. Creating a task does not start it — the user runs it from the board. Report back the real task ID the CLI returned, and if a command fails, show the user what it said rather than claiming success.
+
+            This chat itself is not a task: it has no board status, no repository and no worktree, so task progress, task outcome and repository commands do not apply to this conversation. The conversation is split behind the scenes into titled "pages" so your live context stays small while the full history stays searchable.
+            - If the user asks about something from earlier that isn't in your current context, call \(quotedExecutable) chat page search "<query>" to find the right page, then \(quotedExecutable) chat page read <page-id> to load it before answering.
+            - At the end of every single turn, with no exceptions, decide whether the user's message continued the current topic or started a new, unrelated one, and run exactly one of these as a real command (never just write it as text in your reply):
+              \(quotedExecutable) chat page close-turn \(id) --continues true
+              \(quotedExecutable) chat page close-turn \(id) --continues false --new-title "<short title for the new topic>"
+              This single command both records your classification and files this turn under the right page — do not call "chat page new" separately for this; close-turn creates the new page itself when needed.
+              Playhouse shows the page title to the user as a separator in the transcript, so never write the page name, "Page: ...", or any other page bookkeeping into your visible answer.
+            """
+        }
         return """
         Report your current work on the Playhouse task board using the Playhouse CLI. Publish at every phase change, when starting or finishing a substantial tool call, and at least every 30 seconds during long commands, builds, tests, waits, or investigation. Keep the report current while a tool runs; after it finishes, replace it with the next active action. During tests, identify the active suite/case and position when known (for example, "CLI/XPC 3/8: task progress persistence"); during other work, name the concrete action and useful target. Keep each detail to a short subtitle, ideally under 80 characters. Do not report every tiny edit. Use these commands for this task:
         \(quotedExecutable) task progress publish \(id) --type <planning|searching|building|running|testing|reviewing|writing|committing> [--detail \"short detail\"]
@@ -1942,9 +1973,9 @@ enum TaskThreadDeveloperInstructions {
         \(quotedExecutable) workspace repos list
 
         At the very end of every turn, make exactly one definitive outcome call using this task ID:
-        \(quotedExecutable) task outcome \(id) <completed|waiting-response>
-        Use completed only when all work for this turn is finished and no user decision or response is needed. If you need the user to answer, choose between options, provide missing information, or take another action before you can continue, use waiting-response. The outcome call must be your final CLI action for the turn. Playhouse moves the task to Review only for completed.
-        Reporting an outcome is required for every successful turn. If you finish without reporting one, Playhouse will send up to two private follow-up messages explicitly asking you to report the outcome. Respond to those messages without repeating the completed work, and run the task outcome command for this task. Playhouse uses Waiting Response only if neither reminder produces an outcome.
+        \(quotedExecutable) task outcome \(id) <\(TurnOutcome.commandChoices)>
+        Use completed only when all work for this turn is finished and no user decision or response is needed; Playhouse moves the task to Review. Use waiting-response when you need the user to answer, choose between options, provide missing information, or take another action before you can continue. Use in-progress when this turn is ending but the work is not done and you need nothing from the user: Playhouse keeps the task In Progress and immediately sends you a private continuation turn so you can carry on. Never end a turn mid-work without an outcome — report in-progress instead. The outcome call must be your final CLI action for the turn.
+        Reporting an outcome is required for every successful turn. If you end a turn without one, Playhouse privately nudges you to report your current status, up to \(TurnOutcome.maxContinuations) times per request. Answer a nudge with an outcome call rather than by repeating finished work. If the nudges run out without the work settling, Playhouse marks the task Blocked.
         """
     }
 
