@@ -752,6 +752,80 @@ class StationAIBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(current)["status"], expected_status)
         return result
 
+    def complete_standalone_chat_fixture_turn(self, chat_task_id, message, continues=True, new_title=None, executable_name="codex-fixture-chat", skip_close_turn=False):
+        """Drive one real provider turn on the hidden standalone chat task, simulating the
+        agent's mandatory `chat page close-turn` tool call instead of `task outcome`.
+        `skip_close_turn=True` simulates an agent that forgets to classify the turn, so the
+        missed-signal compliance tracking can be exercised."""
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / executable_name
+        hold_marker = Path(str(executable) + ".hold-release")
+        hold_marker.touch()
+        (self.data_directory / ".stationai-codex-fixture-owner").write_text(
+            "StationAI test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        environment = {"STATIONAI_E2E_CODEX_EXECUTABLE": str(executable)}
+        command = ["conversation", "send", chat_task_id, "--message", message]
+        active = Path(str(executable) + ".turn-active")
+        release = Path(str(executable) + ".turn-release")
+        active.unlink(missing_ok=True)
+        release.unlink(missing_ok=True)
+        process = self.start_cli(*command, extra_environment=environment)
+        try:
+            deadline = time.monotonic() + 90
+            close_turn_count = 0
+            while process.poll() is None and time.monotonic() < deadline:
+                if active.exists() and not release.exists():
+                    if not skip_close_turn:
+                        close_turn_args = [
+                            "chat", "page", "close-turn", chat_task_id,
+                            "--continues", "true" if continues else "false",
+                        ]
+                        if new_title:
+                            close_turn_args += ["--new-title", new_title]
+                        response, _ = self.call_cli(*close_turn_args, extra_environment=environment)
+                        self.assert_success(response)
+                        close_turn_count += 1
+                    release.write_text("Release the completed fixture turn.\n", encoding="utf-8")
+                time.sleep(0.02)
+            if not skip_close_turn:
+                self.assertGreater(close_turn_count, 0, "The fixture should hold the turn until its chat page close-turn signal.")
+            response, _ = self.finish_cli(process, command)
+        finally:
+            if process.poll() is None:
+                release.write_text("Release the fixture turn.\n", encoding="utf-8")
+                process.communicate(timeout=20)
+            active.unlink(missing_ok=True)
+            release.unlink(missing_ok=True)
+            hold_marker.unlink(missing_ok=True)
+        return self.assert_success(response)
+
+    def seed_legacy_standalone_chat_task(self, session_id="legacy-chat-session"):
+        """Recreate a standalone chat stored as a hidden board task, as before the split."""
+        repository_root = Path(__file__).resolve().parent.parent
+        executable = self.data_directory / "seed-legacy-standalone-chat-task"
+        subprocess.run(
+            [
+                # Self-contained: it declares the pre-split BoardTask itself, so compiling it
+                # against the current models would redeclare the entity.
+                "xcrun", "swiftc", "-parse-as-library", "-swift-version", "5", "-O",
+                str(repository_root / "scripts" / "seed-legacy-standalone-chat-task.swift"),
+                "-o", str(executable),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        result = subprocess.run(
+            [str(executable), str(self.data_directory), session_id],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip().splitlines()[-1]
+
     def seed_done_task_pull_request(self, task_id, number=123, repository_index=0):
         repository_root = Path(__file__).resolve().parent.parent
         executable = self.data_directory / "seed-task-pr-link"
@@ -759,6 +833,7 @@ class StationAIBridgeTests(unittest.TestCase):
             [
                 "xcrun", "swiftc", "-module-name", "StationAI",
                 str(repository_root / "StationAI" / "App" / "BoardTask.swift"),
+                str(repository_root / "StationAI" / "App" / "ConversationSubject.swift"),
                 str(repository_root / "scripts" / "seed-task-pr-link.swift"),
                 "-o", str(executable),
             ],
@@ -856,6 +931,648 @@ class StationAIBridgeTests(unittest.TestCase):
             expected_status=expected_status,
         )
         return response
+
+    # case-contract: test_standalone_chat_legacy_hidden_task_migrates | A standalone chat left in the store as a hidden board task is converted once into its own model: it keeps its ID so the existing conversation transcript stays attached, keeps its provider session, carries its in-flight turn state across with the status message and progress report that explain it, is removed from the board so it never lists or resolves as a task, and reopening the chat returns that same migrated chat rather than creating a second one.
+    def test_standalone_chat_legacy_hidden_task_migrates(self):
+        # The seeded row is a real hidden board task, exactly as the old design stored it.
+        # Reading the board is itself a migration trigger, so the first read already asserts
+        # the converted state rather than the pre-migration one.
+        legacy_id = self.seed_legacy_standalone_chat_task(session_id="legacy-chat-session")
+
+        opened = self.assert_success(self.call_cli("chat", "open")[0])
+        self.assertEqual(
+            opened["id"], legacy_id,
+            "The migrated chat must keep its ID so its existing transcript stays attached.",
+        )
+        self.assertEqual(opened["claudeSessionID"], "legacy-chat-session", "The chat's provider session must survive migration.")
+        # The turn state must arrive with its explanation, not just the raw status.
+        self.assertEqual(opened["status"], "In Progress")
+        self.assertEqual(opened["statusMessage"], "Carried from the legacy chat task.")
+        self.assertEqual(opened["progressType"], "searching")
+        self.assertEqual(opened["progressLabel"], "Searching")
+        self.assertEqual(opened["progressDetail"], "Looking into volcanoes")
+        self.assertEqual(opened["repositoryWorktrees"], [])
+
+        self.assertEqual(
+            self.assert_success(self.call_cli("task", "list")[0])["tasks"], [],
+            "The migrated chat must no longer be a board task.",
+        )
+        response, _ = self.call_cli("task", "get", legacy_id, expected_status=3)
+        self.assert_failure(response, "not_found")
+
+        reopened = self.assert_success(self.call_cli("chat", "open")[0])
+        self.assertEqual(reopened["id"], legacy_id, "Migration must run once, not create a second chat.")
+
+    # case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, and the Changes sidebar. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state. A chat turn never triggers the private task-outcome reminders, because the chat is told not to report an outcome; its developer instructions teach it that task language means StationAI's own board and give it the StationAI task CLI, and they never ask it to write the page title into its visible answer.
+    def test_standalone_chat_separate_model_and_pages_round_trip(self):
+        opened = self.assert_success(self.call_cli("chat", "open")[0])
+        self.assertEqual(opened["title"], "Chat")
+        self.assertEqual(opened["repositoryWorktrees"], [])
+        self.assertEqual(opened["workspaceRoots"], [])
+        chat_task_id = opened["id"]
+
+        reopened = self.assert_success(self.call_cli("chat", "open")[0])
+        self.assertEqual(reopened["id"], chat_task_id, "Opening chat twice must reuse the same chat.")
+
+        tasks = self.assert_success(self.call_cli("task", "list")[0])["tasks"]
+        self.assertFalse(
+            any(task["id"] == chat_task_id for task in tasks),
+            "The standalone chat must never appear in board.list/task.list.",
+        )
+        # The chat is its own model, not a task, so task commands cannot reach it at all.
+        # This is the separation itself, not a filter that could be forgotten somewhere.
+        response, _ = self.call_cli("task", "get", chat_task_id, expected_status=3)
+        self.assert_failure(response, "not_found")
+        response, _ = self.call_cli("task", "move", chat_task_id, "Done", expected_status=3)
+        self.assert_failure(response, "not_found")
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        self.assertIsNone(self.assert_success(self.call_cli("settings", "get")[0])["defaultParentFolder"])
+
+        kyoto = self.assert_success(self.call_cli("chat", "page", "new", "--title", "Trip to Kyoto")[0])["page"]
+        self.assertEqual(kyoto["title"], "Trip to Kyoto")
+        self.assertEqual(kyoto["messageCount"], 0)
+
+        continued = self.assert_success(
+            self.call_cli("chat", "page", "close-turn", chat_task_id, "--continues", "true")[0]
+        )["page"]
+        self.assertEqual(continued["id"], kyoto["id"], "Continuing must append to the already-active page.")
+
+        recipes = self.assert_success(
+            self.call_cli(
+                "chat", "page", "close-turn", chat_task_id,
+                "--continues", "false", "--new-title", "Dinner recipes",
+            )[0]
+        )["page"]
+        self.assertNotEqual(recipes["id"], kyoto["id"], "A topic change must start a new page.")
+        self.assertEqual(recipes["title"], "Dinner recipes")
+
+        self.call_cli(
+            "chat", "page", "close-turn", chat_task_id, "--continues", "false",
+            expected_status=2,
+        )
+
+        page_listing = self.assert_success(self.call_cli("chat", "page", "list")[0])
+        pages = page_listing["pages"]
+        self.assertEqual({page["id"] for page in pages}, {kyoto["id"], recipes["id"]})
+        archive_directory = self.data_directory / "StandaloneChat-Pages"
+        self.assertEqual(page_listing["archiveDirectory"], str(archive_directory))
+        self.assertEqual(
+            {path.stem for path in archive_directory.glob("*.json")},
+            {kyoto["id"], recipes["id"]},
+            "Every page should have a separate JSON file with its page ID as the filename.",
+        )
+        # Recreate the pre-archive database state: pages exist, but the one-time
+        # export migration marker does not. The next manager open must backfill.
+        with sqlite3.connect(self.data_directory / "StandaloneChat-v1.sqlite") as connection:
+            connection.execute("DELETE FROM chat_archive_migrations WHERE version = 1")
+        (archive_directory / f"{kyoto['id']}.json").unlink()
+        self.assert_success(self.call_cli("chat", "page", "list")[0])
+        self.assertTrue((archive_directory / f"{kyoto['id']}.json").is_file(), "Opening a pre-archive database should backfill missing page files once.")
+        for page in pages:
+            archive = json.loads((archive_directory / f"{page['id']}.json").read_text(encoding="utf-8"))
+            self.assertEqual(archive["page"]["title"], page["title"])
+            self.assertEqual(archive["messages"], [])
+
+        matches = self.assert_success(self.call_cli("chat", "page", "search", "Kyoto")[0])["matches"]
+        self.assertTrue(
+            any(match["page"]["id"] == kyoto["id"] for match in matches),
+            "Searching the old page's title should find it even after a newer page is active.",
+        )
+
+        read_back = self.assert_success(self.call_cli("chat", "page", "read", kyoto["id"])[0])
+        self.assertEqual(read_back["page"]["id"], kyoto["id"])
+        self.assertEqual(read_back["messages"], [])
+
+        # A real provider turn that continues the active page ("Dinner recipes") must persist
+        # both the user's message and the assistant's reply into that page, not just bookkeeping.
+        self.complete_standalone_chat_fixture_turn(chat_task_id, "What's a good side dish?", continues=True, executable_name="codex-fixture-chat-unique-turns-hold-release")
+        recipes_archive_path = archive_directory / f"{recipes['id']}.json"
+        recipes_archive = json.loads(recipes_archive_path.read_text(encoding="utf-8"))
+        self.assertEqual(recipes_archive["page"]["title"], "Dinner recipes")
+        self.assertTrue(any(message["text"] == "What's a good side dish?" for message in recipes_archive["messages"]))
+        recipes_messages = self.assert_success(self.call_cli("chat", "page", "read", recipes["id"])[0])["messages"]
+        self.assertTrue(
+            any(message["role"] == "user" and message["text"] == "What's a good side dish?" for message in recipes_messages),
+            "The user's message should be persisted on the page the agent's close-turn call selected.",
+        )
+        self.assertTrue(
+            any(message["role"] == "assistant" and message["text"] for message in recipes_messages),
+            "The assistant's reply should also be persisted on that page.",
+        )
+        # A send moves the chat's own turn state away from Backlog. That state used to belong to
+        # a hidden BoardTask, which is how the chat leaked onto the visible Kanban board; it now
+        # lives on the chat's own model, so no status value can put it in a board column.
+        chat_turn_state = self.assert_success(self.call_cli("chat", "open")[0])["status"]
+        self.assertIn(chat_turn_state, ["In Progress", "Waiting Response"], "A completed send should move the chat's own turn state.")
+        self.assertEqual(
+            self.assert_success(self.call_cli("task", "list")[0])["tasks"], [],
+            "The standalone chat must stay absent from task/board listing in every turn state.",
+        )
+        # The chat is told never to report a task outcome, so chasing one with private
+        # reminders can only spend extra provider turns and bury the user's next message in
+        # a reminder turn that answers nobody.
+        chat_fixture_history = json.loads(
+            Path(str(self.data_directory / "codex-fixture-chat-unique-turns-hold-release") + ".history").read_text(encoding="utf-8")
+        )
+        self.assertTrue(chat_fixture_history.get("turns"), "The chat fixture should have recorded its turns.")
+        self.assertFalse(
+            any("outcome reminder" in (turn.get("userMessage") or "").lower() for turn in chat_fixture_history["turns"]),
+            "A standalone chat turn must not trigger the private task-outcome reminders.",
+        )
+        # The chat must know it is StationAI's own chat and own the board through the CLI,
+        # instead of reaching for an unrelated task tool that the user can never see.
+        chat_instructions = chat_fixture_history.get("threadStartDeveloperInstructions") or ""
+        self.assertIn("task create", chat_instructions, "The chat must be taught the StationAI task CLI.")
+        self.assertIn("they always mean StationAI", chat_instructions)
+        # Page titles reach the user as transcript separators, parsed from close-turn.
+        # Assert the prohibition positively too: pinning only the old wording would let the
+        # instruction come back phrased differently.
+        self.assertIn("never write the page name", chat_instructions)
+        self.assertNotIn("Page: <current page title>", chat_instructions)
+        recipes_read = self.assert_success(self.call_cli("chat", "page", "read", recipes["id"])[0])
+        self.assertEqual(recipes_read["filePath"], str(recipes_archive_path))
+        recipes_archive = json.loads(Path(recipes_read["filePath"]).read_text(encoding="utf-8"))
+        self.assertEqual(recipes_archive["page"]["title"], "Dinner recipes")
+        self.assertEqual(
+            [message["text"] for message in recipes_archive["messages"]],
+            [message["text"] for message in recipes_messages],
+            "The per-page file should contain the current persisted transcript.",
+        )
+        self.assertEqual(
+            self.assert_success(self.call_cli("chat", "page", "read", kyoto["id"])[0])["messages"], [],
+            "Messages from the recipes turn must not leak onto an unrelated page.",
+        )
+
+        # The compliant turn above must be reflected as compliant in chat status.
+        status = self.assert_success(self.call_cli("chat", "status")[0])
+        self.assertFalse(status["missedPreviousPageSignal"], "A turn that called close-turn must not be flagged as missed.")
+        self.assertEqual(status["activePage"]["id"], recipes["id"])
+
+        # Standalone chat can never gain a repository/worktree, regardless of who tries.
+        self.assert_failure(
+            self.call_cli("task", "repository", "add", chat_task_id, "--repo", str(self.primary), expected_status=2)[0],
+            "invalid_argument",
+        )
+
+        # The primary agent omits close-turn; the cheap, background Codex fallback must
+        # classify the distinct topic and move that turn onto a titled page.
+        classifier_executable = self.data_directory / "codex-fixture-chat-unique-turns-hold-release"
+        classifier_hold = Path(str(classifier_executable) + ".hold-classifier")
+        classifier_active = Path(str(classifier_executable) + ".classifier-active")
+        classifier_release = Path(str(classifier_executable) + ".classifier-release")
+        classifier_active.unlink(missing_ok=True)
+        classifier_release.unlink(missing_ok=True)
+        classifier_hold.touch()
+        self.complete_standalone_chat_fixture_turn(
+            chat_task_id,
+            "Tell me about Saturn's rings",
+            skip_close_turn=True,
+            executable_name="codex-fixture-chat-unique-turns-hold-release",
+        )
+        classifier_command = ("chat", "status")
+        classifier_process = self.start_cli(
+            *classifier_command,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not classifier_active.exists():
+            time.sleep(0.02)
+        self.assertTrue(classifier_active.exists(), "The fixture should hold the fallback after the primary send returns.")
+
+        followup_command = ("conversation", "send", chat_task_id, "--message", "One more thought about Saturn")
+        followup_turn_hold = Path(str(classifier_executable) + ".hold-release")
+        followup_turn_active = Path(str(classifier_executable) + ".turn-active")
+        followup_turn_release = Path(str(classifier_executable) + ".turn-release")
+        followup_turn_active.unlink(missing_ok=True)
+        followup_turn_release.unlink(missing_ok=True)
+        followup_turn_hold.touch()
+        followup_process = self.start_cli(
+            *followup_command,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )
+        try:
+            time.sleep(0.2)
+            self.assertIsNone(followup_process.poll(), "A follow-up turn must wait until the pending page decision finishes.")
+            pending_history = json.loads(Path(str(classifier_executable) + ".history").read_text(encoding="utf-8"))
+            self.assertFalse(
+                any((turn.get("userMessage") or "").startswith("One more thought about Saturn") for turn in pending_history.get("turns", [])),
+                "The next provider turn must not overtake the held page classification.",
+            )
+        finally:
+            classifier_release.write_text("Release classifier.\n", encoding="utf-8")
+        classifier_response, _ = self.finish_cli(classifier_process, classifier_command)
+        fallback_status = self.assert_success(classifier_response)
+        fallback_archive_path = archive_directory / f"{fallback_status['activePage']['id']}.json"
+        fallback_archive = json.loads(fallback_archive_path.read_text(encoding="utf-8"))
+        self.assertEqual(fallback_archive["page"]["title"], "Saturn Rings")
+        self.assertTrue(any(message["text"] == "Tell me about Saturn's rings" for message in fallback_archive["messages"]))
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not followup_turn_active.exists():
+            time.sleep(0.02)
+        self.assertTrue(followup_turn_active.exists(), "The queued follow-up should reach the fixture after classification resolves.")
+        # Queuing is a conversation action, so it must resolve the chat and not look for a
+        # board task. The turn is held active here, which is exactly when a follow-up queues.
+        queued_in_chat = self.assert_success(
+            self.call_cli("conversation", "queue", chat_task_id, "--message", "Queue this for after the chat turn.")[0]
+        )
+        self.assertEqual(queued_in_chat["text"], "Queue this for after the chat turn.")
+        self.assertEqual(queued_in_chat["taskID"], chat_task_id)
+        self.assert_success(self.call_cli("conversation", "queue-remove", chat_task_id, queued_in_chat["id"])[0])
+        # Selecting the provider the chat already uses is a no-op that must return the chat.
+        unchanged_provider = self.assert_success(
+            self.call_cli("conversation", "provider", chat_task_id, "set", "codex")[0]
+        )
+        self.assertEqual(unchanged_provider["id"], chat_task_id)
+        self.assertEqual(unchanged_provider["conversationProvider"], "codex")
+        followup_turn_release.write_text("Release follow-up turn.\n", encoding="utf-8")
+        followup_response, _ = self.finish_cli(followup_process, followup_command)
+        followup_turn_hold.unlink(missing_ok=True)
+        followup_turn_active.unlink(missing_ok=True)
+        followup_turn_release.unlink(missing_ok=True)
+        self.assert_success(followup_response)
+        followup_status = self.assert_success(self.call_cli(
+            "chat", "status",
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )[0])
+        self.assertFalse(followup_status["missedPreviousPageSignal"])
+        self.assertEqual(followup_status["activePage"]["title"], "Saturn Rings")
+
+        self.assertFalse(fallback_status["missedPreviousPageSignal"], "The background fallback should clear the missed-signal warning after applying its classification.")
+        self.assertEqual(fallback_status["activePage"]["title"], "Saturn Rings", "The fallback title should appear as soon as its result is persisted.")
+        classifier_history = json.loads(Path(str(classifier_executable) + ".history").read_text(encoding="utf-8"))
+        classifier_turns = classifier_history.get("turns", [])
+        classifier_turns = [turn for turn in classifier_turns if (turn.get("userMessage") or "").startswith("Classify the latest user message for StationAI's continuous chat page index.")]
+        self.assertEqual(len(classifier_turns), 3, "The fallback should reject one malformed result, retry, and classify the held follow-up.")
+        classifier_turn = classifier_turns[-1]
+        self.assertEqual(classifier_turn.get("modelID"), "gpt-6-luna", "The Codex fallback should use Luna.")
+        self.assertEqual(classifier_turn.get("reasoningEffort"), "low", "The fallback must use low effort.")
+        self.assertIn("Saturn Rings", self.assert_success(self.call_cli("chat", "page", "list")[0])["pages"][0]["title"])
+        fallback_read = self.assert_success(self.call_cli("chat", "page", "read", fallback_status["activePage"]["id"])[0])
+        fallback_archive = json.loads(Path(fallback_read["filePath"]).read_text(encoding="utf-8"))
+        self.assertEqual(fallback_archive["page"]["title"], "Saturn Rings")
+        missed_messages = fallback_read["messages"]
+        self.assertEqual([message["text"] for message in fallback_archive["messages"]], [message["text"] for message in missed_messages])
+        self.assertTrue(
+            any(message["role"] == "user" and message["text"] == "Tell me about Saturn's rings" for message in missed_messages),
+            "The fallback-classified turn's messages must be moved onto its new page.",
+        )
+        self.assertFalse(
+            any(message["role"] == "user" and message["text"] == "Tell me about Saturn's rings"
+                for message in self.assert_success(self.call_cli("chat", "page", "read", recipes["id"])[0])["messages"]),
+            "The fallback-classified turn must not remain duplicated on the prior page.",
+        )
+
+        # Compliance resumes once the agent calls close-turn again on a later turn.
+        self.complete_standalone_chat_fixture_turn(
+            chat_task_id, "Thanks, that's all for now.", continues=True,
+            executable_name="codex-fixture-chat-unique-turns-hold-release",
+        )
+        recovered_status = self.assert_success(self.call_cli(
+            "chat", "status",
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )[0])
+        self.assertFalse(recovered_status["missedPreviousPageSignal"], "Compliance should clear once close-turn is called again.")
+        recovered_messages = self.assert_success(self.call_cli("chat", "page", "read", fallback_status["activePage"]["id"])[0])["messages"]
+        ordered = [message["text"] for message in recovered_messages]
+        self.assertEqual(ordered, [
+            "Tell me about Saturn's rings", "Answers received: Blue / fixture-secret.",
+            "One more thought about Saturn", "Answers received: Blue / fixture-secret.",
+            "Thanks, that's all for now.", "Answers received: Blue / fixture-secret.",
+        ], "After fallback moves a turn, a later append must follow it in transcript order.")
+
+        # Codex answers visible history from its own thread, and page sessions rotate, so the
+        # transcript must restore earlier pages from the local archive instead of losing them.
+        visible = self.assert_success(self.call_cli(
+            "conversation", "history", chat_task_id,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )[0])
+        visible_texts = [message["text"] for message in visible["messages"]]
+        self.assertTrue(
+            any(text.endswith("What's a good side dish?") for text in visible_texts),
+            "An earlier Codex page must stay visible after its page session rotated.",
+        )
+        self.assertTrue(
+            any(text.endswith("Thanks, that's all for now.") for text in visible_texts),
+            "The live Codex page must stay visible alongside the restored earlier pages.",
+        )
+        # A chat page only belongs to the standalone chat, never to a board task.
+        board_task = self.create_task("Context page rejection")
+        self.assert_failure(self.call_cli(
+            "conversation", "send", board_task["id"], "--message", "Hello",
+            "--context-page", fallback_status["activePage"]["id"], expected_status=2,
+        )[0], "invalid_argument")
+
+        # An explicit page start while the fallback is in flight supersedes its
+        # eventual Neptune classification without moving the old turn.
+        neptune_classifier_hold = Path(str(classifier_executable) + ".hold-neptune-classifier")
+        neptune_classifier_hold.touch()
+        self.complete_standalone_chat_fixture_turn(
+            chat_task_id, "Tell me about Neptune", skip_close_turn=True,
+            executable_name="codex-fixture-chat-unique-turns-hold-release",
+        )
+        classifier_process = self.start_cli(
+            "chat", "status",
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not classifier_active.exists():
+            time.sleep(0.02)
+        self.assertTrue(classifier_active.exists(), "The second fallback should be held before the explicit page start.")
+        explicit_page = self.assert_success(self.call_cli("chat", "page", "new", "--title", "Explicit topic")[0])["page"]
+        self.assertEqual(self.assert_success(self.call_cli("chat", "page", "list")[0])["pages"][0]["id"], explicit_page["id"])
+        classifier_release.write_text("Release classifier.\n", encoding="utf-8")
+        classifier_response, _ = self.finish_cli(classifier_process, ("chat", "status"))
+        self.assert_success(classifier_response)
+        final_status = self.assert_success(self.call_cli(
+            "chat", "status",
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )[0])
+        self.assertFalse(final_status["missedPreviousPageSignal"], "Explicit page creation should clear the missed-signal warning.")
+        self.assertEqual(final_status["activePage"]["id"], explicit_page["id"], "A stale classifier must not replace an explicit page start.")
+        self.assertEqual(final_status["activePage"]["title"], "Explicit topic")
+        explicit_messages = self.assert_success(self.call_cli("chat", "page", "read", explicit_page["id"])[0])["messages"]
+        self.assertEqual(explicit_messages, [], "The missed turn remains archived on its original page.")
+        old_page_messages = self.assert_success(self.call_cli("chat", "page", "read", fallback_status["activePage"]["id"])[0])["messages"]
+        self.assertTrue(any(message["text"] == "Tell me about Neptune" for message in old_page_messages))
+        self.assertTrue(any(message["role"] == "assistant" for message in old_page_messages[-1:]))
+
+        # Exhausted helper retries keep the pending turn authoritative and prevent
+        # a later provider turn from overtaking it. Once the helper is healthy, retry.
+        classifier_failure = Path(str(classifier_executable) + ".fail-classifier")
+        classifier_failure.touch()
+        self.complete_standalone_chat_fixture_turn(
+            chat_task_id, "Tell me about Mars", skip_close_turn=True,
+            executable_name="codex-fixture-chat-unique-turns-hold-release",
+        )
+        failed_status = self.assert_success(self.call_cli(
+            "chat", "status",
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )[0])
+        self.assertTrue(failed_status["missedPreviousPageSignal"], "An invalid fallback response must leave the page decision pending.")
+        blocked_response, _ = self.call_cli(
+            "conversation", "send", chat_task_id, "--message", "Do not overtake Mars",
+            expected_status=1,
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )
+        self.assert_failure(blocked_response, "operation_failed")
+        blocked_history = json.loads(Path(str(classifier_executable) + ".history").read_text(encoding="utf-8"))
+        self.assertFalse(
+            any((turn.get("userMessage") or "") == "Do not overtake Mars" for turn in blocked_history.get("turns", [])),
+            "An unresolved page decision must prevent the rejected prompt from reaching Codex.",
+        )
+        classifier_failure.unlink()
+        recovered_status = self.assert_success(self.call_cli(
+            "chat", "status",
+            extra_environment={"STATIONAI_E2E_CODEX_EXECUTABLE": str(classifier_executable)},
+        )[0])
+        self.assertFalse(recovered_status["missedPreviousPageSignal"])
+        self.assertEqual(recovered_status["activePage"]["title"], "Mars")
+        self.complete_standalone_chat_fixture_turn(
+            chat_task_id, "Another thought about Mars", continues=True,
+            executable_name="codex-fixture-chat-unique-turns-hold-release",
+        )
+        recovered_messages = self.assert_success(self.call_cli("chat", "page", "read", recovered_status["activePage"]["id"])[0])["messages"]
+        self.assertFalse(any(message["text"] == "Do not overtake Mars" for message in recovered_messages))
+        self.assertIn("Another thought about Mars", [message["text"] for message in recovered_messages])
+
+    # case-contract: test_standalone_chat_page_sessions_isolate_context | Each standalone chat page is its own provider session: the first turn of a page starts a fresh session carrying the system prompt plus only that page's own turns, later turns on that page resume it without repeating the page context, and a different page never shares it, so an earlier page's turns never reach a later page. An annotation that quotes an earlier page carries just that page into the current turn, and rotating sessions still leaves every page's messages visible in the transcript.
+    def test_standalone_chat_page_sessions_isolate_context(self):
+        self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        executable = self.data_directory / "claude-fixture-chat-page-sessions"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
+            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        chat_id = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["id"]
+        history_path = Path(str(executable) + ".history")
+
+        def wait_for_page(title):
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+                if not status["missedPreviousPageSignal"] and status["activePage"]["title"] == title:
+                    return status
+                time.sleep(0.1)
+            self.fail(f"The chat never settled on page {title!r}.")
+
+        def send(message, *extra):
+            self.assert_success(self.call_cli(
+                "conversation", "send", chat_id, "--message", message, *extra, extra_environment=environment
+            )[0])
+
+        def answer_turns():
+            turns = json.loads(history_path.read_text(encoding="utf-8"))["turns"]
+            return [
+                turn for turn in turns
+                if not (turn.get("userText") or "").startswith("Classify the latest user message")
+            ]
+
+        def turn_for(message):
+            matches = [turn for turn in answer_turns() if (turn.get("userText") or "").endswith(message)]
+            self.assertTrue(matches, f"The fixture never received a turn ending with {message!r}.")
+            return matches[-1]
+
+        send("Tell me about volcanoes")
+        volcanoes = wait_for_page("Volcanoes")["activePage"]
+        send("Tell me about Saturn's rings")
+        saturn = wait_for_page("Saturn Rings")["activePage"]
+        self.assertNotEqual(saturn["id"], volcanoes["id"])
+        send("One more thought about Saturn")
+        wait_for_page("Saturn Rings")
+
+        first = turn_for("Tell me about volcanoes")
+        second = turn_for("Tell me about Saturn's rings")
+        third = turn_for("One more thought about Saturn")
+        # The turn that opens a page still answers in the page it was sent into; only once the
+        # classifier moves it does the next turn get that new page's own session.
+        self.assertEqual(first["sessionID"], second["sessionID"], "One page answers in one session.")
+        self.assertNotEqual(
+            third["sessionID"], first["sessionID"],
+            "A different page must never share another page's provider session.",
+        )
+        for turn in (first, third):
+            self.assertFalse(turn["resumed"], "A page's first turn starts that page's own session.")
+            instructions = turn["arguments"][turn["arguments"].index("--append-system-prompt") + 1]
+            self.assertIn(
+                "chat page close-turn", instructions,
+                "Every page session must carry the standalone chat system prompt.",
+            )
+        self.assertTrue(second["resumed"], "A turn sent into an existing page resumes its session.")
+        self.assertIn(
+            "Tell me about Saturn's rings", third["userText"],
+            "A fresh page session is seeded with its own page's turns.",
+        )
+        self.assertNotIn(
+            "Tell me about volcanoes", third["userText"],
+            "An earlier page must never be sent as context for a later page.",
+        )
+        self.assertNotIn("Tell me about volcanoes", second["userText"])
+
+        # A later turn on the same page resumes its session without repeating the page block.
+        send("Another thought about Mars")
+        wait_for_page("Saturn Rings")
+        fourth = turn_for("Another thought about Mars")
+        self.assertEqual(fourth["sessionID"], third["sessionID"], "The same page keeps one session.")
+        self.assertTrue(fourth["resumed"], "A continuing turn resumes the page's session.")
+        self.assertNotIn(
+            "<stationai-handoff-context>", fourth["userText"],
+            "A resumed page session already holds its page, so it must not repeat the context block.",
+        )
+
+        # An annotation that quotes an earlier page carries only that page into this turn.
+        send("What did we say before?", "--context-page", volcanoes["id"])
+        wait_for_page("Saturn Rings")
+        annotated = turn_for("What did we say before?")
+        self.assertIn(
+            "Tell me about volcanoes", annotated["userText"],
+            "A page referenced by an annotation travels with the turn that quotes it.",
+        )
+
+        # Rotating sessions must not hide earlier pages from the visible transcript.
+        visible = self.assert_success(self.call_cli("conversation", "history", chat_id, extra_environment=environment)[0])
+        texts = [message["text"] for message in visible["messages"]]
+        self.assertTrue(any(text.endswith("Tell me about volcanoes") for text in texts))
+        self.assertTrue(any(text.endswith("One more thought about Saturn") for text in texts))
+
+    # case-contract: test_standalone_chat_claude_fallback_classifier | When a standalone chat uses Claude, a missed page signal invokes the Haiku helper at low effort; a malformed result is rejected and retried, an unrelated later question and its assistant reply move to a new titled page, the UI keeps page evaluation visually quiet without blocking the primary answer, updates the transcript separator when classification completes, and holds a following send until the decision resolves, and appends the related follow-up in chronological order. The Claude-specific model and effort arguments are verified through the real CLI/XPC path. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes.
+    def test_standalone_chat_claude_fallback_classifier(self):
+        self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        executable = self.data_directory / "claude-fixture-chat-page-fallback"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".stationai-claude-fixture-owner").write_text(
+            "StationAI test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"STATIONAI_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        chat = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])
+        chat_id = chat["id"]
+        first = self.assert_success(self.call_cli("chat", "page", "new", "--title", "General chat", extra_environment=environment)[0])["page"]
+
+        def wait_for_page(title):
+            deadline = time.monotonic() + 30
+            status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+            while time.monotonic() < deadline:
+                if not status["missedPreviousPageSignal"] and status["activePage"]["title"] == title:
+                    return status
+                time.sleep(0.1)
+                status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+            self.fail(f"Claude fallback did not resolve the active page as {title!r}: {status!r}")
+
+        classifier_hold = Path(str(executable) + ".hold-classifier")
+        classifier_active = Path(str(executable) + ".classifier-active")
+        classifier_release = Path(str(executable) + ".classifier-release")
+        classifier_active.unlink(missing_ok=True)
+        classifier_release.unlink(missing_ok=True)
+        classifier_hold.touch()
+        self.assert_success(self.call_cli(
+            "conversation", "send", chat_id, "--message", "Tell me about volcanoes", extra_environment=environment
+        )[0])
+        classifier_command = ("chat", "status")
+        classifier_process = self.start_cli(*classifier_command, extra_environment=environment)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not classifier_active.exists():
+            time.sleep(0.02)
+        self.assertTrue(classifier_active.exists(), "Claude send should return while Haiku classification is held in the background.")
+        queued_turn = ("conversation", "send", chat_id, "--message", "Tell me about Saturn's rings")
+        queued_process = self.start_cli(*queued_turn, extra_environment=environment)
+        try:
+            time.sleep(0.2)
+            self.assertIsNone(queued_process.poll(), "Claude should hold a subsequent turn behind pending page resolution.")
+            pending_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+            self.assertFalse(
+                any((turn.get("userText") or "").startswith("Tell me about Saturn's rings") for turn in pending_history.get("turns", [])),
+                "A queued Claude turn must not reach its provider before the page decision is persisted.",
+            )
+        finally:
+            classifier_release.write_text("Release classifier.\n", encoding="utf-8")
+        classifier_response, _ = self.finish_cli(classifier_process, classifier_command)
+        classifier_status = self.assert_success(classifier_response)
+        self.assertFalse(classifier_status["missedPreviousPageSignal"])
+        queued_result, _ = self.finish_cli(queued_process, queued_turn)
+        self.assert_success(queued_result)
+        second_status = wait_for_page("Saturn Rings")
+        self.assertNotEqual(second_status["activePage"]["id"], first["id"], "An unrelated turn should start a Claude-classified page.")
+        self.assertEqual(self.assert_success(self.call_cli("chat", "page", "list", extra_environment=environment)[0])["pages"][1]["title"], "Volcanoes")
+        self.assert_success(self.call_cli(
+            "conversation", "send", chat_id, "--message", "One more thought about Saturn", extra_environment=environment
+        )[0])
+        third_status = wait_for_page("Saturn Rings")
+        self.assertEqual(third_status["activePage"]["id"], second_status["activePage"]["id"], "The related follow-up should continue the Saturn page.")
+        first_messages = self.assert_success(self.call_cli("chat", "page", "read", first["id"], extra_environment=environment)[0])["messages"]
+        second_messages = self.assert_success(self.call_cli("chat", "page", "read", third_status["activePage"]["id"], extra_environment=environment)[0])["messages"]
+        self.assertEqual(
+            [message["text"] for message in second_messages],
+            ["Tell me about Saturn's rings", "OK.", "One more thought about Saturn", "OK."],
+            "A later appended turn must follow messages moved by the Claude fallback.",
+        )
+        self.assertTrue(any(message["text"] == "Tell me about volcanoes" for message in first_messages))
+        self.assertTrue(any(message["text"] == "Tell me about Saturn's rings" for message in second_messages))
+        self.assertFalse(any(message["text"] == "Tell me about Saturn's rings" for message in first_messages))
+        history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        classification_turns = [turn for turn in history["turns"] if (turn.get("userText") or "").startswith("Classify the latest user message for StationAI's continuous chat page index.")]
+        self.assertEqual(len(classification_turns), 4, "The fallback should retry one malformed result and classify a later follow-up.")
+        for turn in classification_turns:
+            self.assertEqual(turn["effort"], "low", "Claude fallback must set low effort.")
+            self.assertEqual(turn["arguments"][turn["arguments"].index("--model") + 1], "haiku", "Claude fallback must use Haiku.")
+
+        classifier_hold.touch()
+        self.assert_success(self.call_cli(
+            "conversation", "send", chat_id, "--message", "Tell me about Neptune", extra_environment=environment
+        )[0])
+        classifier_process = self.start_cli("chat", "status", extra_environment=environment)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not classifier_active.exists():
+            time.sleep(0.02)
+        self.assertTrue(classifier_active.exists(), "The Claude fallback should be pending when the explicit page starts.")
+        explicit_page = self.assert_success(self.call_cli(
+            "chat", "page", "new", "--title", "Explicit topic", extra_environment=environment
+        )[0])["page"]
+        self.assertEqual(self.assert_success(self.call_cli("chat", "page", "list", extra_environment=environment)[0])["pages"][0]["id"], explicit_page["id"])
+        classifier_release.write_text("Release classifier.\n", encoding="utf-8")
+        classifier_response, _ = self.finish_cli(classifier_process, ("chat", "status"))
+        self.assert_success(classifier_response)
+        final_status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+        self.assertFalse(final_status["missedPreviousPageSignal"], "Explicit page creation should clear the missed-signal warning.")
+        self.assertEqual(final_status["activePage"]["id"], explicit_page["id"])
+        self.assertEqual(final_status["activePage"]["title"], "Explicit topic")
+        self.assertEqual(self.assert_success(self.call_cli("chat", "page", "read", explicit_page["id"], extra_environment=environment)[0])["messages"], [])
+        old_page_messages = self.assert_success(self.call_cli("chat", "page", "read", second_status["activePage"]["id"], extra_environment=environment)[0])["messages"]
+        self.assertTrue(any(message["text"] == "Tell me about Neptune" for message in old_page_messages))
+        self.assertTrue(any(message["role"] == "assistant" and message["text"] == "OK." for message in old_page_messages))
+
+        classifier_failure = Path(str(executable) + ".fail-classifier")
+        classifier_failure.touch()
+        self.assert_success(self.call_cli(
+            "conversation", "send", chat_id, "--message", "Tell me about Mars", extra_environment=environment
+        )[0])
+        failed_status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+        self.assertTrue(failed_status["missedPreviousPageSignal"], "Invalid Haiku responses must leave the classification pending.")
+        blocked_response, _ = self.call_cli(
+            "conversation", "send", chat_id, "--message", "Do not overtake Mars",
+            expected_status=1, extra_environment=environment,
+        )
+        self.assert_failure(blocked_response, "operation_failed")
+        blocked_history = json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))
+        self.assertFalse(
+            any((turn.get("userText") or "") == "Do not overtake Mars" for turn in blocked_history.get("turns", [])),
+            "An unresolved page decision must prevent the rejected prompt from reaching Claude.",
+        )
+        classifier_failure.unlink()
+        recovered_status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+        self.assertFalse(recovered_status["missedPreviousPageSignal"])
+        self.assertEqual(recovered_status["activePage"]["title"], "Mars")
+        self.assert_success(self.call_cli(
+            "conversation", "send", chat_id, "--message", "Another thought about Mars", extra_environment=environment
+        )[0])
+        recovered_messages = self.assert_success(self.call_cli(
+            "chat", "page", "read", recovered_status["activePage"]["id"], extra_environment=environment
+        )[0])["messages"]
+        self.assertFalse(any(message["text"] == "Do not overtake Mars" for message in recovered_messages))
+        self.assertIn("Another thought about Mars", [message["text"] for message in recovered_messages])
 
     # case-contract: test_service_reports_bridge_version | StationAI opens one main board window titled with its worktree label, displays the transparent theater logo in the board header, uses the same foreground artwork for the Dock AppIcon on a solid #2C2F36 background, and the bridge reports API version 1.
     def test_service_reports_bridge_version(self):
@@ -5695,8 +6412,9 @@ class StationAIBridgeTests(unittest.TestCase):
         # then read the durable result through the real bundled CLI/XPC.
         root = Path(__file__).resolve().parent.parent
         probe = self.data_directory / "codex-question-ownership-probe"
-        core = ["BoardTask", "WorkspaceSupport", "WorkspaceChanges", "CodexAppServerClient",
-                "ConversationModel", "ClaudeCodeClient", "ConversationTranscriptStore", "BridgeCore"]
+        core = ["BoardTask", "ConversationSubject", "WorkspaceSupport", "WorkspaceChanges", "CodexAppServerClient",
+                "ConversationModel", "ClaudeCodeClient", "ConversationTranscriptStore",
+                "StandaloneChatStore", "BridgeCore"]
         command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone"]
         for framework in ("Foundation", "AppKit", "SwiftUI", "SwiftData", "Combine"):
             command.extend(["-framework", framework])

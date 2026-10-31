@@ -69,6 +69,7 @@ struct RemoteConversationManager {
         mode: ConversationMode = .code,
         modelID: String? = nil,
         statusBeforeSubmission: TaskStatus? = nil,
+        contextPageIDs: [String] = [],
         onTurnStarting: (() -> Void)? = nil,
         onUpdate: @escaping (ConversationUpdate) -> Void = { _ in },
         onUserInput: @escaping (ConversationUserInputRequest) -> Void = { _ in }
@@ -82,6 +83,8 @@ struct RemoteConversationManager {
         ]
         if let modelID { arguments["model"] = .string(modelID) }
         if let statusBeforeSubmission { arguments["statusBeforeSubmission"] = .string(statusBeforeSubmission.rawValue) }
+        // Standalone chat only: pages an annotation quotes, carried for this turn.
+        if !contextPageIDs.isEmpty { arguments["contextPages"] = .array(contextPageIDs.map(BridgeValue.string)) }
         let forward = forwardUpdates(onUpdate)
         do {
             let result = try await daemon.call("conversation.send", arguments) { event in

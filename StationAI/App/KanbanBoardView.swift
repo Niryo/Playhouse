@@ -40,6 +40,9 @@ struct KanbanBoardView: View {
     @State private var isShowingBoardSearch = false
     @State private var boardSearchText = ""
     @FocusState private var isBoardSearchFocused: Bool
+    @State private var isShowingChatSidebar = false
+    @State private var chatTask: StandaloneChat?
+    @State private var isOpeningChatSidebar = false
 
     /// Provider-owning operations run in the bridge daemon.
     private var remoteConversations: RemoteConversationManager {
@@ -47,6 +50,27 @@ struct KanbanBoardView: View {
     }
 
     var body: some View {
+        HStack(spacing: 0) {
+            if isShowingChatSidebar, let chatTask {
+                TaskConversationView(
+                    task: chatTask, isNewTask: false, isReadOnly: false,
+                    conflictResolutionRequested: false,
+                    onConflictResolutionChecked: { _ in }
+                ) {
+                    withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = false }
+                }
+                .frame(width: 460)
+                .transition(.move(edge: .leading).combined(with: .opacity))
+                .id(chatTask.id)
+                .accessibilityIdentifier("chat-sidebar")
+                Divider()
+            }
+            mainContent
+        }
+        .animation(.easeInOut(duration: 0.22), value: isShowingChatSidebar)
+    }
+
+    private var mainContent: some View {
         Group {
             if let selectedTask {
                 TaskConversationView(
@@ -69,6 +93,9 @@ struct KanbanBoardView: View {
         .background(WorkspaceTheme.windowBackground)
         .frame(minWidth: 980, minHeight: 640)
         .onAppear {
+            // The board renders from its own @Query, not the board.list path, so it has to
+            // convert a chat still stored as a hidden task itself or that row shows as a card.
+            try? BoardTaskManager(modelContext: modelContext).migrateLegacyStandaloneChatTasks()
             checkReviewPullRequests()
             let retained = StationAIStore.takeLifecycleResetNotice(
                 dataDirectory: ProcessInfo.processInfo.environment["STATIONAI_DATA_DIRECTORY"]
@@ -474,6 +501,20 @@ struct KanbanBoardView: View {
                 .accessibilityIdentifier("done-archive-button")
 
                 Button {
+                    openChatSidebar()
+                } label: {
+                    Label("Chat", systemImage: "bubble.left.and.bubble.right")
+                        .font(.system(size: 13, weight: .semibold))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                }
+                .buttonHoverPointer()
+                .help("Open the standalone chat")
+                .buttonStyle(.bordered)
+                .disabled(isOpeningChatSidebar)
+                .accessibilityIdentifier("chat-sidebar-button")
+
+                Button {
                     openNewTask()
                 } label: {
                     Label("New Task", systemImage: "plus")
@@ -655,6 +696,38 @@ struct KanbanBoardView: View {
             get: { saveError != nil },
             set: { if !$0 { saveError = nil } }
         )
+    }
+
+    private func openChatSidebar() {
+        if isShowingChatSidebar {
+            withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = false }
+            return
+        }
+        guard !isOpeningChatSidebar else { return }
+        if let chatTask {
+            withAnimation(.easeInOut(duration: 0.22)) {
+                self.chatTask = chatTask
+                isShowingChatSidebar = true
+            }
+            return
+        }
+        isOpeningChatSidebar = true
+        Task { @MainActor in
+            defer { isOpeningChatSidebar = false }
+            do {
+                let manager = BoardTaskManager(modelContext: modelContext)
+                let record = try await manager.getOrCreateStandaloneChat(
+                    provider: WorkspaceSettingsManager().defaultConversationProvider
+                )
+                guard let chat = try manager.standaloneChatModel(record.id) else {
+                    throw BridgeCommandError(code: "operation_failed", message: "The standalone chat could not be opened.")
+                }
+                chatTask = chat
+                withAnimation(.easeInOut(duration: 0.22)) { isShowingChatSidebar = true }
+            } catch {
+                saveError = error.localizedDescription
+            }
+        }
     }
 
     private func openNewTask() {

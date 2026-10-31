@@ -51,6 +51,19 @@ def echoed_outcome_answer(user_message):
     return f"{ECHOED_OUTCOME_ANSWER}\U0001F6E0\uFE0F\nstationai-cli task outcome {task_id} completed"
 
 
+def own_user_text(message):
+    """The user's own words, without StationAI's hidden context envelope.
+
+    Standalone chat seeds a page's first turn with that page's transcript, so a sentinel
+    repeated by an earlier assistant answer must not re-trigger a scenario branch here.
+    """
+    text = message or ""
+    close = "</stationai-handoff-context>"
+    if text.startswith("<stationai-handoff-context>") and close in text:
+        return text.split(close, 1)[1].strip()
+    return text
+
+
 def write(value):
     sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
     sys.stdout.flush()
@@ -58,6 +71,50 @@ def write(value):
 
 def answer_text(user_message):
     mode = os.path.basename(sys.argv[0])
+    if isinstance(user_message, str) and user_message.startswith(
+        "Classify the latest user message for StationAI's continuous chat page index."
+    ):
+        hold = Path(str(sys.argv[0]) + ".hold-classifier")
+        neptune_hold = Path(str(sys.argv[0]) + ".hold-neptune-classifier")
+        should_hold = hold.exists() or (
+            neptune_hold.exists()
+            and "Latest user message:\nTell me about Neptune" in user_message
+        )
+        if should_hold:
+            hold.unlink(missing_ok=True)
+            neptune_hold.unlink(missing_ok=True)
+            active = Path(str(sys.argv[0]) + ".classifier-active")
+            release = Path(str(sys.argv[0]) + ".classifier-release")
+            active.write_text("The fallback classifier is held in the background.\n", encoding="utf-8")
+            deadline = time.monotonic() + 30
+            while not release.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            released = release.exists()
+            active.unlink(missing_ok=True)
+            release.unlink(missing_ok=True)
+            if not released:
+                return '{"continues":true,"title":null}'
+        history_path = Path(str(sys.argv[0]) + ".history")
+        history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
+        if Path(str(sys.argv[0]) + ".fail-classifier").exists():
+            return '{"continues":"sometimes","title":null}'
+        classifier_attempts = sum(
+            1 for turn in history.get("turns", [])
+            if (turn.get("userMessage") or "").startswith("Classify the latest user message for StationAI's continuous chat page index.")
+        )
+        if classifier_attempts == 1:
+            return '{"continues":false,"title":"Ignored extra field","unexpected":true}'
+        if "Neptune" in user_message:
+            return '{"continues":false,"title":"Neptune"}'
+        if "Another thought about Mars" in user_message:
+            return '{"continues":true,"title":null}'
+        if "Latest user message:\nOne more thought about Saturn" in user_message:
+            return '{"continues":true,"title":null}'
+        if "Mars" in user_message:
+            return '{"continues":false,"title":"Mars"}'
+        if "Saturn's rings" in user_message:
+            return '{"continues":false,"title":"Saturn Rings"}'
+        return '{"continues":true,"title":null}'
     if "stationai internal outcome reminder:" in (user_message or "").lower():
         return "Fixture internal reminder reply."
     if user_message == "Follow up after private recovery.":
@@ -630,6 +687,7 @@ def main():
                 "imageInputs": image_inputs,
                 "conversationMode": message.get("params", {}).get("collaborationMode", {}).get("mode"),
                 "reasoningEffort": message.get("params", {}).get("collaborationMode", {}).get("settings", {}).get("reasoningEffort"),
+                "modelID": message.get("params", {}).get("collaborationMode", {}).get("settings", {}).get("model"),
                 "developerInstructions": message.get("params", {}).get("collaborationMode", {}).get("settings", {}).get("developerInstructions"),
                 "cwd": message.get("params", {}).get("cwd"),
                 "runtimeWorkspaceRoots": message.get("params", {}).get("runtimeWorkspaceRoots", []),
@@ -672,6 +730,26 @@ def main():
                 }})
                 return
             write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": TURN_ID, "status": "inProgress"}}})
+            if (turn_message or "").startswith(
+                "Classify the latest user message for StationAI's continuous chat page index."
+            ):
+                # One-shot Codex helper clients consume the streamed completion
+                # directly; provide the same fixture answer the transcript path
+                # returns for ordinary conversation turns.
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": THREAD_ID,
+                    "turnId": TURN_ID,
+                    "item": {
+                        "id": "item_stationai_chat_classifier",
+                        "type": "agentMessage",
+                        "text": answer_text(turn_message),
+                    },
+                }})
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": THREAD_ID,
+                    "turn": {"id": TURN_ID, "status": "completed"},
+                }})
+                return
             async_provider_error = Path(str(sys.argv[0]) + ".provider-error-async")
             if async_provider_error.exists():
                 async_provider_error.unlink(missing_ok=True)
@@ -1544,7 +1622,7 @@ def main():
                                 "changes": [{"path": "progress-fixture.txt", "kind": "update", "diff": "+ordinary-turn-diff-after-reminders"}],
                                 "status": "completed",
                             })
-                        if "fixture-secret" in (user_message or ""):
+                        if "fixture-secret" in own_user_text(user_message):
                             contents.append({
                                 "id": f"item_private_recovery_file_change_{index}",
                                 "type": "fileChange",
