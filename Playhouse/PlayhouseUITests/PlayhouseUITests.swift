@@ -10982,7 +10982,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Playhouse recovers and continues work after an unexpected restart")
     }
 
-    // case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view lists every file changed from the task branch's recorded base in a Changes section below a collapsed Viewed section, including committed branch changes and current staged, unstaged, and untracked edits, and excluding commits unique to the base branch. Marking a file viewed saves its current contents, stages the file in Git, and adds a Viewed entry that keeps showing the reviewed work from the branch base to that snapshot. Work done after that review is listed again under Changes and diffed against the saved snapshot, so one file can appear in both sections at once; a path with no content in the branch base and no current file is zero net change and is hidden entirely, even with a stale viewed snapshot, rather than showing a ghost entry. Selecting text or JSON files opens a calculated side-by-side diff whose header names the baseline used. Viewed snapshots persist across fresh CLI/XPC connections. Files that aren't current Changes entries, including already-viewed and unknown paths, are rejected by the mark-viewed CLI operation, and the UI offers that action only for Changes entries. Uncommitted filenames are green. Diagnostics record inventory and file-read outcomes without logging file contents.
+    // case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view lists every file changed from the task branch's recorded base in a Changes section below a collapsed Viewed section, including committed branch changes and current staged, unstaged, and untracked edits, and excluding commits unique to the base branch. Marking a file viewed saves its current contents, stages the file in Git, and adds a Viewed entry that keeps showing the reviewed work from the branch base to that snapshot. Work done after that review is listed again under Changes and diffed against the saved snapshot, so one file can appear in both sections at once; a path with no content in the branch base and no current file is zero net change and is hidden entirely, even with a stale viewed snapshot, rather than showing a ghost entry. Selecting text or JSON files opens a calculated side-by-side diff whose header names the baseline used. Viewed snapshots persist across fresh CLI/XPC connections. Files that aren't current Changes entries, including already-viewed and unknown paths, are rejected by the mark-viewed CLI operation, and the UI offers that action only for Changes entries. Uncommitted filenames are green. Opening one diff after another serves each file's own content from the side-by-side editor the app loads once per session, so a later diff reuses that warm editor instead of starting Monaco again. Diagnostics record inventory and file-read outcomes without logging file contents.
     func test_task_workspace_changes_group_staged_and_unstaged_diffs() throws {
         _ = try runCLI([
             "task", "create", "--title", "Git changes", "--root", fixture.changes.path
@@ -11031,6 +11031,12 @@ final class PlayhouseUITests: XCTestCase {
         assertText("workspace-diff-title", equals: "shared.txt")
         assertText("workspace-diff-source", equals: "suggested-parent/changes · Since branch base")
         assertText("workspace-diff-editor-status", equals: "Side-by-side")
+        let firstEditorStatus = monacoEditorStatus()
+        XCTAssertTrue(
+            firstEditorStatus.hasPrefix("Editor 1 ") && firstEditorStatus.hasSuffix(", showing shared.txt"),
+            "The first diff must render in Monaco's first load. The editor reported ‘\(firstEditorStatus)’."
+        )
+        attachScreenshot(named: "The first diff opens in the side-by-side editor")
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertFalse(element("workspace-diff-overlay").waitForExistence(timeout: 2))
 
@@ -11058,7 +11064,7 @@ final class PlayhouseUITests: XCTestCase {
         element("workspace-change-viewed-shared.txt").click()
         XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
         assertText("workspace-diff-source", equals: "suggested-parent/changes · Since branch base")
-        let reviewedMonacoValue = element("workspace-diff-editor").value as? String ?? ""
+        let reviewedMonacoValue = renderedDiffValue()
         XCTAssertTrue(reviewedMonacoValue.contains("Original:\nShared baseline.\n"))
         XCTAssertTrue(
             reviewedMonacoValue.contains("Modified:\nShared working version.\n"),
@@ -11070,7 +11076,7 @@ final class PlayhouseUITests: XCTestCase {
         assertText("workspace-diff-source", equals: "suggested-parent/changes · Since last viewed")
         assertText("workspace-diff-editor-status", equals: "Side-by-side")
         assertText("workspace-diff-highlight-status", equals: "1 change highlighted")
-        let viewedMonacoValue = element("workspace-diff-editor").value as? String ?? ""
+        let viewedMonacoValue = renderedDiffValue()
         XCTAssertTrue(viewedMonacoValue.contains("Original:\nShared working version.\n"))
         XCTAssertTrue(viewedMonacoValue.contains("Modified:\nEdited after viewing.\n"))
         XCTAssertEqual(element("workspace-change-unviewed-shared.txt").value as? String, "Uncommitted, green")
@@ -11092,7 +11098,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("workspace-change-viewed-untracked.txt").exists)
         element("workspace-change-unviewed-untracked.txt").click()
         XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
-        let recreatedUntrackedValue = element("workspace-diff-editor").value as? String ?? ""
+        let recreatedUntrackedValue = renderedDiffValue()
         XCTAssertTrue(recreatedUntrackedValue.contains("Original:\nUntracked file.\n"))
         XCTAssertTrue(recreatedUntrackedValue.contains("Modified:\nUntracked file, edited after viewing.\n"))
         app.typeKey(.escape, modifierFlags: [])
@@ -11111,7 +11117,7 @@ final class PlayhouseUITests: XCTestCase {
         assertText("workspace-change-unviewed-deleted.txt", equals: "deleted.txt, added, pending")
         element("workspace-change-unviewed-deleted.txt").click()
         XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
-        let recreatedMonacoValue = element("workspace-diff-editor").value as? String ?? ""
+        let recreatedMonacoValue = renderedDiffValue()
         XCTAssertTrue(recreatedMonacoValue.contains("Original:\n\nModified:\nRecreated after viewing.\n"))
         app.typeKey(.escape, modifierFlags: [])
         assertCLIError(
@@ -11150,10 +11156,31 @@ final class PlayhouseUITests: XCTestCase {
         element("workspace-change-unviewed-untracked.txt").click()
         assertText("workspace-diff-title", equals: "untracked.txt")
         assertText("workspace-diff-editor-status", equals: "Side-by-side")
+        XCTAssertEqual(
+            monacoEditorStatus(),
+            "Editor 1 reused, showing untracked.txt",
+            "Reopening a diff must reuse Monaco's first load instead of loading the editor again."
+        )
         element("workspace-change-unviewed-syntax.json").click()
+        XCTAssertNotEqual(
+            element("workspace-diff-editor-status").value as? String,
+            "Editor 1 reused, showing untracked.txt",
+            "The warm editor must stop presenting the previous file as soon as another one is opened."
+        )
         assertText("workspace-diff-title", equals: "syntax.json")
         assertText("workspace-diff-editor-status", equals: "Side-by-side")
+        XCTAssertEqual(
+            monacoEditorStatus(),
+            "Editor 1 reused, showing syntax.json",
+            "Switching files keeps rendering in the same warm editor."
+        )
+        let reusedEditorValue = renderedDiffValue()
+        XCTAssertTrue(
+            reusedEditorValue.contains("Modified:\n{\"value\":\"working version\"}"),
+            "The reused editor must show the newly opened file, not the previous diff."
+        )
         assertText("workspace-diff-highlight-status", equals: "1 change highlighted")
+        attachScreenshot(named: "A later diff opens in the already-loaded side-by-side editor")
         app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(element("empty-conversation").exists, "Closing the diff should reveal the conversation again.")
 
@@ -12660,6 +12687,27 @@ final class PlayhouseUITests: XCTestCase {
 
     private func element(_ identifier: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    /// The diff header's report of which Monaco load rendered the open diff, and of which
+    /// file it rendered, once the editor has finished presenting it.
+    private func monacoEditorStatus(timeout: TimeInterval = 10) -> String {
+        var status = ""
+        _ = waitUntil({
+            status = self.element("workspace-diff-editor-status").value as? String ?? ""
+            return status.hasPrefix("Editor ")
+        }, timeout: timeout)
+        return status
+    }
+
+    /// The diff text Monaco has actually rendered, which lands after the editor applies it.
+    private func renderedDiffValue(timeout: TimeInterval = 10) -> String {
+        var value = ""
+        _ = waitUntil({
+            value = self.element("workspace-diff-editor").value as? String ?? ""
+            return value.contains("Original:")
+        }, timeout: timeout)
+        return value
     }
 
     private func assertHelpTag(for element: XCUIElement, equals expected: String) {
