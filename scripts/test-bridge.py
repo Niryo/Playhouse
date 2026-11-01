@@ -7280,6 +7280,74 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "An outcome reported in the woken turn must not trigger private outcome reminders.",
         )
 
+    # case-contract: test_claude_steers_turn_parked_on_background_work | A Claude turn whose result is already out while a background shell keeps it open is still steerable: a queued follow-up's Steer reaches the running turn instead of silently staying queued, leaves the queue, appears in the conversation, and the turn waits for Claude's answer to it before the woken parent turn ends the send.
+    def test_claude_steers_turn_parked_on_background_work(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / "claude-fixture-parked-steer"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        created, _ = self.call_cli(
+            "task", "create", "--title", "Claude parked steer", "--root", self.primary, "--provider", "claude"
+        )
+        task_id = self.assert_success(created)["id"]
+        ready = Path(f"{executable}.parked-shell-ready")
+        command = ("conversation", "send", task_id, "--message", "Launch a parked background shell for this turn.")
+        process = self.start_cli(*command, extra_environment=env)
+        try:
+            deadline = time.monotonic() + 20
+            while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "The fixture should park the turn after its result while the shell runs.")
+            # Let a premature settle end the send before asserting the turn is steerable.
+            time.sleep(0.5)
+            self.assertIsNone(process.poll(), "The send must stay open while the background shell runs.")
+            queued = self.assert_success(self.call_cli(
+                "conversation", "queue", task_id, "--message", "Check the other blocked tasks too.",
+            )[0])
+            steered = self.assert_success(self.call_cli(
+                "conversation", "queue-steer", task_id, queued["id"], extra_environment=env,
+            )[0])
+            self.assertEqual(steered["text"], "Check the other blocked tasks too.")
+            self.assertFalse(
+                steered["queued"],
+                "A turn held open by a background shell is still active, so its follow-up must steer it.",
+            )
+            self.assertEqual(
+                self.assert_success(self.call_cli("conversation", "queue-list", task_id)[0]), [],
+                "An accepted steer must leave the queue.",
+            )
+            response, events = self.finish_cli(process, command, timeout=60)
+        finally:
+            if process.poll() is None:
+                process.communicate(timeout=30)
+        self.assert_success(response)
+        self.assertIn(
+            "Check the other blocked tasks too.",
+            [e["payload"].get("message") for e in events if e["type"] == "steered_message"],
+            "The running turn must stream the steered follow-up it accepted.",
+        )
+        self.assertEqual([e["payload"]["text"] for e in events if e["type"] == "assistant_final"], ["PARKED HANDLED"])
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        self.assertIn(
+            "Check the other blocked tasks too.",
+            [message["text"] for message in history["messages"] if message["role"] == "user"],
+            "The steered follow-up belongs in the conversation it steered.",
+        )
+        self.assertIn(
+            "STEERED: Check the other blocked tasks too.",
+            [message["text"] for message in history["messages"] if message["role"] == "assistant"],
+            "Claude's answer to the steered follow-up belongs in the same turn.",
+        )
+        self.assertEqual(
+            [message["text"] for message in history["messages"] if message["role"] == "assistant"][-1],
+            "PARKED HANDLED",
+            "The woken parent turn's answer still ends the turn.",
+        )
+
     # case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, Playhouse returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics.
     def test_claude_private_recovery_failure_fails_closed(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"

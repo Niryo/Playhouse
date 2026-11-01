@@ -9836,6 +9836,69 @@ final class PlayhouseUITests: XCTestCase {
         )
     }
 
+    // case-contract: test_claude_steers_turn_parked_on_background_work | A Claude turn whose result is already out while a background shell keeps it open is still steerable: a queued follow-up's Steer reaches the running turn instead of silently staying queued, leaves the queue, appears in the conversation, and the turn waits for Claude's answer to it before the woken parent turn ends the send.
+    func test_claude_steers_turn_parked_on_background_work() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-parked-steer")
+        try FileManager.default.copyItem(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"),
+            atomically: true,
+            encoding: .utf8
+        )
+        claudeFixtureExecutable = executable.path
+        let parkedReady = URL(fileURLWithPath: executable.path + ".parked-shell-ready")
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude parked steer", "--root", fixture.primary.path, "--provider", "claude"
+        ]) ["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        launchApp(defaultParent: fixture.parent.path)
+        openTask(named: "Claude parked steer")
+        element("message-composer").click()
+        element("message-composer").typeText("Launch a parked background shell for this turn.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: parkedReady.path) }, timeout: 15),
+                      "The fixture should park the turn after its result while the shell runs.")
+        XCTAssertTrue(waitUntil({ self.transcriptContains("PARKED STARTED") }, timeout: 10))
+        XCTAssertTrue(element("pause-response-button").exists, "The parked turn must still read as the active turn.")
+
+        let followUp = "Check the other blocked tasks too."
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText(followUp)
+        composer.typeKey(.return, modifierFlags: [])
+        let queued = try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
+        let queuedID = try XCTUnwrap(queued?.first(where: { $0["text"] as? String == followUp })?["id"] as? String)
+        let steerButton = element("steer-queued-message-\(queuedID)")
+        XCTAssertTrue(steerButton.waitForExistence(timeout: 10), "The queued follow-up should offer its row Steer action.")
+        attachScreenshot(named: "Parked turn with the queued follow-up ready to steer")
+
+        steerButton.click()
+        XCTAssertTrue(waitUntil({ self.transcriptContains(followUp) }, timeout: 15),
+                      "Steering a turn parked on background work must deliver the follow-up into that turn.")
+        XCTAssertTrue(waitUntil({ (try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])??.isEmpty == true }, timeout: 10),
+                      "An accepted steer must leave the queue.")
+        XCTAssertFalse(element("queued-message-text-\(queuedID)").exists, "The steered row should no longer be queued.")
+        XCTAssertTrue(waitUntil({ self.transcriptContains("STEERED: \(followUp)") }, timeout: 15),
+                      "Claude's answer to the steered follow-up belongs in the same turn.")
+        attachScreenshot(named: "Steered follow-up answered inside the parked turn")
+
+        XCTAssertTrue(waitUntil({ self.transcriptContains("PARKED HANDLED") }, timeout: 20),
+                      "The woken parent turn's answer still ends the turn.")
+        let history = try XCTUnwrap(try runCLI(
+            ["conversation", "history", taskID],
+            extraEnvironment: ["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": executable.path]
+        )["result"] as? [String: Any])
+        let messages = history["messages"] as? [[String: Any]] ?? []
+        XCTAssertTrue(messages.contains { $0["role"] as? String == "user" && $0["text"] as? String == followUp },
+                      "The steered follow-up belongs in the conversation it steered.")
+        XCTAssertEqual(messages.filter { $0["role"] as? String == "assistant" }.last?["text"] as? String, "PARKED HANDLED")
+        attachScreenshot(named: "Parked turn finished after the steered follow-up")
+    }
+
     // case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, Playhouse returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics.
     func test_claude_private_recovery_failure_fails_closed() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-recovery-failure")
