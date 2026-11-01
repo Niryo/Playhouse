@@ -256,6 +256,14 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         if not received_interrupt:
             raise TimeoutError("Timed out waiting for Claude interrupt.")
         commands.append({"interruptReceived": True})
+    elif user_text.strip().lower() == "please fail-this-claude-turn.":
+        # Match only the live message, not a historical mention: once this turn
+        # fails and its text is part of the transcript, a later turn's handoff
+        # context quotes it back verbatim, and a substring check would misfire.
+        # The session already exists by now: Playhouse answered initialize and
+        # sent this turn. Failing here leaves the session behind, so the next
+        # turn must resume it instead of claiming its ID again.
+        raise RuntimeError("Claude fixture failed this turn after creating its session.")
     elif "hold-claude-turn-for-concurrency" in user_text.lower():
         ready = Path(str(sys.argv[0]) + ".concurrent-turn-ready")
         release = Path(str(sys.argv[0]) + ".concurrent-turn-release")

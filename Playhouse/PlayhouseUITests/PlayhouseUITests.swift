@@ -6054,7 +6054,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("provider-boundary-codex").exists)
     }
 
-    // case-contract: test_claude_resume_recovers_visible_history | After a Claude turn and Playhouse restart, if Claude cannot find its native resumed session, the retried fresh session receives the prior visible conversation from Playhouse's persisted transcript together with the new prompt. Claude completes the turn, and fresh CLI/XPC history and the visible UI retain both turns. A normal Claude resume continues using the native session without receiving duplicate handoff context.
+    // case-contract: test_claude_resume_recovers_visible_history | A Claude turn that fails after Claude Code created its session leaves that session in place, and the next turn resumes it instead of claiming the same session ID again. After a Claude turn and Playhouse restart, if Claude cannot find its native resumed session, the retried fresh session receives the prior visible conversation from Playhouse's persisted transcript together with the new prompt. Claude completes the turn, and fresh CLI/XPC history and the visible UI retain both turns. A normal Claude resume continues using the native session without receiving duplicate handoff context.
     func test_claude_resume_recovers_visible_history() throws {
         let source = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         let executable = dataDirectory.appendingPathComponent("claude-fixture-resume-recovery")
@@ -6079,17 +6079,39 @@ final class PlayhouseUITests: XCTestCase {
         func send(_ text: String) {
             XCTAssertTrue(waitUntil({ composer.exists && composer.isHittable }, timeout: 15), "The composer should accept a message.")
             composer.click()
+            // A prior failed turn restores its text as a pending draft so the user
+            // can retry it; clear that before typing the next message.
+            composer.typeKey("a", modifierFlags: .command)
             composer.typeText(text)
             element("send-message-button").click()
         }
         let story = "BISCUIT-7 waited by the gate every evening. One night the boy finally came home."
+        let fixtureHistoryURL = URL(fileURLWithPath: executable.path + ".history")
+
+        // A first turn that fails after Claude Code created the session must not
+        // leave the conversation unresumable: the retry resumes that session
+        // instead of claiming its ID again.
+        send("Please fail-this-claude-turn.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Blocked" }, timeout: 20),
+                      "A failed Claude turn should move the task to Blocked.")
+        XCTAssertTrue((try taskRecord(id: taskID)?["statusMessage"] as? String ?? "").contains("Claude Code stopped unexpectedly"),
+                      "The Blocked reason should name the provider failure.")
+        attachScreenshot(named: "Claude turn failed after its session was created")
+        let sessionAfterFailure = try XCTUnwrap(try taskRecord(id: taskID)?["claudeSessionID"] as? String)
+
         send("Tell me a very short dog story.")
         XCTAssertTrue(waitUntil({ self.transcriptContains(story) }, timeout: 20))
+        attachScreenshot(named: "The next turn resumes the session the failed turn left behind")
+        let afterFailureHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureHistoryURL)) as? [String: Any])
+        let afterFailureTurn = try XCTUnwrap((afterFailureHistory["turns"] as? [[String: Any]])?
+            .last { $0["userText"] as? String == "Tell me a very short dog story." })
+        XCTAssertTrue(afterFailureTurn["resumed"] as? Bool == true,
+                      "A session left behind by a failed turn must be resumed, not claimed again.")
+        XCTAssertEqual(afterFailureTurn["sessionID"] as? String, sessionAfterFailure)
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["status"] as? String) == "Review" }, timeout: 20))
         send("Please inspect the workspace.")
         XCTAssertTrue(waitUntil({ self.transcriptContains("Inspection done: the workspace is ready.") }, timeout: 20))
         XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 20), "The normal resumed Claude turn should finish.")
-        let fixtureHistoryURL = URL(fileURLWithPath: executable.path + ".history")
         var fixtureHistory = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureHistoryURL)) as? [String: Any])
         var fixtureTurns = try XCTUnwrap(fixtureHistory["turns"] as? [[String: Any]])
         let normalResume = try XCTUnwrap(fixtureTurns.first { $0["userText"] as? String == "Please inspect the workspace." })
