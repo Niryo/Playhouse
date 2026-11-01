@@ -31,12 +31,25 @@ private struct ComposerDraftScope<Content: View>: View {
     var body: some View { content() }
 }
 
+private enum MarkdownTableColumnAlignment {
+    case leading, center, trailing
+
+    var textAlignment: TextAlignment {
+        switch self {
+        case .leading: .leading
+        case .center: .center
+        case .trailing: .trailing
+        }
+    }
+}
+
 private struct AssistantMarkdownBlock: Identifiable {
     enum Kind {
         case heading(Int)
         case listItem
         case orderedListItem(number: Int)
         case codeBlock(language: String?)
+        case table(headers: [String], alignments: [MarkdownTableColumnAlignment], rows: [[String]])
         case paragraph
     }
 
@@ -49,6 +62,7 @@ private struct AssistantMarkdownBlock: Identifiable {
         case .heading(let level): NSFont.systemFont(ofSize: level == 1 ? 19 : level == 2 ? 17 : 15, weight: .semibold)
         case .listItem, .orderedListItem, .paragraph: NSFont.systemFont(ofSize: 16)
         case .codeBlock: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+        case .table: NSFont.systemFont(ofSize: 14)
         }
     }
 }
@@ -140,6 +154,76 @@ private struct CodeBlockTextView: NSViewRepresentable {
         guard let renderedText = nsView.textStorage else { return nil }
         let contentHeight = measuredTextHeight(for: renderedText, width: width)
         return CGSize(width: width, height: ceil(contentHeight) + 2)
+    }
+}
+
+/// Renders a parsed Markdown pipe table as a bordered grid instead of its raw `|`/`---` source,
+/// following `CodeBlockCardView`'s card styling so tables visually match other assistant blocks.
+private struct TableBlockView: View {
+    let blockID: Int
+    let headers: [String]
+    let alignments: [MarkdownTableColumnAlignment]
+    let rows: [[String]]
+    let font: NSFont
+
+    private func alignment(forColumn column: Int) -> MarkdownTableColumnAlignment {
+        column < alignments.count ? alignments[column] : .leading
+    }
+
+    /// Maps a column's text alignment to the matching frame alignment, so the cell's text and its
+    /// containing frame agree on where content sits (`.leading`/`.trailing` text alignment alone
+    /// has no effect inside a frame that doesn't also pin content to that same edge).
+    private func frameAlignment(forColumn column: Int) -> Alignment {
+        switch alignment(forColumn: column) {
+        case .leading: .leading
+        case .center: .center
+        case .trailing: .trailing
+        }
+    }
+
+    /// The weight is applied here rather than by the caller because `cellText` already sets a
+    /// `.font`, and the innermost `.font` modifier is the one SwiftUI honors — a `.semibold` font
+    /// applied by the caller outside this view would be silently discarded.
+    private func cellText(_ cell: String, weight: Font.Weight = .regular) -> some View {
+        let formatted = TaskConversationView.markdownNSAttributedString(cell, baseFont: font)
+        return Text((try? AttributedString(formatted, including: \.appKit)) ?? AttributedString(cell))
+            .font(.system(size: font.pointSize, weight: weight))
+    }
+
+    var body: some View {
+        Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+            GridRow {
+                ForEach(Array(headers.enumerated()), id: \.offset) { column, header in
+                    cellText(header, weight: .semibold)
+                        .multilineTextAlignment(alignment(forColumn: column).textAlignment)
+                        .frame(maxWidth: .infinity, alignment: frameAlignment(forColumn: column))
+                        .padding(8)
+                        .accessibilityIdentifier("assistant-markdown-table-\(blockID)-header-\(column)")
+                }
+            }
+            .background(WorkspaceTheme.inputBackground)
+
+            Divider().opacity(0.3)
+
+            ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, row in
+                GridRow {
+                    ForEach(Array(row.enumerated()), id: \.offset) { column, cell in
+                        cellText(cell)
+                            .multilineTextAlignment(alignment(forColumn: column).textAlignment)
+                            .frame(maxWidth: .infinity, alignment: frameAlignment(forColumn: column))
+                            .padding(8)
+                            .accessibilityIdentifier("assistant-markdown-table-\(blockID)-cell-\(rowIndex)-\(column)")
+                    }
+                }
+                if rowIndex < rows.count - 1 {
+                    Divider().opacity(0.12)
+                }
+            }
+        }
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.secondary.opacity(0.25)))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("assistant-markdown-table-\(blockID)")
     }
 }
 
@@ -350,6 +434,13 @@ struct TaskConversationView: View {
     /// Natural height of the rendered transcript, before the filler that keeps
     /// the newest turn pinnable to the top of the viewport.
     @State private var conversationContentHeight: CGFloat = 0
+    /// Top of the newest turn and bottom of the transcript, in the scroll's own
+    /// coordinate space. Their difference is the newest turn's height, which is
+    /// what the filler has to leave room for; measuring the turn itself keeps
+    /// the pin reachable even once older messages are revealed above it, when
+    /// the transcript as a whole is far taller than the viewport.
+    @State private var latestTurnTopY: CGFloat?
+    @State private var transcriptBottomY: CGFloat?
     @State private var lastScrolledUserMessageID: String?
     @State private var annotations: [ConversationAnnotation] = []
     @State private var annotationSelection: AnnotationSelection?
@@ -512,6 +603,13 @@ struct TaskConversationView: View {
     private var latestConversationTurnStartID: String? {
         let allMessages = conversationMessages
         return allMessages.last(where: { $0.role == .user })?.id ?? allMessages.last?.id
+    }
+
+    /// Height of the newest turn, from its question to the end of the
+    /// transcript, or `nil` until both ends have been measured.
+    private var latestTurnHeight: CGFloat? {
+        guard let latestTurnTopY, let transcriptBottomY, transcriptBottomY >= latestTurnTopY else { return nil }
+        return transcriptBottomY - latestTurnTopY
     }
 
     /// The window runs from `oldestRenderedMessageID` to the newest message.
@@ -1933,6 +2031,16 @@ struct TaskConversationView: View {
                                 }
                                 messageBubble(message)
                                     .id(message.id)
+                                    .background {
+                                        if message.id == latestConversationTurnStartID {
+                                            GeometryReader { geometry in
+                                                Color.clear.preference(
+                                                    key: ConversationLatestTurnTopKey.self,
+                                                    value: geometry.frame(in: .named(Self.conversationScrollCoordinateSpace)).minY
+                                                )
+                                            }
+                                        }
+                                    }
                                 ForEach(providerBoundaries.filter {
                                     renderedAnchorMessageID(for: boundaryAnchorID(for: $0)) == message.id
                                 }) { boundary in
@@ -1996,6 +2104,14 @@ struct TaskConversationView: View {
                     Color.clear
                         .frame(height: 1)
                         .id("conversation-latest-anchor")
+                        .background {
+                            GeometryReader { geometry in
+                                Color.clear.preference(
+                                    key: ConversationTranscriptBottomKey.self,
+                                    value: geometry.frame(in: .named(Self.conversationScrollCoordinateSpace)).maxY
+                                )
+                            }
+                        }
                 }
                 .padding(.horizontal, 28)
                 .padding(.vertical, 24)
@@ -2012,10 +2128,18 @@ struct TaskConversationView: View {
 
                 // Filler below the rendered window. Together with the runway
                 // above it, this is what lets a turn that is shorter than the
-                // viewport still be scrolled to the top.
-                if hasOlderConversationMessages {
+                // viewport still be scrolled to the top. The window-based
+                // measure only covers a transcript still short enough to
+                // measure whole, so the newest turn's own height carries the
+                // pin once older messages are revealed above it.
+                let windowFiller = hasOlderConversationMessages
+                    ? max(0, viewport.size.height - conversationContentHeight)
+                    : 0
+                let turnFiller = latestTurnHeight.map { max(0, viewport.size.height - $0) } ?? 0
+                let filler = max(windowFiller, turnFiller)
+                if filler > 0 {
                     Color.clear
-                        .frame(height: max(0, viewport.size.height - conversationContentHeight))
+                        .frame(height: filler)
                         .accessibilityHidden(true)
                 }
                 }
@@ -2040,6 +2164,18 @@ struct TaskConversationView: View {
                     using: scrollProxy
                 )
             })
+            // A row the LazyVStack has not realized reports nothing; keeping the
+            // last measurement stops the filler from collapsing — and the
+            // transcript from jumping under the reader — while the newest turn
+            // is scrolled out of view.
+            .onPreferenceChange(ConversationLatestTurnTopKey.self) { top in
+                guard let top, latestTurnTopY != top else { return }
+                latestTurnTopY = top
+            }
+            .onPreferenceChange(ConversationTranscriptBottomKey.self) { bottom in
+                guard let bottom, transcriptBottomY != bottom else { return }
+                transcriptBottomY = bottom
+            }
             .onPreferenceChange(ConversationScrollContentHeightKey.self) { height in
                 // Only "shorter than the viewport?" is ever asked of this value,
                 // and a LazyVStack keeps revising its measured height as rows
@@ -2819,7 +2955,7 @@ struct TaskConversationView: View {
     /// Bridges Markdown-parsed text to `NSAttributedString`, resizing inline code/bold/italic
     /// runs to `baseFont`'s point size (preserving their monospace/bold/italic traits) instead of
     /// the parser's own default-size font, so inline formatting matches the surrounding body text.
-    private static func markdownNSAttributedString(_ markdown: String, baseFont: NSFont) -> NSAttributedString {
+    fileprivate static func markdownNSAttributedString(_ markdown: String, baseFont: NSFont) -> NSAttributedString {
         let cacheKey = "\(baseFont.fontName)|\(baseFont.pointSize)|\(markdown)" as NSString
         if let cached = markdownNSAttributedStringCache.object(forKey: cacheKey) {
             return cached
@@ -3002,6 +3138,8 @@ struct TaskConversationView: View {
                 case .codeBlock(let language):
                     CodeBlockCardView(blockID: block.id, code: block.text, language: language, font: block.font)
                         .accessibilityIdentifier("assistant-markdown-code-block-\(block.id)")
+                case .table(let headers, let alignments, let rows):
+                    TableBlockView(blockID: block.id, headers: headers, alignments: alignments, rows: rows, font: block.font)
                 case .paragraph:
                     selectableAnnotationText(block, messageID: messageID, responseAnnotations: responseAnnotations, wholeMessageText: markdown)
                         .accessibilityIdentifier("assistant-markdown-paragraph-\(block.id)")
@@ -3092,6 +3230,38 @@ struct TaskConversationView: View {
         }
     }
 
+    /// Splits a Markdown table row on `|`, dropping an optional leading/trailing pipe the way
+    /// GFM tables are usually written (`| a | b |` as well as the bare `a | b`).
+    private static func markdownTableCells(_ line: String) -> [String] {
+        var trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("|") { trimmed.removeFirst() }
+        if trimmed.hasSuffix("|") { trimmed.removeLast() }
+        return trimmed.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// Returns the per-column alignment if `line` is a valid GFM table separator row (each cell is
+    /// dashes with optional leading/trailing colon, e.g. `---`, `:---`, `:---:`, `---:`), or `nil`
+    /// if it isn't a separator row at all.
+    private static func markdownTableSeparatorAlignments(_ line: String) -> [MarkdownTableColumnAlignment]? {
+        let cells = markdownTableCells(line)
+        guard !cells.isEmpty else { return nil }
+        var alignments: [MarkdownTableColumnAlignment] = []
+        for cell in cells {
+            var body = cell
+            let leadingColon = body.hasPrefix(":")
+            if leadingColon { body.removeFirst() }
+            let trailingColon = body.hasSuffix(":")
+            if trailingColon { body.removeLast() }
+            guard !body.isEmpty, body.allSatisfy({ $0 == "-" }) else { return nil }
+            switch (leadingColon, trailingColon) {
+            case (true, true): alignments.append(.center)
+            case (false, true): alignments.append(.trailing)
+            default: alignments.append(.leading)
+            }
+        }
+        return alignments
+    }
+
     private static func orderedListPrefix(_ line: Substring) -> (number: Int, rest: Substring)? {
         let digits = line.prefix(while: { $0.isNumber })
         guard !digits.isEmpty, let number = Int(digits) else { return nil }
@@ -3156,6 +3326,38 @@ struct TaskConversationView: View {
                     text: codeLines.joined(separator: "\n")
                 ))
                 continue
+            }
+            if line.contains("|"), index + 1 < rawLines.count,
+               let alignments = Self.markdownTableSeparatorAlignments(rawLines[index + 1].trimmingCharacters(in: .whitespaces)) {
+                let headers = Self.markdownTableCells(line)
+                // A separator row with a different cell count than the header isn't a valid GFM
+                // table (e.g. a stray "---" thematic break after a line that merely contains "|");
+                // fall through to the normal paragraph/heading/list handling below instead.
+                if headers.count == alignments.count {
+                    flushParagraph()
+                    lastOrderedNumber = nil
+                    let tableStart = index
+                    index += 2 // consume the header row and the separator row
+                    var rows: [[String]] = []
+                    while index < rawLines.count {
+                        let rowLine = rawLines[index].trimmingCharacters(in: .whitespaces)
+                        guard !rowLine.isEmpty, rowLine.contains("|") else { break }
+                        // GFM pads short rows and drops extra cells, so every row renders with the
+                        // header's column count; without this a ragged row would shift the Grid's
+                        // remaining columns out of alignment with their headers.
+                        var cells = Self.markdownTableCells(rowLine)
+                        if cells.count > headers.count { cells.removeSubrange(headers.count...) }
+                        cells.append(contentsOf: Array(repeating: "", count: max(0, headers.count - cells.count)))
+                        rows.append(cells)
+                        index += 1
+                    }
+                    blocks.append(AssistantMarkdownBlock(
+                        id: tableStart,
+                        kind: .table(headers: headers, alignments: alignments, rows: rows),
+                        text: ""
+                    ))
+                    continue
+                }
             }
             if line.range(of: #":(?:playhouse-annotation|codex-annotation)\{index=\"\d+\"\}"#, options: .regularExpression) != nil {
                 flushParagraph()
@@ -3833,6 +4035,8 @@ struct TaskConversationView: View {
         isLatestConversationTurnPinPending = true
         isOlderConversationRevealArmed = false
         conversationContentHeight = 0
+        latestTurnTopY = nil
+        transcriptBottomY = nil
         oldestRenderedMessageID = nil
         errorMessage = nil
         let draftAtLoadStart = draft
@@ -5273,6 +5477,23 @@ private struct ConversationScrollContentHeightKey: PreferenceKey {
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
+    }
+}
+
+/// Only the newest turn reports a top, so the first non-nil value is it.
+private struct ConversationLatestTurnTopKey: PreferenceKey {
+    static var defaultValue: CGFloat?
+
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+        value = nextValue() ?? value
+    }
+}
+
+private struct ConversationTranscriptBottomKey: PreferenceKey {
+    static var defaultValue: CGFloat?
+
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+        value = nextValue() ?? value
     }
 }
 
