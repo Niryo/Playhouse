@@ -1883,14 +1883,21 @@ struct TaskConversationView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     if messages.isEmpty && activeGoal?.status != "complete" && !isLoadingHistory {
                         VStack(spacing: 0) {
-                            Text(emptyConversationRepositoryTitle)
-                                .font(.system(size: 30, weight: .bold))
-                                .foregroundStyle(emptyConversationRepositoryTitleColor)
-                                .multilineTextAlignment(.center)
-                                .lineLimit(2)
-                                .accessibilityLabel(emptyConversationRepositoryTitle)
-                                .accessibilityIdentifier("empty-conversation-repository-title")
-                            Spacer(minLength: 58)
+                            if task.isStandaloneChat {
+                                // A chat has no repository to name, so the placeholder keeps only
+                                // its prompt. The leading spacer balances the trailing one that
+                                // the title would otherwise have pushed against.
+                                Spacer(minLength: 0)
+                            } else {
+                                Text(emptyConversationRepositoryTitle)
+                                    .font(.system(size: 30, weight: .bold))
+                                    .foregroundStyle(emptyConversationRepositoryTitleColor)
+                                    .multilineTextAlignment(.center)
+                                    .lineLimit(2)
+                                    .accessibilityLabel(emptyConversationRepositoryTitle)
+                                    .accessibilityIdentifier("empty-conversation-repository-title")
+                                Spacer(minLength: 58)
+                            }
                             VStack(spacing: 14) {
                                 Image(systemName: "bubble.left.and.bubble.right")
                                     .font(.system(size: 29, weight: .regular))
