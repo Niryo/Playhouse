@@ -262,6 +262,69 @@ struct ConversationProviderBoundary: Codable, Equatable, Identifiable {
     let afterMessageID: String?
 }
 
+/// One turn's token cost together with the tools, skills, MCP servers and
+/// subagents that ran in it.
+///
+/// Neither runtime attributes tokens to an individual tool call — usage is
+/// reported once per turn — so the turn is the unit Playhouse records, and the
+/// tool labels say what that turn's tokens were spent on.
+struct ConversationTurnUsageReport: Sendable {
+    let turnID: String?
+    let usage: ConversationTokenUsage
+    let toolLabels: [String]
+}
+
+/// A task's token accounting: the running totals, the per-turn detail behind
+/// them, and what each tool took part in.
+struct TaskTokenUsageSummary: Codable, Equatable {
+    struct Turn: Codable, Equatable, Identifiable {
+        let id: String
+        let provider: ConversationProvider
+        let recordedAt: Date
+        let usage: ConversationTokenUsage
+        let tools: [String]
+        /// Stored rather than computed so the CLI payload carries it too.
+        let totalTokens: Int
+
+        init(id: String, provider: ConversationProvider, recordedAt: Date, usage: ConversationTokenUsage, tools: [String]) {
+            self.id = id
+            self.provider = provider
+            self.recordedAt = recordedAt
+            self.usage = usage
+            self.tools = tools
+            totalTokens = usage.totalTokens
+        }
+    }
+
+    /// A tool, skill, MCP server or subagent, with the turns it ran in.
+    ///
+    /// `totalTokens` is what those turns cost in full, not what the tool alone
+    /// cost: neither provider reports usage below turn granularity, so a turn
+    /// that ran several tools counts toward each of them.
+    struct Tool: Codable, Equatable, Identifiable {
+        let id: String
+        let turnCount: Int
+        let totalTokens: Int
+    }
+
+    let taskID: UUID
+    let usage: ConversationTokenUsage
+    let turns: [Turn]
+    let tools: [Tool]
+    /// Stored rather than computed so the CLI payload carries it too.
+    let totalTokens: Int
+
+    var turnCount: Int { turns.count }
+
+    init(taskID: UUID, usage: ConversationTokenUsage, turns: [Turn], tools: [Tool]) {
+        self.taskID = taskID
+        self.usage = usage
+        self.turns = turns
+        self.tools = tools
+        totalTokens = usage.totalTokens
+    }
+}
+
 /// The operations Playhouse's shared conversation orchestration needs from a
 /// provider runtime. Codex and Claude Code each implement it over their own
 /// native protocol; history composition and persistence stay in the manager.
@@ -304,6 +367,7 @@ protocol ConversationProviderClient: AnyObject {
         onSteerMessage: @escaping (String, [String]) -> Void,
         onProgressMessage: @escaping (ConversationMessage) -> Void,
         onTurnStarted: @escaping (String) -> Void,
+        onTokenUsage: @escaping (ConversationTurnUsageReport) -> Void,
         sensitiveUserInputAnswerValues: [String],
         hideSensitiveRecoveryPrompt: Bool
     ) async throws
@@ -362,6 +426,7 @@ extension ConversationProviderClient {
             onDelta: { _ in }, onFinalMessage: onFinalMessage, onActivity: { _ in }, onDiff: { _ in },
             onHistory: { _ in }, onActionRequest: {}, onUserInput: onUserInput,
             onSteerMessage: { _, _ in }, onProgressMessage: { _ in }, onTurnStarted: { _ in },
+            onTokenUsage: { _ in },
             sensitiveUserInputAnswerValues: [], hideSensitiveRecoveryPrompt: false
         )
     }

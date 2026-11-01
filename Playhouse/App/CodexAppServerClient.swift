@@ -122,6 +122,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         let onActivity: (ConversationActivity) -> Void
         let onDiff: (ConversationTurnDiff) -> Void
         let onAction: () -> Void
+        let onTokenUsage: (ConversationTurnUsageReport) -> Void
         var activities: [String: ConversationActivity] = [:]
         var startedAtUptime: [String: UInt64] = [:]
         var startedAtDate: [String: Date] = [:]
@@ -130,9 +131,11 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         init(onDelta: @escaping (String) -> Void, onFinal: @escaping (String) -> Void,
              onProgress: @escaping (ConversationMessage) -> Void, onSteer: @escaping (String, [String]) -> Void,
              onActivity: @escaping (ConversationActivity) -> Void, onDiff: @escaping (ConversationTurnDiff) -> Void,
-             onAction: @escaping () -> Void) {
+             onAction: @escaping () -> Void,
+             onTokenUsage: @escaping (ConversationTurnUsageReport) -> Void = { _ in }) {
             self.onDelta = onDelta; self.onFinal = onFinal; self.onProgress = onProgress
             self.onSteer = onSteer; self.onActivity = onActivity; self.onDiff = onDiff; self.onAction = onAction
+            self.onTokenUsage = onTokenUsage
         }
     }
     private var turnContexts: [String: TurnContext] = [:]
@@ -593,6 +596,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         onSteerMessage: @escaping (String, [String]) -> Void = { _, _ in },
         onProgressMessage: @escaping (ConversationMessage) -> Void = { _ in },
         onTurnStarted: @escaping (String) -> Void,
+        onTokenUsage: @escaping (ConversationTurnUsageReport) -> Void = { _ in },
         sensitiveUserInputAnswerValues: [String] = [],
         hideSensitiveRecoveryPrompt: Bool = false
     ) async throws {
@@ -600,7 +604,8 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             throw BridgeCommandError(code: "invalid_transition", message: "This conversation already has an active send.")
         }
         let context = TurnContext(onDelta: onDelta, onFinal: onFinalMessage, onProgress: onProgressMessage,
-                                  onSteer: onSteerMessage, onActivity: onActivity, onDiff: onDiff, onAction: onActionRequest)
+                                  onSteer: onSteerMessage, onActivity: onActivity, onDiff: onDiff, onAction: onActionRequest,
+                                  onTokenUsage: onTokenUsage)
         turnContexts[threadID] = context
         // A new turn supersedes a stop another client recorded for this thread.
         for client in Self.allSharedClients { client.interruptedThreadIDs.remove(threadID) }
@@ -1571,6 +1576,29 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                   let turnID = turn["id"] as? String else { return }
 
             flushDeltaLogSummaries(threadID: threadID, turnID: turnID, reason: "turn_completed")
+
+            // The app-server reports a turn's cost on its terminal notification,
+            // either beside the turn envelope or inside it.
+            if let context,
+               let payload = (params["usage"] as? [String: Any]) ?? (turn["usage"] as? [String: Any]) {
+                let usage = ConversationTokenUsage(providerPayload: payload)
+                if usage.isEmpty {
+                    // A non-empty payload that parses to all zeros means the
+                    // app-server changed its usage field names; silently
+                    // dropping it would make a real regression invisible.
+                    PlayhouseDiagnostics.record("codex.turn.usage_unparsed", fields: diagnosticFields([
+                        "threadID": threadID,
+                        "turnID": turnID,
+                        "payloadKeys": payload.keys.sorted().joined(separator: ","),
+                    ]))
+                } else {
+                    context.onTokenUsage(ConversationTurnUsageReport(
+                        turnID: turnID,
+                        usage: usage,
+                        toolLabels: Array(Set(context.activities.values.map(\.tokenUsageLabel))).sorted()
+                    ))
+                }
+            }
 
             PlayhouseDiagnostics.record("codex.turn.ended", fields: diagnosticFields([
                 "threadID": threadID,

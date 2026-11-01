@@ -11052,6 +11052,186 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Branch changes exclude base-only commits and retain task commits")
     }
 
+    // case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. The task card shows a token usage dot whose tooltip reports the total, and the Token Stats context-menu item opens a modal showing the totals, the per-tool rollup and the per-turn breakdown.
+    func test_task_token_usage_records_claude_turn_breakdown() throws {
+        let environment = try installClaudeFixture(named: "claude-fixture-ui-token-usage")
+        launchApp(defaultParent: fixture.parent.path)
+        let taskID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Token usage task", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        let card = app.buttons["Token usage task"]
+        XCTAssertTrue(card.waitForExistence(timeout: 10))
+        let dot = element("task-token-usage-dot-\(taskID)")
+        XCTAssertTrue(dot.waitForExistence(timeout: 5), "A task card should carry its token usage dot.")
+        XCTAssertEqual(dot.label, "No tokens used yet", "A task with no turns reports no usage.")
+
+        card.rightClick()
+        element("token-stats-task-menu-item").click()
+        let emptyState = element("token-stats-empty")
+        XCTAssertTrue(emptyState.waitForExistence(timeout: 10), "Token Stats should say plainly that nothing has been recorded yet.")
+        XCTAssertFalse(element("token-stats-total").exists, "An empty task should show no totals.")
+        attachScreenshot(named: "Token Stats modal before any turns have run")
+        element("close-token-stats-button").click()
+        XCTAssertTrue(waitUntil({ !emptyState.exists }, timeout: 5))
+
+        // "Tell me a story." is one of the fixture's few branches that reports a
+        // task outcome, ending in exactly one Claude result message; an
+        // outcome-less prompt (like "inspect") makes Playhouse send several
+        // internal nudge turns in the same session, each contributing its own
+        // result and inflating this fixture's flat per-result usage.
+        _ = try runCLI(
+            ["conversation", "send", taskID, "--message", "Tell me a story."],
+            extraEnvironment: environment
+        )
+        _ = try runCLI(
+            ["conversation", "send", taskID, "--message", "Tell me a story."],
+            extraEnvironment: environment
+        )
+        // Two fixture turns of 1,600 tokens each.
+        XCTAssertTrue(waitUntil({ dot.label == "3K tokens used" }, timeout: 15), "The dot should report the accumulated total, not one turn's.")
+        attachScreenshot(named: "Task card shows its token usage dot beside the time counter")
+
+        card.rightClick()
+        let statsAction = element("token-stats-task-menu-item")
+        XCTAssertTrue(statsAction.waitForExistence(timeout: 5), "The task context menu should offer Token Stats.")
+        statsAction.click()
+
+        // The sheet's summary loads asynchronously (`.task`), so its text commits
+        // a moment after the element appears; assertText waits on the content.
+        // A SwiftUI Text reports its string as the accessibility value, not label.
+        let total = element("token-stats-total")
+        assertText("token-stats-total", equals: "3,200")
+        XCTAssertTrue(element("token-stats-tool-Bash").exists, "The rollup should name the tool the turns ran.")
+        let turnRows = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "token-stats-turn-"
+        ))
+        XCTAssertEqual(turnRows.count, 2, "Each recorded turn should have its own row.")
+        attachScreenshot(named: "Token Stats modal breaks usage down by tool and by turn")
+        element("close-token-stats-button").click()
+        XCTAssertTrue(waitUntil({ !total.exists }, timeout: 5), "Token Stats should close again.")
+
+        let summary = try XCTUnwrap(try runCLI(["task", "token-usage", taskID])["result"] as? [String: Any])
+        XCTAssertEqual(summary["totalTokens"] as? Int, 3_200)
+        XCTAssertEqual((summary["turns"] as? [[String: Any]])?.count, 2)
+    }
+
+    // case-contract: test_task_token_usage_records_codex_turn_breakdown | A Codex app-server fixture turn's usage reaches the same per-task totals and per-turn breakdown through Codex's own wire shape, mapping its cached-input bucket onto Playhouse's cache-read bucket and leaving cache-write at zero. The recorded turn row names Codex as its provider, and the Token Stats modal shows those Codex totals in the app.
+    func test_task_token_usage_records_codex_turn_breakdown() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Codex token usage", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Codex token usage")
+        let card = app.buttons["Codex token usage"]
+        XCTAssertTrue(card.waitForExistence(timeout: 10))
+
+        // A bare send only reports its usage once the terminal `turn/completed`
+        // notification arrives, and the default fixture never emits one on its
+        // own for an ordinary prompt — it waits for Playhouse to report an
+        // outcome while the turn is held, exactly like `complete_fixture_turn`
+        // drives it in the CLI/XPC suite. Reproduce that hold/outcome/release
+        // dance here so the turn actually completes.
+        let executable = dataDirectory.appendingPathComponent("codex-fixture-token-usage")
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8)
+            .write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
+        let holdMarker = URL(fileURLWithPath: executable.path + ".hold-release")
+        let activeMarker = URL(fileURLWithPath: executable.path + ".turn-active")
+        let releaseMarker = URL(fileURLWithPath: executable.path + ".turn-release")
+        try Data().write(to: holdMarker)
+        try? FileManager.default.removeItem(at: activeMarker)
+        try? FileManager.default.removeItem(at: releaseMarker)
+
+        let process = try startCLIProcess(
+            ["conversation", "send", taskID, "--message", "Complete this task.", "--answer", "color=Blue", "--answer", "token=fixture-secret"],
+            extraEnvironment: ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": executable.path]
+        )
+        defer {
+            if process.process.isRunning {
+                try? "Release the active turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+                process.process.waitUntilExit()
+            }
+            try? FileManager.default.removeItem(at: activeMarker)
+            try? FileManager.default.removeItem(at: releaseMarker)
+            try? FileManager.default.removeItem(at: holdMarker)
+        }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The fixture should hold the turn open for a CLI outcome report.")
+        let outcome = try runCLI(["task", "outcome", taskID, "completed"])
+        XCTAssertEqual((outcome["result"] as? [String: Any])?["outcome"] as? String, "completed")
+        try "Release the completed fixture turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+        _ = try finishCLIProcess(process)
+
+        // One Codex fixture turn of 1,300 tokens.
+        let dot = element("task-token-usage-dot-\(taskID)")
+        XCTAssertTrue(waitUntil({ dot.exists && dot.label == "1K tokens used" }, timeout: 15), "A Codex turn's usage should reach the card's dot.")
+
+        card.rightClick()
+        element("token-stats-task-menu-item").click()
+        assertText("token-stats-total", equals: "1,300")
+        attachScreenshot(named: "Token Stats modal shows a Codex turn's usage")
+        element("close-token-stats-button").click()
+
+        let summary = try XCTUnwrap(try runCLI(["task", "token-usage", taskID])["result"] as? [String: Any])
+        let usage = try XCTUnwrap(summary["usage"] as? [String: Any])
+        XCTAssertEqual(usage["cacheReadTokens"] as? Int, 250, "Codex's cached input maps onto the cache-read bucket.")
+        XCTAssertEqual(usage["cacheCreationTokens"] as? Int, 0, "Codex reports no cache-write bucket.")
+        XCTAssertEqual((summary["turns"] as? [[String: Any]])?.first?["provider"] as? String, "codex")
+    }
+
+    // case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to one million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's usage dot re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
+    func test_settings_token_usage_color_max_round_trip() throws {
+        let environment = try installClaudeFixture(named: "claude-fixture-ui-token-max")
+        launchApp(defaultParent: fixture.parent.path)
+        let taskID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Dot heat task", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        XCTAssertTrue(app.buttons["Dot heat task"].waitForExistence(timeout: 10))
+        // "Tell me a story." reports a task outcome, so it ends in exactly one
+        // Claude result message instead of the several internal nudge turns an
+        // outcome-less prompt would trigger in the same session.
+        _ = try runCLI(
+            ["conversation", "send", taskID, "--message", "Tell me a story."],
+            extraEnvironment: environment
+        )
+        let dot = element("task-token-usage-dot-\(taskID)")
+        XCTAssertTrue(waitUntil({ dot.exists && dot.label == "1K tokens used" }, timeout: 15))
+
+        XCTAssertEqual(
+            (try runCLI(["settings", "get"])["result"] as? [String: Any])?["tokenUsageColorMax"] as? Int, 1_000_000,
+            "The dot's scale tops out at a million tokens by default."
+        )
+        XCTAssertTrue(waitUntil({ self.isGreenDominant(dot) }, timeout: 10), "1,600 tokens of a million should still read as cool green.")
+        attachScreenshot(named: "Usage dot reads green against the default million-token ceiling")
+
+        app.typeKey(",", modifierFlags: .command)
+        let preferences = settingsWindow
+        XCTAssertTrue(preferences.waitForExistence(timeout: 10), "Workspace Settings did not open.")
+        let maxField = preferences.descendants(matching: .any)
+            .matching(identifier: "token-usage-color-max-field").firstMatch
+        XCTAssertTrue(maxField.waitForExistence(timeout: 5), "Settings should expose the token usage maximum.")
+        XCTAssertEqual(maxField.value as? String, "1,000,000", "The field should show the stored maximum.")
+        attachScreenshot(named: "Workspace Settings exposes the token usage color maximum")
+        maxField.click()
+        maxField.typeKey("a", modifierFlags: .command)
+        maxField.typeText("1600\r")
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["settings", "get"])["result"] as? [String: Any])?["tokenUsageColorMax"] as? Int) == 1_600
+        }, timeout: 10), "An edited maximum should save through the same settings manager the CLI reads.")
+        app.typeKey("w", modifierFlags: .command)
+        XCTAssertTrue(waitUntil({ !preferences.exists }, timeout: 5))
+
+        XCTAssertTrue(waitUntil({ self.isRedDominant(dot) }, timeout: 10), "The same usage should read hot once it reaches the ceiling.")
+        attachScreenshot(named: "Usage dot turns red once the ceiling drops to the task's own usage")
+
+        assertCLIError(
+            try runCLI(["settings", "set-token-usage-color-max", "0"], expectedStatus: 2),
+            code: "invalid_argument"
+        )
+        XCTAssertEqual(
+            (try runCLI(["settings", "get"])["result"] as? [String: Any])?["tokenUsageColorMax"] as? Int, 1_600,
+            "A rejected maximum should leave the stored one alone."
+        )
+    }
+
     /// The real provider selected for opt-in live UI cases, or nil for the
     /// deterministic fixture suite. The runner writes it to the marker file.
     private var liveProvider: String? {
@@ -11592,6 +11772,35 @@ final class PlayhouseUITests: XCTestCase {
         let source = card.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
         let doneTarget = board.coordinate(withNormalizedOffset: CGVector(dx: 0.985, dy: 0.5))
         source.press(forDuration: 0.5, thenDragTo: doneTarget)
+    }
+
+    /// Installs the Claude Code protocol fixture for this case and returns the
+    /// environment a CLI-driven turn needs. Must run before `launchApp` so the
+    /// app's own turns use it too.
+    private func installClaudeFixture(named name: String) throws -> [String: String] {
+        let executable = dataDirectory.appendingPathComponent(name)
+        try FileManager.default.copyItem(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8).write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
+        )
+        claudeFixtureExecutable = executable.path
+        return ["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": executable.path]
+    }
+
+    /// The usage dot is one flat hue, so the dominant channel says where on the
+    /// green-to-red heatmap it currently sits.
+    private func isGreenDominant(_ element: XCUIElement) -> Bool {
+        let image = element.screenshot().image
+        return pixelCount(in: image) { $0.greenComponent > $0.redComponent + 0.15 } > 4
+    }
+
+    private func isRedDominant(_ element: XCUIElement) -> Bool {
+        let image = element.screenshot().image
+        return pixelCount(in: image) { $0.redComponent > $0.greenComponent + 0.15 } > 4
     }
 
     private func assertPixel(_ image: NSImage, normalizedX: CGFloat, normalizedY: CGFloat, rgb expected: (Int, Int, Int), accuracy: Int = 8, file: StaticString = #filePath, line: UInt = #line) {

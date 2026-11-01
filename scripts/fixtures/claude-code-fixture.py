@@ -29,7 +29,21 @@ SIMPLE_ANSWER = "OK."
 PENDING_QUESTION_SUCCESS_MARKER = "finish while a structured question remains pending"
 
 
+# Claude Code reports a turn's token cost on its `result` message. Every result
+# this fixture writes carries the same deterministic block, so a test can assert
+# exact per-turn and per-task totals.
+TURN_USAGE = {
+    "input_tokens": 1000,
+    "output_tokens": 200,
+    "cache_read_input_tokens": 300,
+    "cache_creation_input_tokens": 100,
+}
+TURN_USAGE_TOTAL = sum(TURN_USAGE.values())
+
+
 def write(value):
+    if isinstance(value, dict) and value.get("type") == "result" and "usage" not in value:
+        value = {**value, "usage": dict(TURN_USAGE)}
     sys.stdout.write(json.dumps(value) + "\n")
     sys.stdout.flush()
 

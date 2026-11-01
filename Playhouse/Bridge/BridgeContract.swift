@@ -96,6 +96,15 @@ enum BridgeValue: Codable, Equatable {
 
     var string: String? { if case .string(let value) = self { value } else { nil } }
     var bool: Bool? { if case .boolean(let value) = self { value } else { nil } }
+    var int: Int? {
+        switch self {
+        case .integer(let value): value
+        // A CLI argument arrives as text; JSON transports may also widen it.
+        case .decimal(let value): Int(exactly: value.rounded())
+        case .string(let value): Int(value.trimmingCharacters(in: .whitespaces))
+        default: nil
+        }
+    }
     var strings: [String]? {
         guard case .array(let values) = self else { return nil }
         let strings = values.compactMap(\.string)
