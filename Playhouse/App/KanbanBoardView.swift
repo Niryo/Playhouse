@@ -13,6 +13,7 @@ struct KanbanBoardView: View {
     @State private var selectedTask: BoardTask?
     @State private var isSelectedTaskNew = false
     @State private var taskBeingRenamed: BoardTask?
+    @State private var taskShowingTokenStats: BoardTask?
     @State private var taskBeingDeleted: BoardTask?
     @State private var isShowingDeleteConfirmation = false
     @State private var isDoneTargetActive = false
@@ -131,6 +132,14 @@ struct KanbanBoardView: View {
                     }
                     self.taskBeingRenamed = nil
                 }
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { taskShowingTokenStats != nil },
+            set: { if !$0 { taskShowingTokenStats = nil } }
+        )) {
+            if let taskShowingTokenStats {
+                TokenStatsSheet(taskID: taskShowingTokenStats.id, taskTitle: taskShowingTokenStats.title, modelContext: modelContext)
             }
         }
         .confirmationDialog(
@@ -382,6 +391,7 @@ struct KanbanBoardView: View {
                 taskBeingDeleted = $0
                 isShowingDeleteConfirmation = true
             },
+            onShowTaskTokenStats: { taskShowingTokenStats = $0 },
             draggedTaskID: $draggedTaskID,
             minHeight: minHeight
         )
@@ -1053,6 +1063,7 @@ private struct KanbanColumnView: View {
     let onOpenTask: (BoardTask) -> Void
     let onRenameTask: (BoardTask) -> Void
     let onDeleteTask: (BoardTask) -> Void
+    let onShowTaskTokenStats: (BoardTask) -> Void
     @Binding var draggedTaskID: UUID?
     let minHeight: CGFloat
 
@@ -1151,6 +1162,7 @@ private struct KanbanColumnView: View {
             onOpen: { onOpenTask(task) },
             onRename: { onRenameTask(task) },
             onDelete: { onDeleteTask(task) },
+            onShowTokenStats: { onShowTaskTokenStats(task) },
             onCreatePullRequests: { onCreatePullRequests(task) },
             onResolveConflicts: { onResolveConflicts(task) },
             isCreatingPullRequests: creatingPullRequestTaskIDs.contains(task.id),
@@ -1312,10 +1324,13 @@ private struct KanbanTaskDropDelegate: DropDelegate {
 }
 
 private struct TaskCardView: View {
+    @AppStorage(WorkspaceSettings.tokenUsageColorMaxKey, store: WorkspaceSettings.preferencesStore)
+    private var tokenUsageColorMax = WorkspaceSettings.defaultTokenUsageColorMax
     let task: BoardTask
     let onOpen: () -> Void
     let onRename: () -> Void
     let onDelete: () -> Void
+    let onShowTokenStats: () -> Void
     let onCreatePullRequests: () -> Void
     let onResolveConflicts: () -> Void
     let isCreatingPullRequests: Bool
@@ -1428,6 +1443,10 @@ private struct TaskCardView: View {
             .buttonHoverPointer()
             .help("Rename")
                 .accessibilityIdentifier("rename-task-menu-item")
+            Button("Token Stats…", systemImage: "chart.bar", action: onShowTokenStats)
+            .buttonHoverPointer()
+            .help("Token Stats")
+                .accessibilityIdentifier("token-stats-task-menu-item")
             Button("Delete Task", systemImage: "trash", role: .destructive, action: onDelete)
             .buttonHoverPointer()
             .help("Delete Task")
@@ -1461,9 +1480,19 @@ private struct TaskCardView: View {
                 Text(task.createdAt.formatted(date: .abbreviated, time: .omitted))
                     .font(.system(size: 10))
             }
+            tokenUsageDot
         }
         .foregroundStyle(.tertiary)
         .allowsHitTesting(false)
+    }
+
+    private var tokenUsageDot: some View {
+        Circle()
+            .fill(TokenUsageHeatmap.color(totalTokens: task.totalTokens, max: tokenUsageColorMax))
+            .frame(width: 8, height: 8)
+            .help(TokenUsageHeatmap.label(totalTokens: task.totalTokens))
+            .accessibilityIdentifier("task-token-usage-dot-\(task.id.uuidString)")
+            .accessibilityLabel(TokenUsageHeatmap.label(totalTokens: task.totalTokens))
     }
 
     @ViewBuilder
@@ -1573,6 +1602,165 @@ private struct TaskCardView: View {
         if hours < 24 { return "\(hours)h\(minutes % 60 == 0 ? "" : " \(minutes % 60)m")" }
         let days = hours / 24
         return "\(days)d\(hours % 24 == 0 ? "" : " \(hours % 24)h")"
+    }
+}
+
+/// A task's token accounting: the totals, the per-turn detail, and what each
+/// tool took part in.
+private struct TokenStatsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let taskID: UUID
+    let taskTitle: String
+    let modelContext: ModelContext
+    @State private var summary: TaskTokenUsageSummary?
+    @State private var didLoad = false
+
+    private static let number = IntegerFormatStyle<Int>().grouping(.automatic)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Token stats")
+                    .font(.system(size: 19, weight: .semibold, design: .rounded))
+                Text(taskTitle)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            if let summary, summary.totalTokens > 0 {
+                totals(summary)
+                Divider()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        tools(summary)
+                        turns(summary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 320)
+            } else if didLoad {
+                Text("No tokens recorded for this task yet.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("token-stats-empty")
+            }
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .buttonHoverPointer()
+                    .help("Done")
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityIdentifier("close-token-stats-button")
+            }
+        }
+        .padding(24)
+        .frame(width: 520)
+        // Reads the transcript once per sheet presentation rather than on every
+        // SwiftUI re-render of this view.
+        .task {
+            summary = try? BoardTaskManager(modelContext: modelContext).tokenUsageSummary(taskID)
+            didLoad = true
+        }
+    }
+
+    private func totals(_ summary: TaskTokenUsageSummary) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(summary.totalTokens.formatted(Self.number))
+                .font(.system(size: 30, weight: .semibold, design: .rounded))
+                .accessibilityIdentifier("token-stats-total")
+            let turnsTotal = summary.turns.reduce(0) { $0 + $1.totalTokens }
+            Text("tokens across \(summary.turnCount) \(summary.turnCount == 1 ? "turn" : "turns")")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            if turnsTotal != summary.totalTokens {
+                // A private recovery turn contributes to the total with no
+                // visible row, so the two numbers can legitimately differ;
+                // say so rather than let it read as a miscount.
+                Text("Includes tokens from private turns not shown below.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityIdentifier("token-stats-hidden-turns-note")
+            }
+            HStack(spacing: 18) {
+                bucket("Input", summary.usage.inputTokens)
+                bucket("Output", summary.usage.outputTokens)
+                bucket("Cache read", summary.usage.cacheReadTokens)
+                bucket("Cache write", summary.usage.cacheCreationTokens)
+            }
+        }
+    }
+
+    private func bucket(_ name: String, _ value: Int) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(name)
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+            Text(value.formatted(Self.number))
+                .font(.system(size: 13, weight: .medium))
+        }
+    }
+
+    @ViewBuilder
+    private func tools(_ summary: TaskTokenUsageSummary) -> some View {
+        if !summary.tools.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("By tool, skill and MCP")
+                    .font(.system(size: 12, weight: .semibold))
+                // Providers report usage once per turn, so a turn's cost counts
+                // toward every tool that ran in it. Say so rather than implying
+                // these totals add up to the task total.
+                Text("Cost of the turns each ran in; turns with several tools count toward each.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                ForEach(summary.tools) { tool in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(tool.id)
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                        Spacer(minLength: 8)
+                        Text("\(tool.turnCount) \(tool.turnCount == 1 ? "turn" : "turns")")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                        Text(tool.totalTokens.formatted(Self.number))
+                            .font(.system(size: 11, weight: .medium))
+                            .monospacedDigit()
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("token-stats-tool-\(tool.id)")
+                }
+            }
+        }
+    }
+
+    private func turns(_ summary: TaskTokenUsageSummary) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("By turn")
+                .font(.system(size: 12, weight: .semibold))
+            ForEach(summary.turns) { turn in
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(turn.recordedAt.formatted(date: .abbreviated, time: .shortened))
+                            .font(.system(size: 11))
+                        Text(turn.provider.displayName)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                        Spacer(minLength: 8)
+                        Text(turn.totalTokens.formatted(Self.number))
+                            .font(.system(size: 11, weight: .medium))
+                            .monospacedDigit()
+                    }
+                    if !turn.tools.isEmpty {
+                        Text(turn.tools.joined(separator: " · "))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("token-stats-turn-\(turn.id)")
+            }
+        }
     }
 }
 

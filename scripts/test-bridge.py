@@ -8154,6 +8154,111 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse(entries["tracked.txt"]["isUncommitted"])
         self.assertNotIn("base-only.txt", entries)
 
+    def install_claude_fixture(self, name):
+        """Installs the Claude Code protocol fixture and returns its turn environment."""
+        source = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / name
+        shutil.copyfile(source, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        return {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+
+    # case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. The task card shows a token usage dot whose tooltip reports the total, and the Token Stats context-menu item opens a modal showing the totals, the per-tool rollup and the per-turn breakdown.
+    def test_task_token_usage_records_claude_turn_breakdown(self):
+        # Matches TURN_USAGE in scripts/fixtures/claude-code-fixture.py.
+        expected_turn_usage = {
+            "inputTokens": 1000, "outputTokens": 200, "cacheReadTokens": 300, "cacheCreationTokens": 100,
+        }
+        turn_total = sum(expected_turn_usage.values())
+        environment = self.install_claude_fixture("claude-fixture-token-usage")
+        task_id = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Claude token usage", "--root", self.primary, "--provider", "claude"
+        )[0])["id"]
+
+        empty = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])
+        self.assertEqual(empty["totalTokens"], 0, "A task with no turns has recorded no tokens.")
+        self.assertEqual(empty["turns"], [])
+        self.assertEqual(empty["tools"], [])
+
+        # "Tell me a story." is one of the fixture's few branches that reports a
+        # task outcome, so it ends in exactly one Claude `result` message; a
+        # prompt that leaves the outcome unreported (like "inspect") makes
+        # Playhouse send several internal nudge turns in the same session,
+        # each contributing its own `result` and inflating this fixture's
+        # flat per-result usage well past one turn's worth.
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Tell me a story.",
+            extra_environment=environment,
+        )[0])
+        first = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])
+        self.assertEqual(first["usage"], expected_turn_usage, "Claude's usage buckets should reach the task totals.")
+        self.assertEqual(first["totalTokens"], turn_total)
+        self.assertEqual(len(first["turns"]), 1, "The completed turn should be recorded once.")
+        turn = first["turns"][0]
+        self.assertEqual(turn["provider"], "claude")
+        self.assertEqual(turn["usage"], expected_turn_usage)
+        self.assertEqual(turn["totalTokens"], turn_total)
+        self.assertIn("Bash", turn["tools"], "The turn should name the tool it ran.")
+        self.assertEqual(
+            [tool for tool in first["tools"] if tool["id"] == "Bash"],
+            [{"id": "Bash", "turnCount": 1, "totalTokens": turn_total}],
+            "The rollup should credit the Bash tool with the turn it ran in.",
+        )
+
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Tell me a story.",
+            extra_environment=environment,
+        )[0])
+        second = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])
+        self.assertEqual(second["totalTokens"], turn_total * 2, "A second turn adds to the running total.")
+        self.assertEqual(second["usage"]["inputTokens"], expected_turn_usage["inputTokens"] * 2)
+        self.assertEqual(len(second["turns"]), 2, "Each turn keeps its own row.")
+        self.assertEqual(len({turn["id"] for turn in second["turns"]}), 2, "Turn rows must not share an id.")
+        self.assertTrue(
+            all(turn["totalTokens"] == turn_total for turn in second["turns"]),
+            "Each turn row should carry only its own cost.",
+        )
+
+    # case-contract: test_task_token_usage_records_codex_turn_breakdown | A Codex app-server fixture turn's usage reaches the same per-task totals and per-turn breakdown through Codex's own wire shape, mapping its cached-input bucket onto Playhouse's cache-read bucket and leaving cache-write at zero. The recorded turn row names Codex as its provider, and the Token Stats modal shows those Codex totals in the app.
+    def test_task_token_usage_records_codex_turn_breakdown(self):
+        # Matches TURN_USAGE in scripts/fixtures/codex-app-server-fixture.py.
+        expected_turn_usage = {
+            "inputTokens": 900, "outputTokens": 150, "cacheReadTokens": 250, "cacheCreationTokens": 0,
+        }
+        turn_total = sum(expected_turn_usage.values())
+        task_id = self.create_task(title="Codex token usage", roots=[self.primary])["id"]
+        self.complete_fixture_turn(task_id, executable_name="codex-fixture-token-usage")
+
+        summary = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])
+        self.assertEqual(
+            summary["usage"], expected_turn_usage,
+            "Codex's cached-input bucket should map onto cache read, with no cache-write bucket.",
+        )
+        self.assertEqual(summary["totalTokens"], turn_total)
+        self.assertEqual(len(summary["turns"]), 1)
+        self.assertEqual(summary["turns"][0]["provider"], "codex")
+        self.assertEqual(summary["turns"][0]["totalTokens"], turn_total)
+
+    # case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to one million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's usage dot re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
+    def test_settings_token_usage_color_max_round_trip(self):
+        settings = self.assert_success(self.call_cli("settings", "get")[0])
+        self.assertEqual(settings["tokenUsageColorMax"], 1_000_000, "The dot's scale tops out at a million tokens by default.")
+
+        updated = self.assert_success(self.call_cli("settings", "set-token-usage-color-max", "2400")[0])
+        self.assertEqual(updated["tokenUsageColorMax"], 2400)
+        self.assertEqual(
+            self.assert_success(self.call_cli("settings", "get")[0])["tokenUsageColorMax"], 2400,
+            "The edited maximum should survive a fresh read.",
+        )
+
+        response, _ = self.call_cli("settings", "set-token-usage-color-max", "0", expected_status=2)
+        self.assert_failure(response, "invalid_argument")
+        self.assertEqual(
+            self.assert_success(self.call_cli("settings", "get")[0])["tokenUsageColorMax"], 2400,
+            "A rejected maximum should leave the stored one alone.",
+        )
 
 
 class TimedTestResult(unittest.TextTestResult):

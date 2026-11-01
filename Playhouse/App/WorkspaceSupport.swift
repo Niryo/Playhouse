@@ -61,6 +61,8 @@ enum WorkspaceSettings {
     static let lastSelectedRepositoriesKey = "lastSelectedRepositories"
     static let appearanceKey = "appearance"
     static let defaultConversationProviderKey = "defaultConversationProvider"
+    static let tokenUsageColorMaxKey = "tokenUsageColorMax"
+    static let defaultTokenUsageColorMax = TokenUsageHeatmap.defaultColorMax
 
     static var preferencesStore: UserDefaults {
         #if DEBUG
@@ -233,6 +235,18 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
 
     var isActive: Bool { status.lowercased() == "inprogress" || status.lowercased() == "running" }
 
+    /// How this call is named in a task's token breakdown: an MCP call by
+    /// `server/tool`, a subagent by the agent it ran, anything else by its tool
+    /// name. Falls back to the visible title so a call is never counted as "".
+    var tokenUsageLabel: String {
+        if toolKind == "mcp", let server {
+            return tool.map { "\(server)/\($0)" } ?? server
+        }
+        if let agentPath, !agentPath.isEmpty { return "Agent: \(agentPath)" }
+        if let tool, !tool.isEmpty { return tool }
+        return title
+    }
+
     func durationLabel(at now: Date = .now) -> String? {
         if let durationMs {
             return "Duration · \(durationMs) ms"
@@ -323,6 +337,10 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
                 title: command.isEmpty ? "Running command" : "Running \(command)",
                 detail: detail,
                 status: status,
+                // Named to match Claude's equivalent built-in tool, so the token
+                // usage breakdown groups the same kind of work the same way
+                // regardless of which provider ran it.
+                tool: "Bash",
                 durationMs: item["durationMs"] as? Int ?? measuredDurationMs,
                 startedAt: startedAt,
                 turnID: turnID
@@ -335,13 +353,14 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
                 title: paths.isEmpty ? "Editing files" : "Editing \(paths.count) \(paths.count == 1 ? "file" : "files")",
                 detail: paths.joined(separator: ", "),
                 status: status,
+                tool: "Edit",
                 durationMs: item["durationMs"] as? Int ?? measuredDurationMs,
                 startedAt: startedAt
             )
         case "webSearch":
-            return ConversationActivity(id: id, title: "Searching the web", detail: item["query"] as? String ?? "", status: status, durationMs: item["durationMs"] as? Int ?? measuredDurationMs, startedAt: startedAt)
+            return ConversationActivity(id: id, title: "Searching the web", detail: item["query"] as? String ?? "", status: status, tool: "WebSearch", durationMs: item["durationMs"] as? Int ?? measuredDurationMs, startedAt: startedAt)
         case "imageView":
-            return ConversationActivity(id: id, title: "Viewing image", detail: item["path"] as? String ?? "", status: status, durationMs: item["durationMs"] as? Int ?? measuredDurationMs, startedAt: startedAt)
+            return ConversationActivity(id: id, title: "Viewing image", detail: item["path"] as? String ?? "", status: status, tool: "ViewImage", durationMs: item["durationMs"] as? Int ?? measuredDurationMs, startedAt: startedAt)
         case "mcpToolCall":
             let server = item["server"] as? String
             let tool = item["tool"] as? String
@@ -399,7 +418,7 @@ struct ConversationActivity: Codable, Identifiable, Equatable {
                 return [agentStatus, message].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ": ")
             }
             let detail = ([prompt] + stateDetails).filter { !$0.isEmpty }.joined(separator: "\n")
-            return ConversationActivity(id: id, title: "Task delegated to subagent", detail: detail, status: status, durationMs: item["durationMs"] as? Int ?? measuredDurationMs, startedAt: startedAt)
+            return ConversationActivity(id: id, title: "Task delegated to subagent", detail: detail, status: status, tool: "Agent", durationMs: item["durationMs"] as? Int ?? measuredDurationMs, startedAt: startedAt)
         default:
             return nil
         }
@@ -1451,7 +1470,9 @@ struct FlowLayout: Layout {
 struct WorkspaceSettingsView: View {
     @AppStorage(WorkspaceSettings.defaultParentFolderKey, store: WorkspaceSettings.preferencesStore) private var defaultParentFolderPath = ""
     @State private var appearance = WorkspaceSettings.preferencesStore.string(forKey: WorkspaceSettings.appearanceKey) ?? "dark"
+    @State private var tokenUsageColorMax = WorkspaceSettingsManager().tokenUsageColorMax
     @State private var pickerError: String?
+    @State private var tokenUsageError: String?
 
     private var parentFolderURL: URL? {
         WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath)
@@ -1476,6 +1497,30 @@ struct WorkspaceSettingsView: View {
                 }
                 .accessibilityIdentifier("appearance-picker")
                 .accessibilityValue(appearance)
+            }
+            Section("Token usage") {
+                Text("A task card's dot warms from green to red as the task's token use approaches this total.")
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 10) {
+                    Text("Red at")
+                    TextField("Tokens", value: Binding(
+                        get: { tokenUsageColorMax },
+                        set: { value in
+                            do {
+                                try WorkspaceSettingsManager().setTokenUsageColorMax(value)
+                                tokenUsageColorMax = value
+                            } catch {
+                                tokenUsageError = error.localizedDescription
+                            }
+                        }
+                    ), format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 120)
+                    .accessibilityIdentifier("token-usage-color-max-field")
+                    Text("tokens")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
             }
             Section("Repository root") {
                 Text("Choose the root folder that contains your repositories. Playhouse searches below it for repository suggestions, and a valid root is required before sending a conversation.")
@@ -1526,11 +1571,13 @@ struct WorkspaceSettingsView: View {
                    updatedAppearance != appearance {
                     appearance = updatedAppearance
                 }
+                let updatedMax = WorkspaceSettingsManager().tokenUsageColorMax
+                if updatedMax != tokenUsageColorMax { tokenUsageColorMax = updatedMax }
                 try? await Task.sleep(for: .milliseconds(250))
             }
         }
         .formStyle(.grouped)
-        .frame(width: 560, height: 320)
+        .frame(width: 560, height: 420)
         .preferredColorScheme(appearance == "light" ? .light : .dark)
         .alert("Couldn't choose folder", isPresented: Binding(
             get: { pickerError != nil },
@@ -1541,6 +1588,16 @@ struct WorkspaceSettingsView: View {
             .help("Dismiss folder error")
         } message: {
             Text(pickerError ?? "Please try again.")
+        }
+        .alert("Couldn't save token usage setting", isPresented: Binding(
+            get: { tokenUsageError != nil },
+            set: { if !$0 { tokenUsageError = nil } }
+        )) {
+            Button("OK", role: .cancel) { tokenUsageError = nil }
+            .buttonHoverPointer()
+            .help("Dismiss token usage setting error")
+        } message: {
+            Text(tokenUsageError ?? "Please try again.")
         }
     }
 

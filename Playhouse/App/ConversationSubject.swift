@@ -1,6 +1,57 @@
 import Foundation
 import SwiftData
 
+/// Token counts a provider reported for one completed turn.
+///
+/// Both runtimes bill the same four buckets, so the breakdown is stored in
+/// Playhouse's own shape rather than either provider's wire spelling. Defined
+/// here rather than beside its other conversation-model siblings because
+/// `scripts/seed-task-pr-link.swift` compiles this file and `BoardTask.swift`
+/// standalone and must not gain a dependency on the rest of the app module.
+struct ConversationTokenUsage: Codable, Equatable, Sendable {
+    var inputTokens = 0
+    var outputTokens = 0
+    var cacheReadTokens = 0
+    var cacheCreationTokens = 0
+
+    var totalTokens: Int { inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens }
+    var isEmpty: Bool { totalTokens == 0 }
+
+    static func + (lhs: Self, rhs: Self) -> Self {
+        Self(
+            inputTokens: lhs.inputTokens + rhs.inputTokens,
+            outputTokens: lhs.outputTokens + rhs.outputTokens,
+            cacheReadTokens: lhs.cacheReadTokens + rhs.cacheReadTokens,
+            cacheCreationTokens: lhs.cacheCreationTokens + rhs.cacheCreationTokens
+        )
+    }
+
+    /// Reads a provider's `usage` object. Claude Code reports
+    /// `input_tokens`/`cache_read_input_tokens`; the Codex app-server reports
+    /// the same counts as `cached_input_tokens` and in camelCase, so both
+    /// spellings are accepted for each bucket.
+    init(providerPayload: [String: Any]) {
+        func count(_ names: [String]) -> Int {
+            for name in names {
+                if let value = providerPayload[name] as? Int { return max(0, value) }
+                if let value = providerPayload[name] as? Double { return max(0, Int(value)) }
+            }
+            return 0
+        }
+        inputTokens = count(["input_tokens", "inputTokens"])
+        outputTokens = count(["output_tokens", "outputTokens"])
+        cacheReadTokens = count(["cache_read_input_tokens", "cacheReadInputTokens", "cached_input_tokens", "cachedInputTokens"])
+        cacheCreationTokens = count(["cache_creation_input_tokens", "cacheCreationInputTokens"])
+    }
+
+    init(inputTokens: Int = 0, outputTokens: Int = 0, cacheReadTokens: Int = 0, cacheCreationTokens: Int = 0) {
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.cacheReadTokens = cacheReadTokens
+        self.cacheCreationTokens = cacheCreationTokens
+    }
+}
+
 /// The state a conversation turn needs, independent of what owns the conversation.
 ///
 /// `BoardTask` and `StandaloneChat` are different creatures: a task is a board card with
@@ -39,6 +90,12 @@ protocol ConversationSubject: AnyObject, Observable {
     var draftImageDataURLsData: Data? { get set }
     var conversationActivityDurationsData: Data? { get set }
     var answeredAsyncQuestionIDsData: Data? { get set }
+
+    /// Running token totals across every turn this conversation has run.
+    var totalInputTokens: Int { get set }
+    var totalOutputTokens: Int { get set }
+    var totalCacheReadTokens: Int { get set }
+    var totalCacheCreationTokens: Int { get set }
 
     /// Workspace roots the turn may read. Empty for a standalone chat, which runs with no
     /// repository or worktree context.
@@ -124,6 +181,25 @@ extension ConversationSubject {
         }
     }
 
+    var tokenUsage: ConversationTokenUsage {
+        get {
+            ConversationTokenUsage(
+                inputTokens: totalInputTokens,
+                outputTokens: totalOutputTokens,
+                cacheReadTokens: totalCacheReadTokens,
+                cacheCreationTokens: totalCacheCreationTokens
+            )
+        }
+        set {
+            totalInputTokens = newValue.inputTokens
+            totalOutputTokens = newValue.outputTokens
+            totalCacheReadTokens = newValue.cacheReadTokens
+            totalCacheCreationTokens = newValue.cacheCreationTokens
+        }
+    }
+
+    var totalTokens: Int { tokenUsage.totalTokens }
+
     var currentInProgressSeconds: Double {
         totalInProgressSeconds + (status == .inProgress ? max(0, Date.now.timeIntervalSince(inProgressStartedAt ?? .now)) : 0)
     }
@@ -158,6 +234,10 @@ final class StandaloneChat {
     var draftImageDataURLsData: Data?
     var conversationActivityDurationsData: Data?
     var answeredAsyncQuestionIDsData: Data?
+    var totalInputTokens: Int = 0
+    var totalOutputTokens: Int = 0
+    var totalCacheReadTokens: Int = 0
+    var totalCacheCreationTokens: Int = 0
 
     init(provider: ConversationProvider = .codex) {
         id = UUID()

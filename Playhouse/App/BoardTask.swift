@@ -30,6 +30,44 @@ enum TaskStatus: String, CaseIterable, Identifiable {
     }
 }
 
+/// The heatmap a task's token usage dot is read from: a light green at zero
+/// warming through orange to red as usage approaches the configured maximum.
+enum TokenUsageHeatmap {
+    /// Canonical default ceiling, defined here rather than in `WorkspaceSettings`
+    /// (`WorkspaceSupport.swift`) because `scripts/seed-task-pr-link.swift`
+    /// compiles `BoardTask.swift` standalone as a small seeding utility and must
+    /// not gain a dependency on the rest of the app module.
+    static let defaultColorMax = 1_000_000
+
+    /// Hue in SwiftUI's 0...1 space: 0.33 is green, 0.0 is red. Orange falls out
+    /// of the interpolation between them, so the scale reads as one ramp.
+    private static let greenHue = 0.33
+    private static let redHue = 0.0
+
+    static func color(totalTokens: Int, max: Int) -> Color {
+        // Matches WorkspaceSettingsManager.tokenUsageColorMax's own fallback, so
+        // a stored zero or negative value reads the same here as it does there
+        // instead of this view alone forcing the dot to full red.
+        let ceiling = max > 0 ? max : defaultColorMax
+        let fraction = Swift.min(1, Swift.max(0, Double(totalTokens) / Double(ceiling)))
+        return Color(
+            hue: greenHue + (redHue - greenHue) * fraction,
+            // A pale green at zero deepens as it warms, so low usage stays quiet.
+            saturation: 0.45 + 0.45 * fraction,
+            brightness: 0.80
+        )
+    }
+
+    static func label(totalTokens: Int) -> String {
+        switch totalTokens {
+        case 0: "No tokens used yet"
+        case ..<1_000: "\(totalTokens) tokens used"
+        case ..<1_000_000: "\(totalTokens / 1_000)K tokens used"
+        default: String(format: "%.1fM tokens used", Double(totalTokens) / 1_000_000)
+        }
+    }
+}
+
 /// The agent runtime that executes a task's conversation turns.
 enum ConversationProvider: String, Codable, CaseIterable, Identifiable, Sendable {
     case codex
@@ -102,6 +140,10 @@ final class BoardTask {
     var conversationActivityDurationsData: Data?
     var answeredAsyncQuestionIDsData: Data?
     var viewedWorkspaceChangesData: Data?
+    var totalInputTokens: Int = 0
+    var totalOutputTokens: Int = 0
+    var totalCacheReadTokens: Int = 0
+    var totalCacheCreationTokens: Int = 0
     /// Legacy marker from when the standalone chat was a hidden board task. Nothing reads it
     /// for behavior; it exists so `migrateLegacyStandaloneChatTasks()` can find those rows and
     /// convert them to `StandaloneChat`. The original column name is preserved so the migration

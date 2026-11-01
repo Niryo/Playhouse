@@ -2651,6 +2651,75 @@ final class BoardTaskManager {
         return (try? JSONDecoder().decode([String: Int].self, from: data)) ?? [:]
     }
 
+    /// Adds one turn's reported cost to the task's running totals and to its
+    /// per-turn breakdown. A logical turn can report several times (Claude owes
+    /// a result per background-task wake), so a repeat for the same turn adds to
+    /// that turn's row rather than replacing it.
+    /// Writes the per-turn transcript row before the task's running totals, so a
+    /// failure between the two steps leaves the totals behind the visible
+    /// breakdown rather than ahead of it: the modal (which reads the rows) and
+    /// the diagnostics log both see the gap, instead of the dot silently
+    /// counting a turn that never appears in the breakdown.
+    func recordTokenUsage(taskID: UUID, provider: ConversationProvider, report: ConversationTurnUsageReport) async throws {
+        guard !report.usage.isEmpty else { return }
+        if let turnID = report.turnID {
+            try conversationTranscriptStore().mutate(taskID) { transcript in
+                var rows = transcript.tokenUsage ?? []
+                if let index = rows.firstIndex(where: { $0.id == turnID }) {
+                    rows[index].usage = rows[index].usage + report.usage
+                    rows[index].toolLabels = Array(Set(rows[index].toolLabels).union(report.toolLabels)).sorted()
+                } else {
+                    rows.append(ConversationTranscript.TurnTokenUsage(
+                        id: turnID,
+                        provider: provider,
+                        recordedAt: .now,
+                        usage: report.usage,
+                        toolLabels: report.toolLabels.sorted()
+                    ))
+                }
+                transcript.tokenUsage = rows
+            }
+        }
+        try await withTaskOperationLock(taskID) {
+            let task = try self.requireSubject(taskID)
+            task.tokenUsage = task.tokenUsage + report.usage
+            try await self.saveTaskContext(taskID: taskID)
+        }
+        PlayhouseDiagnostics.record("task.token_usage.recorded", fields: [
+            "taskID": taskID.uuidString,
+            "provider": provider.rawValue,
+            "turnID": report.turnID ?? "",
+            "totalTokens": String(report.usage.totalTokens),
+        ])
+    }
+
+    func tokenUsageSummary(_ id: UUID) throws -> TaskTokenUsageSummary {
+        let task = try requireSubject(id)
+        let rows = (try? conversationTranscriptStore().read(id).tokenUsage) ?? []
+        var turnsByTool: [String: (turnCount: Int, totalTokens: Int)] = [:]
+        for row in rows {
+            for label in Set(row.toolLabels) {
+                let running = turnsByTool[label] ?? (0, 0)
+                turnsByTool[label] = (running.turnCount + 1, running.totalTokens + row.usage.totalTokens)
+            }
+        }
+        return TaskTokenUsageSummary(
+            taskID: id,
+            usage: task.tokenUsage,
+            turns: rows.map {
+                TaskTokenUsageSummary.Turn(
+                    id: $0.id, provider: $0.provider, recordedAt: $0.recordedAt,
+                    usage: $0.usage, tools: $0.toolLabels
+                )
+            },
+            tools: turnsByTool
+                .map { TaskTokenUsageSummary.Tool(id: $0.key, turnCount: $0.value.turnCount, totalTokens: $0.value.totalTokens) }
+                .sorted { lhs, rhs in
+                    lhs.totalTokens != rhs.totalTokens ? lhs.totalTokens > rhs.totalTokens : lhs.id < rhs.id
+                }
+        )
+    }
+
     func answeredAsyncQuestionIDs(taskID: UUID) throws -> [String] {
         try requireSubject(taskID).answeredAsyncQuestionIDs
     }
@@ -3428,6 +3497,27 @@ final class WorkspaceSettingsManager {
         }
         defaults.set(value, forKey: WorkspaceSettings.appearanceKey)
         PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "appearance", "value": value])
+    }
+
+    /// The token total a task's usage dot reaches full red at. Everything below
+    /// shades from green through orange toward it.
+    var tokenUsageColorMax: Int {
+        let stored = defaults.integer(forKey: WorkspaceSettings.tokenUsageColorMaxKey)
+        return stored > 0 ? stored : WorkspaceSettings.defaultTokenUsageColorMax
+    }
+
+    func setTokenUsageColorMax(_ value: Int) throws {
+        PlayhouseDiagnostics.record("settings.write.started", fields: ["setting": "tokenUsageColorMax", "value": String(value)])
+        guard value > 0 else {
+            PlayhouseDiagnostics.record("settings.write.failed", fields: [
+                "setting": "tokenUsageColorMax",
+                "value": String(value),
+                "errorCode": "invalid_argument"
+            ])
+            throw BridgeCommandError(code: "invalid_argument", message: "The token usage color maximum must be greater than zero.")
+        }
+        defaults.set(value, forKey: WorkspaceSettings.tokenUsageColorMaxKey)
+        PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "tokenUsageColorMax", "value": String(value)])
     }
 
     /// The provider new tasks start with. Codex until the user chooses otherwise.
@@ -6216,6 +6306,26 @@ final class ConversationManager {
                         self.recordCodexTurnStarted(taskID: taskID, segmentID: segment.segmentID, turnID: turnID, modelID: modelID)
                     }
                 },
+                onTokenUsage: { report in
+                    // A private recovery turn still costs tokens, so the task's
+                    // totals include it, but its per-turn row is withheld for the
+                    // same reason its activity and messages are.
+                    let isHidden = hideSensitiveRecoveryPrompt || hideInternalOutcomeReminder
+                    let attributed = ConversationTurnUsageReport(
+                        turnID: isHidden ? nil : (provider == .claude ? claudeTurnID : report.turnID),
+                        usage: report.usage,
+                        toolLabels: isHidden ? [] : report.toolLabels
+                    )
+                    Task { @MainActor in
+                        do {
+                            try await self.tasks.recordTokenUsage(taskID: taskID, provider: provider, report: attributed)
+                        } catch {
+                            var fields = PlayhouseDiagnostics.errorFields(error)
+                            fields["taskID"] = taskID.uuidString
+                            PlayhouseDiagnostics.record("task.token_usage.record_failed", fields: fields)
+                        }
+                    }
+                },
                 sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
                 hideSensitiveRecoveryPrompt: hideSensitiveRecoveryPrompt
             )
@@ -6765,6 +6875,9 @@ final class PlayhouseBridgeRuntime {
             case "task.get", "task.show":
                 let taskID = try request.requiredUUID("taskID")
                 result = try Self.value(taskManager.get(taskID))
+            case "task.token-usage":
+                let taskID = try request.requiredUUID("taskID")
+                result = try Self.value(taskManager.tokenUsageSummary(taskID))
             case "task.move":
                 let taskID = try request.requiredUUID("taskID")
                 let status = try request.requiredString("status")
@@ -6993,8 +7106,12 @@ final class PlayhouseBridgeRuntime {
                     "defaultParentAvailable": .boolean(settings.defaultParentFolderURL != nil),
                     "lastSelectedRepositories": .array(settings.lastSelectedRepositories.map(BridgeValue.string)),
                     "appearance": .string(settings.appearance),
-                    "defaultProvider": .string(settings.defaultConversationProvider.rawValue)
+                    "defaultProvider": .string(settings.defaultConversationProvider.rawValue),
+                    "tokenUsageColorMax": .integer(settings.tokenUsageColorMax)
                 ])
+            case "settings.set-token-usage-color-max":
+                try settings.setTokenUsageColorMax(request.requiredInt("max"))
+                result = .object(["tokenUsageColorMax": .integer(settings.tokenUsageColorMax)])
             case "settings.set-default-provider":
                 try settings.setDefaultConversationProvider(request.requiredString("provider"))
                 result = .object(["defaultProvider": .string(settings.defaultConversationProvider.rawValue)])
@@ -7422,6 +7539,13 @@ private extension BridgeRequest {
     func requiredString(_ name: String) throws -> String {
         guard let value = arguments[name]?.string, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw BridgeCommandError(code: "invalid_argument", message: "Missing required argument: \(name).")
+        }
+        return value
+    }
+
+    func requiredInt(_ name: String) throws -> Int {
+        guard let value = arguments[name]?.int else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Missing or non-numeric required argument: \(name).")
         }
         return value
     }

@@ -64,7 +64,21 @@ def own_user_text(message):
     return text
 
 
+# The app-server reports a turn's cost on its terminal notification. Codex names
+# its cached bucket `cached_input_tokens` and has no cache-write bucket, so the
+# totals differ from the Claude fixture's on purpose.
+TURN_USAGE = {
+    "input_tokens": 900,
+    "output_tokens": 150,
+    "cached_input_tokens": 250,
+}
+TURN_USAGE_TOTAL = sum(TURN_USAGE.values())
+
+
 def write(value):
+    if (isinstance(value, dict) and value.get("method") == "turn/completed"
+            and "usage" not in value.get("params", {})):
+        value = {**value, "params": {**value["params"], "usage": dict(TURN_USAGE)}}
     sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
     sys.stdout.flush()
 
