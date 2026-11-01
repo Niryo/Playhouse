@@ -4644,6 +4644,9 @@ final class ConversationManager {
         guard task.status != .done else {
             throw PlayhouseManagerError.invalidTransition("Done tasks are closed. Create a new task to use another provider.")
         }
+        // The user's explicit choice becomes the default for the next task or
+        // chat, so a provider switch doesn't keep reverting to Codex.
+        try? settingsManager.setDefaultConversationProvider(provider.rawValue)
         guard task.conversationProvider != provider else { return BoardTaskRecord(task: task) }
         guard task.hasConversation else {
             return try await tasks.setConversationProvider(taskID, provider: provider)

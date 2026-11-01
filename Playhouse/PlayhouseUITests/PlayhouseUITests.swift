@@ -5795,7 +5795,7 @@ final class PlayhouseUITests: XCTestCase {
         try exerciseRejectedStop(provider: "claude", title: "Claude rejected stop")
     }
 
-    // case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC.
+    // case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC. Switching a task's provider also updates the sticky default provider for new tasks and chats.
     func test_conversation_provider_selection_persists_and_validates() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -5821,6 +5821,13 @@ final class PlayhouseUITests: XCTestCase {
         claudeChoice.click()
         XCTAssertTrue(waitUntil({ providerMenu.label.contains("Claude") }, timeout: 10), "A task without a conversation switches immediately.")
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["conversationProvider"] as? String) == "claude" }, timeout: 10))
+        XCTAssertTrue(waitUntil({
+            guard let settings = try? self.runCLI(["settings", "get"]) else { return false }
+            return (settings["result"] as? [String: Any])?["defaultProvider"] as? String == "claude"
+        }, timeout: 10), "Switching a task's provider updates the sticky default for new tasks and chats.")
+        try createTaskFixture(title: "Provider follows switch UI", roots: [fixture.primary.path])
+        let providerFollowsSwitchTaskID = try self.taskID(named: "Provider follows switch UI")
+        XCTAssertEqual(try taskRecord(id: providerFollowsSwitchTaskID)?["conversationProvider"] as? String, "claude", "A new task defaults to the provider last chosen in any conversation, not Codex.")
         let claudeModelBeforeSelection = try runCLI(["conversation", "model", taskID])
         XCTAssertEqual((claudeModelBeforeSelection["result"] as? [String: Any])?["modelID"] as? String, nil, "Claude must not inherit the Codex model selection.")
         _ = try runCLI(["conversation", "model", taskID, "set", "claude-choice"])
