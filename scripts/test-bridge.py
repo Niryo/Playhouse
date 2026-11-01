@@ -4507,7 +4507,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(recovered_record["savedPrompt"], stale_prompt)
         self.assertIsNone(recovered_record.get("pendingSubmittedPrompt"))
 
-    # case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC.
+    # case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC. Switching a task's provider also updates the sticky default provider for new tasks and chats.
     def test_conversation_provider_selection_persists_and_validates(self):
         settings = self.assert_success(self.call_cli("settings", "get")[0])
         self.assertEqual(settings["defaultProvider"], "codex", "Existing installs keep Codex as the default provider.")
@@ -4534,6 +4534,15 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_failure(unknown_switch, "invalid_argument")
         switched = self.assert_success(self.call_cli("conversation", "provider", codex_task["id"], "set", "claude")[0])
         self.assertEqual(switched["conversationProvider"], "claude", "A task without a conversation switches immediately.")
+        self.assertEqual(
+            self.assert_success(self.call_cli("settings", "get")[0])["defaultProvider"], "claude",
+            "Switching a task's provider updates the sticky default for new tasks and chats."
+        )
+        provider_follows_switch_task = self.create_task("Provider follows switch task")
+        self.assertEqual(
+            provider_follows_switch_task["conversationProvider"], "claude",
+            "A new task defaults to the provider last chosen in any conversation, not Codex."
+        )
         self.assertIsNone(self.assert_success(self.call_cli("conversation", "model", codex_task["id"])[0])["modelID"], "Claude must not inherit the Codex model selection.")
         self.assert_success(self.call_cli("conversation", "model", codex_task["id"], "set", "claude-choice")[0])
         self.assertEqual(self.assert_success(self.call_cli("conversation", "provider", codex_task["id"], "set", "codex")[0])["conversationProvider"], "codex")

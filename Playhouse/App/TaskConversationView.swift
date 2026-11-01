@@ -786,6 +786,10 @@ struct TaskConversationView: View {
             } catch { errorMessage = "Couldn't load image: \(error.localizedDescription)" }
         }
         .task {
+            // Synchronous, so the picker shows the cached model name on the
+            // first frame instead of "Default" while the conversation and a
+            // fresh model list are still round-tripping through the bridge.
+            if !isReadOnly { primeModelOptionsFromCache() }
             if !isReadOnly { refreshQueuedMessages() }
             if !isReadOnly {
                 _ = try? await conversationManager.reconcileLifecycleStatusOnOpen(taskID: task.id)
@@ -3991,12 +3995,19 @@ struct TaskConversationView: View {
         annotations = restored
     }
 
-    private func loadModels() async {
+    /// Shows the cached provider model list and remembered selection without a
+    /// bridge round trip, so the picker never has to fall back to the literal
+    /// "Default" placeholder just because the live fetch hasn't returned yet.
+    private func primeModelOptionsFromCache() {
         selectedModelID = (try? conversationManager.modelID(taskID: task.id)) ?? ""
         selectedEffort = (try? conversationManager.effort(taskID: task.id)) ?? .medium
         if let cachedModels = try? conversationManager.cachedModels(taskID: task.id), !cachedModels.isEmpty {
             modelOptions = cachedModels.newestVersionPerFamily()
         }
+    }
+
+    private func loadModels() async {
+        primeModelOptionsFromCache()
         do {
             modelOptions = try await conversationManager.models(taskID: task.id)
             if !currentEffortChoices.contains(selectedEffort) {
