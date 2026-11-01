@@ -2030,7 +2030,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.width, 30, "The PR action should have a comfortable horizontal hit target.")
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.height, 30, "The PR action should have a comfortable vertical hit target.")
         assertHoverEmphasis(for: activeCreateButton)
-        XCTAssertEqual(activeCreateButton.label, "Create a pull request for each repository linked to this task")
+        XCTAssertEqual(activeCreateButton.label, "PR. Create a pull request for each repository linked to this task")
         assertNativeHelpPresentation(for: activeCreateButton)
         moveTaskToDone(taskID: taskID)
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
@@ -2040,7 +2040,7 @@ final class PlayhouseUITests: XCTestCase {
         let createButton = element("done-archive-create-pr-\(taskID)")
         XCTAssertTrue(createButton.waitForExistence(timeout: 5))
         assertHoverEmphasis(for: createButton)
-        XCTAssertEqual(createButton.label, "Create a pull request for each repository linked to this completed task")
+        XCTAssertEqual(createButton.label, "PR. Create a pull request for each repository linked to this completed task")
         assertNativeHelpPresentation(for: createButton)
         let operationLock = try TaskOperationLockBarrier(dataDirectory: dataDirectory, taskID: taskID)
         var operationLockReleased = false
@@ -2136,53 +2136,126 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertNil(finalRecord["pullRequestNumber"])
     }
 
-    // case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC fresh reads confirm saved PR data; the UI shows active and archived PR links and an active task's Create PR button. Hovering the outer padded edge of each control triggers its hover feedback.
+    // case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC creates PRs for two repositories, verifies the first PR persists when the second creation fails, retries only the missing repository, confirms each gh create call targets the corresponding repository worktree, and confirms both saved numbers on fresh reads. The UI labels active-card and Done-archive multi-repository creation actions PRs, clicks the active action, verifies the partial-success retry action, confirms the gh create calls target both repository worktrees and retry only the failed one, then shows the exact created PR numbers on the active task and every linked number in the Done archive. Hovering the outer padded edge of each PR link triggers its feedback.
     func test_done_archive_displays_existing_pull_request_link() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
-        // The board checks linked PRs on launch; the fixture gh keeps the real unauthorized gh from alerting over the cards.
-        // Only the Review card's PR is probed at launch; the Done task's #123 is not on the board.
-        let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [456])
+        // The fixture `gh` handles list/create and merged-state calls without GitHub sign-in.
+        let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
-        let created = try XCTUnwrap(try runCLI(["task", "create", "--title", "Archived linked PR UI", "--repo", fixture.primary.path])["result"] as? [String: Any])
+        let created = try XCTUnwrap(try runCLI(["task", "create", "--title", "Archived linked PR UI", "--repo", fixture.primary.path, "--repo", fixture.secondary.path])["result"] as? [String: Any])
         let taskID = try XCTUnwrap(created["id"] as? String)
         openTask(named: "Archived linked PR UI")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Archived linked PR UI")
         element("back-to-board-button").click()
         moveTaskToDone(taskID: taskID)
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
+        element("done-archive-button").click()
+        let archiveCreatePRButton = element("done-archive-create-pr-\(taskID)")
+        XCTAssertTrue(archiveCreatePRButton.waitForExistence(timeout: 10))
+        XCTAssertEqual(archiveCreatePRButton.label, "PRs. Create pull requests for each repository linked to this completed task")
+        attachScreenshot(named: "Done archive labels its multi-repository action PRs")
+        element("done-archive-button").click()
 
         let activeCreated = try XCTUnwrap(try runCLI([
-            "task", "create", "--title", "Active linked PR UI", "--repo", fixture.primary.path,
+            "task", "create", "--title", "Active linked PR UI", "--repo", fixture.primary.path, "--repo", fixture.secondary.path,
         ])["result"] as? [String: Any])
         let activeTaskID = try XCTUnwrap(activeCreated["id"] as? String)
         openTask(named: "Active linked PR UI")
         try completeCurrentTaskWithFixtureAnswers(taskTitle: "Active linked PR UI")
         element("back-to-board-button").click()
         XCTAssertEqual(try taskRecord(id: activeTaskID)?["status"] as? String, "Review")
+        XCTAssertTrue(terminateAppAndWait(app), "Close Playhouse before clearing the fixture provider session.")
+        try clearTaskProviderSession(taskID: activeTaskID)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
         let createPRButton = element("task-create-pr-\(activeTaskID)")
         XCTAssertTrue(createPRButton.waitForExistence(timeout: 5), "An active repository task should expose its Create PR button.")
+        XCTAssertEqual(createPRButton.label, "PRs. Create pull requests for each repository linked to this task")
         assertHoverEmphasis(for: createPRButton)
+        attachScreenshot(named: "Multi-repository task labels its action PRs")
+        let records = try XCTUnwrap((try taskRecord(id: activeTaskID)?["repositoryWorktrees"] as? [[String: Any]]))
+        let remoteRoot = dataDirectory.appendingPathComponent("multi-pr-remotes", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: remoteRoot.path), "Each case must start with isolated PR remotes.")
+        try FileManager.default.createDirectory(at: remoteRoot, withIntermediateDirectories: true)
+        try WorkspaceFixture.ownerContents.write(to: remoteRoot.appendingPathComponent(WorkspaceFixture.ownerMarker), atomically: true, encoding: .utf8)
+        for repository in [fixture.primary, fixture.secondary] {
+            XCTAssertFalse(try runGitOutput(repository, "remote").split(whereSeparator: \.isNewline).contains("origin"), "The isolated source fixture must not already have an origin remote.")
+        }
+        defer {
+            for repository in [fixture.primary, fixture.secondary] {
+                try? runGit(repository, "remote", "remove", "origin")
+            }
+        }
+        for (index, record) in records.enumerated() {
+            let remote = remoteRoot.appendingPathComponent("repository-\(index).git", isDirectory: true)
+            try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+            try runGit(remote, "init", "--bare")
+            let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String))
+            try runGit(worktree, "remote", "add", "origin", remote.path)
+            try runGit(worktree, "push", "origin", "main")
+        }
+        let failurePath = URL(fileURLWithPath: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_CREATE_FAILURE_PATH"]))
+        try "2\n".write(to: failurePath, atomically: true, encoding: .utf8)
+        createPRButton.click()
+        let partialFailure = app.sheets.firstMatch
+        XCTAssertTrue(partialFailure.waitForExistence(timeout: 30), "The second repository's configured gh failure should surface in the task.")
+        partialFailure.buttons["OK"].click()
+        let firstCreatedLink = app.links["task-pr-link-\(activeTaskID)-501"]
+        XCTAssertTrue(firstCreatedLink.waitForExistence(timeout: 10), "The first repository's successful PR should persist after the second fails.")
+        XCTAssertEqual(firstCreatedLink.label, "#501")
+        let retryPRButton = element("task-create-pr-\(activeTaskID)")
+        XCTAssertTrue(retryPRButton.waitForExistence(timeout: 10), "The task should keep a PRs action while another repository has no PR.")
+        XCTAssertEqual(retryPRButton.label, "PRs. Create pull requests for repositories without a linked pull request")
+        attachScreenshot(named: "Task shows its PR and retry action after partial creation")
+        try "\n".write(to: failurePath, atomically: true, encoding: .utf8)
+        retryPRButton.click()
+        let secondCreatedLink = app.links["task-pr-link-\(activeTaskID)-502"]
+        XCTAssertTrue(secondCreatedLink.waitForExistence(timeout: 30), "Retry should create a PR for the repository still missing one.")
+        XCTAssertEqual(secondCreatedLink.label, "#502")
+        let createdTask = try XCTUnwrap(taskRecord(id: activeTaskID))
+        let createdRecords = try XCTUnwrap(createdTask["repositoryWorktrees"] as? [[String: Any]])
+        XCTAssertEqual(createdRecords.compactMap { $0["pullRequestNumber"] as? Int }, [501, 502])
+        let createLog = try String(contentsOfFile: try XCTUnwrap(ghEnvironment["PLAYHOUSE_E2E_GH_CREATE_LOG"]), encoding: .utf8)
+        XCTAssertEqual(createLog.components(separatedBy: "\n").filter { $0.hasPrefix("created\t") }.count, 2)
+        XCTAssertEqual(createLog.components(separatedBy: "\n").filter { $0.hasPrefix("failed\t") }.count, 1)
+        let createTargets = createLog.components(separatedBy: "\n")
+            .filter { $0.hasPrefix("create\t") || $0.hasPrefix("failed\t") }
+            .compactMap { $0.split(separator: "\t", maxSplits: 2).dropFirst().first.map(String.init) }
+            .map { $0.replacingOccurrences(of: "/private/tmp/", with: "/tmp/") }
+        let expectedCreateTargets = try [records[0], records[1], records[1]].map {
+            URL(fileURLWithPath: try XCTUnwrap($0["worktreePath"] as? String))
+                .resolvingSymlinksInPath().path.replacingOccurrences(of: "/private/tmp/", with: "/tmp/")
+        }
+        XCTAssertEqual(createTargets, expectedCreateTargets, "The action should create one PR per repository and retry only the repository whose first create failed.")
+        attachScreenshot(named: "Task shows PR numbers for both repositories")
 
         app.terminate()
-        XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 10), "The app must close its SwiftData container before seeding the isolated store.")
+        XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 10), "The app must close its SwiftData container before seeding the archived store.")
         let prURL = "https://github.com/playhouse-test/fixture/pull/123"
-        let activePRURL = "https://github.com/playhouse-test/fixture/pull/456"
+        let secondPRURL = "https://github.com/playhouse-test/fixture/pull/124"
         try seedTaskPullRequest(taskID: taskID, number: 123, url: prURL)
-        try seedTaskPullRequest(taskID: activeTaskID, number: 456, url: activePRURL)
+        try seedTaskPullRequest(taskID: taskID, number: 124, url: secondPRURL, repositoryIndex: 1)
         let persisted = try XCTUnwrap(taskRecord(id: taskID))
         XCTAssertEqual(persisted["status"] as? String, "Done")
         let record = try XCTUnwrap((persisted["repositoryWorktrees"] as? [[String: Any]])?.first)
         XCTAssertEqual(record["pullRequestNumber"] as? Int, 123)
         XCTAssertEqual(record["pullRequestURL"] as? String, prURL)
+        XCTAssertEqual((persisted["repositoryWorktrees"] as? [[String: Any]])?.count, 2)
 
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
-        let activePRLink = app.links["task-pr-link-\(activeTaskID)-456"]
-        XCTAssertTrue(activePRLink.waitForExistence(timeout: 10), "The active task card should show its saved PR number as a link.")
-        assertHoverEmphasis(for: activePRLink)
+        let firstActiveLink = app.links["task-pr-link-\(activeTaskID)-501"]
+        let secondActiveLink = app.links["task-pr-link-\(activeTaskID)-502"]
+        XCTAssertTrue(firstActiveLink.waitForExistence(timeout: 10))
+        XCTAssertTrue(secondActiveLink.waitForExistence(timeout: 10), "The active task card should show each repository's created PR number.")
+        XCTAssertEqual(firstActiveLink.label, "#501")
+        XCTAssertEqual(secondActiveLink.label, "#502")
         element("done-archive-button").click()
         XCTAssertTrue(element("done-archive-task-\(taskID)").waitForExistence(timeout: 10))
         let prLink = app.links["done-archive-pr-link-\(taskID)-123"]
         XCTAssertTrue(prLink.waitForExistence(timeout: 10), "The Done archive should show the saved PR number as a link.")
+        let secondPRLink = app.links["done-archive-pr-link-\(taskID)-124"]
+        XCTAssertTrue(secondPRLink.waitForExistence(timeout: 10), "The Done archive should show every repository's saved PR number.")
+        XCTAssertEqual(prLink.label, "#123")
+        XCTAssertEqual(secondPRLink.label, "#124")
         assertHoverEmphasis(for: prLink)
         attachScreenshot(named: "Done archive shows the linked pull request")
     }
@@ -11240,6 +11313,8 @@ final class PlayhouseUITests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let stateURL = directory.appendingPathComponent("state")
         let callLogURL = directory.appendingPathComponent("calls")
+        let createLogURL = directory.appendingPathComponent("create-calls")
+        let createFailureURL = directory.appendingPathComponent("fail-create-attempt")
         try expectedNumbers.map { "\($0)=unmerged" }.joined(separator: "\n").appending("\n")
             .write(to: stateURL, atomically: true, encoding: .utf8)
         let startedDirectory = directory.appendingPathComponent("started", isDirectory: true)
@@ -11254,6 +11329,9 @@ final class PlayhouseUITests: XCTestCase {
             "PATH": "\(ghDirectory.path):\(inheritedPath)",
             "PLAYHOUSE_E2E_GH_STATE_PATH": stateURL.path,
             "PLAYHOUSE_E2E_GH_CALL_LOG": callLogURL.path,
+            "PLAYHOUSE_E2E_GH_CREATE_LOG": createLogURL.path,
+            "PLAYHOUSE_E2E_GH_CREATE_FAILURE_PATH": createFailureURL.path,
+            "PLAYHOUSE_E2E_GH_CREATE_FIRST_NUMBER": "501",
             "PLAYHOUSE_E2E_GH_STARTED_DIRECTORY": startedDirectory.path,
             "PLAYHOUSE_E2E_GH_EXPECTED_IDS": expectedIDs,
         ]
@@ -12079,6 +12157,23 @@ final class PlayhouseUITests: XCTestCase {
         let seedText = String(data: seedOutput.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         XCTAssertEqual(seed.terminationStatus, 0, "The isolated SwiftData task record should be seeded: \(seedText)")
         XCTAssertTrue(seedText.contains("Seeded linked PR #\(number)"), seedText)
+    }
+
+    private func clearTaskProviderSession(taskID: String) throws {
+        let seeder = WorkspaceFixture.root.appendingPathComponent("seed-task-pr-link")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: seeder.path), "The precompiled SwiftData fixture seeder should be executable.")
+
+        let seed = Process()
+        seed.executableURL = seeder
+        seed.arguments = [dataDirectory.path, taskID, "--clear-provider-session"]
+        let seedOutput = Pipe()
+        seed.standardOutput = seedOutput
+        seed.standardError = seedOutput
+        try seed.run()
+        seed.waitUntilExit()
+        let seedText = String(data: seedOutput.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(seed.terminationStatus, 0, "The isolated SwiftData task session should be cleared: \(seedText)")
+        XCTAssertTrue(seedText.contains("Cleared provider sessions"), seedText)
     }
 
     private func runCLI(
