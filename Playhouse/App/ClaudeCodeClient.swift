@@ -278,9 +278,13 @@ final class ClaudeSessionRunner {
 
     /// Delivers input into the running turn with `priority: "next"`, which Claude
     /// Code injects at its next tool boundary without cancelling in-flight work.
+    /// A turn Claude Code answered but that this runner still holds open — for
+    /// an outstanding background task, an undelivered notification, or a parent
+    /// wake — is as steerable as one still streaming: Playhouse keeps showing it
+    /// as the active turn, so its input must still reach the running process.
     func sendSteerInput(text: String, imageDataURLs: [String]) throws -> Bool {
         guard isTurnActive, activeTurnID != nil, process?.isRunning == true,
-              !turnCompletion.resultReceived || !pendingCommandUUIDs.isEmpty else { return false }
+              !isTurnSettled || !turnCompletion.resultReceived || !pendingCommandUUIDs.isEmpty else { return false }
         let uuid = UUID().uuidString.lowercased()
         pendingCommandUUIDs.insert(uuid)
         do {
@@ -289,6 +293,8 @@ final class ClaudeSessionRunner {
             pendingCommandUUIDs.remove(uuid)
             throw error
         }
+        // The answer to this input, not the result that preceded it, ends the turn.
+        if turnCompletion.resultError == nil { turnCompletion.resultReceived = false }
         PlayhouseDiagnostics.record("claude.turn.steered", fields: diagnosticFields(["imageCount": String(imageDataURLs.count)]))
         return true
     }
