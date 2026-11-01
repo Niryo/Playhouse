@@ -376,6 +376,7 @@ struct TaskConversationView: View {
     @State private var isLoadingDiff = false
     @State private var diffError: String?
     @State private var isMonacoReady = false
+    @State private var monacoPresentation: MonacoDiffPresentation?
     @State private var monacoError: String?
     @State private var diffChangeCount: Int?
     @State private var isLoadingHistory = false
@@ -466,6 +467,14 @@ struct TaskConversationView: View {
         guard let diffChangeCount else { return "Calculating changes…" }
         guard diffChangeCount > 0 else { return "No text changes" }
         return "\(diffChangeCount) change\(diffChangeCount == 1 ? "" : "s") highlighted"
+    }
+
+    /// Describes the editor the diff is actually rendered in: Monaco is loaded once per
+    /// session, so a later diff reports the same editor it reused.
+    private var monacoStartupDescription: String {
+        guard isMonacoReady, let monacoPresentation else { return "Starting editor" }
+        let reuse = monacoPresentation.reusedWarmEditor ? "reused" : "loaded"
+        return "Editor \(monacoPresentation.editorTag) \(reuse), showing \(monacoPresentation.path)"
     }
 
     private var latestConversationTurnID: String? {
@@ -1276,6 +1285,7 @@ struct TaskConversationView: View {
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("workspace-diff-editor-status")
+                        .accessibilityValue(monacoStartupDescription)
                     if isMonacoReady {
                         Text(diffHighlightStatus)
                             .font(.system(size: 10, weight: .medium))
@@ -1327,7 +1337,10 @@ struct TaskConversationView: View {
                                 isMonacoReady = false
                                 diffChangeCount = nil
                                 self.monacoError = nil
+                                // Clearing the diff first takes the shared editor out of the
+                                // view tree; resetting alone can't replace a hosted NSView.
                                 self.selectedDiff = nil
+                                MonacoDiffWebViewHost.shared.reset()
                                 if let selectedChange { openDiff(selectedChange) }
                             }
                             .buttonHoverPointer()
@@ -1342,7 +1355,8 @@ struct TaskConversationView: View {
                                 theme: colorScheme == .dark ? "vs-dark" : "vs",
                                 isReady: $isMonacoReady,
                                 loadError: $monacoError,
-                                diffChangeCount: $diffChangeCount
+                                diffChangeCount: $diffChangeCount,
+                                presentation: $monacoPresentation
                             )
                             .accessibilityIdentifier("workspace-diff-editor")
 
@@ -1386,6 +1400,7 @@ struct TaskConversationView: View {
         diffError = nil
         monacoError = nil
         isMonacoReady = false
+        monacoPresentation = nil
         diffChangeCount = nil
         withAnimation(.easeInOut(duration: 0.24)) {
             isDiffPresented = true

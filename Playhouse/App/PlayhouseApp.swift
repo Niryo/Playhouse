@@ -90,6 +90,11 @@ extension Notification.Name {
 private final class PlayhouseApplicationDelegate: NSObject, NSApplicationDelegate {
     static var terminationHandler: (() async -> Void)?
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Monaco loads once per session, so the first diff opens into a warm editor.
+        MonacoDiffWebViewHost.shared.prewarm()
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let terminationHandler = Self.terminationHandler else { return .terminateNow }
         Task {
