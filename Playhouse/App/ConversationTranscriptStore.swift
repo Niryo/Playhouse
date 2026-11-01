@@ -63,9 +63,25 @@ struct ConversationTranscript: Codable, Equatable {
         var activities: [ConversationActivity] = []
     }
 
+    /// What one turn cost, and what ran in it.
+    ///
+    /// Kept at transcript level rather than inside `Turn` because only Claude
+    /// turns have a `Turn` row — Codex keeps its own thread history — and both
+    /// providers must appear in the same breakdown.
+    struct TurnTokenUsage: Codable, Equatable, Identifiable {
+        let id: String
+        let provider: ConversationProvider
+        let recordedAt: Date
+        var usage: ConversationTokenUsage
+        var toolLabels: [String] = []
+    }
+
     var version = 1
     var segments: [Segment] = []
     var turns: [Turn] = []
+    /// Per-turn token costs, oldest first. Absent in transcripts written before
+    /// token tracking existed.
+    var tokenUsage: [TurnTokenUsage]?
     /// A provider question that is waiting for user input. The native request
     /// ID is useful only while its provider process is alive; this durable copy
     /// lets the UI restore the question and continue the saved session later.

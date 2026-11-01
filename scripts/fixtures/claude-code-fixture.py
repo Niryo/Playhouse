@@ -29,7 +29,21 @@ SIMPLE_ANSWER = "OK."
 PENDING_QUESTION_SUCCESS_MARKER = "finish while a structured question remains pending"
 
 
+# Claude Code reports a turn's token cost on its `result` message. Every result
+# this fixture writes carries the same deterministic block, so a test can assert
+# exact per-turn and per-task totals.
+TURN_USAGE = {
+    "input_tokens": 1000,
+    "output_tokens": 200,
+    "cache_read_input_tokens": 300,
+    "cache_creation_input_tokens": 100,
+}
+TURN_USAGE_TOTAL = sum(TURN_USAGE.values())
+
+
 def write(value):
+    if isinstance(value, dict) and value.get("type") == "result" and "usage" not in value:
+        value = {**value, "usage": dict(TURN_USAGE)}
     sys.stdout.write(json.dumps(value) + "\n")
     sys.stdout.flush()
 
@@ -73,6 +87,14 @@ def run_tool(tool_id, name, tool_input, command=None):
 
 
 background_result_sent = False
+current_command_uuid = None
+
+
+def complete_command(uuid):
+    """Mirrors Claude Code reporting that it finished a submitted user command;
+    Playhouse stops counting that command as outstanding for the turn."""
+    if uuid:
+        write({"type": "command_lifecycle", "command_uuid": uuid, "state": "completed"})
 
 
 def parent_request_started(message_id, woken=False):
@@ -96,6 +118,28 @@ def wait_for_release(name, description):
         time.sleep(0.02)
     if not release.exists():
         raise TimeoutError(f"The test did not release the fixture after: {description}")
+
+
+def read_steered_input(description):
+    """Consumes input Playhouse steers into the running turn, mirroring Claude
+    Code taking a `priority: next` user message at its next tool boundary.
+    Returns its text and command uuid, which the turn completes once answered."""
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        readable, _, _ = select.select([sys.stdin], [], [], 0.02)
+        if not readable:
+            continue
+        line = sys.stdin.readline()
+        if not line.strip():
+            continue
+        message = json.loads(line)
+        if message.get("type") != "user":
+            continue
+        content = message.get("message", {}).get("content", [])
+        steered = "".join(block.get("text", "") for block in content if block.get("type") == "text")
+        if steered:
+            return steered, message.get("uuid")
+    raise TimeoutError(f"Playhouse did not steer {description}.")
 
 
 def respond(user_text, instructions, preserve_no_outcome=False):
@@ -256,6 +300,14 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         if not received_interrupt:
             raise TimeoutError("Timed out waiting for Claude interrupt.")
         commands.append({"interruptReceived": True})
+    elif user_text.strip().lower() == "please fail-this-claude-turn.":
+        # Match only the live message, not a historical mention: once this turn
+        # fails and its text is part of the transcript, a later turn's handoff
+        # context quotes it back verbatim, and a substring check would misfire.
+        # The session already exists by now: Playhouse answered initialize and
+        # sent this turn. Failing here leaves the session behind, so the next
+        # turn must resume it instead of claiming its ID again.
+        raise RuntimeError("Claude fixture failed this turn after creating its session.")
     elif "hold-claude-turn-for-concurrency" in user_text.lower():
         ready = Path(str(sys.argv[0]) + ".concurrent-turn-ready")
         release = Path(str(sys.argv[0]) + ".concurrent-turn-release")
@@ -449,6 +501,47 @@ def respond(user_text, instructions, preserve_no_outcome=False):
             parent_request_started("msg_background_woken", woken=True)
             text("msg_background_woken", "BACKGROUND HANDLED")
             write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+    elif "parked background shell" in user_text.lower():
+        # Mirrors a turn Claude Code has already answered while a background
+        # shell keeps running: the parent result is out, no notification has
+        # arrived yet, and the turn is still the active one. Input steered into
+        # that window must reach the process and be answered inside the same
+        # turn, before the shell's notification and the woken parent turn.
+        tool_id = "toolu_parked_shell"
+        task_id = "bgshell-parked-1"
+        assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": "Bash", "input": {
+            "command": "sleep 1; echo PARKED", "description": "Parked shell", "run_in_background": True,
+        }}])
+        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tool_id, "is_error": False,
+             "content": f"Command running in background with ID: {task_id}."},
+        ]}})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
+            {"task_id": task_id, "run_id": "fixture-run-1", "task_type": "local_bash", "description": "Parked shell"},
+        ]})
+        write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "description": "Parked shell", "task_type": "local_bash"})
+        text("msg_parked_started", "PARKED STARTED")
+        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+        background_result_sent = True
+        # The submitted command is finished too, so only the running shell holds
+        # the turn open: exactly the window the real CLI parks a turn in.
+        complete_command(current_command_uuid)
+        Path(str(sys.argv[0]) + ".parked-shell-ready").write_text(
+            "The parent result is out while the shell runs.\n", encoding="utf-8"
+        )
+        steered, steered_uuid = read_steered_input("the parked background shell turn")
+        text("msg_parked_steered", f"STEERED: {steered}")
+        write({"type": "system", "subtype": "task_updated", "task_id": task_id, "run_id": "fixture-run-1",
+               "patch": {"status": "completed", "end_time": 0}})
+        write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "status": "completed", "output_file": "",
+               "summary": 'Background command "Parked shell" completed (exit code 0)'})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+        parent_request_started("msg_parked_final", woken=True)
+        text("msg_parked_final", "PARKED HANDLED")
+        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+        complete_command(steered_uuid)
     elif "background shell" in user_text.lower():
         # Mirrors the real `claude` CLI for a Bash call with run_in_background:
         # the tool_result only confirms the launch, the shell reports through
@@ -498,7 +591,7 @@ def respond(user_text, instructions, preserve_no_outcome=False):
 
 
 def main():
-    global background_result_sent
+    global background_result_sent, current_command_uuid
     history_path = Path(str(sys.argv[0]) + ".history")
     instructions = argument("--append-system-prompt") or ""
     turn = {
@@ -582,6 +675,7 @@ def main():
             history_path.write_text(json.dumps(history), encoding="utf-8")
         elif message.get("type") == "user":
             background_result_sent = False
+            current_command_uuid = message.get("uuid")
             content = message.get("message", {}).get("content", [])
             user_text = "".join(block.get("text", "") for block in content if block.get("type") == "text")
             turn["userText"] = user_text

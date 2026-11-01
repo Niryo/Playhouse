@@ -118,6 +118,10 @@ final class ClaudeSessionRunner {
     private(set) var pendingUserInputRequest: ConversationUserInputRequest?
     private(set) var wasInterrupted = false
     private(set) var activityDurations: [String: Int] = [:]
+    /// Set once Claude Code has accepted this session ID and owns its transcript.
+    /// From then on the session exists whether or not the turn succeeds, so the
+    /// next turn must resume it instead of claiming the ID again.
+    private(set) var sessionExists = false
 
     var deltaHandler: ((String) -> Void)?
     var finalMessageHandler: ((String) -> Void)?
@@ -126,6 +130,7 @@ final class ClaudeSessionRunner {
     var activityHandler: ((ConversationActivity) -> Void)?
     var actionRequestHandler: (() -> Void)?
     var userInputHandler: ((ConversationUserInputRequest) async -> Void)?
+    var tokenUsageHandler: ((ConversationTurnUsageReport) -> Void)?
 
     init(
         sessionID: String,
@@ -196,6 +201,9 @@ final class ClaudeSessionRunner {
                 workspace: workspace, developerInstructions: developerInstructions
             )
         }
+        // Claude Code has the session now. A turn that fails after this point
+        // still leaves the transcript behind, so the next turn resumes it.
+        sessionExists = true
         try ClaudeCodeClient.verifyVersion(initialize["claude_code_version"] as? String)
 
         let turnID = UUID().uuidString.lowercased()
@@ -278,9 +286,13 @@ final class ClaudeSessionRunner {
 
     /// Delivers input into the running turn with `priority: "next"`, which Claude
     /// Code injects at its next tool boundary without cancelling in-flight work.
+    /// A turn Claude Code answered but that this runner still holds open — for
+    /// an outstanding background task, an undelivered notification, or a parent
+    /// wake — is as steerable as one still streaming: Playhouse keeps showing it
+    /// as the active turn, so its input must still reach the running process.
     func sendSteerInput(text: String, imageDataURLs: [String]) throws -> Bool {
         guard isTurnActive, activeTurnID != nil, process?.isRunning == true,
-              !turnCompletion.resultReceived || !pendingCommandUUIDs.isEmpty else { return false }
+              !isTurnSettled || !turnCompletion.resultReceived || !pendingCommandUUIDs.isEmpty else { return false }
         let uuid = UUID().uuidString.lowercased()
         pendingCommandUUIDs.insert(uuid)
         do {
@@ -289,6 +301,8 @@ final class ClaudeSessionRunner {
             pendingCommandUUIDs.remove(uuid)
             throw error
         }
+        // The answer to this input, not the result that preceded it, ends the turn.
+        if turnCompletion.resultError == nil { turnCompletion.resultReceived = false }
         PlayhouseDiagnostics.record("claude.turn.steered", fields: diagnosticFields(["imageCount": String(imageDataURLs.count)]))
         return true
     }
@@ -934,6 +948,7 @@ final class ClaudeSessionRunner {
     private func handleResult(_ message: [String: Any]) {
         let subtype = message["subtype"] as? String ?? ""
         let isError = message["is_error"] as? Bool ?? (subtype != "success")
+        reportTokenUsage(message)
         if isError {
             let text = (message["result"] as? String) ?? (message["errors"] as? [String])?.joined(separator: " ") ?? ""
             if text.contains("No conversation found with session ID") { sessionWasMissing = true }
@@ -952,6 +967,31 @@ final class ClaudeSessionRunner {
         }
         turnCompletion.resultCount += 1
         completeTurnIfSettled()
+    }
+
+    /// Claude Code reports a turn's token cost on its `result` message. A logical
+    /// Playhouse turn can take several results (each background-task wake owes
+    /// its own), so every result's usage is reported and the recorder sums them.
+    private func reportTokenUsage(_ message: [String: Any]) {
+        guard let payload = message["usage"] as? [String: Any] else { return }
+        let usage = ConversationTokenUsage(providerPayload: payload)
+        guard !usage.isEmpty else {
+            // A non-empty payload that parses to all zeros means Claude Code
+            // changed its usage field names; silently dropping it would make a
+            // real regression invisible.
+            PlayhouseDiagnostics.record("claude.turn.usage_unparsed", fields: diagnosticFields([
+                "payloadKeys": payload.keys.sorted().joined(separator: ","),
+            ]))
+            return
+        }
+        let labels = toolActivities.values
+            .filter { $0.turnID == activeTurnID }
+            .map(\.tokenUsageLabel)
+        tokenUsageHandler?(ConversationTurnUsageReport(
+            turnID: activeTurnID,
+            usage: usage,
+            toolLabels: Array(Set(labels)).sorted()
+        ))
     }
 
     /// Every change to the expected wake invalidates a pending backstop, so a
@@ -1248,6 +1288,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         onSteerMessage: @escaping (String, [String]) -> Void = { _, _ in },
         onProgressMessage: @escaping (ConversationMessage) -> Void = { _ in },
         onTurnStarted: @escaping (String) -> Void,
+        onTokenUsage: @escaping (ConversationTurnUsageReport) -> Void = { _ in },
         sensitiveUserInputAnswerValues: [String] = [],
         hideSensitiveRecoveryPrompt: Bool = false
     ) async throws {
@@ -1277,6 +1318,7 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         runner.activityHandler = onActivity
         runner.actionRequestHandler = onActionRequest
         runner.userInputHandler = onUserInput
+        runner.tokenUsageHandler = onTokenUsage
         runners[sessionID] = runner
         Self.activeRunnersBySessionID[sessionID] = runner
         // A new turn supersedes a stop another client recorded for this session.
@@ -1285,6 +1327,11 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         activityDurationsByThread[sessionID] = [:]
         lastFinishedThreadID = sessionID
         defer {
+            // A session Claude Code accepted is no longer new, whether or not the
+            // turn succeeded. Keeping the marker past a failed first turn would
+            // claim the ID again on the retry and fail with "already in use",
+            // leaving the conversation unresumable.
+            if runner.sessionExists { newSessionIDs.remove(sessionID) }
             // The identity only; the client reports whether a turn is still active.
             lastTurnDiagnosticsByThread[sessionID] = runner.diagnosticFields([:])
                 .filter { $0.key != "isTurnActive" }
@@ -1313,7 +1360,6 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
             sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
             hideSensitiveRecoveryPrompt: hideSensitiveRecoveryPrompt
         )
-        newSessionIDs.remove(sessionID)
     }
 
     func interruptActiveTurn(threadID: String) async throws -> Bool {
@@ -1492,18 +1538,18 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         switch name {
         case "Bash":
             let command = string("command") ?? ""
-            return ConversationActivity(id: toolID, title: command.isEmpty ? "Running command" : "Running \(command)", detail: string("description") ?? "", status: status, turnID: turnID)
+            return ConversationActivity(id: toolID, title: command.isEmpty ? "Running command" : "Running \(command)", detail: string("description") ?? "", status: status, tool: name, turnID: turnID)
         case "Edit", "MultiEdit", "Write", "NotebookEdit":
             let path = string("file_path") ?? string("notebook_path") ?? ""
-            return ConversationActivity(id: toolID, title: "Editing 1 file", detail: path, status: status, turnID: turnID)
+            return ConversationActivity(id: toolID, title: "Editing 1 file", detail: path, status: status, tool: name, turnID: turnID)
         case "Read":
-            return ConversationActivity(id: toolID, title: "Reading \(string("file_path").map { URL(fileURLWithPath: $0).lastPathComponent } ?? "file")", detail: string("file_path") ?? "", status: status, turnID: turnID)
+            return ConversationActivity(id: toolID, title: "Reading \(string("file_path").map { URL(fileURLWithPath: $0).lastPathComponent } ?? "file")", detail: string("file_path") ?? "", status: status, tool: name, turnID: turnID)
         case "Grep", "Glob":
-            return ConversationActivity(id: toolID, title: "Searching files", detail: string("pattern") ?? "", status: status, turnID: turnID)
+            return ConversationActivity(id: toolID, title: "Searching files", detail: string("pattern") ?? "", status: status, tool: name, turnID: turnID)
         case "WebSearch":
-            return ConversationActivity(id: toolID, title: "Searching the web", detail: string("query") ?? "", status: status, turnID: turnID)
+            return ConversationActivity(id: toolID, title: "Searching the web", detail: string("query") ?? "", status: status, tool: name, turnID: turnID)
         case "WebFetch":
-            return ConversationActivity(id: toolID, title: "Fetching a web page", detail: string("url") ?? "", status: status, turnID: turnID)
+            return ConversationActivity(id: toolID, title: "Fetching a web page", detail: string("url") ?? "", status: status, tool: name, turnID: turnID)
         case "Task", "Agent":
             let agentType = string("subagent_type") ?? "general-purpose"
             let spaced = agentType.replacingOccurrences(of: "-", with: " ").replacingOccurrences(of: "_", with: " ")

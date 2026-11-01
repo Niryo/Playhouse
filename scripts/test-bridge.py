@@ -858,6 +858,30 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIn(f"Seeded linked PR #{number}", result.stdout)
         return seeded_url
 
+    def clear_task_provider_session(self, task_id):
+        executable = self.data_directory / "seed-task-pr-link"
+        if not executable.exists():
+            repository_root = Path(__file__).resolve().parent.parent
+            subprocess.run(
+                [
+                    "xcrun", "swiftc", "-module-name", "Playhouse",
+                    str(repository_root / "Playhouse" / "App" / "BoardTask.swift"),
+                    str(repository_root / "Playhouse" / "App" / "ConversationSubject.swift"),
+                    str(repository_root / "scripts" / "seed-task-pr-link.swift"),
+                    "-o", str(executable),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        result = subprocess.run(
+            [str(executable), str(self.data_directory), task_id, "--clear-provider-session"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn("Cleared provider sessions", result.stdout)
+
     def wait_for_marker(self, marker, present, message, timeout=10):
         deadline = time.monotonic() + timeout
         while marker.exists() != present and time.monotonic() < deadline:
@@ -973,7 +997,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         reopened = self.assert_success(self.call_cli("chat", "open")[0])
         self.assertEqual(reopened["id"], legacy_id, "Migration must run once, not create a second chat.")
 
-    # case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, the Changes sidebar, and the no-repository-selected banner. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state. A chat turn never triggers the private task-outcome reminders, because the chat is told not to report an outcome; its developer instructions teach it that task language means Playhouse's own board and give it the Playhouse task CLI, and they never ask it to write the page title into its visible answer.
+    # case-contract: test_standalone_chat_separate_model_and_pages_round_trip | The Chat button opens the standalone chat — its own model rather than a board task — in a sliding sidebar that never appears on the board, task commands cannot reach it by ID, and the bridge rejects any attempt to add a repository or worktree root to it. The GUI composer works without a configured repository parent and omits task status, repository controls, the Changes sidebar, and the no-repository-selected banner. Its CLI page close-turn signal keeps a continuing reply on the active page and starts a new titled page on a topic change, a completed turn's user and assistant messages persist onto the active page without leaking onto other pages, and pages are findable by search. Each page is also stored in a separate atomic JSON file in a discoverable archive directory; pages already present before file archiving are backfilled once, and each file tracks current metadata and messages. A turn that omits close-turn is tracked as missed, then a background low-effort Luna fallback rejects one malformed classification and retries, moves both messages to its correctly titled page, keeps page evaluation visually quiet while the primary answer remains usable, then updates the transcript separator with the title when classification completes; a following send waits for that decision, and preserves chronological order on a later append. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes. Earlier pages stay visible in the transcript after their page session rotates, and a board task conversation rejects a chat page as turn context. While a chat turn is held active, queuing a follow-up on the chat resolves the chat rather than a board task and the queued message can be removed, and selecting the provider the chat already uses returns the chat unchanged instead of failing. The chat's own turn state changes (In Progress, then Waiting Response) during a send, and it never renders as a card on the visible Kanban board in any state. A chat turn never triggers the private task-outcome reminders, because the chat is told not to report an outcome; its developer instructions teach it that task language means Playhouse's own board and give it the Playhouse task CLI, and they never ask it to write the page title into its visible answer. Opening a board task while the chat sidebar is showing replaces it with that task's conversation view instead of showing both at once, and returning to the board reveals the chat sidebar again, with the chat's own model left untouched by the unrelated task.
     def test_standalone_chat_separate_model_and_pages_round_trip(self):
         opened = self.assert_success(self.call_cli("chat", "open")[0])
         self.assertEqual(opened["title"], "Chat")
@@ -989,6 +1013,22 @@ class PlayhouseBridgeTests(unittest.TestCase):
             any(task["id"] == chat_task_id for task in tasks),
             "The standalone chat must never appear in board.list/task.list.",
         )
+
+        # A board task existing (and, in the GUI, being opened to cover the chat sidebar) must
+        # not disturb the chat's own model — the two are separate records, not a shared view state.
+        covering_task = self.assert_success(
+            self.call_cli("task", "create", "--title", "Covers standalone chat")[0]
+        )
+        reopened_chat = self.assert_success(self.call_cli("chat", "open")[0])
+        self.assertEqual(reopened_chat["id"], chat_task_id, "An unrelated board task must not affect the chat identity.")
+        self.assertEqual(reopened_chat["title"], "Chat")
+        refreshed_task = self.assert_success(self.call_cli("task", "get", covering_task["id"])[0])
+        self.assertEqual(refreshed_task["id"], covering_task["id"])
+        self.assertTrue(
+            self.assert_success(self.call_cli("task", "delete", covering_task["id"])[0])["deleted"],
+            "Clean up the covering task so later board-emptiness assertions in this case stay valid.",
+        )
+
         # The chat is its own model, not a task, so task commands cannot reach it at all.
         # This is the separation itself, not a filter that could be forgotten somewhere.
         response, _ = self.call_cli("task", "get", chat_task_id, expected_status=3)
@@ -2836,20 +2876,92 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review")
         self.run_git(self.primary, "remote", "remove", "origin")
 
-    # case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC fresh reads confirm saved PR data; the UI shows active and archived PR links and an active task's Create PR button. Hovering the outer padded edge of each control triggers its hover feedback.
+    # case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC creates PRs for two repositories, verifies the first PR persists when the second creation fails, retries only the missing repository, confirms each gh create call targets the corresponding repository worktree, and confirms both saved numbers on fresh reads. The UI labels active-card and Done-archive multi-repository creation actions PRs, clicks the active action, verifies the partial-success retry action, confirms the gh create calls target both repository worktrees and retry only the failed one, then shows the exact created PR numbers on the active task and every linked number in the Done archive. Hovering the outer padded edge of each PR link triggers its feedback.
     def test_done_archive_displays_existing_pull_request_link(self):
-        task = self.create_repo_task("Archived linked PR", [self.primary], materialize=True)
+        task = self.create_repo_task("Archived linked PR", [self.primary, self.secondary], materialize=True)
         completed, _ = self.call_cli("task", "move", task["id"], "Done")
         self.assertEqual(self.assert_success(completed)["status"], "Done")
         url = self.seed_done_task_pull_request(task["id"])
+        second_url = self.seed_done_task_pull_request(task["id"], number=124, repository_index=1)
 
         current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(current["status"], "Done")
         record = current["repositoryWorktrees"][0]
         self.assertEqual(record["pullRequestNumber"], 123)
         self.assertEqual(record["pullRequestURL"], url)
+        self.assertEqual(current["repositoryWorktrees"][1]["pullRequestNumber"], 124)
+        self.assertEqual(current["repositoryWorktrees"][1]["pullRequestURL"], second_url)
         archived = next(item for item in self.assert_success(self.call_cli("board", "list")[0])["tasks"] if item["id"] == task["id"])
         self.assertEqual(archived["repositoryWorktrees"][0]["pullRequestNumber"], 123)
+        self.assertEqual(archived["repositoryWorktrees"][1]["pullRequestNumber"], 124)
+
+        creating = self.create_repo_task("Create PRs for every repository", [self.primary, self.secondary], materialize=True)
+        self.clear_task_provider_session(creating["id"])
+        remote_root = self.data_directory / "pull-request-remotes"
+        self.assertFalse(remote_root.exists(), "Each case must start with an isolated remote fixture directory.")
+        remote_root.mkdir()
+        (remote_root / ".playhouse-test-owner").write_text("Playhouse bridge test owns these PR remotes.\n", encoding="utf-8")
+        for index, record in enumerate(creating["repositoryWorktrees"]):
+            remote = remote_root / f"repository-{index}.git"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+            source_repository = Path(record["repositoryPath"])
+            self.assertNotIn("origin", self.run_git(source_repository, "remote").split())
+
+            def remove_fixture_origin(repository, expected_url):
+                current = subprocess.run(
+                    ["git", "-C", str(repository), "remote", "get-url", "origin"],
+                    check=False, capture_output=True, text=True,
+                )
+                if current.returncode == 0 and current.stdout.strip() == str(expected_url):
+                    self.run_git(repository, "remote", "remove", "origin")
+
+            self.addCleanup(remove_fixture_origin, source_repository, remote)
+            self.run_git(Path(record["worktreePath"]), "remote", "add", "origin", str(remote))
+            self.run_git(Path(record["worktreePath"]), "push", "origin", "main")
+
+        gh_directory = self.data_directory / "creation-gh-fixture"
+        gh_directory.mkdir()
+        gh = gh_directory / "gh"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
+        gh.chmod(0o755)
+        gh_state = gh_directory / "state"
+        gh_state.write_text("", encoding="utf-8")
+        create_log = gh_directory / "create-calls"
+        failure_path = gh_directory / "fail-create-attempt"
+        failure_path.write_text("2\n", encoding="utf-8")
+        gh_environment = {
+            "PATH": f"{gh_directory}:{os.environ.get('PATH', '')}",
+            "PLAYHOUSE_E2E_GH_STATE_PATH": str(gh_state),
+            "PLAYHOUSE_E2E_GH_CALL_LOG": str(gh_directory / "view-calls"),
+            "PLAYHOUSE_E2E_GH_CREATE_LOG": str(create_log),
+            "PLAYHOUSE_E2E_GH_CREATE_FAILURE_PATH": str(failure_path),
+            "PLAYHOUSE_E2E_GH_CREATE_FIRST_NUMBER": "501",
+        }
+        failed_create, _ = self.call_cli("task", "pr", "create", creating["id"], expected_status=1, extra_environment=gh_environment)
+        self.assert_failure(failed_create, "operation_failed")
+        partially_created = self.assert_success(self.call_cli("task", "get", creating["id"])[0])
+        self.assertEqual(partially_created["repositoryWorktrees"][0]["pullRequestNumber"], 501)
+        self.assertIsNone(partially_created["repositoryWorktrees"][1].get("pullRequestNumber"))
+        failure_path.write_text("", encoding="utf-8")
+        retried = self.assert_success(self.call_cli("task", "pr", "create", creating["id"], extra_environment=gh_environment)[0])
+        self.assertEqual([record["pullRequestNumber"] for record in retried["repositoryWorktrees"]], [501, 502])
+        self.assertEqual(
+            [record["pullRequestURL"] for record in retried["repositoryWorktrees"]],
+            ["https://github.com/playhouse-test/fixture/pull/501", "https://github.com/playhouse-test/fixture/pull/502"],
+        )
+        create_events = create_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(sum(line.startswith("created\t") for line in create_events), 2)
+        self.assertEqual(sum(line.startswith("failed\t") for line in create_events), 1)
+        create_targets = [line.split("\t", 2)[1] for line in create_events if line.startswith(("create\t", "failed\t"))]
+        self.assertEqual(
+            create_targets,
+            [str(Path(creating["repositoryWorktrees"][0]["worktreePath"]).resolve()),
+             str(Path(creating["repositoryWorktrees"][1]["worktreePath"]).resolve()),
+             str(Path(creating["repositoryWorktrees"][1]["worktreePath"]).resolve())],
+            "Creation must target each repository, and retry only the repository whose create failed.",
+        )
+        fresh = self.assert_success(self.call_cli("task", "get", creating["id"])[0])
+        self.assertEqual([record["pullRequestNumber"] for record in fresh["repositoryWorktrees"]], [501, 502])
 
     # case-contract: test_task_lifecycle_rollout_clears_records_and_clean_worktrees | The one-time lifecycle rollout clears task records and clean managed worktrees, preserves branches, and retains dirty managed worktrees with a notice.
     def test_task_lifecycle_rollout_clears_records_and_clean_worktrees(self):
@@ -4507,7 +4619,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(recovered_record["savedPrompt"], stale_prompt)
         self.assertIsNone(recovered_record.get("pendingSubmittedPrompt"))
 
-    # case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC.
+    # case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC. Switching a task's provider also updates the sticky default provider for new tasks and chats.
     def test_conversation_provider_selection_persists_and_validates(self):
         settings = self.assert_success(self.call_cli("settings", "get")[0])
         self.assertEqual(settings["defaultProvider"], "codex", "Existing installs keep Codex as the default provider.")
@@ -4534,6 +4646,15 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_failure(unknown_switch, "invalid_argument")
         switched = self.assert_success(self.call_cli("conversation", "provider", codex_task["id"], "set", "claude")[0])
         self.assertEqual(switched["conversationProvider"], "claude", "A task without a conversation switches immediately.")
+        self.assertEqual(
+            self.assert_success(self.call_cli("settings", "get")[0])["defaultProvider"], "claude",
+            "Switching a task's provider updates the sticky default for new tasks and chats."
+        )
+        provider_follows_switch_task = self.create_task("Provider follows switch task")
+        self.assertEqual(
+            provider_follows_switch_task["conversationProvider"], "claude",
+            "A new task defaults to the provider last chosen in any conversation, not Codex."
+        )
         self.assertIsNone(self.assert_success(self.call_cli("conversation", "model", codex_task["id"])[0])["modelID"], "Claude must not inherit the Codex model selection.")
         self.assert_success(self.call_cli("conversation", "model", codex_task["id"], "set", "claude-choice")[0])
         self.assertEqual(self.assert_success(self.call_cli("conversation", "provider", codex_task["id"], "set", "codex")[0])["conversationProvider"], "codex")
@@ -4641,7 +4762,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertNotIn("private outcome response hidden", handoff, "Redacted reminder replies must not enter handoff context.")
         self.assertTrue(handoff.endswith("Continue the story."))
 
-    # case-contract: test_claude_resume_recovers_visible_history | After a Claude turn and Playhouse restart, if Claude cannot find its native resumed session, the retried fresh session receives the prior visible conversation from Playhouse's persisted transcript together with the new prompt. Claude completes the turn, and fresh CLI/XPC history and the visible UI retain both turns. A normal Claude resume continues using the native session without receiving duplicate handoff context.
+    # case-contract: test_claude_resume_recovers_visible_history | A Claude turn that fails after Claude Code created its session leaves that session in place, and the next turn resumes it instead of claiming the same session ID again. After a Claude turn and Playhouse restart, if Claude cannot find its native resumed session, the retried fresh session receives the prior visible conversation from Playhouse's persisted transcript together with the new prompt. Claude completes the turn, and fresh CLI/XPC history and the visible UI retain both turns. A normal Claude resume continues using the native session without receiving duplicate handoff context.
     def test_claude_resume_recovers_visible_history(self):
         claude = self.data_directory / "claude-fixture-resume-recovery"
         shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", claude)
@@ -4652,12 +4773,31 @@ class PlayhouseBridgeTests(unittest.TestCase):
         fixtures = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(claude)}
         task = self.create_task("Claude session recovery", roots=[self.primary])
         self.assert_success(self.call_cli("conversation", "provider", task["id"], "set", "claude")[0])
+        fixture_history_path = Path(str(claude) + ".history")
+
+        # A first turn that fails after Claude Code created the session leaves the
+        # session behind. The next turn must resume it; claiming the same ID again
+        # makes Claude Code exit with "Session ID ... is already in use".
+        failed, _ = self.call_cli(
+            "conversation", "send", task["id"], "--message", "Please fail-this-claude-turn.",
+            expected_status=1, extra_environment=fixtures,
+        )
+        self.assertFalse(failed.get("ok"), failed)
+        session_after_failure = self.assert_success(self.call_cli("task", "get", task["id"])[0])["claudeSessionID"]
+        self.assertTrue(session_after_failure, "The failed first turn should still have persisted its Claude session.")
+
         first, _ = self.call_cli("conversation", "send", task["id"], "--message", "Tell me a very short dog story.", extra_environment=fixtures)
         self.assert_success(first)
+        after_failure = next(
+            turn for turn in reversed(json.loads(fixture_history_path.read_text(encoding="utf-8"))["turns"])
+            if turn.get("userText") == "Tell me a very short dog story."
+        )
+        self.assertTrue(after_failure["resumed"], "A session left behind by a failed turn must be resumed, not claimed again.")
+        self.assertEqual(after_failure["sessionID"], session_after_failure, after_failure)
+
         second, _ = self.call_cli("conversation", "send", task["id"], "--message", "Please inspect the workspace.", extra_environment=fixtures)
         self.assert_success(second)
 
-        fixture_history_path = Path(str(claude) + ".history")
         normal_resume = next(
             turn for turn in reversed(json.loads(fixture_history_path.read_text(encoding="utf-8"))["turns"])
             if turn.get("userText") == "Please inspect the workspace."
@@ -6293,7 +6433,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "A fresh read-only subagent inspection should return the child conversation's stored content.",
         )
 
-    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in, the question that started it stays pinned near the top of the transcript instead of being auto-scrolled past as the answer grows, consistent with the user message preceding its final answer in CLI/XPC history.
+    # case-contract: test_plan_mode_renders_markdown_in_conversation | Selecting Plan mode keeps planning active across completed turns and reopening; follow-up instructions start another plan turn, and Start Implementing stays enabled with an empty chat and composer, switches to Code mode, and starts an implementation turn; subsequent composer messages remain Code turns. The plan renders automatically as Markdown with visible spacing, remains selectable and copyable as one complete text view, and CLI events and bridge history preserve the exact plan text and latest implementation handoff. Ordered list items stay on separate lines instead of being merged, and a fenced code block renders as a distinct block with its declared language label and a copy action that places its exact source on the pasteboard. A Markdown pipe table renders as a distinct bordered grid with a header row and data rows instead of raw pipe/dash text, preserving cell content and column alignment, while CLI/XPC history preserves the exact raw table source text. Multiple plan deltas are summarized per item with count and byte totals at turn completion, with no per-delta notification records and no plan text in diagnostics. While the first plan is still streaming in, the question that started it stays pinned near the top of the transcript instead of being auto-scrolled past as the answer grows, consistent with the user message preceding its final answer in CLI/XPC history.
     def test_plan_mode_renders_markdown_in_conversation(self):
         task_id = self.create_task(title="Plan mode Markdown", roots=[self.primary])["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -6304,7 +6444,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
         )
         env = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
-        markdown_reply = "## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening\n\n1. First numbered step: capture the baseline state before changes.\n\n2. Second numbered step: apply the fix and confirm there are no regressions.\n\n```javascript\nconsole.log(\"Hello, world!\");\n```"
+        markdown_reply = "## Implementation plan\n\nStart with the **workspace model**.\n\nA separate paragraph confirms readable spacing between plan sections.\n\n- Implementation detail 01: verify the saved conversation state and rendered result\n- Implementation detail 02: verify the saved conversation state and rendered result\n- Implementation detail 03: verify the saved conversation state and rendered result\n- Implementation detail 04: verify the saved conversation state and rendered result\n- Implementation detail 05: verify the saved conversation state and rendered result\n- Implementation detail 06: verify the saved conversation state and rendered result\n- Implementation detail 07: verify the saved conversation state and rendered result\n- Implementation detail 08: verify the saved conversation state and rendered result\n- Implementation detail 09: verify the saved conversation state and rendered result\n- Implementation detail 10: verify the saved conversation state and rendered result\n- Implementation detail 11: verify the saved conversation state and rendered result\n- Implementation detail 12: verify the saved conversation state and rendered result\n- Implementation detail 13: verify the saved conversation state and rendered result\n- Implementation detail 14: verify the saved conversation state and rendered result\n- Implementation detail 15: verify the saved conversation state and rendered result\n- Implementation detail 16: verify the saved conversation state and rendered result\n- Implementation detail 17: verify the saved conversation state and rendered result\n- Implementation detail 18: verify the saved conversation state and rendered result\n- Implementation detail 19: verify the saved conversation state and rendered result\n- Implementation detail 20: verify the saved conversation state and rendered result\n- Implementation detail 21: verify the saved conversation state and rendered result\n- Implementation detail 22: verify the saved conversation state and rendered result\n- Implementation detail 23: verify the saved conversation state and rendered result\n- Implementation detail 24: verify the saved conversation state and rendered result\n- Implementation detail 25: verify the saved conversation state and rendered result\n- Implementation detail 26: verify the saved conversation state and rendered result\n- Implementation detail 27: verify the saved conversation state and rendered result\n- Implementation detail 28: verify the saved conversation state and rendered result\n- Implementation detail 29: verify the saved conversation state and rendered result\n- Final verification: confirm the latest message is visible after reopening\n\n1. First numbered step: capture the baseline state before changes.\n\n2. Second numbered step: apply the fix and confirm there are no regressions.\n\n```javascript\nconsole.log(\"Hello, world!\");\n```\n\n| Step | Status |\n| --- | :---: |\n| Verify fixture | Done |\n| Render table | Pending |"
         sent, events = self.call_cli(
             "conversation", "send", task_id, "--message", "Plan the task.", "--mode", "plan",
             extra_environment=env,
@@ -6349,6 +6489,10 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(any(message["role"] == "assistant" and message["text"] == markdown_reply
                             and message["phase"] == "final_answer" for message in reloaded_messages))
         self.assertEqual(reloaded_messages[-1]["role"], "assistant", "The latest response should be last in bridge history.")
+        reloaded_plan = next(message["text"] for message in reloaded_messages
+                             if message["role"] == "assistant" and message["phase"] == "final_answer")
+        self.assertIn("| Step | Status |\n| --- | :---: |\n| Verify fixture | Done |", reloaded_plan,
+                      "Bridge history should preserve the plan's raw Markdown table source for the client to render.")
         plan_diagnostics = self.diagnostic_events()
         plan_summary = next(event for event in plan_diagnostics
                             if event.get("event") == "codex.notification.summary"
@@ -7264,6 +7408,74 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "An outcome reported in the woken turn must not trigger private outcome reminders.",
         )
 
+    # case-contract: test_claude_steers_turn_parked_on_background_work | A Claude turn whose result is already out while a background shell keeps it open is still steerable: a queued follow-up's Steer reaches the running turn instead of silently staying queued, leaves the queue, appears in the conversation, and the turn waits for Claude's answer to it before the woken parent turn ends the send.
+    def test_claude_steers_turn_parked_on_background_work(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / "claude-fixture-parked-steer"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        env = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        created, _ = self.call_cli(
+            "task", "create", "--title", "Claude parked steer", "--root", self.primary, "--provider", "claude"
+        )
+        task_id = self.assert_success(created)["id"]
+        ready = Path(f"{executable}.parked-shell-ready")
+        command = ("conversation", "send", task_id, "--message", "Launch a parked background shell for this turn.")
+        process = self.start_cli(*command, extra_environment=env)
+        try:
+            deadline = time.monotonic() + 20
+            while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "The fixture should park the turn after its result while the shell runs.")
+            # Let a premature settle end the send before asserting the turn is steerable.
+            time.sleep(0.5)
+            self.assertIsNone(process.poll(), "The send must stay open while the background shell runs.")
+            queued = self.assert_success(self.call_cli(
+                "conversation", "queue", task_id, "--message", "Check the other blocked tasks too.",
+            )[0])
+            steered = self.assert_success(self.call_cli(
+                "conversation", "queue-steer", task_id, queued["id"], extra_environment=env,
+            )[0])
+            self.assertEqual(steered["text"], "Check the other blocked tasks too.")
+            self.assertFalse(
+                steered["queued"],
+                "A turn held open by a background shell is still active, so its follow-up must steer it.",
+            )
+            self.assertEqual(
+                self.assert_success(self.call_cli("conversation", "queue-list", task_id)[0]), [],
+                "An accepted steer must leave the queue.",
+            )
+            response, events = self.finish_cli(process, command, timeout=60)
+        finally:
+            if process.poll() is None:
+                process.communicate(timeout=30)
+        self.assert_success(response)
+        self.assertIn(
+            "Check the other blocked tasks too.",
+            [e["payload"].get("message") for e in events if e["type"] == "steered_message"],
+            "The running turn must stream the steered follow-up it accepted.",
+        )
+        self.assertEqual([e["payload"]["text"] for e in events if e["type"] == "assistant_final"], ["PARKED HANDLED"])
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        self.assertIn(
+            "Check the other blocked tasks too.",
+            [message["text"] for message in history["messages"] if message["role"] == "user"],
+            "The steered follow-up belongs in the conversation it steered.",
+        )
+        self.assertIn(
+            "STEERED: Check the other blocked tasks too.",
+            [message["text"] for message in history["messages"] if message["role"] == "assistant"],
+            "Claude's answer to the steered follow-up belongs in the same turn.",
+        )
+        self.assertEqual(
+            [message["text"] for message in history["messages"] if message["role"] == "assistant"][-1],
+            "PARKED HANDLED",
+            "The woken parent turn's answer still ends the turn.",
+        )
+
     # case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, Playhouse returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics.
     def test_claude_private_recovery_failure_fails_closed(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
@@ -7759,7 +7971,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         recovered_thread, _ = self.call_cli("task", "get", threaded_restart["id"])
         self.assertEqual(self.assert_success(recovered_thread)["status"], "Review")
 
-    # case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view lists every file changed from the task branch's recorded base in a Changes section below a collapsed Viewed section, including committed branch changes and current staged, unstaged, and untracked edits, and excluding commits unique to the base branch. Marking a file viewed saves its current contents, stages the file in Git, and adds a Viewed entry that keeps showing the reviewed work from the branch base to that snapshot. Work done after that review is listed again under Changes and diffed against the saved snapshot, so one file can appear in both sections at once; a path with no content in the branch base and no current file is zero net change and is hidden entirely, even with a stale viewed snapshot, rather than showing a ghost entry. Selecting text or JSON files opens a calculated side-by-side diff whose header names the baseline used. Viewed snapshots persist across fresh CLI/XPC connections. Files that aren't current Changes entries, including already-viewed and unknown paths, are rejected by the mark-viewed CLI operation, and the UI offers that action only for Changes entries. Uncommitted filenames are green. Diagnostics record inventory and file-read outcomes without logging file contents.
+    # case-contract: test_task_workspace_changes_group_staged_and_unstaged_diffs | The task view lists every file changed from the task branch's recorded base in a Changes section below a collapsed Viewed section, including committed branch changes and current staged, unstaged, and untracked edits, and excluding commits unique to the base branch. Marking a file viewed saves its current contents, stages the file in Git, and adds a Viewed entry that keeps showing the reviewed work from the branch base to that snapshot. Work done after that review is listed again under Changes and diffed against the saved snapshot, so one file can appear in both sections at once; a path with no content in the branch base and no current file is zero net change and is hidden entirely, even with a stale viewed snapshot, rather than showing a ghost entry. Selecting text or JSON files opens a calculated side-by-side diff whose header names the baseline used. Viewed snapshots persist across fresh CLI/XPC connections. Files that aren't current Changes entries, including already-viewed and unknown paths, are rejected by the mark-viewed CLI operation, and the UI offers that action only for Changes entries. Uncommitted filenames are green. Opening one diff after another serves each file's own content from the side-by-side editor the app loads once per session, so a later diff reuses that warm editor instead of starting Monaco again. Diagnostics record inventory and file-read outcomes without logging file contents.
     def test_task_workspace_changes_group_staged_and_unstaged_diffs(self):
         self.prepare_workspace_changes()
         task_id = self.create_task(title="Workspace changes", roots=[self.changes])["id"]
@@ -7786,6 +7998,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         deleted = self.assert_success(self.changes_diff(task_id, "deleted.txt", "unviewed"))
         self.assertEqual(deleted["original"], "Deleted baseline.\n")
         self.assertEqual(deleted["modified"], "")
+        reopened = self.assert_success(self.changes_diff(task_id, "shared.txt", "unviewed"))
+        self.assertEqual(reopened, shared, "Opening one diff after another keeps serving each file's own content.")
 
         marked, _ = self.call_cli("task", "changes", "mark-viewed", task_id, "--repository", str(self.changes), "--path", "shared.txt")
         self.assertEqual(self.assert_success(marked), {"viewed": True})
@@ -7946,6 +8160,111 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse(entries["tracked.txt"]["isUncommitted"])
         self.assertNotIn("base-only.txt", entries)
 
+    def install_claude_fixture(self, name):
+        """Installs the Claude Code protocol fixture and returns its turn environment."""
+        source = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / name
+        shutil.copyfile(source, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        return {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+
+    # case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. The task card shows a token usage dot whose tooltip reports the total, and the Token Stats context-menu item opens a modal showing the totals, the per-tool rollup and the per-turn breakdown.
+    def test_task_token_usage_records_claude_turn_breakdown(self):
+        # Matches TURN_USAGE in scripts/fixtures/claude-code-fixture.py.
+        expected_turn_usage = {
+            "inputTokens": 1000, "outputTokens": 200, "cacheReadTokens": 300, "cacheCreationTokens": 100,
+        }
+        turn_total = sum(expected_turn_usage.values())
+        environment = self.install_claude_fixture("claude-fixture-token-usage")
+        task_id = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Claude token usage", "--root", self.primary, "--provider", "claude"
+        )[0])["id"]
+
+        empty = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])
+        self.assertEqual(empty["totalTokens"], 0, "A task with no turns has recorded no tokens.")
+        self.assertEqual(empty["turns"], [])
+        self.assertEqual(empty["tools"], [])
+
+        # "Tell me a story." is one of the fixture's few branches that reports a
+        # task outcome, so it ends in exactly one Claude `result` message; a
+        # prompt that leaves the outcome unreported (like "inspect") makes
+        # Playhouse send several internal nudge turns in the same session,
+        # each contributing its own `result` and inflating this fixture's
+        # flat per-result usage well past one turn's worth.
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Tell me a story.",
+            extra_environment=environment,
+        )[0])
+        first = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])
+        self.assertEqual(first["usage"], expected_turn_usage, "Claude's usage buckets should reach the task totals.")
+        self.assertEqual(first["totalTokens"], turn_total)
+        self.assertEqual(len(first["turns"]), 1, "The completed turn should be recorded once.")
+        turn = first["turns"][0]
+        self.assertEqual(turn["provider"], "claude")
+        self.assertEqual(turn["usage"], expected_turn_usage)
+        self.assertEqual(turn["totalTokens"], turn_total)
+        self.assertIn("Bash", turn["tools"], "The turn should name the tool it ran.")
+        self.assertEqual(
+            [tool for tool in first["tools"] if tool["id"] == "Bash"],
+            [{"id": "Bash", "turnCount": 1, "totalTokens": turn_total}],
+            "The rollup should credit the Bash tool with the turn it ran in.",
+        )
+
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Tell me a story.",
+            extra_environment=environment,
+        )[0])
+        second = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])
+        self.assertEqual(second["totalTokens"], turn_total * 2, "A second turn adds to the running total.")
+        self.assertEqual(second["usage"]["inputTokens"], expected_turn_usage["inputTokens"] * 2)
+        self.assertEqual(len(second["turns"]), 2, "Each turn keeps its own row.")
+        self.assertEqual(len({turn["id"] for turn in second["turns"]}), 2, "Turn rows must not share an id.")
+        self.assertTrue(
+            all(turn["totalTokens"] == turn_total for turn in second["turns"]),
+            "Each turn row should carry only its own cost.",
+        )
+
+    # case-contract: test_task_token_usage_records_codex_turn_breakdown | A Codex app-server fixture turn's usage reaches the same per-task totals and per-turn breakdown through Codex's own wire shape, mapping its cached-input bucket onto Playhouse's cache-read bucket and leaving cache-write at zero. The recorded turn row names Codex as its provider, and the Token Stats modal shows those Codex totals in the app.
+    def test_task_token_usage_records_codex_turn_breakdown(self):
+        # Matches TURN_USAGE in scripts/fixtures/codex-app-server-fixture.py.
+        expected_turn_usage = {
+            "inputTokens": 900, "outputTokens": 150, "cacheReadTokens": 250, "cacheCreationTokens": 0,
+        }
+        turn_total = sum(expected_turn_usage.values())
+        task_id = self.create_task(title="Codex token usage", roots=[self.primary])["id"]
+        self.complete_fixture_turn(task_id, executable_name="codex-fixture-token-usage")
+
+        summary = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])
+        self.assertEqual(
+            summary["usage"], expected_turn_usage,
+            "Codex's cached-input bucket should map onto cache read, with no cache-write bucket.",
+        )
+        self.assertEqual(summary["totalTokens"], turn_total)
+        self.assertEqual(len(summary["turns"]), 1)
+        self.assertEqual(summary["turns"][0]["provider"], "codex")
+        self.assertEqual(summary["turns"][0]["totalTokens"], turn_total)
+
+    # case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to one million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's usage dot re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
+    def test_settings_token_usage_color_max_round_trip(self):
+        settings = self.assert_success(self.call_cli("settings", "get")[0])
+        self.assertEqual(settings["tokenUsageColorMax"], 1_000_000, "The dot's scale tops out at a million tokens by default.")
+
+        updated = self.assert_success(self.call_cli("settings", "set-token-usage-color-max", "2400")[0])
+        self.assertEqual(updated["tokenUsageColorMax"], 2400)
+        self.assertEqual(
+            self.assert_success(self.call_cli("settings", "get")[0])["tokenUsageColorMax"], 2400,
+            "The edited maximum should survive a fresh read.",
+        )
+
+        response, _ = self.call_cli("settings", "set-token-usage-color-max", "0", expected_status=2)
+        self.assert_failure(response, "invalid_argument")
+        self.assertEqual(
+            self.assert_success(self.call_cli("settings", "get")[0])["tokenUsageColorMax"], 2400,
+            "A rejected maximum should leave the stored one alone.",
+        )
 
 
 class TimedTestResult(unittest.TextTestResult):
