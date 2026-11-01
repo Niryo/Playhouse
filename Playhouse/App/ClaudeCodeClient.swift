@@ -118,6 +118,10 @@ final class ClaudeSessionRunner {
     private(set) var pendingUserInputRequest: ConversationUserInputRequest?
     private(set) var wasInterrupted = false
     private(set) var activityDurations: [String: Int] = [:]
+    /// Set once Claude Code has accepted this session ID and owns its transcript.
+    /// From then on the session exists whether or not the turn succeeds, so the
+    /// next turn must resume it instead of claiming the ID again.
+    private(set) var sessionExists = false
 
     var deltaHandler: ((String) -> Void)?
     var finalMessageHandler: ((String) -> Void)?
@@ -196,6 +200,9 @@ final class ClaudeSessionRunner {
                 workspace: workspace, developerInstructions: developerInstructions
             )
         }
+        // Claude Code has the session now. A turn that fails after this point
+        // still leaves the transcript behind, so the next turn resumes it.
+        sessionExists = true
         try ClaudeCodeClient.verifyVersion(initialize["claude_code_version"] as? String)
 
         let turnID = UUID().uuidString.lowercased()
@@ -1291,6 +1298,11 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
         activityDurationsByThread[sessionID] = [:]
         lastFinishedThreadID = sessionID
         defer {
+            // A session Claude Code accepted is no longer new, whether or not the
+            // turn succeeded. Keeping the marker past a failed first turn would
+            // claim the ID again on the retry and fail with "already in use",
+            // leaving the conversation unresumable.
+            if runner.sessionExists { newSessionIDs.remove(sessionID) }
             // The identity only; the client reports whether a turn is still active.
             lastTurnDiagnosticsByThread[sessionID] = runner.diagnosticFields([:])
                 .filter { $0.key != "isTurnActive" }
@@ -1319,7 +1331,6 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
             sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
             hideSensitiveRecoveryPrompt: hideSensitiveRecoveryPrompt
         )
-        newSessionIDs.remove(sessionID)
     }
 
     func interruptActiveTurn(threadID: String) async throws -> Bool {

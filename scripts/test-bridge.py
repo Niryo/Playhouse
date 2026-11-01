@@ -4762,7 +4762,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertNotIn("private outcome response hidden", handoff, "Redacted reminder replies must not enter handoff context.")
         self.assertTrue(handoff.endswith("Continue the story."))
 
-    # case-contract: test_claude_resume_recovers_visible_history | After a Claude turn and Playhouse restart, if Claude cannot find its native resumed session, the retried fresh session receives the prior visible conversation from Playhouse's persisted transcript together with the new prompt. Claude completes the turn, and fresh CLI/XPC history and the visible UI retain both turns. A normal Claude resume continues using the native session without receiving duplicate handoff context.
+    # case-contract: test_claude_resume_recovers_visible_history | A Claude turn that fails after Claude Code created its session leaves that session in place, and the next turn resumes it instead of claiming the same session ID again. After a Claude turn and Playhouse restart, if Claude cannot find its native resumed session, the retried fresh session receives the prior visible conversation from Playhouse's persisted transcript together with the new prompt. Claude completes the turn, and fresh CLI/XPC history and the visible UI retain both turns. A normal Claude resume continues using the native session without receiving duplicate handoff context.
     def test_claude_resume_recovers_visible_history(self):
         claude = self.data_directory / "claude-fixture-resume-recovery"
         shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", claude)
@@ -4773,12 +4773,31 @@ class PlayhouseBridgeTests(unittest.TestCase):
         fixtures = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(claude)}
         task = self.create_task("Claude session recovery", roots=[self.primary])
         self.assert_success(self.call_cli("conversation", "provider", task["id"], "set", "claude")[0])
+        fixture_history_path = Path(str(claude) + ".history")
+
+        # A first turn that fails after Claude Code created the session leaves the
+        # session behind. The next turn must resume it; claiming the same ID again
+        # makes Claude Code exit with "Session ID ... is already in use".
+        failed, _ = self.call_cli(
+            "conversation", "send", task["id"], "--message", "Please fail-this-claude-turn.",
+            expected_status=1, extra_environment=fixtures,
+        )
+        self.assertFalse(failed.get("ok"), failed)
+        session_after_failure = self.assert_success(self.call_cli("task", "get", task["id"])[0])["claudeSessionID"]
+        self.assertTrue(session_after_failure, "The failed first turn should still have persisted its Claude session.")
+
         first, _ = self.call_cli("conversation", "send", task["id"], "--message", "Tell me a very short dog story.", extra_environment=fixtures)
         self.assert_success(first)
+        after_failure = next(
+            turn for turn in reversed(json.loads(fixture_history_path.read_text(encoding="utf-8"))["turns"])
+            if turn.get("userText") == "Tell me a very short dog story."
+        )
+        self.assertTrue(after_failure["resumed"], "A session left behind by a failed turn must be resumed, not claimed again.")
+        self.assertEqual(after_failure["sessionID"], session_after_failure, after_failure)
+
         second, _ = self.call_cli("conversation", "send", task["id"], "--message", "Please inspect the workspace.", extra_environment=fixtures)
         self.assert_success(second)
 
-        fixture_history_path = Path(str(claude) + ".history")
         normal_resume = next(
             turn for turn in reversed(json.loads(fixture_history_path.read_text(encoding="utf-8"))["turns"])
             if turn.get("userText") == "Please inspect the workspace."
