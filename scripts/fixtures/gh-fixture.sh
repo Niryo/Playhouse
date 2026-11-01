@@ -1,10 +1,14 @@
 #!/bin/sh
 # Deterministic stand-in for the GitHub CLI used by the bridge and UI suites.
-# It answers `gh pr view <123|456> --json mergedAt[,mergeable,headRefOid]` from
-# a state file (lines of `<number>=<merged|unmerged|conflicting|head-mismatch>`)
-# and logs each probed number. Environment:
+# It answers pull-request list/create calls and `gh pr view <number> --json
+# mergedAt[,mergeable,headRefOid]` from a state file (lines of
+# `<number>=<merged|unmerged|conflicting|head-mismatch>`) and logs each probe.
+# Create calls return sequential fixture PR numbers. Environment:
 #   PLAYHOUSE_E2E_GH_STATE_PATH          state file (required)
 #   PLAYHOUSE_E2E_GH_CALL_LOG            append-only log of probed PR numbers (required)
+#   PLAYHOUSE_E2E_GH_CREATE_LOG          append-only log of list/create calls
+#   PLAYHOUSE_E2E_GH_CREATE_FIRST_NUMBER first generated PR number (default 501)
+#   PLAYHOUSE_E2E_GH_CREATE_FAILURE_PATH  optional file containing create attempt to fail
 #   PLAYHOUSE_E2E_GH_STARTED_DIRECTORY   with EXPECTED_IDS, full probes must all start
 #   PLAYHOUSE_E2E_GH_EXPECTED_IDS        before any answers (parallel-probe check)
 #   PLAYHOUSE_E2E_GH_REMOTE_REPOSITORY   bare repo whose refs/heads/pr-<n> is the PR head
@@ -15,11 +19,37 @@
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 : "${PLAYHOUSE_E2E_GH_STATE_PATH:=$script_directory/state}"
 : "${PLAYHOUSE_E2E_GH_CALL_LOG:=$script_directory/calls}"
+: "${PLAYHOUSE_E2E_GH_CREATE_LOG:=$script_directory/create-calls}"
 if [ ! -f "$PLAYHOUSE_E2E_GH_STATE_PATH" ]; then
   echo 'gh fixture requires a state file (PLAYHOUSE_E2E_GH_STATE_PATH or `state` beside the script)' >&2
   exit 2
 fi
-if [ "$1" != pr ] || [ "$2" != view ] || { [ "$3" != 123 ] && [ "$3" != 456 ]; } || [ "$4" != --json ]; then
+touch "$PLAYHOUSE_E2E_GH_CREATE_LOG"
+if [ "$1" = pr ] && [ "$2" = list ]; then
+  printf 'list\t%s\t%s\n' "$PWD" "$*" >> "$PLAYHOUSE_E2E_GH_CREATE_LOG"
+  printf '[]\n'
+  exit 0
+fi
+if [ "$1" = pr ] && [ "$2" = create ]; then
+  attempt=$(awk -F '\t' '$1 == "created" || $1 == "failed" { count++ } END { print count + 1 }' "$PLAYHOUSE_E2E_GH_CREATE_LOG")
+  failure_attempt=
+  if [ -n "${PLAYHOUSE_E2E_GH_CREATE_FAILURE_PATH:-}" ] && [ -f "$PLAYHOUSE_E2E_GH_CREATE_FAILURE_PATH" ]; then
+    failure_attempt=$(cat "$PLAYHOUSE_E2E_GH_CREATE_FAILURE_PATH")
+  fi
+  if [ "$attempt" = "$failure_attempt" ]; then
+    printf 'failed\t%s\t%s\n' "$PWD" "$*" >> "$PLAYHOUSE_E2E_GH_CREATE_LOG"
+    echo 'fixture GitHub create failure' >&2
+    exit 1
+  fi
+  printf 'create\t%s\t%s\n' "$PWD" "$*" >> "$PLAYHOUSE_E2E_GH_CREATE_LOG"
+  count=$(awk -F '\t' '$1 == "created" { count++ } END { print count }' "$PLAYHOUSE_E2E_GH_CREATE_LOG")
+  first_number=${PLAYHOUSE_E2E_GH_CREATE_FIRST_NUMBER:-501}
+  create_number=$((first_number + count))
+  printf 'created\t%s\t%s\n' "$PWD" "$create_number" >> "$PLAYHOUSE_E2E_GH_CREATE_LOG"
+  printf 'https://github.com/playhouse-test/fixture/pull/%s\n' "$create_number"
+  exit 0
+fi
+if [ "$1" != pr ] || [ "$2" != view ] || ! printf '%s' "$3" | grep -Eq '^[0-9]+$' || [ "$4" != --json ]; then
   echo 'Unexpected gh fixture command' >&2
   exit 2
 fi

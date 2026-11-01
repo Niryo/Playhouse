@@ -858,6 +858,30 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIn(f"Seeded linked PR #{number}", result.stdout)
         return seeded_url
 
+    def clear_task_provider_session(self, task_id):
+        executable = self.data_directory / "seed-task-pr-link"
+        if not executable.exists():
+            repository_root = Path(__file__).resolve().parent.parent
+            subprocess.run(
+                [
+                    "xcrun", "swiftc", "-module-name", "Playhouse",
+                    str(repository_root / "Playhouse" / "App" / "BoardTask.swift"),
+                    str(repository_root / "Playhouse" / "App" / "ConversationSubject.swift"),
+                    str(repository_root / "scripts" / "seed-task-pr-link.swift"),
+                    "-o", str(executable),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        result = subprocess.run(
+            [str(executable), str(self.data_directory), task_id, "--clear-provider-session"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn("Cleared provider sessions", result.stdout)
+
     def wait_for_marker(self, marker, present, message, timeout=10):
         deadline = time.monotonic() + timeout
         while marker.exists() != present and time.monotonic() < deadline:
@@ -2852,20 +2876,92 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review")
         self.run_git(self.primary, "remote", "remove", "origin")
 
-    # case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC fresh reads confirm saved PR data; the UI shows active and archived PR links and an active task's Create PR button. Hovering the outer padded edge of each control triggers its hover feedback.
+    # case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC creates PRs for two repositories, verifies the first PR persists when the second creation fails, retries only the missing repository, confirms each gh create call targets the corresponding repository worktree, and confirms both saved numbers on fresh reads. The UI labels active-card and Done-archive multi-repository creation actions PRs, clicks the active action, verifies the partial-success retry action, confirms the gh create calls target both repository worktrees and retry only the failed one, then shows the exact created PR numbers on the active task and every linked number in the Done archive. Hovering the outer padded edge of each PR link triggers its feedback.
     def test_done_archive_displays_existing_pull_request_link(self):
-        task = self.create_repo_task("Archived linked PR", [self.primary], materialize=True)
+        task = self.create_repo_task("Archived linked PR", [self.primary, self.secondary], materialize=True)
         completed, _ = self.call_cli("task", "move", task["id"], "Done")
         self.assertEqual(self.assert_success(completed)["status"], "Done")
         url = self.seed_done_task_pull_request(task["id"])
+        second_url = self.seed_done_task_pull_request(task["id"], number=124, repository_index=1)
 
         current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(current["status"], "Done")
         record = current["repositoryWorktrees"][0]
         self.assertEqual(record["pullRequestNumber"], 123)
         self.assertEqual(record["pullRequestURL"], url)
+        self.assertEqual(current["repositoryWorktrees"][1]["pullRequestNumber"], 124)
+        self.assertEqual(current["repositoryWorktrees"][1]["pullRequestURL"], second_url)
         archived = next(item for item in self.assert_success(self.call_cli("board", "list")[0])["tasks"] if item["id"] == task["id"])
         self.assertEqual(archived["repositoryWorktrees"][0]["pullRequestNumber"], 123)
+        self.assertEqual(archived["repositoryWorktrees"][1]["pullRequestNumber"], 124)
+
+        creating = self.create_repo_task("Create PRs for every repository", [self.primary, self.secondary], materialize=True)
+        self.clear_task_provider_session(creating["id"])
+        remote_root = self.data_directory / "pull-request-remotes"
+        self.assertFalse(remote_root.exists(), "Each case must start with an isolated remote fixture directory.")
+        remote_root.mkdir()
+        (remote_root / ".playhouse-test-owner").write_text("Playhouse bridge test owns these PR remotes.\n", encoding="utf-8")
+        for index, record in enumerate(creating["repositoryWorktrees"]):
+            remote = remote_root / f"repository-{index}.git"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+            source_repository = Path(record["repositoryPath"])
+            self.assertNotIn("origin", self.run_git(source_repository, "remote").split())
+
+            def remove_fixture_origin(repository, expected_url):
+                current = subprocess.run(
+                    ["git", "-C", str(repository), "remote", "get-url", "origin"],
+                    check=False, capture_output=True, text=True,
+                )
+                if current.returncode == 0 and current.stdout.strip() == str(expected_url):
+                    self.run_git(repository, "remote", "remove", "origin")
+
+            self.addCleanup(remove_fixture_origin, source_repository, remote)
+            self.run_git(Path(record["worktreePath"]), "remote", "add", "origin", str(remote))
+            self.run_git(Path(record["worktreePath"]), "push", "origin", "main")
+
+        gh_directory = self.data_directory / "creation-gh-fixture"
+        gh_directory.mkdir()
+        gh = gh_directory / "gh"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
+        gh.chmod(0o755)
+        gh_state = gh_directory / "state"
+        gh_state.write_text("", encoding="utf-8")
+        create_log = gh_directory / "create-calls"
+        failure_path = gh_directory / "fail-create-attempt"
+        failure_path.write_text("2\n", encoding="utf-8")
+        gh_environment = {
+            "PATH": f"{gh_directory}:{os.environ.get('PATH', '')}",
+            "PLAYHOUSE_E2E_GH_STATE_PATH": str(gh_state),
+            "PLAYHOUSE_E2E_GH_CALL_LOG": str(gh_directory / "view-calls"),
+            "PLAYHOUSE_E2E_GH_CREATE_LOG": str(create_log),
+            "PLAYHOUSE_E2E_GH_CREATE_FAILURE_PATH": str(failure_path),
+            "PLAYHOUSE_E2E_GH_CREATE_FIRST_NUMBER": "501",
+        }
+        failed_create, _ = self.call_cli("task", "pr", "create", creating["id"], expected_status=1, extra_environment=gh_environment)
+        self.assert_failure(failed_create, "operation_failed")
+        partially_created = self.assert_success(self.call_cli("task", "get", creating["id"])[0])
+        self.assertEqual(partially_created["repositoryWorktrees"][0]["pullRequestNumber"], 501)
+        self.assertIsNone(partially_created["repositoryWorktrees"][1].get("pullRequestNumber"))
+        failure_path.write_text("", encoding="utf-8")
+        retried = self.assert_success(self.call_cli("task", "pr", "create", creating["id"], extra_environment=gh_environment)[0])
+        self.assertEqual([record["pullRequestNumber"] for record in retried["repositoryWorktrees"]], [501, 502])
+        self.assertEqual(
+            [record["pullRequestURL"] for record in retried["repositoryWorktrees"]],
+            ["https://github.com/playhouse-test/fixture/pull/501", "https://github.com/playhouse-test/fixture/pull/502"],
+        )
+        create_events = create_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(sum(line.startswith("created\t") for line in create_events), 2)
+        self.assertEqual(sum(line.startswith("failed\t") for line in create_events), 1)
+        create_targets = [line.split("\t", 2)[1] for line in create_events if line.startswith(("create\t", "failed\t"))]
+        self.assertEqual(
+            create_targets,
+            [str(Path(creating["repositoryWorktrees"][0]["worktreePath"]).resolve()),
+             str(Path(creating["repositoryWorktrees"][1]["worktreePath"]).resolve()),
+             str(Path(creating["repositoryWorktrees"][1]["worktreePath"]).resolve())],
+            "Creation must target each repository, and retry only the repository whose create failed.",
+        )
+        fresh = self.assert_success(self.call_cli("task", "get", creating["id"])[0])
+        self.assertEqual([record["pullRequestNumber"] for record in fresh["repositoryWorktrees"]], [501, 502])
 
     # case-contract: test_task_lifecycle_rollout_clears_records_and_clean_worktrees | The one-time lifecycle rollout clears task records and clean managed worktrees, preserves branches, and retains dirty managed worktrees with a notice.
     def test_task_lifecycle_rollout_clears_records_and_clean_worktrees(self):

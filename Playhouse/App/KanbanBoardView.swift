@@ -620,14 +620,16 @@ struct KanbanBoardView: View {
     @ViewBuilder
     private func archivedTaskPullRequestControl(_ task: BoardTask) -> some View {
         let linked = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
+        let missingPullRequests = task.repositoryWorktrees.contains { !$0.isPending && ($0.pullRequestNumber == nil || $0.pullRequestURL == nil) }
         if linked.isEmpty {
+            let hasMultipleRepositories = task.repositoryWorktrees.filter { !$0.isPending }.count > 1
             Button {
                 createPullRequests(for: task)
             } label: {
                 if taskCreatingPullRequests.contains(task.id) {
                     ProgressView().controlSize(.mini)
                 } else {
-                    Text("PR").font(.system(size: 10, weight: .semibold))
+                    Text(hasMultipleRepositories ? "PRs" : "PR").font(.system(size: 10, weight: .semibold))
                             .frame(minWidth: 30, minHeight: 30)
                 }
             }
@@ -637,10 +639,30 @@ struct KanbanBoardView: View {
             .disabled(taskCreatingPullRequests.contains(task.id))
             .frame(width: 30, height: 30)
             .contentShape(Rectangle())
-            .accessibilityLabel("Create a pull request for each repository linked to this completed task")
+            .accessibilityLabel(hasMultipleRepositories ? "PRs. Create pull requests for each repository linked to this completed task" : "PR. Create a pull request for each repository linked to this completed task")
             .accessibilityIdentifier("done-archive-create-pr-\(task.id.uuidString)")
         } else {
             HStack(spacing: 5) {
+                if missingPullRequests {
+                    Button {
+                        createPullRequests(for: task)
+                    } label: {
+                        if taskCreatingPullRequests.contains(task.id) {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Text(task.repositoryWorktrees.filter { !$0.isPending }.count > 1 ? "PRs" : "PR")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                    }
+                    .actionButtonHoverEmphasis()
+                    .buttonHoverPointer()
+                    .help("Create pull requests for repositories without a linked pull request")
+                    .disabled(taskCreatingPullRequests.contains(task.id))
+                    .frame(width: 30, height: 30)
+                    .contentShape(Rectangle())
+                    .accessibilityLabel(task.repositoryWorktrees.filter { !$0.isPending }.count > 1 ? "PRs. Create pull requests for repositories without a linked pull request" : "PR. Create a pull request for the repository without a linked pull request")
+                    .accessibilityIdentifier("done-archive-create-pr-\(task.id.uuidString)")
+                }
                 ForEach(linked, id: \.repositoryPath) { record in
                     if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
                         Link("#\(number)", destination: url)
@@ -1417,6 +1439,10 @@ private struct TaskCardView: View {
         task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
     }
 
+    private var hasRepositoriesMissingPullRequests: Bool {
+        task.repositoryWorktrees.contains { !$0.isPending && ($0.pullRequestNumber == nil || $0.pullRequestURL == nil) }
+    }
+
     private var showPullRequestControls: Bool {
         task.status != .backlog && !task.repositoryWorktrees.isEmpty
     }
@@ -1445,11 +1471,12 @@ private struct TaskCardView: View {
         HStack(spacing: 5) {
             let linked = linkedPullRequests
             if linked.isEmpty {
+                let hasMultipleRepositories = task.repositoryWorktrees.filter { !$0.isPending }.count > 1
                 Button(action: onCreatePullRequests) {
                     if isCreatingPullRequests {
                         ProgressView().controlSize(.mini)
                     } else {
-                        Text("PR").font(.system(size: 10, weight: .semibold))
+                        Text(hasMultipleRepositories ? "PRs" : "PR").font(.system(size: 10, weight: .semibold))
                             .frame(minWidth: 30, minHeight: 30)
                     }
                 }
@@ -1459,9 +1486,27 @@ private struct TaskCardView: View {
                 .disabled(isCreatingPullRequests)
                 .frame(width: 30, height: 30)
                 .contentShape(Rectangle())
-                .accessibilityLabel("Create a pull request for each repository linked to this task")
+                .accessibilityLabel(hasMultipleRepositories ? "PRs. Create pull requests for each repository linked to this task" : "PR. Create a pull request for each repository linked to this task")
                 .accessibilityIdentifier("task-create-pr-\(task.id.uuidString)")
             } else {
+                if hasRepositoriesMissingPullRequests {
+                    Button(action: onCreatePullRequests) {
+                        if isCreatingPullRequests {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Text(task.repositoryWorktrees.filter { !$0.isPending }.count > 1 ? "PRs" : "PR")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                    }
+                    .actionButtonHoverEmphasis(padding: 10)
+                    .buttonHoverPointer()
+                    .help("Create pull requests for repositories without a linked pull request")
+                    .disabled(isCreatingPullRequests)
+                    .frame(width: 30, height: 30)
+                    .contentShape(Rectangle())
+                    .accessibilityLabel(task.repositoryWorktrees.filter { !$0.isPending }.count > 1 ? "PRs. Create pull requests for repositories without a linked pull request" : "PR. Create a pull request for the repository without a linked pull request")
+                    .accessibilityIdentifier("task-create-pr-\(task.id.uuidString)")
+                }
                 if isPullRequestMerged, let onMoveToDone {
                     Button(action: onMoveToDone) {
                         Image(systemName: "checkmark")

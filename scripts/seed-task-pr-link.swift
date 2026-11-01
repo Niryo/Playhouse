@@ -6,11 +6,7 @@ import SwiftData
 struct SeedTaskPullRequestLink {
     static func main() throws {
         let arguments = Array(CommandLine.arguments.dropFirst())
-        guard (4...5).contains(arguments.count),
-              let taskID = UUID(uuidString: arguments[1]),
-              let number = Int(arguments[2]), number > 0,
-              let repositoryIndex = arguments.count == 5 ? Int(arguments[4]) : 0,
-              let url = URL(string: arguments[3]), url.scheme == "https", url.host != nil else {
+        guard arguments.count >= 2, let taskID = UUID(uuidString: arguments[1]) else {
             throw SeedError.usage
         }
 
@@ -26,9 +22,24 @@ struct SeedTaskPullRequestLink {
         let container = try ModelContainer(for: schema, configurations: [configuration])
         let context = ModelContext(container)
         let descriptor = FetchDescriptor<BoardTask>(predicate: #Predicate { $0.id == taskID })
-        guard let task = try context.fetch(descriptor).first,
-              task.repositoryWorktrees.indices.contains(repositoryIndex) else {
+        guard let task = try context.fetch(descriptor).first else {
             throw SeedError.taskUnavailable
+        }
+
+        if arguments.count == 3, arguments[2] == "--clear-provider-session" {
+            task.codexThreadID = nil
+            task.claudeSessionID = nil
+            try context.save()
+            print("Cleared provider sessions for task \(taskID).")
+            return
+        }
+
+        guard (4...5).contains(arguments.count),
+              let number = Int(arguments[2]), number > 0,
+              let repositoryIndex = arguments.count == 5 ? Int(arguments[4]) : 0,
+              let url = URL(string: arguments[3]), url.scheme == "https", url.host != nil,
+              task.repositoryWorktrees.indices.contains(repositoryIndex) else {
+            throw SeedError.usage
         }
 
         var worktrees = task.repositoryWorktrees
@@ -47,7 +58,7 @@ private enum SeedError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .usage:
-            "Usage: seed-task-pr-link <data-directory> <task-id> <pr-number> <https-url> [repository-index]"
+            "Usage: seed-task-pr-link <data-directory> <task-id> <pr-number> <https-url> [repository-index] | <data-directory> <task-id> --clear-provider-session"
         case .taskUnavailable:
             "The task must exist and have at least one repository."
         }
