@@ -318,7 +318,9 @@ final class PlayhouseUITests: XCTestCase {
             throw XCTSkip("Not run because an earlier case hit a global Playhouse startup/focus failure: \(reason)")
         }
         continueAfterFailure = false
-        codexFixtureExecutable = nil
+        // Every case starts on a plain fixture so nothing can reach an installed Codex CLI;
+        // cases that need a specific fixture replace it.
+        codexFixtureExecutable = isLiveIntegration ? nil : WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui").path
         claudeFixtureExecutable = nil
         codexFixtureStateDirectory = nil
         launchWindowTitle = nil
@@ -358,6 +360,16 @@ final class PlayhouseUITests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        // Read before cleanup, report after it: a failure here stops tearDown, which must
+        // not leave the app running or the data directory behind for the next case.
+        let providerViolations = runDirectory != nil && !isLiveIntegration ? providerFixtureViolations() : []
+        try cleanUpAfterCase()
+        for violation in providerViolations {
+            XCTFail(violation)
+        }
+    }
+
+    private func cleanUpAfterCase() throws {
         if (testRun?.failureCount ?? 0) > 0 {
             if let app {
                 let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
@@ -2694,12 +2706,13 @@ final class PlayhouseUITests: XCTestCase {
 
     // case-contract: test_task_outcome_in_progress_drives_continuations_until_blocked | An in-progress outcome is accepted during an active turn, leaves the task In Progress, and makes Playhouse send a private continuation turn that names the in-progress report; a completed report during that continuation stops the loop at Review. When every turn reports in-progress, Playhouse sends exactly five continuation turns, keeps the task In Progress throughout, and then marks it Blocked with a continuation-limit reason instead of Waiting Response, since the user was never asked anything. Continuation prompts and replies stay out of the visible conversation history. The user taking the work back ends Playhouse's private driving: stopping a continuation keeps the Stop's Waiting Response with no failure reason, and a queued follow-up runs next instead of being buried under further continuations.
     func test_task_outcome_in_progress_drives_continuations_until_blocked() throws {
+        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-in-progress-continuation-hold-release")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
+        // The app reads each opened conversation through this fixture.
+        codexFixtureExecutable = executable.path
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Continue in progress", roots: [fixture.primary.path])
         let taskID = try taskID(named: "Continue in progress")
-        let executable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-in-progress-continuation-hold-release")
-        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
-        codexFixtureExecutable = executable.path
         let activeMarker = URL(fileURLWithPath: executable.path + ".turn-active")
         let releaseMarker = URL(fileURLWithPath: executable.path + ".turn-release")
         try? FileManager.default.removeItem(at: activeMarker)
@@ -2937,6 +2950,8 @@ final class PlayhouseUITests: XCTestCase {
             queuedTurns.contains { ($0["userMessage"] as? String)?.contains("Follow-up from the user.") == true },
             "The queued follow-up should be the next turn the provider receives."
         )
+        // This task's thread lives in the queue fixture; the app must read it there.
+        relaunchApp()
         openTask(named: "Queued over continuation")
         XCTAssertTrue(transcriptMessage("Follow-up from the user.").waitForExistence(timeout: 15),
                       "The queued follow-up should be visible in the conversation it ran in.")
@@ -4209,9 +4224,14 @@ final class PlayhouseUITests: XCTestCase {
     func test_standalone_chat_separate_model_and_pages_round_trip() throws {
         let fixtureSource = WorkspaceFixture.root.appendingPathComponent("codex-fixture-success")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: fixtureSource.path), "The prepared Codex fixture is missing or not executable.")
-        let chatFixtureExecutable = dataDirectory.appendingPathComponent("codex-fixture-chat-unique-turns-hold-release")
+        // The `.hold-release` marker holds the one turn that needs it; a `-hold-release` name
+        // would hold every later turn too, including the GUI send the classifier waits on.
+        let chatFixtureExecutable = dataDirectory.appendingPathComponent("codex-fixture-chat-unique-turns-success")
         try FileManager.default.copyItem(at: fixtureSource, to: chatFixtureExecutable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: chatFixtureExecutable.path)
+        // Without the owner marker the app ignores this copy and falls back to the installed Codex CLI.
+        try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8)
+            .write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
         codexFixtureExecutable = chatFixtureExecutable.path
         launchApp(defaultParent: fixture.parent.path)
         XCTAssertTrue(element("chat-sidebar-button").exists, "The board header should offer a Chat button next to New Task.")
@@ -4412,7 +4432,7 @@ final class PlayhouseUITests: XCTestCase {
             code: "invalid_argument"
         )
         _ = try runCLI(["settings", "clear-parent"])
-        XCTAssertNil((try runCLI(["settings", "get"])["result"] as? [String: Any])?["defaultParentFolder"])
+        XCTAssertNil((try runCLI(["settings", "get"])["result"] as? [String: Any])?["defaultParentFolder"] as? String)
 
         // Exercise the actual sidebar composer without a default repository root. The
         // background fallback must update the visible page title after the GUI send returns.
@@ -4422,21 +4442,24 @@ final class PlayhouseUITests: XCTestCase {
         let classifierActive = URL(fileURLWithPath: chatFixtureExecutable.path + ".classifier-active")
         let classifierRelease = URL(fileURLWithPath: chatFixtureExecutable.path + ".classifier-release")
         try Data().write(to: classifierHold)
-        XCTAssertTrue(element("send-message-button").isEnabled, "Standalone chat should send without a configured repository root.")
         element("message-composer").click()
         element("message-composer").typeText("Tell me about Saturn's rings")
+        XCTAssertTrue(element("send-message-button").isEnabled, "Standalone chat should send without a configured repository root.")
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: classifierActive.path) }, timeout: 15), "The fallback classifier should run after the primary answer and be held independently.")
         XCTAssertFalse(element("chat-active-page-title").exists, "Page titles should appear in transcript separators, not the header.")
         XCTAssertFalse(element("chat-missed-page-signal-notice").exists, "Page evaluation should stay visually quiet while pending.")
         XCTAssertEqual(element("chat-sidebar").descendants(matching: .progressIndicator).count, 0, "Page evaluation should not show a loader in the chat sidebar.")
-        XCTAssertTrue(app.staticTexts["Answers received: Blue / fixture-secret."].waitForExistence(timeout: 10), "The primary answer should render before the background classifier is released.")
-        XCTAssertTrue(element("send-message-button").isEnabled, "The background classifier must not keep the composer turn active.")
+        XCTAssertTrue(transcriptMessage("Answers received: Blue / fixture-secret.").waitForExistence(timeout: 10), "The primary answer should render before the background classifier is released.")
+        XCTAssertTrue(waitUntil({ self.noTurnIsRunning() }, timeout: 10), "The background classifier must not keep the chat turn running.")
         XCTAssertTrue(chatPageSeparatorIsVisible("Dinner recipes"), "The current title should remain in its transcript separator until classification completes.")
         element("message-composer").click()
         element("message-composer").typeText("One more thought about Saturn")
         element("send-message-button").click()
-        XCTAssertTrue(waitUntil({ !element("send-message-button").isEnabled }, timeout: 10), "A new send should queue behind the held fallback decision.")
+        XCTAssertFalse(
+            waitUntil({ self.fixtureTurnCount(chatFixtureExecutable, containing: "One more thought about Saturn") > 0 }, timeout: 3),
+            "A new send should queue behind the held fallback decision."
+        )
         try Data("Release classifier.\n".utf8).write(to: classifierRelease)
         let fallbackReady = waitUntil({
             guard let status = try? self.runCLI(["chat", "status"])["result"] as? [String: Any],
@@ -4470,11 +4493,15 @@ final class PlayhouseUITests: XCTestCase {
         let priorPageMessages = try XCTUnwrap(
             (try runCLI(["chat", "page", "read", try XCTUnwrap(recipes["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]]
         )
+        // The fixture answers every turn with the same text, so the moved turn is identified
+        // by its turn ID: none of its messages, user or assistant, may remain on the prior page.
+        let movedTurnID = try XCTUnwrap(
+            fallbackMessages.first { ($0["role"] as? String) == "user" && ($0["text"] as? String) == "Tell me about Saturn's rings" }?["turnID"] as? String
+        )
         XCTAssertFalse(
-            priorPageMessages.contains { ($0["role"] as? String) == "user" && ($0["text"] as? String) == "Tell me about Saturn's rings" },
+            priorPageMessages.contains { ($0["turnID"] as? String) == movedTurnID },
             "The fallback-classified turn must not remain duplicated on the prior page."
         )
-        XCTAssertFalse(priorPageMessages.contains { ($0["role"] as? String) == "assistant" && ($0["text"] as? String) == "Answers received: Blue / fixture-secret." })
 
         // A later turn was queued while the first fallback was held; both turns must
         // now appear in order on the fallback-selected page.
@@ -4498,7 +4525,9 @@ final class PlayhouseUITests: XCTestCase {
         let priorPageID = try XCTUnwrap(fallbackPage["id"] as? String)
         try? FileManager.default.removeItem(at: classifierActive)
         try? FileManager.default.removeItem(at: classifierRelease)
-        try Data().write(to: classifierHold)
+        // Hold only Neptune's classifier: a generic hold is taken by whichever classifier runs
+        // next, which can be the previous turn's still-running decision.
+        try Data().write(to: URL(fileURLWithPath: chatFixtureExecutable.path + ".hold-neptune-classifier"))
         element("message-composer").click()
         element("message-composer").typeText("Tell me about Neptune")
         element("send-message-button").click()
@@ -4508,7 +4537,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ !element("chat-sidebar").exists }, timeout: 5))
         element("chat-sidebar-button").click()
         XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
-        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Explicit topic") }, timeout: 10))
+        // A page's title separator is drawn before its first message, so the new page shows
+        // once a turn lands on it (asserted after the Mars send below).
         XCTAssertFalse(element("chat-missed-page-signal-notice").exists)
         try Data("Release classifier.\n".utf8).write(to: classifierRelease)
         XCTAssertTrue(waitUntil({
@@ -4516,7 +4546,6 @@ final class PlayhouseUITests: XCTestCase {
                   let page = status["activePage"] as? [String: Any] else { return false }
             return (page["id"] as? String) == (explicitPage["id"] as? String)
         }, timeout: 30), "The late classifier must not replace the explicit page.")
-        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Explicit topic") }, timeout: 10))
         let explicitMessages = try XCTUnwrap((try runCLI(["chat", "page", "read", try XCTUnwrap(explicitPage["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
         XCTAssertTrue(explicitMessages.isEmpty)
         let oldPageMessages = try XCTUnwrap((try runCLI(["chat", "page", "read", priorPageID])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
@@ -4531,10 +4560,11 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({
             (try? self.runCLI(["chat", "status"])["result"] as? [String: Any])?["missedPreviousPageSignal"] as? Bool == true
         }, timeout: 30), "Malformed helper results should keep the pending decision visible and durable.")
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Explicit topic") }, timeout: 10), "The explicit page's title should appear with its first message.")
         XCTAssertFalse(element("chat-active-page-title").exists, "Unresolved classification should not add a page title to the header.")
         XCTAssertFalse(element("chat-missed-page-signal-notice").exists, "Unresolved classification should remain visually quiet.")
         XCTAssertEqual(element("chat-sidebar").descendants(matching: .progressIndicator).count, 0, "Unresolved classification should not show a loader.")
-        XCTAssertTrue(waitUntil({ self.element("send-message-button").isEnabled }, timeout: 10))
+        XCTAssertTrue(waitUntil({ self.noTurnIsRunning() }, timeout: 10), "The Mars turn should finish before the next send.")
         element("message-composer").click()
         element("message-composer").typeText("Do not overtake Mars")
         element("send-message-button").click()
@@ -4569,9 +4599,10 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 30), "A new send should work once the pending page decision has recovered.")
 
         // Page sessions rotate, so earlier pages must stay visible rather than disappearing.
+        XCTAssertTrue(revealWholeTranscript(), "The reopened chat should load its earlier pages as the reader scrolls up.")
         XCTAssertTrue(chatPageSeparatorIsVisible("Dinner recipes"), "An earlier page stays visible after its session rotated.")
         XCTAssertTrue(
-            element("chat-sidebar").staticTexts["What's a good side dish?"].exists,
+            element("chat-sidebar").groups["What's a good side dish?"].exists,
             "An earlier page keeps its messages in the chat transcript."
         )
         let boardTask = try XCTUnwrap(
@@ -4593,7 +4624,7 @@ final class PlayhouseUITests: XCTestCase {
     func test_standalone_chat_page_sessions_isolate_context() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-sessions")
         try FileManager.default.copyItem(
-            at: WorkspaceFixture.root.appendingPathComponent("claude-code-fixture.py"),
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
             to: executable
         )
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
@@ -4626,10 +4657,13 @@ final class PlayhouseUITests: XCTestCase {
         func sendFromSidebar(_ prompt: String) {
             let composer = element("message-composer")
             XCTAssertTrue(composer.waitForExistence(timeout: 10))
+            let receivedBefore = fixtureTurnCount(executable, containing: prompt)
             composer.click()
             composer.typeText(prompt)
             element("send-message-button").click()
-            XCTAssertTrue(waitUntil({ element("send-message-button").isEnabled }, timeout: 30), "The turn should finish.")
+            XCTAssertTrue(waitUntil({
+                self.fixtureTurnCount(executable, containing: prompt) > receivedBefore && self.noTurnIsRunning()
+            }, timeout: 30), "The turn should finish.")
         }
 
         func answerTurns() throws -> [[String: Any]] {
@@ -4711,10 +4745,18 @@ final class PlayhouseUITests: XCTestCase {
         let commentField = element("comment-input-field")
         XCTAssertTrue(commentField.waitForExistence(timeout: 5))
         commentField.typeText("What did we say before?")
+        // Clicking the arrow submits a comment on a user message (it once did nothing there).
         element("add-comment-button").click()
-        XCTAssertTrue(element("send-message-button").isEnabled, "A comment alone should be sendable.")
+        XCTAssertTrue(waitUntil({ !commentField.exists }, timeout: 5), "Submitting the comment should close its popover.")
+        XCTAssertTrue(waitUntil({ element("send-message-button").isEnabled }, timeout: 5), "A comment alone should be sendable.")
+        XCTAssertTrue(waitUntil({
+            self.accessibleLabelOrValue(of: self.element("pending-comment-count")).contains("1 comment")
+        }, timeout: 5), "The arrow adds exactly one comment on a user message.")
+        let annotatedBefore = fixtureTurnCount(executable, containing: "What did we say before?")
         element("send-message-button").click()
-        XCTAssertTrue(waitUntil({ element("send-message-button").isEnabled }, timeout: 30), "The annotated turn should finish.")
+        XCTAssertTrue(waitUntil({
+            self.fixtureTurnCount(executable, containing: "What did we say before?") > annotatedBefore && self.noTurnIsRunning()
+        }, timeout: 30), "The annotated turn should finish.")
         _ = try waitForPage("Saturn Rings")
         let annotated = try XCTUnwrap(
             try answerTurns().last { (($0["userText"] as? String) ?? "").contains("What did we say before?") },
@@ -4728,7 +4770,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(chatPageSeparatorIsVisible("Volcanoes"), "Rotating sessions must not hide earlier pages.")
         XCTAssertTrue(chatPageSeparatorIsVisible("Saturn Rings"))
         XCTAssertTrue(
-            element("chat-sidebar").staticTexts["Tell me about volcanoes"].exists,
+            element("chat-sidebar").groups["Tell me about volcanoes"].exists,
             "Earlier pages stay visible in the chat transcript."
         )
         attachScreenshot(named: "Standalone chat pages keep separate sessions")
@@ -4738,7 +4780,7 @@ final class PlayhouseUITests: XCTestCase {
     func test_standalone_chat_claude_fallback_classifier() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-fallback")
         try FileManager.default.copyItem(
-            at: WorkspaceFixture.root.appendingPathComponent("claude-code-fixture.py"),
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
             to: executable
         )
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
@@ -4761,26 +4803,29 @@ final class PlayhouseUITests: XCTestCase {
         func sendFromSidebar(_ prompt: String, expectedTitle: String) throws {
             let composer = element("message-composer")
             XCTAssertTrue(composer.waitForExistence(timeout: 10))
-            XCTAssertTrue(element("send-message-button").isEnabled, "Standalone chat should remain sendable without a repository parent.")
             let hold = URL(fileURLWithPath: executable.path + ".hold-classifier")
             let active = URL(fileURLWithPath: executable.path + ".classifier-active")
             let release = URL(fileURLWithPath: executable.path + ".classifier-release")
             if prompt == "Tell me about volcanoes" { try Data().write(to: hold) }
             composer.click()
             composer.typeText(prompt)
+            XCTAssertTrue(element("send-message-button").isEnabled, "Standalone chat should remain sendable without a repository parent.")
             element("send-message-button").click()
             if prompt == "Tell me about volcanoes" {
                 XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: active.path) }, timeout: 15), "The Haiku fallback should remain held after the primary Claude turn finishes.")
                 XCTAssertFalse(element("chat-active-page-title").exists, "Page titles should appear in transcript separators, not the header.")
                 XCTAssertFalse(element("chat-missed-page-signal-notice").exists, "Page evaluation should stay visually quiet while pending.")
                 XCTAssertEqual(element("chat-sidebar").descendants(matching: .progressIndicator).count, 0, "Page evaluation should not show a loader in the chat sidebar.")
-                XCTAssertTrue(app.staticTexts["OK."].waitForExistence(timeout: 10), "The primary Claude answer should be visible while fallback classification is pending.")
-                XCTAssertTrue(element("send-message-button").isEnabled, "A background classifier must not block another chat send.")
+                XCTAssertTrue(transcriptMessage("OK.").waitForExistence(timeout: 10), "The primary Claude answer should be visible while fallback classification is pending.")
+                XCTAssertTrue(waitUntil({ self.noTurnIsRunning() }, timeout: 10), "A background classifier must not keep the chat turn running.")
                 XCTAssertTrue(chatPageSeparatorIsVisible("General chat"))
                 return
             }
             if prompt == "Tell me about Saturn's rings" {
-                XCTAssertTrue(waitUntil({ !element("send-message-button").isEnabled }, timeout: 10), "The queued Claude turn should wait for the prior page decision.")
+                XCTAssertFalse(
+                    waitUntil({ self.fixtureTurnCount(executable, containing: prompt) > 0 }, timeout: 3),
+                    "The queued Claude turn should wait for the prior page decision."
+                )
                 try Data("Release classifier.\n".utf8).write(to: release)
             }
             XCTAssertTrue(waitUntil({
@@ -4854,7 +4899,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ !element("chat-sidebar").exists }, timeout: 5))
         element("chat-sidebar-button").click()
         XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
-        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Explicit topic") }, timeout: 10))
+        // A page's title separator is drawn before its first message, so the new page shows
+        // once a turn lands on it (asserted after the Mars send below).
         XCTAssertFalse(element("chat-missed-page-signal-notice").exists)
         try Data("Release classifier.\n".utf8).write(to: release)
         XCTAssertTrue(waitUntil({
@@ -4862,7 +4908,6 @@ final class PlayhouseUITests: XCTestCase {
                   let page = status["activePage"] as? [String: Any] else { return false }
             return (page["id"] as? String) == (explicitPage["id"] as? String)
         }, timeout: 30))
-        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Explicit topic") }, timeout: 10))
         let explicitMessages = try XCTUnwrap((try runCLI(["chat", "page", "read", try XCTUnwrap(explicitPage["id"] as? String)])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
         XCTAssertTrue(explicitMessages.isEmpty)
         let oldPageMessages = try XCTUnwrap((try runCLI(["chat", "page", "read", priorPageID])["result"] as? [String: Any])?["messages"] as? [[String: Any]])
@@ -4877,7 +4922,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({
             (try? self.runCLI(["chat", "status"])["result"] as? [String: Any])?["missedPreviousPageSignal"] as? Bool == true
         }, timeout: 30))
-        XCTAssertTrue(waitUntil({ self.element("send-message-button").isEnabled }, timeout: 10))
+        XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Explicit topic") }, timeout: 10), "The explicit page's title should appear with its first message.")
+        XCTAssertTrue(waitUntil({ self.noTurnIsRunning() }, timeout: 10), "The Mars turn should finish before the next send.")
         composer.click()
         composer.typeText("Do not overtake Mars")
         element("send-message-button").click()
@@ -4987,7 +5033,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Unsent task prompt is saved after returning to backlog")
     }
 
-    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. As content is typed in short increments through successive wrapped lines after a line break, the newest insertion remains inside the visible composer viewport while its internal document follows the caret without scrolling backward. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation; if it is concurrently renamed while title generation is pending, the custom title determines the auto branch. A standalone Untitled task starts and persists its provider thread while background title generation is still pending. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
+    // case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. As content is typed in short increments through successive wrapped lines after a line break, the newest insertion remains inside the visible composer viewport while its internal document follows the caret without scrolling backward. Typed straight quotes, apostrophes, and double hyphens stay literal rather than being substituted. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation; if it is concurrently renamed while title generation is pending, the custom title determines the auto branch. A standalone Untitled task starts and persists its provider thread while background title generation is still pending. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
     func test_conversation_composer_rejects_blank_and_supports_live_turn_controls() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -5022,7 +5068,8 @@ final class PlayhouseUITests: XCTestCase {
         draftEditor.typeKey(.return, modifierFlags: .shift)
         var typedAfterLineBreak = ""
         var previousDocumentTop = documentTopBeforeLineBreak
-        let wrapText = String(repeating: "First characters stay visible across wrapped lines. ", count: 3)
+        // No trailing space: autosave trims the draft, as it does to tell a blank draft apart.
+        let wrapText = String(repeating: "First characters stay visible across wrapped lines. ", count: 3).trimmingCharacters(in: .whitespaces)
         let wrapChunks = stride(from: 0, to: wrapText.count, by: 2).map { String(wrapText.dropFirst($0).prefix(2)) }
         for chunk in wrapChunks {
             draftEditor.typeText(chunk)
@@ -5079,6 +5126,17 @@ final class PlayhouseUITests: XCTestCase {
         }), "The selected composer model '\(selectedModelValue)' should match an available Codex model: \(availableModels).")
         XCTAssertFalse(sendButton.isEnabled)
         composer.click()
+        // Typed punctuation must reach the draft literally: smart quotes or an em dash would
+        // change the prompt the provider receives. This detects substitution only while the
+        // VM's "Use smart quotes and dashes" preference is on, as it is on a fresh macOS image.
+        let literalPunctuation = "Use \"straight\" quotes -- it's literal"
+        composer.typeText(literalPunctuation)
+        XCTAssertEqual(composer.value as? String, literalPunctuation, "The composer must not substitute smart quotes or dashes for typed punctuation.")
+        XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: longDraftTaskID)?["savedPrompt"] as? String) == literalPunctuation }, timeout: 10),
+                      "The saved draft must keep the typed punctuation literal.")
+        composer.typeKey("a", modifierFlags: .command)
+        composer.typeKey(.delete, modifierFlags: [])
+        XCTAssertTrue(waitUntil({ (composer.value as? String ?? "").isEmpty }, timeout: 5))
         composer.typeText("First line")
         composer.typeKey(.return, modifierFlags: .shift)
         XCTAssertTrue(waitUntil({ editorViewport.frame.height > shortHeight }, timeout: 5), "The composer should reserve the empty caret line immediately after a trailing newline.")
@@ -5383,7 +5441,8 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertTrue(queuedMessageRow.waitForExistence(timeout: 10), "The saved queued follow-up should appear after reopening the conversation.")
             XCTAssertEqual(queuedMessageRow.value as? String, queuedText)
             app.terminate()
-            codexFixtureExecutable = nil
+            // A plain fixture, never the installed Codex CLI.
+            codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui").path
             launchApp(defaultParent: fixture.parent.path)
             openTask(named: "Blank message")
         }
@@ -5990,6 +6049,7 @@ final class PlayhouseUITests: XCTestCase {
 
         relaunchApp()
         openTask(named: "Claude answer UI")
+        XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load its earlier turns as the reader scrolls up.")
         XCTAssertTrue(visibleTexts(containing: story).firstMatch.waitForExistence(timeout: 10), "The saved Claude answer should persist across a relaunch.")
         XCTAssertTrue(element("provider-boundary-codex").exists)
     }
@@ -6038,6 +6098,7 @@ final class PlayhouseUITests: XCTestCase {
 
         relaunchApp()
         openTask(named: "Claude resume recovery UI")
+        XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load its earlier turns as the reader scrolls up.")
         XCTAssertTrue(waitUntil({ self.transcriptContains(story) }, timeout: 10), "The first Claude answer should restore from Playhouse's persisted transcript.")
         XCTAssertTrue(transcriptMessage("Please inspect the workspace.").waitForExistence(timeout: 10), "The previous user prompt should remain in the reopened transcript.")
         XCTAssertTrue(waitUntil({ self.transcriptContains("Inspection done: the workspace is ready.") }, timeout: 10), "The second Claude answer should also restore from Playhouse's persisted transcript.")
@@ -6267,6 +6328,7 @@ final class PlayhouseUITests: XCTestCase {
         conversationHierarchy.name = "Comment test conversation accessibility hierarchy"
         conversationHierarchy.lifetime = .keepAlways
         add(conversationHierarchy)
+        XCTAssertTrue(revealWholeTranscript(), "The source turn should load as the reader scrolls up.")
         let userView = element("user-message-\(sourceID)")
         XCTAssertTrue(userView.waitForExistence(timeout: 10))
         let transcriptScrollView = element("conversation-scroll-view")
@@ -6292,7 +6354,11 @@ final class PlayhouseUITests: XCTestCase {
         // Keep this diagnostic run focused on the response comment hover below.
         XCTAssertLessThan(abs(addComment.frame.midX - userView.frame.midX), 70,
                           "For a multiline selection, the floating hint should center over the selected lines.")
-        XCTAssertLessThanOrEqual(addComment.frame.maxY, userView.frame.minY + 8,
+        // The hint is part of the message element, so measure against its text: the bubble's
+        // edge is 11pt above the text.
+        let userText = userView.textViews.firstMatch
+        XCTAssertTrue(userText.exists, "The user message should expose its selectable text.")
+        XCTAssertLessThanOrEqual(addComment.frame.maxY, userText.frame.minY - 11 + 8,
                                  "The floating hint should sit above the multiline selection.")
         addComment.click()
         let initialCommentField = element("comment-input-field")
@@ -7025,6 +7091,7 @@ final class PlayhouseUITests: XCTestCase {
             .matching(NSPredicate(format: "label == %@", firstPrompt)).firstMatch
         let secondPersistedMessage = conversation.descendants(matching: .any)
             .matching(NSPredicate(format: "label == %@", secondPrompt)).firstMatch
+        XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load its earlier turns as the reader scrolls up.")
         XCTAssertTrue(firstPersistedMessage.waitForExistence(timeout: 10), "Reopening the task should retain the first completed send in conversation history.")
         XCTAssertTrue(secondPersistedMessage.waitForExistence(timeout: 10), "Reopening the task should load the completed second send from the real app-server thread.")
     }
@@ -7468,6 +7535,7 @@ final class PlayhouseUITests: XCTestCase {
         )).firstMatch
         XCTAssertTrue(followupAnswer.waitForExistence(timeout: 10))
         XCTAssertEqual(followupAnswer.label, "Answers received: Blue / fixture-secret.")
+        XCTAssertTrue(revealWholeTranscript(), "The earlier image turn should load as the reader scrolls up.")
         XCTAssertTrue(element("chat-image-item_user_fixture_1-0").waitForExistence(timeout: 10), "Refreshing history after another turn should keep the earlier image visible.")
         let refreshedHistory = try runCLI(["conversation", "history", try taskID(named: "Image conversation")])["result"] as? [String: Any]
         let refreshedUserMessages = (refreshedHistory?["messages"] as? [[String: Any]] ?? []).filter { $0["role"] as? String == "user" }
@@ -7692,6 +7760,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertLessThan(imageIndex, followupIndex, "The image should remain before the next Codex turn.")
         element("back-to-board-button").click()
         openTask(named: "Codex active image")
+        XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load its earlier turns as the reader scrolls up.")
         XCTAssertTrue(element("chat-image-\(imageID)-0").waitForExistence(timeout: 10), "Reopening the Codex conversation should render the exact published image.")
     }
 
@@ -8466,7 +8535,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(partialPlan.contains("workspace model"), "The partial plan should show its streamed content.")
         XCTAssertTrue(partialPlan.contains("\n\n"), "Distinct Markdown paragraphs should retain visible spacing.")
         XCTAssertFalse(partialPlan.contains("Final verification"), "The rest of the plan should wait for the fixture release.")
-        let planQuestion = app.staticTexts["Plan the task."]
+        let planQuestion = transcriptMessage("Plan the task.")
         let planTranscriptScrollView = element("conversation-scroll-view")
         XCTAssertTrue(planQuestion.waitForExistence(timeout: 5))
         XCTAssertTrue(waitUntil({
@@ -8598,7 +8667,7 @@ final class PlayhouseUITests: XCTestCase {
 
     // case-contract: test_thread_goal_lifecycle_persists_through_cli_xpc | CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime.
     func test_thread_goal_lifecycle_persists_through_cli_xpc() throws {
-        codexFixtureExecutable = nil
+        if isLiveCodexIntegration { codexFixtureExecutable = nil }
         try FileManager.default.createDirectory(at: dataDirectory.appendingPathComponent("codex-home"), withIntermediateDirectories: true)
         let usesLiveCodex = isLiveCodexIntegration
         if usesLiveCodex {
@@ -9954,6 +10023,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
         relaunchApp()
         openTask(named: "Codex recovery without a secret")
+        XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load its earlier turns as the reader scrolls up.")
         XCTAssertTrue(transcriptMessage("Recovered answer: Blue; no secret was required.").waitForExistence(timeout: 15),
             "A later secret recovery must leave the earlier safe no-secret response visible after restart.")
         XCTAssertTrue(transcriptMessage("[Response to private answer hidden]").exists,
@@ -10524,6 +10594,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(composer.value as? String, "An unsent draft stays here.")
         element("back-to-board-button").click()
         openTask(named: "Async Codex question")
+        XCTAssertTrue(revealWholeTranscript(), "The reopened conversation should load its earlier turns as the reader scrolls up.")
         XCTAssertTrue(card.waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Answered"].exists)
         XCTAssertTrue(laterCard.exists)
@@ -10785,9 +10856,13 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("workspace-diff-overlay").waitForExistence(timeout: 2))
 
         element("mark-viewed-shared.txt").click()
-        let marked = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        // Marking saves a snapshot and stages the file asynchronously.
+        var marked: [String: Any]?
+        XCTAssertTrue(waitUntil({
+            marked = try? self.runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+            return ((marked?["viewed"] as? [[String: Any]]) ?? []).contains { $0["path"] as? String == "shared.txt" }
+        }, timeout: 10), "Marking a file viewed should persist its Viewed entry.")
         XCTAssertFalse(((marked?["unviewed"] as? [[String: Any]]) ?? []).contains { $0["path"] as? String == "shared.txt" })
-        XCTAssertTrue(((marked?["viewed"] as? [[String: Any]]) ?? []).contains { $0["path"] as? String == "shared.txt" })
         element("viewed-changes-section").click()
         XCTAssertTrue(element("workspace-change-viewed-shared.txt").waitForExistence(timeout: 10))
         XCTAssertFalse(element("mark-viewed-shared.txt").exists, "Viewed entries must not offer the mark-viewed action.")
@@ -10804,7 +10879,7 @@ final class PlayhouseUITests: XCTestCase {
         element("workspace-change-viewed-shared.txt").click()
         XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
         assertText("workspace-diff-source", equals: "suggested-parent/changes · Since branch base")
-        let reviewedMonacoValue = element("workspace-monaco-webview").value as? String ?? ""
+        let reviewedMonacoValue = element("workspace-diff-editor").value as? String ?? ""
         XCTAssertTrue(reviewedMonacoValue.contains("Original:\nShared baseline.\n"))
         XCTAssertTrue(
             reviewedMonacoValue.contains("Modified:\nShared working version.\n"),
@@ -10816,11 +10891,11 @@ final class PlayhouseUITests: XCTestCase {
         assertText("workspace-diff-source", equals: "suggested-parent/changes · Since last viewed")
         assertText("workspace-diff-editor-status", equals: "Side-by-side")
         assertText("workspace-diff-highlight-status", equals: "1 change highlighted")
-        let viewedMonacoValue = element("workspace-monaco-webview").value as? String ?? ""
+        let viewedMonacoValue = element("workspace-diff-editor").value as? String ?? ""
         XCTAssertTrue(viewedMonacoValue.contains("Original:\nShared working version.\n"))
         XCTAssertTrue(viewedMonacoValue.contains("Modified:\nEdited after viewing.\n"))
-        XCTAssertEqual(element("workspace-change-name-unviewed-shared.txt").value as? String, "Uncommitted, green")
-        XCTAssertEqual(element("workspace-change-name-viewed-shared.txt").value as? String, "Uncommitted, green")
+        XCTAssertEqual(element("workspace-change-unviewed-shared.txt").value as? String, "Uncommitted, green")
+        XCTAssertEqual(element("workspace-change-viewed-shared.txt").value as? String, "Uncommitted, green")
         app.typeKey(.escape, modifierFlags: [])
         attachScreenshot(named: "A re-edited file is listed under both Viewed and Changes")
 
@@ -10838,12 +10913,17 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("workspace-change-viewed-untracked.txt").exists)
         element("workspace-change-unviewed-untracked.txt").click()
         XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
-        let recreatedUntrackedValue = element("workspace-monaco-webview").value as? String ?? ""
+        let recreatedUntrackedValue = element("workspace-diff-editor").value as? String ?? ""
         XCTAssertTrue(recreatedUntrackedValue.contains("Original:\nUntracked file.\n"))
         XCTAssertTrue(recreatedUntrackedValue.contains("Modified:\nUntracked file, edited after viewing.\n"))
         app.typeKey(.escape, modifierFlags: [])
 
         element("mark-viewed-deleted.txt").click()
+        // The viewed snapshot is saved asynchronously; recreating the file first would be reviewed too.
+        XCTAssertTrue(waitUntil({
+            let inventory = try? self.runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+            return ((inventory?["viewed"] as? [[String: Any]]) ?? []).contains { $0["path"] as? String == "deleted.txt" }
+        }, timeout: 10), "Marking the deletion viewed should persist before the file is recreated.")
         try "Recreated after viewing.\n".write(to: fixture.changes.appendingPathComponent("deleted.txt"), atomically: true, encoding: .utf8)
         element("refresh-workspace-changes-button").click()
         XCTAssertTrue(element("workspace-change-unviewed-deleted.txt").waitForExistence(timeout: 10))
@@ -10852,7 +10932,7 @@ final class PlayhouseUITests: XCTestCase {
         assertText("workspace-change-unviewed-deleted.txt", equals: "deleted.txt, added, pending")
         element("workspace-change-unviewed-deleted.txt").click()
         XCTAssertTrue(element("workspace-diff-overlay").waitForExistence(timeout: 10))
-        let recreatedMonacoValue = element("workspace-monaco-webview").value as? String ?? ""
+        let recreatedMonacoValue = element("workspace-diff-editor").value as? String ?? ""
         XCTAssertTrue(recreatedMonacoValue.contains("Original:\n\nModified:\nRecreated after viewing.\n"))
         app.typeKey(.escape, modifierFlags: [])
         assertCLIError(
@@ -10950,7 +11030,7 @@ final class PlayhouseUITests: XCTestCase {
         let branchEntries = branchInventory?["unviewed"] as? [[String: Any]] ?? []
         XCTAssertEqual(branchEntries.map { $0["path"] as? String }, ["tracked.txt"])
         XCTAssertEqual(branchEntries.first?["isUncommitted"] as? Bool, false)
-        XCTAssertEqual(element("workspace-change-name-unviewed-tracked.txt").value as? String, "Committed, primary")
+        XCTAssertEqual(element("workspace-change-unviewed-tracked.txt").value as? String, "Committed, primary")
 
         try "Edited externally.\n".write(to: branchFile, atomically: true, encoding: .utf8)
         try "Untracked external file.\n".write(to: worktree.appendingPathComponent("untracked.txt"), atomically: true, encoding: .utf8)
@@ -10959,7 +11039,7 @@ final class PlayhouseUITests: XCTestCase {
         let dirty = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
         XCTAssertEqual((dirty?["unviewed"] as? [[String: Any]])?.map { $0["path"] as? String }, ["tracked.txt", "untracked.txt"])
         XCTAssertTrue((dirty?["unviewed"] as? [[String: Any]])?.allSatisfy { $0["isUncommitted"] as? Bool == true } ?? false)
-        XCTAssertEqual(element("workspace-change-name-unviewed-tracked.txt").value as? String, "Uncommitted, green")
+        XCTAssertEqual(element("workspace-change-unviewed-tracked.txt").value as? String, "Uncommitted, green")
 
         try runGit(worktree, "add", "tracked.txt", "untracked.txt")
         try runGit(worktree, "commit", "-m", "Second task branch commit")
@@ -10967,7 +11047,7 @@ final class PlayhouseUITests: XCTestCase {
         let committedEntries = committed?["unviewed"] as? [[String: Any]] ?? []
         XCTAssertEqual(committedEntries.map { $0["path"] as? String }, ["tracked.txt", "untracked.txt"])
         XCTAssertTrue(committedEntries.allSatisfy { $0["isUncommitted"] as? Bool == false })
-        XCTAssertTrue(waitUntil({ self.element("workspace-change-name-unviewed-tracked.txt").value as? String == "Committed, primary" }, timeout: 10))
+        XCTAssertTrue(waitUntil({ self.element("workspace-change-unviewed-tracked.txt").value as? String == "Committed, primary" }, timeout: 10))
         XCTAssertFalse(committedEntries.contains { $0["path"] as? String == "base-only.txt" })
         attachScreenshot(named: "Branch changes exclude base-only commits and retain task commits")
     }
@@ -11539,12 +11619,10 @@ final class PlayhouseUITests: XCTestCase {
         let orangePixels = pixelCount(in: image) {
             $0.redComponent > 0.75 && $0.greenComponent > 0.25 && $0.greenComponent < 0.75 && $0.blueComponent < 0.35
         }
-        let redPixels = pixelCount(in: image) {
-            $0.redComponent > 0.55 && $0.redComponent > $0.greenComponent + 0.25 && $0.redComponent > $0.blueComponent + 0.35
-        }
-        XCTAssertGreaterThan(bluePixels, 2, "The conflict indicator should render its blue branch inside the action.", file: file, line: line)
-        XCTAssertGreaterThan(orangePixels, 2, "The conflict indicator should render its orange branch inside the action.", file: file, line: line)
-        XCTAssertGreaterThan(redPixels, 2, "The conflict indicator should render its warning symbol inside the action.", file: file, line: line)
+        // The indicator is a single orange repair glyph; any blue would mean the old
+        // two-tone branch artwork came back.
+        XCTAssertGreaterThan(orangePixels, 2, "The conflict indicator should render its orange repair icon inside the action.", file: file, line: line)
+        XCTAssertEqual(bluePixels, 0, "The conflict indicator should no longer render the old blue branch artwork.", file: file, line: line)
     }
 
     private func assertTrackThickness(_ image: NSImage, file: StaticString = #filePath, line: UInt = #line) {
@@ -11696,6 +11774,28 @@ final class PlayhouseUITests: XCTestCase {
             self.element("conversation-scroll-view").scroll(byDeltaX: 0, deltaY: -300)
             return false
         }, timeout: timeout)
+    }
+
+    /// Opening a conversation renders only its newest turn, and older batches load as the
+    /// reader scrolls up. Scrolls up as a reader would until every message is rendered, so
+    /// an earlier turn can be asserted. The scroll view reports "Showing latest N of M".
+    @discardableResult
+    private func revealWholeTranscript(timeout: TimeInterval = 20) -> Bool {
+        let scrollView = element("conversation-scroll-view")
+        func renderedCounts() -> [Int] {
+            (scrollView.value as? String ?? "").split(separator: " ").compactMap { Int($0) }
+        }
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let counts = renderedCounts()
+            if counts.count == 2, counts[0] == counts[1] { return true }
+            scrollView.scroll(byDeltaX: 0, deltaY: 400)
+            // A revealed batch restores its anchor asynchronously; scrolling again
+            // before it lands would carry past it.
+            _ = waitUntil({ renderedCounts() != counts }, timeout: 1)
+        }
+        let counts = renderedCounts()
+        return counts.count == 2 && counts[0] == counts[1]
     }
 
     /// A user message in the transcript, which is exposed as a labeled group.
@@ -11895,6 +11995,42 @@ final class PlayhouseUITests: XCTestCase {
                 return false
             }
         }, timeout: timeout)
+    }
+
+    /// How many turns a provider fixture has received whose prompt contains `text`, not
+    /// counting page classifier calls. The Claude fixture records `userText`, Codex `userMessage`.
+    private func fixtureTurnCount(_ executable: URL, containing text: String) -> Int {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: executable.path + ".history")),
+              let history = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let turns = history["turns"] as? [[String: Any]] else { return 0 }
+        return turns.filter {
+            let prompt = ($0["userText"] ?? $0["userMessage"]) as? String ?? ""
+            return prompt.contains(text) && !prompt.hasPrefix("Classify the latest user message")
+        }.count
+    }
+
+    /// No provider turn is running. The send button can't tell: it is disabled whenever the
+    /// composer is empty.
+    private func noTurnIsRunning() -> Bool {
+        guard let runtime = try? runCLI(["conversation", "runtime"])["result"] as? [String: Any] else { return false }
+        return (runtime["activeThreadIDs"] as? [String] ?? []).isEmpty && !element("pause-response-button").exists
+    }
+
+    /// The suite must never reach an installed Codex or Claude CLI: every provider process a
+    /// case starts, from the app or from the daemon on its behalf, is one of its own fixtures.
+    private func providerFixtureViolations() -> [String] {
+        guard let events = try? diagnosticEvents() else {
+            // A case that launched the app always has a diagnostics log to check.
+            return app == nil ? [] : ["The case's Diagnostics.jsonl could not be read, so provider launches were not verified."]
+        }
+        let fixtureRoots = [WorkspaceFixture.root.path, runDirectory.path]
+        return events.compactMap { event in
+            guard let name = event["event"] as? String,
+                  name == "codex.app_server.started" || name == "claude.process.started" else { return nil }
+            let executable = event["executable"] as? String ?? ""
+            guard !fixtureRoots.contains(where: { executable.hasPrefix($0 + "/") }) else { return nil }
+            return "\(name) launched \(executable) instead of a test fixture; give the app the case's fixture before it reads the conversation."
+        }
     }
 
     private func diagnosticEvents() throws -> [[String: Any]] {
@@ -12108,7 +12244,8 @@ final class PlayhouseUITests: XCTestCase {
             .staticTexts
             .matching(identifier: "chat-page-separator")
             .allElementsBoundByIndex
-            .contains { $0.label == title }
+            // A static text reports its string as its value.
+            .contains { $0.label == title || $0.value as? String == title }
     }
 
     private func element(_ identifier: String) -> XCUIElement {

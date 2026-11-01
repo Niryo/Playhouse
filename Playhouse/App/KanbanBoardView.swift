@@ -62,6 +62,8 @@ struct KanbanBoardView: View {
                 .frame(width: 460)
                 .transition(.move(edge: .leading).combined(with: .opacity))
                 .id(chatTask.id)
+                // Without a container, this identifier replaces the conversation controls' own.
+                .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("chat-sidebar")
                 Divider()
             }

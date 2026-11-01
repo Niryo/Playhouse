@@ -869,6 +869,10 @@ struct TaskConversationView: View {
             // window only through history.
             guard !isReadOnly else { return }
             refreshQueuedMessages()
+            // A page decision can land after the turn ended; only a revision announces it.
+            // Mid-turn revisions are progress, and turn end refreshes pages anyway, so the
+            // store is only reread while no turn runs.
+            if task.isStandaloneChat, !providerTurnIsActive { refreshChatPageStatus() }
             // History lags what this window's own stream has already shown.
             guard followedTurnStreams == 0 else { return }
             followHistory()
@@ -1043,6 +1047,8 @@ struct TaskConversationView: View {
             .onTapGesture {
                 if title == "Viewed" { isViewedSectionExpanded.toggle() }
             }
+            // Without a container, the section identifier replaces the title's own.
+            .accessibilityElement(children: .contain)
             .accessibilityIdentifier(title == "Viewed" ? "viewed-changes-section" : "unviewed-changes-section")
 
             if title == "Viewed" && !isViewedSectionExpanded {
@@ -1081,8 +1087,6 @@ struct TaskConversationView: View {
                                     .foregroundStyle(entry.isUncommitted ? Color.green : Color.primary)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
-                                    .accessibilityIdentifier("workspace-change-name-\(entry.group.rawValue)-\(entry.path)")
-                                    .accessibilityValue(entry.isUncommitted ? "Uncommitted, green" : "Committed, primary")
                                 Spacer(minLength: 0)
                                 Text(statusBadge(for: entry))
                                     .font(.system(size: 9, weight: .medium, design: .monospaced))
@@ -1097,6 +1101,8 @@ struct TaskConversationView: View {
                             .buttonStyle(.plain)
                             .help("View \(entry.group.displayName) diff for \(entry.path)")
                             .accessibilityLabel("\(entry.path), \(entry.status), \(entry.group.displayName)")
+                            // The button is one accessibility element, so the name's color is reported here.
+                            .accessibilityValue(entry.isUncommitted ? "Uncommitted, green" : "Committed, primary")
                             .accessibilityIdentifier("workspace-change-\(entry.group.rawValue)-\(entry.path)")
                             if entry.group == .unviewed {
                                 Button {
@@ -2085,6 +2091,14 @@ struct TaskConversationView: View {
                     withAnimation(.easeOut(duration: 0.2)) {
                         scrollProxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
                     }
+                    // The form's rows are placed from estimates until realized, so the first
+                    // scroll can stop short of Submit; scroll again once they are.
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    for delay in Self.scrollSettleDelays {
+                        try? await Task.sleep(nanoseconds: delay)
+                        withTransaction(transaction) { scrollProxy.scrollTo("conversation-latest-anchor", anchor: .bottom) }
+                    }
                 }
             }
             }
@@ -2751,6 +2765,12 @@ struct TaskConversationView: View {
                         }
                     )
                         .fixedSize(horizontal: false, vertical: true)
+                        // Anchored on the text like assistant blocks; as a ZStack sibling of the
+                        // bubble the hint's popover ignored clicks on its controls.
+                        .overlay(alignment: .topLeading) {
+                            selectionHint(messageID: message.id, blockID: 0)
+                                .offset(y: -16)
+                        }
                         .padding(.horizontal, 16).padding(.vertical, 11)
                         .background(WorkspaceTheme.accent, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
                 }
@@ -2765,11 +2785,6 @@ struct TaskConversationView: View {
             .accessibilityElement(children: .contain)
             .accessibilityLabel(accessibleText.isEmpty ? "Attached image" : accessibleText)
             .accessibilityIdentifier("user-message-\(message.id)")
-            if currentTextSelection?.messageID == message.id,
-               currentTextSelection?.blockID == 0 {
-                selectionHint(messageID: message.id, blockID: 0)
-                    .offset(y: -16)
-            }
         }
     }
 
@@ -2899,7 +2914,7 @@ struct TaskConversationView: View {
                     .frame(width: 112, height: 30)
                     .position(
                         x: min(max(selection.bounds.midX, 56), max(56, geometry.size.width - 56)),
-                        y: geometry.size.height - selection.bounds.maxY - 22
+                        y: selection.bounds.minY - 22
                     )
                     .zIndex(20)
                     .popover(isPresented: Binding(
@@ -2926,6 +2941,10 @@ struct TaskConversationView: View {
                             .buttonHoverPointer()
                             .buttonStyle(.plain)
                             .help("Add comment")
+                            // Over a user message the button's own action never ran although the
+                            // press reached it; a simultaneous tap does, and addAnnotation ignores
+                            // the second call when both fire.
+                            .simultaneousGesture(TapGesture().onEnded { addAnnotation(selection) })
                             .accessibilityLabel("Add comment")
                             .accessibilityIdentifier("add-comment-button")
                         }
@@ -3046,6 +3065,7 @@ struct TaskConversationView: View {
     }
 
     private func addAnnotation(_ selection: AnnotationSelection) {
+        guard annotationSelection?.id == selection.id else { return }
         annotations.append(ConversationAnnotation(
             id: UUID(), messageID: selection.messageID, blockID: selection.blockID,
             startOffset: selection.range.location, endOffset: NSMaxRange(selection.range),
@@ -4433,12 +4453,15 @@ struct TaskConversationView: View {
         return historyMessages.last?.id ?? GoalAchievementTimelineEntry.beforeFirstMessageID
     }
 
-    private func refreshGoalConversation() async {
+    private func refreshGoalConversation(keepingShownTurn: Bool = false) async {
         do {
             let history = try await conversationManager.history(
                 taskID: task.id,
                 onActionRequest: { actionNotice = approvalNotice }
             )
+            // A provider may not list a running turn's items yet, so mid-turn history can
+            // hold less than this window already shows; applying it would blank the turn.
+            if keepingShownTurn, history.messages.count < messages.count { return }
             messages = history.messages
             activities = history.activities
             providerBoundaries = history.providerBoundaries
@@ -4457,7 +4480,7 @@ struct TaskConversationView: View {
         Task { @MainActor in
             while followedHistoryIsStale, followedTurnStreams == 0 {
                 followedHistoryIsStale = false
-                await refreshGoalConversation()
+                await refreshGoalConversation(keepingShownTurn: providerTurnIsActive)
                 try? await Task.sleep(for: .seconds(1))
             }
             isFollowingHistory = false
@@ -5206,7 +5229,13 @@ struct TaskConversationView: View {
         Task { @MainActor in
             await Task.yield()
             withAnimation(.easeOut(duration: 0.2)) {
-                proxy.scrollTo(latestUserMessage.id, anchor: .top)
+                // A question form that arrived with this turn renders below it and must stay
+                // reachable, Submit included, so it wins over pinning the question to the top.
+                if let request = userInputRequest, request.threadID == task.activeConversationID {
+                    proxy.scrollTo("conversation-latest-anchor", anchor: .bottom)
+                } else {
+                    proxy.scrollTo(latestUserMessage.id, anchor: .top)
+                }
             }
         }
     }
@@ -5271,6 +5300,9 @@ private struct NativeChatEditor: NSViewRepresentable {
         scroll.scrollerStyle = .overlay
         let editor = ChatEditorTextView(frame: NSRect(x: 0, y: 0, width: 100, height: 28))
         editor.isRichText = false
+        // Prompts carry code and commands; send exactly the quotes and dashes the user typed.
+        editor.isAutomaticQuoteSubstitutionEnabled = false
+        editor.isAutomaticDashSubstitutionEnabled = false
         editor.allowsUndo = true
         editor.drawsBackground = false
         editor.font = .systemFont(ofSize: 14)

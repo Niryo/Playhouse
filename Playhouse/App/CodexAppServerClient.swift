@@ -281,6 +281,13 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         return try await readMessages(threadID: threadID)
     }
 
+    /// Reads a thread this client already has open, for a caller that must not load it (a CLI
+    /// history request for the thread the GUI runtime owns): no resume, and the action handler
+    /// and goal observation stay the owner's.
+    func readOpenThread(id threadID: String) async throws -> ConversationHistory {
+        try await readMessages(threadID: threadID)
+    }
+
     /// Reads a child thread without resuming it or changing its turn state.
     func inspectThreadReadOnly(id threadID: String, workspace: ConversationWorkspaceContext) async throws -> ConversationHistory {
         try await ensureInitialized(workspace: workspace)
@@ -848,8 +855,14 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
     /// directory: a thread ID only identifies a thread within one Codex home,
     /// and a client for another home cannot answer for it.
     static func sharedClient(loading threadID: String, compatibleWith reference: CodexAppServerClient) -> CodexAppServerClient? {
-        sharedClients.values.first {
+        let holdsThread: (CodexAppServerClient) -> Bool = {
             $0.resumedThreadParameters[threadID] != nil && $0.process?.isRunning == true
+        }
+        // The caller's own client first: when it runs the thread's turn, another client that
+        // also opened the thread earlier has an app-server that never saw that turn.
+        if holdsThread(reference) { return reference }
+        return sharedClients.values.first {
+            holdsThread($0)
                 && $0.codexExecutableOverride == reference.codexExecutableOverride
                 && $0.codexHomeOverride == reference.codexHomeOverride
                 && $0.dataDirectoryOverride == reference.dataDirectoryOverride

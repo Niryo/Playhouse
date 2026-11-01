@@ -1148,6 +1148,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         while time.monotonic() < deadline and not classifier_active.exists():
             time.sleep(0.02)
         self.assertTrue(classifier_active.exists(), "The fixture should hold the fallback after the primary send returns.")
+        # The decision lands after its turn ended; only a revision tells open windows to reread pages.
+        revision_while_held = self.assert_success(self.call_cli("conversation", "runtime")[0]).get("conversationRevisions", {}).get(chat_task_id, 0)
 
         followup_command = ("conversation", "send", chat_task_id, "--message", "One more thought about Saturn")
         followup_turn_hold = Path(str(classifier_executable) + ".hold-release")
@@ -1175,6 +1177,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         fallback_archive_path = archive_directory / f"{fallback_status['activePage']['id']}.json"
         fallback_archive = json.loads(fallback_archive_path.read_text(encoding="utf-8"))
         self.assertEqual(fallback_archive["page"]["title"], "Saturn Rings")
+        revision_after_decision = self.assert_success(self.call_cli("conversation", "runtime")[0]).get("conversationRevisions", {}).get(chat_task_id, 0)
+        self.assertGreater(revision_after_decision, revision_while_held, "A late page decision should raise the chat's conversation revision.")
         self.assertTrue(any(message["text"] == "Tell me about Saturn's rings" for message in fallback_archive["messages"]))
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline and not followup_turn_active.exists():
@@ -4249,7 +4253,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         serialized_title_events = json.dumps(title_events)
         self.assertNotIn("Explain the delayed title result.", serialized_title_events)
         self.assertNotIn("Generated fixture title", serialized_title_events)
-    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. As content is typed in short increments through successive wrapped lines after a line break, the newest insertion remains inside the visible composer viewport while its internal document follows the caret without scrolling backward. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation; if it is concurrently renamed while title generation is pending, the custom title determines the auto branch. A standalone Untitled task starts and persists its provider thread while background title generation is still pending. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
+    # case-contract: test_conversation_composer_rejects_blank_and_supports_live_turn_controls | Shift+Enter inserts a newline at the caret without sending and Return submits; multiline drafts persist, expand to the editor limit, remain scrollable and editable across reopening, and submitted prompts persist in history. As content is typed in short increments through successive wrapped lines after a line break, the newest insertion remains inside the visible composer viewport while its internal document follows the caret without scrolling backward. Typed straight quotes, apostrophes, and double hyphens stay literal rather than being substituted. Blank drafts cannot be sent or stored. Sending requires a configured repository root, while a task with no selected repository can still be sent as standalone. If a submitted prompt has no Codex thread or active send reservation after restart, the task returns to Waiting Response, clears its pending marker, preserves the draft, and returns it to the composer. Sending to an Untitled auto-branch task derives its branch from the generated title or prompt fallback before preparing the worktree and starting the conversation; if it is concurrently renamed while title generation is pending, the custom title determines the auto branch. A standalone Untitled task starts and persists its provider thread while background title generation is still pending. Pause remains disabled until the turn is interruptible. Diagnostics correlate title generation with the task and thread while excluding prompt and title text. Queued follow-ups persist with task and thread identity, dispatch after a completed turn, and remain visible for explicit retry after interruption. During an active turn, Return queues a follow-up and queued rows offer Steer. The obsolete footer Queue and Steer buttons are absent.
     def test_conversation_composer_rejects_blank_and_supports_live_turn_controls(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         task_id = self.create_task(title="Blank conversation send", roots=[self.primary])["id"]
@@ -4289,6 +4293,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         multiline_prompt = "\n".join(f"Draft line {index}" for index in range(1, 16))
         saved, _ = self.call_cli("task", "prompt", task_id, "--text", multiline_prompt)
         self.assertEqual(self.assert_success(saved)["savedPrompt"], multiline_prompt)
+        literal_punctuation = 'Use "straight" quotes -- it\'s literal'
+        saved, _ = self.call_cli("task", "prompt", task_id, "--text", literal_punctuation)
+        self.assertEqual(self.assert_success(saved)["savedPrompt"], literal_punctuation)
         trailing_newline_prompt = "First line\n"
         saved, _ = self.call_cli("task", "prompt", task_id, "--text", trailing_newline_prompt)
         self.assertEqual(self.assert_success(saved)["savedPrompt"], trailing_newline_prompt)

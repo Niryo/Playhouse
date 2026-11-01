@@ -3472,7 +3472,9 @@ final class WorkspaceSettingsManager {
             "cleared": String(path == nil || path?.isEmpty == true)
         ])
         guard let path, !path.isEmpty else {
-            defaults.removeObject(forKey: WorkspaceSettings.defaultParentFolderKey)
+            // An empty value is unset to every reader. Removing the key is not enough: with a
+            // preferences file the app also writes, another process's value stays visible.
+            defaults.set("", forKey: WorkspaceSettings.defaultParentFolderKey)
             PlayhouseDiagnostics.record("settings.write.succeeded", fields: [
                 "setting": "defaultParentFolder",
                 "cleared": "true"
@@ -3813,6 +3815,8 @@ final class ConversationManager {
     /// window reload history, and the completed message bumps anyway.
     private static let historyVisibleUpdateTypes: Set<String> = [
         "queue_changed", "steered_message", "assistant_progress", "assistant_final", "activity", "diff",
+        // A background page decision lands after its turn ended and moves the turn to a page.
+        "chat_page_updated",
     ]
     private static var pendingQueuedTaskDispatchIDs = Set<UUID>()
     private var activeSendTaskIDs = Set<UUID>()
@@ -4192,7 +4196,12 @@ final class ConversationManager {
     ) async throws -> ConversationHistory? {
         guard let threadID = task.codexThreadID else { return nil }
         let taskID = task.id
-        let codex = clients.codex
+        // Codex allows one writer per thread: when another client already has it open (the
+        // GUI's runtime client, for a CLI caller), read through that one without loading, or
+        // a second app-server would resume it with history's defaults under a running turn.
+        let owner = CodexAppServerClient.sharedClient(loading: threadID, compatibleWith: clients.codex)
+        let codex = owner ?? clients.codex
+        let readsThroughOwner = owner != nil && owner !== clients.codex
         let recoveryTranscript = try? transcripts.read(taskID)
         let hasSensitiveRecoveryState = recoveryTranscript?.pendingUserInputRequest != nil
             || recoveryTranscript?.pendingSensitiveUserInputRedaction == true
@@ -4209,22 +4218,29 @@ final class ConversationManager {
             "taskStatus": task.status.rawValue
         ]))
         do {
-            let history = try await codex.loadThread(
-                id: threadID,
-                workspace: workspace,
-                developerInstructions: TaskThreadDeveloperInstructions.make(
-                    taskID: taskID,
-                    repositories: task.repositoryWorktrees,
-                    contextFolders: task.contextFolderPaths,
-                    repositoryRootPath: repositoryRoot?.path,
-                    isStandaloneChat: task.isStandaloneChat,
-
-                    missedPreviousPageSignal: task.isStandaloneChat ? ((try? tasks.standaloneChatManager().lastTurnMissedSignal()) ?? false) : false
-                ),
-                sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
-                sensitiveConversation: hasSensitiveRecoveryState,
-                onActionRequest: onActionRequest
-            )
+            let history: ConversationHistory
+            if readsThroughOwner, let owner {
+                // Loading would replace the owner's action handler and goal observation with
+                // this caller's, so only read what it already has open; this request then
+                // never emits action_request, which only the owner's own window acts on.
+                history = try await owner.readOpenThread(id: threadID)
+            } else {
+                history = try await codex.loadThread(
+                    id: threadID,
+                    workspace: workspace,
+                    developerInstructions: TaskThreadDeveloperInstructions.make(
+                        taskID: taskID,
+                        repositories: task.repositoryWorktrees,
+                        contextFolders: task.contextFolderPaths,
+                        repositoryRootPath: repositoryRoot?.path,
+                        isStandaloneChat: task.isStandaloneChat,
+                        missedPreviousPageSignal: task.isStandaloneChat ? ((try? tasks.standaloneChatManager().lastTurnMissedSignal()) ?? false) : false
+                    ),
+                    sensitiveUserInputAnswerValues: sensitiveUserInputAnswerValues,
+                    sensitiveConversation: hasSensitiveRecoveryState,
+                    onActionRequest: onActionRequest
+                )
+            }
             let savedDurations = tasks.conversationActivityDurations(taskID: taskID)
             let activities = history.activities.map { activity -> ConversationActivity in
                 var activity = activity

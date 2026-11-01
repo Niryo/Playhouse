@@ -69,6 +69,12 @@ def write(value):
     sys.stdout.flush()
 
 
+def is_page_classifier_prompt(text):
+    """A page classifier runs as a helper on its own thread in Codex, so its turns never
+    belong to the chat thread's items."""
+    return (text or "").startswith("Classify the latest user message for Playhouse's continuous chat page index.")
+
+
 def answer_text(user_message):
     mode = os.path.basename(sys.argv[0])
     if isinstance(user_message, str) and user_message.startswith(
@@ -1615,7 +1621,11 @@ def main():
                 return
             if async_mode:
                 entries = []
-                for index, saved_turn in enumerate(saved_history.get("messages", []), start=1):
+                chat_turns = [
+                    saved_turn for saved_turn in saved_history.get("messages", [])
+                    if not is_page_classifier_prompt(saved_turn.get("userMessage"))
+                ]
+                for index, saved_turn in enumerate(chat_turns, start=1):
                     turn_id = saved_turn["turnID"]
                     entries.append({"turnId": turn_id, "item": {
                         "id": f"item_playhouse_async_user_{index}",
@@ -1657,6 +1667,8 @@ def main():
                 contents = []
                 for index, saved_turn in enumerate(saved_history["messages"], start=1):
                     user_message = saved_turn.get("userMessage")
+                    if is_page_classifier_prompt(user_message):
+                        continue
                     user_images = saved_turn.get("images", [])
                     user_content = ([{"type": "text", "text": user_message}] if user_message else []) + [
                         {"type": "image", "url": image_url} for image_url in user_images
@@ -1670,6 +1682,8 @@ def main():
                 contents = []
                 for index, saved_turn in enumerate(saved_history["turns"], start=1):
                     user_message = saved_turn.get("userMessage")
+                    if is_page_classifier_prompt(user_message):
+                        continue
                     user_images = saved_turn.get("images", [])
                     user_content = ([{"type": "text", "text": user_message}] if user_message else []) + [
                         {"type": "image", "url": image_url} for image_url in user_images
@@ -1789,6 +1803,8 @@ def main():
                 if "playhouse internal outcome nudge:" not in (saved_turn.get("userMessage") or "").lower()
             ]
             for turn_index, saved_turn in enumerate(saved_turns, start=1):
+                if is_page_classifier_prompt(saved_turn.get("userMessage")):
+                    continue
                 if (
                     "hold-release" in os.path.basename(sys.argv[0])
                     and "playhouse internal outcome nudge:" in (saved_turn.get("userMessage") or "").lower()

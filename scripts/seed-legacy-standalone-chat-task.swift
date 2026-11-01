@@ -81,6 +81,9 @@ struct SeedLegacyStandaloneChatTask {
         let task = BoardTask(claudeSessionID: arguments.count == 2 ? arguments[1] : "legacy-chat-session")
         context.insert(task)
         try context.save()
+        // The chat split came after the v2 lifecycle reset, so such a store has already been
+        // through it; without the marker the app's first launch resets it and drops this row.
+        try Data("1\n".utf8).write(to: dataDirectory.appendingPathComponent("task-lifecycle-v2-reset"), options: .atomic)
         print(task.id.uuidString)
     }
 }
