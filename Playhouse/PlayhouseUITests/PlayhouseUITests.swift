@@ -12025,42 +12025,120 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ !bar.exists }, timeout: 15), "The bar should disappear once the turn completes.")
     }
 
-    // case-contract: test_task_cpu_usage_absent_for_codex | A Codex task never reports a numeric CPU percentage from `task cpu-usage`, always citing unsupported_provider, because Codex multiplexes every task's turns inside one shared app-server process with no OS-level way to attribute CPU to a single task.
-    func test_task_cpu_usage_absent_for_codex() throws {
-        var environment = try installClaudeFixture(named: "claude-fixture-ui-cpu-usage-contrast")
-        environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU"] = "1"
-        environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU_SECONDS"] = "25"
+    // case-contract: test_task_cpu_usage_attributes_codex_load_by_worktree | Two Codex tasks rooted in different repository folders share one real fixture app-server. Before any turn each reports cpu-usage as not running. While task A's turn runs a real CPU-burning child process in A's folder and task B's concurrent turn runs an idle child in B's folder, both children belong to the same app-server process; once a baseline is sampled, `task cpu-usage` attributes a plausible non-zero percentage to A and a near-zero one to B, and the task cards show A's CPU bar reading hot against a lowered ceiling beside B's visible but empty bar. Both readings return to not-running once the turns complete.
+    func test_task_cpu_usage_attributes_codex_load_by_worktree() throws {
+        let executable = dataDirectory.appendingPathComponent("codex-fixture-cpu-attribution")
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8)
+            .write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
+        let environment = ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": executable.path]
         launchApp(defaultParent: fixture.parent.path)
-        try createTaskFixture(title: "Codex CPU usage", roots: [fixture.primary.path])
-        let codexTaskID = try taskID(named: "Codex CPU usage")
-        let claudeTaskID = try XCTUnwrap((try runCLI([
-            "task", "create", "--title", "Claude CPU usage contrast", "--root", fixture.primary.path, "--provider", "claude",
+        let busyID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Codex busy worktree", "--root", fixture.primary.path, "--provider", "codex",
         ])["result"] as? [String: Any])?["id"] as? String)
-        XCTAssertTrue(app.buttons["Codex CPU usage"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["Claude CPU usage contrast"].waitForExistence(timeout: 10))
+        let idleID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Codex idle worktree", "--root", fixture.secondary.path, "--provider", "codex",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        XCTAssertTrue(app.buttons["Codex busy worktree"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Codex idle worktree"].waitForExistence(timeout: 10))
 
-        let codexBar = element("task-cpu-usage-bar-\(codexTaskID)")
-        let claudeBar = element("task-cpu-usage-bar-\(claudeTaskID)")
+        let busyBar = element("task-cpu-usage-bar-\(busyID)")
+        let idleBar = element("task-cpu-usage-bar-\(idleID)")
+        let busyCard = element("task-card-\(busyID)")
+        let idleCard = element("task-card-\(idleID)")
+        for taskID in [busyID, idleID] {
+            let before = try XCTUnwrap(try runCLI(["task", "cpu-usage", taskID])["result"] as? [String: Any])
+            XCTAssertTrue(before["cpuPercent"] == nil || before["cpuPercent"] is NSNull, "A Codex task with no turn yet has nothing to sample.")
+            XCTAssertEqual(before["reason"] as? String, "not_running")
+        }
+        XCTAssertFalse(busyBar.exists, "A Codex task with no turn yet should show no CPU bar.")
+        XCTAssertFalse(idleBar.exists, "A Codex task with no turn yet should show no CPU bar.")
 
-        let process = try startCLIProcess(
-            ["conversation", "send", claudeTaskID, "--message", "Tell me a story."],
-            extraEnvironment: environment
-        )
+        let busy = try startCLIProcess(["conversation", "send", busyID, "--message", "Please burn cpu for 25 seconds."], extraEnvironment: environment)
+        let idle = try startCLIProcess(["conversation", "send", idleID, "--message", "Please idle cpu for 25 seconds."], extraEnvironment: environment)
         defer {
-            if process.process.isRunning {
-                process.process.terminate()
-                process.process.waitUntilExit()
+            for running in [busy, idle] where running.process.isRunning {
+                running.process.terminate()
+                running.process.waitUntilExit()
+            }
+            // A failed assertion must not leave the daemon-side burn running into later cases.
+            if let burner = cpuAttributionChild(executable: executable, kind: "burn") {
+                kill(burner.pid, SIGTERM)
             }
         }
-        XCTAssertTrue(claudeBar.waitForExistence(timeout: 10), "A busy Claude task should show its CPU bar.")
-        XCTAssertFalse(codexBar.exists, "A Codex task should never show a CPU bar: its turns share one process with no per-task attribution.")
-        attachScreenshot(named: "A Claude task's CPU bar beside a Codex card with none")
 
-        let codexUsage = try XCTUnwrap(try runCLI(["task", "cpu-usage", codexTaskID])["result"] as? [String: Any])
-        XCTAssertTrue(codexUsage["cpuPercent"] == nil || codexUsage["cpuPercent"] is NSNull, "Codex tasks never get a numeric CPU reading.")
-        XCTAssertEqual(codexUsage["reason"] as? String, "unsupported_provider")
+        var children: [String: (pid: Int32, parentPID: Int32, workingDirectory: String)] = [:]
+        XCTAssertTrue(waitUntil({
+            children = [:]
+            for kind in ["burn", "idle"] {
+                if let child = self.cpuAttributionChild(executable: executable, kind: kind) { children[kind] = child }
+            }
+            return children.count == 2
+        }, timeout: 15), "Both tasks' turns should be running their command children.")
+        XCTAssertEqual(children["burn"]?.parentPID, children["idle"]?.parentPID, "Both tasks' commands should run under one shared app-server.")
+        XCTAssertEqual(children["burn"].map { URL(fileURLWithPath: $0.workingDirectory).resolvingSymlinksInPath().path },
+                       fixture.primary.resolvingSymlinksInPath().path, "The busy command runs in its task's folder.")
+        XCTAssertEqual(children["idle"].map { URL(fileURLWithPath: $0.workingDirectory).resolvingSymlinksInPath().path },
+                       fixture.secondary.resolvingSymlinksInPath().path, "The idle command runs in its task's folder.")
 
-        _ = try finishCLIProcess(process)
+        XCTAssertTrue(busyBar.waitForExistence(timeout: 15), "The busy Codex task should show its left-edge CPU bar.")
+        XCTAssertTrue(idleBar.waitForExistence(timeout: 15), "A running Codex task with an idle command still shows its (empty) CPU bar.")
+        attachScreenshot(named: "Busy and idle Codex task cards both show a CPU bar")
+
+        var readings: [String: [String: Any]] = [:]
+        XCTAssertTrue(waitUntil({
+            for taskID in [busyID, idleID] {
+                readings[taskID] = (try? self.runCLI(["task", "cpu-usage", taskID]))?["result"] as? [String: Any]
+            }
+            return [busyID, idleID].allSatisfy { readings[$0]?["cpuPercent"] is Double }
+        }, timeout: 10), "Both running Codex tasks should be sampled: \(readings)")
+        Thread.sleep(forTimeInterval: 1)
+        let busyReading = try XCTUnwrap(try runCLI(["task", "cpu-usage", busyID])["result"] as? [String: Any])
+        let idleReading = try XCTUnwrap(try runCLI(["task", "cpu-usage", idleID])["result"] as? [String: Any])
+        let busyPercent = try XCTUnwrap(busyReading["cpuPercent"] as? Double, "\(busyReading)")
+        let idlePercent = try XCTUnwrap(idleReading["cpuPercent"] as? Double, "A running Codex task with an idle command still reports a value: \(idleReading)")
+        XCTAssertGreaterThan(busyPercent, 20, "The busy-looping command's CPU should be attributed to its own task.")
+        XCTAssertLessThan(busyPercent, Double(ProcessInfo.processInfo.activeProcessorCount * 100 + 50), "One busy loop can't exceed every core.")
+        XCTAssertLessThan(idlePercent, 5, "The other task's busy command must not leak into the idle task's reading.")
+        // The bars' own labels carry the streamed reading: the idle card's
+        // bar is present but empty, the busy card's is not.
+        XCTAssertTrue(waitUntil({ idleBar.exists && idleBar.label == "CPU 0%" }, timeout: 10), "The idle Codex task's bar should read 0%, got \(idleBar.label)")
+        XCTAssertTrue(waitUntil({
+            busyBar.exists && busyBar.label.hasPrefix("CPU ") && busyBar.label != "CPU 0%"
+        }, timeout: 10), "The busy Codex task's bar should report its load, got \(busyBar.label)")
+
+        // A ceiling below one busy core makes the busy task's bar read
+        // clearly hot while the idle task's bar stays empty. Sampled off each
+        // stable card's left edge, as in the Claude case.
+        _ = try runCLI(["settings", "set-cpu-usage-color-max", "50"])
+        XCTAssertTrue(waitUntil({ self.isRedDominant(busyCard, leftEdgeFraction: 0.06) }, timeout: 10), "The busy Codex task should read hot against a 50% ceiling.")
+        XCTAssertTrue(idleBar.exists, "The idle Codex task keeps its bar while its turn runs.")
+        XCTAssertFalse(isRedDominant(idleCard, leftEdgeFraction: 0.06), "The idle Codex task's bar should stay empty, not inherit the busy task's load.")
+        attachScreenshot(named: "Busy Codex task's bar reads hot beside the idle task's empty bar")
+
+        _ = try finishCLIProcess(busy)
+        _ = try finishCLIProcess(idle)
+        XCTAssertTrue(waitUntil({ !busyBar.exists && !idleBar.exists }, timeout: 15), "Both bars should disappear once the turns complete.")
+        for taskID in [busyID, idleID] {
+            let finished = try XCTUnwrap(try runCLI(["task", "cpu-usage", taskID])["result"] as? [String: Any])
+            XCTAssertTrue(finished["cpuPercent"] == nil || finished["cpuPercent"] is NSNull, "A finished Codex turn is no longer running.")
+            XCTAssertEqual(finished["reason"] as? String, "not_running")
+        }
+        attachScreenshot(named: "Both Codex task cards drop their CPU bars once the turns finish")
+    }
+
+    /// The pid, parent pid and working directory a running CPU-attribution
+    /// fixture child recorded for itself. The sandboxed UI runner can't list
+    /// the daemon's descendants with `ps`, so the child reports them.
+    private func cpuAttributionChild(executable: URL, kind: String) -> (pid: Int32, parentPID: Int32, workingDirectory: String)? {
+        let record = URL(fileURLWithPath: executable.path + ".cpu-child-\(kind).json")
+        guard let data = try? Data(contentsOf: record),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let pid = (object["pid"] as? NSNumber)?.int32Value,
+              let parentPID = (object["parentPID"] as? NSNumber)?.int32Value,
+              let workingDirectory = object["workingDirectory"] as? String else { return nil }
+        return (pid, parentPID, workingDirectory)
     }
 
     // case-contract: test_settings_cpu_usage_color_max_round_trip | The CPU usage color maximum defaults to one fully busy core per logical CPU, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting.

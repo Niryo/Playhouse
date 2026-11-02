@@ -376,8 +376,138 @@ def follow_turn_items(finished):
     return items
 
 
+CPU_ATTRIBUTION_TURN = re.compile(r"\b(burn|idle) cpu for (\d+(?:\.\d+)?) seconds\b", re.IGNORECASE)
+
+
+def run_cpu_attribution_server():
+    """A small evented app-server for per-task CPU attribution tests.
+
+    Unlike the default fixture, which runs one held turn at a time, this one
+    keeps several threads' turns running at once on one process, the way a
+    single shared `codex app-server` does. Every thread gets its own ID. A
+    turn whose message says "burn cpu for N seconds" or "idle cpu for N
+    seconds" runs one real child process in the turn's own `cwd` (a busy
+    loop or a sleep); the turn reports its outcome and completes when that
+    child exits. Other turns (titles, outcome nudges) complete immediately.
+    """
+    threads = {}
+    running = {}
+    buffer = b""
+
+    def finish(thread_id, turn_id, text, status="completed"):
+        threads[thread_id]["items"].append({"turnId": turn_id, "item": {
+            "id": f"item_{turn_id}_answer", "type": "agentMessage", "phase": "final_answer", "text": text,
+        }})
+        write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+            "threadId": thread_id, "turnId": turn_id, "item": threads[thread_id]["items"][-1]["item"],
+        }})
+        write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+            "threadId": thread_id, "turn": {"id": turn_id, "status": status},
+        }})
+
+    def report_outcome(thread_id):
+        instructions = threads[thread_id].get("instructions") or ""
+        line = next((line.strip() for line in instructions.splitlines() if " task outcome " in line), None)
+        if line:
+            subprocess.run(shlex.split(line.replace("<completed|in-progress|waiting-response>", "completed")),
+                           capture_output=True, text=True, timeout=60)
+
+    def handle(message):
+        method = message.get("method")
+        params = message.get("params", {})
+        if "id" not in message:
+            return
+        reply = lambda result: write({"jsonrpc": "2.0", "id": message["id"], "result": result})
+        if method == "initialize":
+            reply({"serverInfo": {"name": "playhouse-cpu-fixture", "version": "1"}})
+        elif method == "model/list":
+            reply({"data": [{"id": "gpt-6-luna", "displayName": "GPT-6 Luna", "isDefault": True,
+                             "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]}]})
+        elif method in ("thread/start", "thread/resume"):
+            thread_id = params.get("threadId") or str(uuid.uuid4())
+            thread = threads.setdefault(thread_id, {"items": []})
+            thread["instructions"] = params.get("developerInstructions") or thread.get("instructions")
+            reply({"thread": {"id": thread_id}, "model": params.get("model", "gpt-6-luna")})
+        elif method == "thread/read":
+            reply({"thread": {"id": params.get("threadId"), "turns": []}})
+        elif method == "thread/turns/list":
+            reply({"data": [], "nextCursor": None})
+        elif method == "thread/items/list":
+            reply({"data": threads.get(params.get("threadId"), {}).get("items", []), "nextCursor": None})
+        elif method == "turn/start":
+            thread_id = params.get("threadId")
+            thread = threads.setdefault(thread_id, {"items": []})
+            thread["instructions"] = (params.get("collaborationMode", {}).get("settings", {}).get("developerInstructions")
+                                      or thread.get("instructions"))
+            turn_id = f"turn-{uuid.uuid4()}"
+            text = next((item.get("text") for item in params.get("input", []) if item.get("type") == "text"), "") or ""
+            thread["items"].append({"turnId": turn_id, "item": {
+                "id": f"item_{turn_id}_user", "type": "userMessage", "content": [{"type": "text", "text": text}],
+            }})
+            reply({"turn": {"id": turn_id, "status": "inProgress"}})
+            match = CPU_ATTRIBUTION_TURN.search(text)
+            if not match:
+                finish(thread_id, turn_id, "Generated fixture title" if text.startswith("Write a concise task title") else "Done.")
+                return
+            seconds = float(match.group(2))
+            # The child records its own real PID, parent PID and working
+            # directory beside the fixture, so tests (including the sandboxed
+            # UI runner, which can't list other processes) can verify where
+            # and under which app-server it runs.
+            record = ("import json, os, sys, time\n"
+                      "path = sys.argv[3] + '.cpu-child-' + sys.argv[2] + '.json'\n"
+                      "open(path + '.tmp', 'w').write(json.dumps("
+                      "{'pid': os.getpid(), 'parentPID': os.getppid(), 'workingDirectory': os.getcwd()}))\n"
+                      "os.replace(path + '.tmp', path)\n")
+            code = record + (f"end = time.time() + {seconds}\nwhile time.time() < end:\n    pass\n"
+                             if match.group(1).lower() == "burn" else f"time.sleep({seconds})\n")
+            # The trailing arguments label the child and name its record file.
+            child = subprocess.Popen(
+                [sys.executable, "-c", code, "playhouse-cpu-attribution", match.group(1).lower(), sys.argv[0]],
+                cwd=params.get("cwd") or os.getcwd(),
+            )
+            running[thread_id] = (turn_id, child, match.group(1).lower())
+        elif method == "turn/interrupt":
+            reply({})
+            thread_id = params.get("threadId")
+            if thread_id in running:
+                turn_id, child, _ = running.pop(thread_id)
+                child.kill()
+                child.wait()
+                finish(thread_id, turn_id, "Interrupted.", status="interrupted")
+        else:
+            reply({})
+
+    while True:
+        ready, _, _ = select.select([sys.stdin.fileno()], [], [], 0.05)
+        if ready:
+            chunk = os.read(sys.stdin.fileno(), 65536)
+            if not chunk:
+                break
+            buffer += chunk
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                handle(message)
+        for thread_id, (turn_id, child, kind) in list(running.items()):
+            if child.poll() is not None:
+                del running[thread_id]
+                # A record exists only while its child runs, so cleanup never signals a reused PID.
+                Path(f"{sys.argv[0]}.cpu-child-{'burn' if kind == 'burn' else 'idle'}.json").unlink(missing_ok=True)
+                report_outcome(thread_id)
+                finish(thread_id, turn_id, f"Finished the {kind} command.")
+    for _, child, _ in running.values():
+        child.kill()
+    return 0
+
+
 def main():
     global THREAD_ID, TURN_ID
+    if "-cpu-attribution" in os.path.basename(sys.argv[0]):
+        return run_cpu_attribution_server()
     _ = None
     ack_deadline = None
     action_item = None

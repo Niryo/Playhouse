@@ -1497,11 +1497,11 @@ private struct TaskCardView: View {
         task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
     }
 
-    /// `nil` for Codex tasks (no per-task CPU attribution is possible — see
-    /// `TaskCPUUsageSnapshot`) or a Claude task with no sample yet.
+    /// `nil` for a task with no running turn or no sample yet. For Codex
+    /// it's the task's working-directory share of the shared app-server
+    /// (see `TaskCPUUsageSnapshot`).
     private var cpuPercent: Double? {
-        guard task.conversationProvider == .claude else { return nil }
-        return cpuUsageModel.percent(threadID: task.claudeSessionID)
+        cpuUsageModel.percent(threadID: task.activeConversationID)
     }
 
     private var cpuFraction: Double? {

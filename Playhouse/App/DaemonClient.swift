@@ -231,9 +231,9 @@ final class ConversationRuntimeModel: ObservableObject {
     func isObservingGoal(threadID: String) -> Bool { snapshot.goal.observedThreadIDs.contains(threadID) }
 }
 
-/// Live CPU usage per Claude Code task, sampled daemon-side and streamed
-/// here the same way `ConversationRuntimeModel` follows turn state. There is
-/// no per-task value for Codex tasks (see `TaskCPUUsageSnapshot`).
+/// Live CPU usage per turn-active task (Claude or Codex), sampled
+/// daemon-side and streamed here the same way `ConversationRuntimeModel`
+/// follows turn state (see `TaskCPUUsageSnapshot`).
 @MainActor
 final class TaskCPUUsageModel: ObservableObject {
     @Published private(set) var snapshot = TaskCPUUsageSnapshot()

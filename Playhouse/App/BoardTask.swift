@@ -68,7 +68,7 @@ enum TokenUsageHeatmap {
     }
 }
 
-/// The gradient a Claude task's live CPU usage bar fills from the bottom:
+/// The gradient a running task's live CPU usage bar fills from the bottom:
 /// green at 0%, red once a task's process tree reaches the configured
 /// ceiling. Unlike `TokenUsageHeatmap`'s single interpolated color, this bar
 /// is a thermometer-style gauge, so the gradient itself is fixed and only
