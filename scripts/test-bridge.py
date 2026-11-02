@@ -3888,15 +3888,17 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(fresh_record["workspaceRoots"], [str(self.custom)])
         self.assertEqual(fresh_record["contextFolders"], [str(self.custom)])
 
-    # case-contract: test_task_repository_removal_preserves_state_on_dirty_worktree | Removing the only pending repository leaves the task with no workspace and preserves the source repository; removing a pending repository preserves other context folders; removing a clean managed worktree through the GUI waits for an active turn, while the task repository API removes it from context immediately and defers clean worktree deletion until the turn releases; a bridge service restart preserves the cleanup intent and a fresh request completes removal; if the active turn writes files before release, deferred cleanup preserves that worktree and its changes; a dirty worktree rejects removal and preserves its task record and files.
+    # case-contract: test_task_repository_removal_preserves_state_on_dirty_worktree | Removing one of two pending repositories leaves the remaining repository in task context and remembered settings, while preserving the removed source repository; the next task restores only the remaining remembered repository. Removing a pending repository preserves other context folders; removing a clean managed worktree through the GUI waits for an active turn, while the task repository API removes it from context immediately and defers clean worktree deletion until the turn releases; a bridge service restart preserves the cleanup intent and a fresh request completes removal; if the active turn writes files before release, deferred cleanup preserves that worktree and its changes; a dirty worktree rejects removal and preserves its task record and files.
     def test_task_repository_removal_preserves_state_on_dirty_worktree(self):
-        sole = self.create_repo_task("Sole repository removal", [self.primary])
+        sole = self.create_repo_task("Two repository removal", [self.primary, self.secondary])
         sole_removed, _ = self.call_cli("task", "repository", "remove", sole["id"], "--repo", self.primary)
         sole_result = self.assert_success(sole_removed)
-        self.assertEqual(sole_result["repositoryWorktrees"], [])
-        self.assertEqual(sole_result["workspaceRoots"], [])
+        self.assertEqual([item["repositoryPath"] for item in sole_result["repositoryWorktrees"]], [str(self.secondary)])
+        self.assertEqual(sole_result["workspaceRoots"], [str(self.secondary)])
         self.assertEqual(sole_result["contextFolders"], [])
         self.assertTrue(self.primary.is_dir(), "Removing a pending repository must preserve its source repository.")
+        remembered, _ = self.call_cli("settings", "get")
+        self.assertEqual(self.assert_success(remembered)["lastSelectedRepositories"], [str(self.secondary)])
 
         pending = self.create_repo_task("Pending repository removal", [self.primary], roots=[self.custom])
         pending_id = pending["id"]
@@ -3906,6 +3908,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(pending_result["contextFolders"], [str(self.custom)])
         self.assertEqual(pending_result["workspaceRoots"], [str(self.custom)])
         self.assertTrue(self.primary.is_dir(), "Removing a pending repository must preserve its source repository.")
+        remembered, _ = self.call_cli("settings", "get")
+        self.assertEqual(self.assert_success(remembered)["lastSelectedRepositories"], [])
 
         clean_active = self.create_repo_task("Clean active repository removal", [self.alternate], roots=[self.custom])
         clean_active_id = clean_active["id"]
@@ -7104,7 +7108,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIn("question", failed.get("error", {}).get("message", "").lower())
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Blocked")
 
-    # case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from Playhouse history, clears pending state, and returns to Waiting Response.
+    # case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from Playhouse history, clears pending state, and returns to Waiting Response. While the recovery turn applying the answer runs, the answered question is no longer pending in history or shown in the reopened conversation, and the task is In Progress; if that recovery dies mid-turn, the question returns for retry with the task in Waiting Response, and answering again succeeds.
     def test_claude_pending_question_recovers_after_provider_process_restarts(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-restart-question"
@@ -7136,6 +7140,57 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse(rejected.get("ok", True), rejected)
         still_pending, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(still_pending).get("pendingUserInputRequest"), pending)
+        recovery_pause = Path(str(executable) + ".recovery-pause")
+        recovery_ready = Path(str(executable) + ".recovery-ready")
+        recovery_release = Path(str(executable) + ".recovery-release")
+        recovery_pause.write_text("Hold the recovery turn open.\n", encoding="utf-8")
+        answer_process = self.start_cli(
+            "conversation", "answer-user-input", task_id, pending["id"], "--answer", "question-1=Green",
+            extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)},
+        )
+        try:
+            deadline = time.monotonic() + 20
+            while not recovery_ready.exists() and answer_process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(recovery_ready.exists(), "The fixture should hold the recovery turn open.")
+            applying = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+            self.assertIsNone(
+                applying.get("pendingUserInputRequest"),
+                "An answered question must not stay pending while its recovery turn runs.",
+            )
+            self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress")
+            # Kill the bridge daemon that owns the recovery turn before it can clean up.
+            send_started = [
+                event for event in self.diagnostic_events()
+                if event.get("event") == "conversation.send.started" and event.get("taskID") == task_id
+            ][-1]
+            bridge_pid = int(send_started["clientPID"])
+            try:
+                os.kill(bridge_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            exit_deadline = time.monotonic() + 5
+            while time.monotonic() < exit_deadline:
+                try:
+                    os.kill(bridge_pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("The bridge daemon owning the recovery turn should exit.")
+            answer_process.communicate(timeout=30)
+        finally:
+            recovery_release.write_text("Release the orphaned recovery turn.\n", encoding="utf-8")
+            if answer_process.poll() is None:
+                answer_process.communicate(timeout=30)
+        crashed = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+        self.assertEqual(
+            crashed.get("pendingUserInputRequest"), pending,
+            "A recovery that dies mid-turn must show its question again for retry.",
+        )
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
+        for marker in (recovery_pause, recovery_ready, recovery_release):
+            marker.unlink(missing_ok=True)
         accepted, _ = self.call_cli(
             "conversation", "answer-user-input", task_id, pending["id"], "--answer", "question-1=Green",
             extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)},

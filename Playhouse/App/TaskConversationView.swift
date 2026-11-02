@@ -4039,6 +4039,9 @@ struct TaskConversationView: View {
         }
         isResponding = true
         errorMessage = nil
+        // After a restart the answer runs as a whole recovery turn before this
+        // call returns, so hide the answered card meanwhile.
+        userInputRequest = nil
         // A recovery turn streams its redacted reply before history hides it.
         var streamedRecoveryFinals: [String] = []
         do {
@@ -4057,6 +4060,7 @@ struct TaskConversationView: View {
             )
             guard accepted else {
                 isResponding = false
+                if userInputRequest == nil { userInputRequest = request }
                 errorMessage = "\(provider.displayName) couldn't accept those answers. Please check the responses and try again."
                 return
             }
@@ -4074,6 +4078,13 @@ struct TaskConversationView: View {
                 showStreamedRecoveryReplies()
             }
         } catch {
+            // A failed answer keeps its saved question for retry; a new question the
+            // turn raised meanwhile is already showing.
+            if userInputRequest == nil,
+               let saved = try? await conversationManager.history(taskID: task.id).pendingUserInputRequest,
+               saved.threadID == task.activeConversationID {
+                userInputRequest = saved
+            }
             isResponding = conversationRuntime.isTurnActive(threadID: request.threadID)
             errorMessage = error.localizedDescription
         }
@@ -5401,11 +5412,9 @@ struct TaskConversationView: View {
     private func removeConversationRepository(_ repository: RepositoryWorktreeRecord) {
         Task { @MainActor in
             do {
-                _ = try await BoardTaskManager(modelContext: modelContext).removeRepository(
-                    task.id,
-                    repositoryPath: repository.repositoryPath,
-                    duringActiveConversation: true
-                )
+                _ = try await WorkspaceManager(
+                    taskManager: BoardTaskManager(modelContext: modelContext)
+                ).removeRepository(repository.repositoryPath, from: task.id)
                 repositoryBeingEdited = nil
                 errorMessage = nil
                 await refreshWorkspaceChanges()
