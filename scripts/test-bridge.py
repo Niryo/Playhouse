@@ -712,7 +712,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             task = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         return task
 
-    def complete_fixture_turn(self, task_id, executable_name="codex-fixture", message="Complete this task.", expected_status="Review"):
+    def complete_fixture_turn(self, task_id, executable_name="codex-fixture", message="Complete this task.", expected_status="Review", extra_environment=None):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / executable_name
         hold_marker = Path(str(executable) + ".hold-release")
@@ -724,6 +724,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         executable.chmod(0o755)
         environment = {
             "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable),
+            **(extra_environment or {}),
         }
         command = [
             "conversation", "send", task_id, "--message", message,
@@ -2617,6 +2618,158 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIsNone(record.get("pullRequestNumber"))
         self.assertIsNone(record.get("pullRequestURL"))
         self.assertEqual(current["status"], "Done")
+
+    # case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a small Auto PR switch in place of the manual PR button, defaulting to off; the switch disappears once a pull request is linked or the task leaves the working states. Selecting Auto PR persists and is reflected across a fresh read. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. The last switch choice is remembered: tasks created after turning it on start on, and tasks created after turning it off start off. Toggling Auto PR for an unknown task is rejected.
+    def test_task_auto_pr_toggle_creates_pull_request_on_review(self):
+        missing, _ = self.call_cli("task", "pr", "auto", str(uuid.uuid4()), "on", expected_status=3)
+        self.assert_failure(missing, "not_found")
+
+        def remove_fixture_origin(repository, expected_url):
+            # A worktree shares its source repository's git config, so adding
+            # "origin" there leaks into every other task worktree of that
+            # repository; remove it only if it still matches what this case set.
+            current = subprocess.run(
+                ["git", "-C", str(repository), "remote", "get-url", "origin"],
+                check=False, capture_output=True, text=True,
+            )
+            if current.returncode == 0 and current.stdout.strip() == str(expected_url):
+                self.run_git(repository, "remote", "remove", "origin")
+
+        task = self.create_repo_task("Auto PR toggle", [self.primary], merge_targets={self.primary: "main"})
+        self.assertFalse(task["autoCreatePullRequestOnReview"], "Auto PR must default to off so existing tasks are unaffected.")
+        enabled = self.assert_success(self.call_cli("task", "pr", "auto", task["id"], "on")[0])
+        self.assertTrue(enabled["autoCreatePullRequestOnReview"])
+        reread = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertTrue(reread["autoCreatePullRequestOnReview"], "The toggle should persist across a fresh CLI connection.")
+
+        remote_root = self.data_directory / "auto-pr-remotes"
+        remote_root.mkdir()
+        (remote_root / ".playhouse-test-owner").write_text("Playhouse bridge test owns these PR remotes.\n", encoding="utf-8")
+        remote = remote_root / "auto-pr.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+
+        gh_directory = self.data_directory / "auto-pr-gh-fixture"
+        gh_directory.mkdir()
+        gh = gh_directory / "gh"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
+        gh.chmod(0o755)
+        gh_state = gh_directory / "state"
+        gh_state.write_text("", encoding="utf-8")
+        create_log = gh_directory / "create-calls"
+        gh_environment = {
+            "PATH": f"{gh_directory}:{os.environ.get('PATH', '')}",
+            "PLAYHOUSE_E2E_GH_STATE_PATH": str(gh_state),
+            "PLAYHOUSE_E2E_GH_CALL_LOG": str(gh_directory / "view-calls"),
+            "PLAYHOUSE_E2E_GH_CREATE_LOG": str(create_log),
+            "PLAYHOUSE_E2E_GH_CREATE_FIRST_NUMBER": "701",
+        }
+
+        # Mirrors complete_fixture_turn's own driving loop (a 90s deadline accommodates
+        # real repository worktree preparation), but adds the remote the first time the
+        # turn holds so the real `gh`/`git` publish path can succeed when the outcome
+        # reports completed with Auto PR on.
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-auto-pr"
+        hold_marker = Path(str(executable) + ".hold-release")
+        hold_marker.touch()
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        turn_environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable), **gh_environment}
+        command = ["conversation", "send", task["id"], "--message", "Complete this task.", "--answer", "color=Blue", "--answer", "token=fixture-secret"]
+        active = Path(str(executable) + ".turn-active")
+        release = Path(str(executable) + ".turn-release")
+        active.unlink(missing_ok=True)
+        release.unlink(missing_ok=True)
+        process = self.start_cli(*command, extra_environment=turn_environment)
+        try:
+            deadline = time.monotonic() + 90
+            remote_added = False
+            outcome_count = 0
+            while process.poll() is None and time.monotonic() < deadline:
+                if active.exists() and not release.exists():
+                    if outcome_count == 0:
+                        # The first hold is the real task turn: make the worktree
+                        # publishable, then report its outcome so Auto PR's
+                        # subsequent pull-request-summary turn (a separate,
+                        # task-outcome-less fixture activation on the same
+                        # executable) has something real to describe.
+                        materialized = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+                        record = materialized["repositoryWorktrees"][0]
+                        self.assertFalse(record["isPending"], "The worktree must be ready by the time the turn is active.")
+                        self.addCleanup(remove_fixture_origin, self.primary, remote)
+                        self.run_git(Path(record["worktreePath"]), "remote", "add", "origin", str(remote))
+                        self.run_git(Path(record["worktreePath"]), "push", "origin", "main")
+                        remote_added = True
+                        response, _ = self.call_cli("task", "outcome", task["id"], "completed", extra_environment=gh_environment)
+                        self.assertEqual(self.assert_success(response)["outcome"], "completed")
+                        outcome_count += 1
+                        # Auto PR's own pull-request-summary turn reuses this same
+                        # executable next; without the hold marker it takes the
+                        # fixture's normal default-answer path instead of pausing
+                        # again for an outcome nothing will ever report.
+                        hold_marker.unlink(missing_ok=True)
+                    release.write_text("Release the fixture turn.\n", encoding="utf-8")
+                time.sleep(0.02)
+            self.assertGreater(outcome_count, 0, "The fixture should hold the turn until its explicit outcome is reported.")
+            self.assertTrue(remote_added, "The remote must be added before the outcome is reported.")
+            response, _ = self.finish_cli(process, command)
+            self.assert_success(response)
+        finally:
+            if process.poll() is None:
+                release.write_text("Release the fixture turn.\n", encoding="utf-8")
+                process.communicate(timeout=20)
+            active.unlink(missing_ok=True)
+            release.unlink(missing_ok=True)
+            hold_marker.unlink(missing_ok=True)
+
+        reviewed = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(reviewed["status"], "Review")
+        self.assertEqual(reviewed["repositoryWorktrees"][0]["pullRequestNumber"], 701)
+        self.assertEqual(reviewed["repositoryWorktrees"][0]["pullRequestURL"], "https://github.com/playhouse-test/fixture/pull/701")
+        create_events = create_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(
+            sum(line.startswith("created\t") for line in create_events), 1,
+            "Auto PR should create the pull request exactly once without the user clicking anything.",
+        )
+
+        sticky_on = self.create_task("Sticky Auto PR on")
+        self.assertTrue(sticky_on["autoCreatePullRequestOnReview"], "A task created after turning Auto PR on should start on.")
+        turned_off = self.assert_success(self.call_cli("task", "pr", "auto", sticky_on["id"], "off")[0])
+        self.assertFalse(turned_off["autoCreatePullRequestOnReview"])
+        sticky_off = self.create_task("Sticky Auto PR off")
+        self.assertFalse(sticky_off["autoCreatePullRequestOnReview"], "A task created after turning Auto PR off should start off.")
+
+        manual_task = self.create_repo_task("Manual PR toggle default", [self.secondary], merge_targets={self.secondary: "main"})
+        self.assertFalse(manual_task["autoCreatePullRequestOnReview"])
+        self.complete_fixture_turn(manual_task["id"], executable_name="codex-fixture-manual-pr")
+        manual_reviewed = self.assert_success(self.call_cli("task", "get", manual_task["id"])[0])
+        self.assertEqual(manual_reviewed["status"], "Review")
+        self.assertIsNone(
+            manual_reviewed["repositoryWorktrees"][0].get("pullRequestNumber"),
+            "With Auto PR off, reaching Review must not create a pull request by itself.",
+        )
+
+        manual_remote_root = self.data_directory / "manual-pr-remotes"
+        manual_remote_root.mkdir()
+        (manual_remote_root / ".playhouse-test-owner").write_text("Playhouse bridge test owns these PR remotes.\n", encoding="utf-8")
+        manual_remote = manual_remote_root / "manual-pr.git"
+        subprocess.run(["git", "init", "--bare", str(manual_remote)], check=True, capture_output=True, text=True)
+        manual_worktree_path = Path(manual_reviewed["repositoryWorktrees"][0]["worktreePath"])
+        self.addCleanup(remove_fixture_origin, self.secondary, manual_remote)
+        self.run_git(manual_worktree_path, "remote", "add", "origin", str(manual_remote))
+        self.run_git(manual_worktree_path, "push", "origin", "main")
+        manual_create_environment = {
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture-manual-pr"),
+            **gh_environment,
+        }
+        manual_created = self.assert_success(self.call_cli("task", "pr", "create", manual_task["id"], extra_environment=manual_create_environment)[0])
+        self.assertEqual(
+            manual_created["repositoryWorktrees"][0]["pullRequestNumber"], 702,
+            "The manual create flow must still work unchanged when Auto PR stays off.",
+        )
 
     # case-contract: test_review_pr_conflicts_probe_and_verify | Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 20 seconds, with focus events during cooldown coalesced into one trailing refresh. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action with its indicator artwork beside its PR link; the UI renders the artwork inside the action, keeps it beside the PR link, and gives both controls hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head.
     def test_review_pr_conflicts_probe_and_verify(self):

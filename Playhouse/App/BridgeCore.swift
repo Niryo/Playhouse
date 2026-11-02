@@ -859,6 +859,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let repositoryWorktrees: [RepositoryWorktreeRecord]
     let contextFolders: [String]
     let draftImageDataURLs: [String]?
+    let autoCreatePullRequestOnReview: Bool
 
     /// Accepts any conversation owner: a board task, or the standalone chat, which reports
     /// empty workspace roots and worktrees because it has none.
@@ -881,6 +882,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         repositoryWorktrees = task.repositoryWorktrees
         contextFolders = task.contextFolderPaths
         draftImageDataURLs = includeDraftImages ? task.draftImageDataURLs : nil
+        autoCreatePullRequestOnReview = task.autoCreatePullRequestOnReview
     }
 }
 
@@ -1638,7 +1640,7 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex) async throws -> BoardTaskRecord {
+    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex, autoCreatePullRequestOnReview: Bool = false) async throws -> BoardTaskRecord {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty else { throw PlayhouseManagerError.invalidTitle }
         let folders = try Self.normalizeOptionalRoots(contextFolders)
@@ -1656,6 +1658,7 @@ final class BoardTaskManager {
         let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: roots, conversationProvider: provider)
         task.repositoryWorktrees = worktrees
         task.contextFolderPaths = folders
+        task.autoCreatePullRequestOnReview = autoCreatePullRequestOnReview
         return try await withRepositoryAllocationLocks(worktrees.map(\.repositoryPath)) {
             try validateRepositoryAssignments(worktrees, excludingTaskID: nil)
             modelContext.insert(task)
@@ -2160,6 +2163,15 @@ final class BoardTaskManager {
                 "taskID": id.uuidString,
                 "status": task.status.rawValue
             ])
+            return BoardTaskRecord(task: task)
+        }
+    }
+
+    func setAutoCreatePullRequestOnReview(_ id: UUID, enabled: Bool) async throws -> BoardTaskRecord {
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            task.autoCreatePullRequestOnReview = enabled
+            try await saveTaskContext(taskID: id)
             return BoardTaskRecord(task: task)
         }
     }
@@ -3592,6 +3604,16 @@ final class WorkspaceSettingsManager {
         }
         defaults.set(provider.rawValue, forKey: WorkspaceSettings.defaultConversationProviderKey)
         PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "defaultConversationProvider", "value": provider.rawValue])
+    }
+
+    /// The Auto PR switch position new tasks start with: whatever the user last chose on any task.
+    var autoCreatePullRequestDefault: Bool {
+        defaults.bool(forKey: WorkspaceSettings.autoCreatePullRequestDefaultKey)
+    }
+
+    func setAutoCreatePullRequestDefault(_ enabled: Bool) {
+        defaults.set(enabled, forKey: WorkspaceSettings.autoCreatePullRequestDefaultKey)
+        PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "autoCreatePullRequestDefault", "value": String(enabled)])
     }
 
     var defaultParentFolderURL: URL? {
@@ -6453,7 +6475,19 @@ final class ConversationManager {
                             message: BoardTaskManager.reviewSyncBlockedMessage(syncError)
                         )
                     } else {
-                        _ = try await tasks.setLifecycleStatus(taskID, to: .review)
+                        let reviewRecord = try await tasks.setLifecycleStatus(taskID, to: .review)
+                        if reviewRecord.autoCreatePullRequestOnReview,
+                           reviewRecord.repositoryWorktrees.contains(where: { !$0.isPending && ($0.pullRequestNumber == nil || $0.pullRequestURL == nil) }) {
+                            phase = "review-auto-pr"
+                            do {
+                                _ = try await tasks.createPullRequests(taskID, clients: clients, settingsManager: settingsManager)
+                            } catch {
+                                PlayhouseDiagnostics.record("task.review.auto_pr.failed", fields: [
+                                    "taskID": taskID.uuidString,
+                                    "error": error.localizedDescription
+                                ])
+                            }
+                        }
                     }
                 case .waitingResponse:
                     _ = try await tasks.setLifecycleStatus(taskID, to: .waitingResponse)
@@ -6951,7 +6985,10 @@ final class PlayhouseBridgeRuntime {
                 let roots = try request.requiredStrings("roots")
                 let repositories = try request.repositorySpecs("repositories")
                 let provider = try request.arguments["provider"]?.string.map(ConversationProvider.parse) ?? settings.defaultConversationProvider
-                result = try Self.value(await taskManager.create(title: title, repositories: repositories, contextFolders: roots, provider: provider))
+                result = try Self.value(await taskManager.create(
+                    title: title, repositories: repositories, contextFolders: roots, provider: provider,
+                    autoCreatePullRequestOnReview: settings.autoCreatePullRequestDefault
+                ))
             case "task.get", "task.show":
                 let taskID = try request.requiredUUID("taskID")
                 result = try Self.value(taskManager.get(taskID))
@@ -6969,6 +7006,10 @@ final class PlayhouseBridgeRuntime {
                     to: status,
                     allowUnmergedPullRequests: request.arguments["allowUnmergedPullRequests"]?.bool ?? false
                 ))
+            case "task.pr.auto":
+                let enabled = request.arguments["enabled"]?.bool ?? false
+                result = try Self.value(await taskManager.setAutoCreatePullRequestOnReview(request.requiredUUID("taskID"), enabled: enabled))
+                settings.setAutoCreatePullRequestDefault(enabled)
             case "task.pr.create":
                 result = try Self.value(await taskManager.createPullRequests(
                     request.requiredUUID("taskID"),

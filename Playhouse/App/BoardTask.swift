@@ -174,6 +174,9 @@ final class BoardTask {
     var totalOutputTokens: Int = 0
     var totalCacheReadTokens: Int = 0
     var totalCacheCreationTokens: Int = 0
+    /// When true, moving this task to Review automatically creates its pull request(s)
+    /// instead of waiting for the user to click the manual "PR" control.
+    var autoCreatePullRequestOnReview: Bool = false
     /// Legacy marker from when the standalone chat was a hidden board task. Nothing reads it
     /// for behavior; it exists so `migrateLegacyStandaloneChatTasks()` can find those rows and
     /// convert them to `StandaloneChat`. The original column name is preserved so the migration

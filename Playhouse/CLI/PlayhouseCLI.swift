@@ -124,9 +124,11 @@ enum PlayhouseCLI {
                 ])
             case "pr":
                 guard tail.count >= 2 else {
-                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync <task-id> [action]")
+                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync|auto <task-id> [action]")
                 }
                 switch tail[0] {
+                case "auto" where tail.count == 3 && (tail[2] == "on" || tail[2] == "off"):
+                    return BridgeRequest(command: "task.pr.auto", arguments: ["taskID": .string(tail[1]), "enabled": .boolean(tail[2] == "on")])
                 case "create" where tail.count == 2:
                     return BridgeRequest(command: "task.pr.create", arguments: ["taskID": .string(tail[1])])
                 case "conflicts" where tail.count == 2:
@@ -140,7 +142,7 @@ enum PlayhouseCLI {
                 case "sync" where tail.count == 2:
                     return BridgeRequest(command: "task.pr.sync", arguments: ["taskID": .string(tail[1])])
                 default:
-                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync <task-id> [resolve-and-push|resolve-only|keep]")
+                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync <task-id> [resolve-and-push|resolve-only|keep], or playhouse task pr auto <task-id> on|off")
                 }
             case "progress":
                 guard let action = tail.first else { throw CLIError.usage("Use: playhouse task progress publish|custom|clear <task-id> ...") }
