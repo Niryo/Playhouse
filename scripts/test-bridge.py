@@ -2678,7 +2678,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         verification, _ = self.call_cli("task", "pr", "verify", task["id"], extra_environment=environment)
         self.assertEqual(self.assert_success(verification)["status"], "resolved")
 
-    # case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects conflicts without mutation and blocks PR creation until conflicts are resolved in the task worktree; CLI/XPC resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI verifies PR creation directs the user to resolve conflicts in the task worktree and leaves unresolved conflicts uncommitted and unpublished.
+    # case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects merge conflicts without mutation, and PR creation still publishes the task branch and reaches the normal GitHub CLI path; conflicts do not block PR creation. CLI/XPC resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI confirms PR creation proceeds for a conflicted branch and the existing Fix Conflicts action still appears once the PR is linked.
     def test_task_pr_conflicts_detect_without_mutation(self):
         task = self.create_repo_task("PR conflict detection", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
         record = task["repositoryWorktrees"][0]
@@ -2706,15 +2706,15 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(self.primary, "rev-parse", "main").strip(), target_head)
         self.assertEqual((worktree / conflict_path).read_text(encoding="utf-8"), "task branch version\n")
         self.assertEqual(target_file.read_text(encoding="utf-8"), "target branch version\n")
-        requires_ui, _ = self.call_cli("task", "pr", "create", task["id"], expected_status=1)
-        self.assert_failure(requires_ui, "conflicts_require_confirmation")
+        pr_attempt, _ = self.call_cli("task", "pr", "create", task["id"], expected_status=1)
+        self.assert_failure(pr_attempt, "operation_failed")
+        self.assertNotIn("conflicts_require_confirmation", json.dumps(pr_attempt))
+        self.assertNotIn("Pull request conflicts were found", pr_attempt["error"]["message"])
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), branch_head)
         task_branch_ref = f"refs/heads/{record['branch']}"
-        kept_remote_branch = subprocess.run(
-            ["git", "--git-dir", str(remote), "show-ref", "--verify", "--quiet", task_branch_ref],
-            check=False, capture_output=True, text=True,
-        )
-        self.assertEqual(kept_remote_branch.returncode, 1, "A blocked PR creation must not publish the task branch.")
+        published_branch_head = self.run_git(remote, "rev-parse", task_branch_ref).strip()
+        self.assertEqual(published_branch_head, branch_head, "A conflict must not block publishing the task branch for PR creation.")
+        subprocess.run(["git", "--git-dir", str(remote), "update-ref", "-d", task_branch_ref], check=True, capture_output=True, text=True)
         self.run_git(worktree, "fetch", "origin", "main")
         merge = subprocess.run(
             ["git", "-C", str(worktree), "merge", "--no-commit", "--no-ff", "FETCH_HEAD"],

@@ -2074,7 +2074,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(current["status"] as? String, "Done")
     }
 
-    // case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects conflicts without mutation and blocks PR creation until conflicts are resolved in the task worktree; CLI/XPC resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI verifies PR creation directs the user to resolve conflicts in the task worktree and leaves unresolved conflicts uncommitted and unpublished.
+    // case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects merge conflicts without mutation, and PR creation still publishes the task branch and reaches the normal GitHub CLI path; conflicts do not block PR creation. CLI/XPC resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI confirms PR creation proceeds for a conflicted branch and the existing Fix Conflicts action still appears once the PR is linked.
     func test_task_pr_conflicts_detect_without_mutation() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -2120,24 +2120,24 @@ final class PlayhouseUITests: XCTestCase {
         let prButton = element("task-create-pr-\(taskID)")
         XCTAssertTrue(prButton.waitForExistence(timeout: 5))
         prButton.click()
-        let blockedAlert = app.sheets.matching(NSPredicate(format: "label == %@", "alert")).firstMatch
-        XCTAssertTrue(blockedAlert.waitForExistence(timeout: 10), "PR creation should direct the user to resolve conflicts in the task worktree.")
-        let alertTitle = blockedAlert.staticTexts.matching(
-            NSPredicate(format: "value == %@", "Pull request operation failed")
-        ).firstMatch
-        XCTAssertTrue(alertTitle.exists, "The conflict sheet should identify the failed pull request operation.")
-        let conflictGuidance = blockedAlert.staticTexts.matching(
+        let failureAlert = app.sheets.matching(NSPredicate(format: "label == %@", "alert")).firstMatch
+        XCTAssertTrue(failureAlert.waitForExistence(timeout: 10), "The local bare remote should reach the normal GitHub CLI failure after the task branch is published.")
+        let conflictGuidance = failureAlert.staticTexts.matching(
             NSPredicate(format: "value BEGINSWITH %@", "Resolve conflicts")
         ).firstMatch
-        XCTAssertTrue(conflictGuidance.exists, "The conflict sheet should direct the user to resolve conflicts in the task worktree.")
-        blockedAlert.buttons["OK"].click()
-        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), branchHead, "Blocked PR creation must leave the task branch unchanged.")
+        XCTAssertFalse(conflictGuidance.exists, "Conflicts must no longer block PR creation.")
+        let ghGuidance = failureAlert.staticTexts.matching(
+            NSPredicate(format: "value CONTAINS %@", "GitHub CLI")
+        ).firstMatch
+        XCTAssertTrue(ghGuidance.exists, "The failure should come from the normal GitHub CLI path, not a conflict preflight.")
+        failureAlert.buttons["OK"].click()
+        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), branchHead)
         XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetHead)
         XCTAssertEqual(
             try runGitOutput(fixture.primary, "ls-remote", "--heads", "origin", try XCTUnwrap(completedRecord["branch"] as? String))
                 .trimmingCharacters(in: .whitespacesAndNewlines),
-            "",
-            "Blocked PR creation must not publish the task branch."
+            "refs/heads/\(try XCTUnwrap(completedRecord["branch"] as? String))\t\(branchHead)",
+            "A conflicted task branch should still be published for PR creation."
         )
         XCTAssertTrue(waitUntil({ prButton.isEnabled }, timeout: 10))
         XCTAssertNil((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"])

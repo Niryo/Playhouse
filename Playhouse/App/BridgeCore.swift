@@ -2165,10 +2165,6 @@ final class BoardTaskManager {
     }
 
     func createPullRequests(_ id: UUID, clients: ConversationClients, settingsManager: WorkspaceSettingsManager? = nil) async throws -> BoardTaskRecord {
-        let conflicts = try await pullRequestConflictRepositories(id)
-        if !conflicts.isEmpty {
-            throw BridgeCommandError(code: "conflicts_require_confirmation", message: "Pull request conflicts were found. Resolve conflicts in the task worktree before creating pull requests.")
-        }
         let lookup = try await withTaskOperationLock(id) {
             let initialTask = try requireTask(id)
             let originalRecords = initialTask.repositoryWorktrees
