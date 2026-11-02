@@ -10310,6 +10310,116 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Parked turn finished after the steered follow-up")
     }
 
+    // case-contract: test_claude_settles_turn_after_consumed_wake_notification | When Claude Code starts the provider turn that would deliver a finished background task's notification and then says nothing at all, Playhouse settles that turn on its own instead of leaving it open and the task In Progress forever: a follow-up queued while the turn was still parked stays queued through the silent wake, the send finishes and the task reaches Review, and that follow-up is then delivered in its own turn rather than stranded in the queue. A woken turn that is alive and merely slow to speak is not cut off by that backstop: it stays quiet past the grace a consumed notification gets and still ends the turn on its own answer.
+    func test_claude_settles_turn_after_consumed_wake_notification() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-consumed-wake")
+        try FileManager.default.copyItem(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"),
+            atomically: true,
+            encoding: .utf8
+        )
+        claudeFixtureExecutable = executable.path
+        let pause = URL(fileURLWithPath: executable.path + ".consumed-wake-pause")
+        let parked = URL(fileURLWithPath: executable.path + ".consumed-wake-ready")
+        let release = URL(fileURLWithPath: executable.path + ".consumed-wake-release")
+        let woken = URL(fileURLWithPath: executable.path + ".consumed-wake-woken")
+        try Data().write(to: pause, options: .atomic)
+        defer {
+            try? Data("Release the consumed-wake fixture pause.\n".utf8).write(to: release, options: .atomic)
+            try? FileManager.default.removeItem(at: pause)
+        }
+        // Short graces keep the case inside the runner's time allowance; which
+        // silence settles the turn and which one waits for Claude does not
+        // depend on their lengths.
+        let graceEnvironment = [
+            "PLAYHOUSE_E2E_CLAUDE_WAKE_GRACE_SECONDS": "4",
+            "PLAYHOUSE_E2E_CLAUDE_WOKEN_SILENCE_GRACE_SECONDS": "24",
+            "PLAYHOUSE_E2E_CLAUDE_SLOW_WOKEN_SILENCE_SECONDS": "8",
+        ]
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude consumed wake", "--root", fixture.primary.path, "--provider", "claude"
+        ]) ["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        let slowCreated = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude slow woken turn", "--root", fixture.primary.path, "--provider", "claude"
+        ]) ["result"] as? [String: Any])
+        let slowTaskID = try XCTUnwrap(slowCreated["id"] as? String)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: graceEnvironment)
+        openTask(named: "Claude consumed wake")
+        element("message-composer").click()
+        element("message-composer").typeText("Park a shell and then consumed wake notification.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: parked.path) }, timeout: 20),
+                      "The fixture should park the turn after its result while the shell runs.")
+        XCTAssertTrue(waitUntil({ self.element("pause-response-button").exists }, timeout: 10),
+                      "The parked turn must read as the active turn while the shell runs.")
+
+        // The turn is still active, so this follow-up queues rather than sends;
+        // only a settled turn can ever deliver it.
+        let stranded = "Then tell the story of the VM run."
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText(stranded)
+        composer.typeKey(.return, modifierFlags: [])
+        let queued = try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
+        let queuedID = try XCTUnwrap(queued?.first(where: { $0["text"] as? String == stranded })?["id"] as? String)
+        XCTAssertTrue(element("queued-message-text-\(queuedID)").waitForExistence(timeout: 10),
+                      "A follow-up sent while the parked turn is active must wait in the queue.")
+
+        try Data("Release the consumed-wake fixture pause.\n".utf8).write(to: release, options: .atomic)
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: woken.path) }, timeout: 20),
+                      "The fixture should start the woken turn and then stay silent.")
+        XCTAssertTrue(element("pause-response-button").exists,
+                      "The silently consumed wake leaves the turn active until Playhouse's own grace period settles it.")
+        XCTAssertTrue(element("queued-message-text-\(queuedID)").exists,
+                      "A stranded turn takes no further input, so the follow-up is still waiting here.")
+        attachScreenshot(named: "Turn still active and the follow-up still queued after the silently consumed wake")
+
+        // Only the woken-turn silence grace can end this turn, so wait past it.
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 60),
+                      "Playhouse must settle a turn stranded by a silently consumed wake instead of leaving it active forever.")
+        XCTAssertTrue(transcriptContains("WAKE SHELL STARTED"),
+                      "Settling a stranded turn must keep the answer it already gave.")
+        attachScreenshot(named: "Playhouse settled the stranded turn by itself")
+
+        XCTAssertTrue(waitUntil({ self.transcriptContains("BISCUIT-7") }, timeout: 60),
+                      "A follow-up queued while the turn was stranded must be delivered once Playhouse settles it.")
+        XCTAssertTrue(waitUntil({
+            (try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])??
+                .contains { $0["id"] as? String == queuedID } == false
+        }, timeout: 30), "The delivered follow-up must leave the queue.")
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["task", "get", taskID])["result"] as? [String: Any])??["status"] as? String) == "Review"
+        }, timeout: 60), "A task whose turn was stranded must not stay In Progress once Playhouse settles it.")
+        attachScreenshot(named: "Delivered follow-up answered and the task out of In Progress")
+
+        // A woken turn that is alive and merely slow to speak must not be cut
+        // off by that same backstop: it gets its own, far longer grace.
+        let announced = URL(fileURLWithPath: executable.path + ".slow-woken-announced")
+        openTask(named: "Claude slow woken turn")
+        element("message-composer").click()
+        element("message-composer").typeText("Park a shell and then a slow woken turn.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: announced.path) }, timeout: 30),
+                      "The fixture should announce the woken turn before going quiet.")
+        XCTAssertTrue(element("pause-response-button").exists,
+                      "A woken turn that has only just announced itself is still the active turn.")
+        attachScreenshot(named: "Slow woken turn announced itself and is still the active turn while it stays quiet")
+        XCTAssertTrue(waitUntil({ self.transcriptContains("SLOW WOKEN HANDLED") }, timeout: 60),
+                      "A woken turn quiet past the consumed-notification grace must still end on its own answer.")
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 30),
+                      "Claude's own answer ends the slow woken turn.")
+        attachScreenshot(named: "Slow woken turn answered instead of being cut off by the backstop")
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["task", "get", slowTaskID])["result"] as? [String: Any])??["status"] as? String) == "Review"
+        }, timeout: 60), "The slow woken turn's own completed outcome should move its task to Review.")
+    }
+
     // case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, Playhouse returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics.
     func test_claude_private_recovery_failure_fails_closed() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-recovery-failure")
