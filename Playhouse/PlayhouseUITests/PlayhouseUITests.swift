@@ -2145,7 +2145,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertNil(finalRecord["pullRequestNumber"])
     }
 
-    // case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC creates PRs for two repositories, verifies the first PR persists when the second creation fails, retries only the missing repository, confirms each gh create call targets the corresponding repository worktree, and confirms both saved numbers on fresh reads. The UI labels active-card and Done-archive multi-repository creation actions PRs, clicks the active action, verifies the partial-success retry action, confirms the gh create calls target both repository worktrees and retry only the failed one, then shows the exact created PR numbers on the active task and every linked number in the Done archive. Hovering the outer padded edge of each PR link triggers its feedback.
+    // case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC creates PRs for two repositories, verifies the first PR persists when the second creation fails, retries only the missing repository, confirms each gh create call targets the corresponding repository worktree, and confirms both saved numbers on fresh reads. The UI labels active-card and Done-archive multi-repository creation actions PRs, clicks the active action, verifies the partial-success retry action, confirms the gh create calls target both repository worktrees and retry only the failed one, then shows exact PR numbers on the active task and Done archive, including four-digit values without grouping separators. Hovering the outer padded edge of each PR link triggers its feedback.
     func test_done_archive_displays_existing_pull_request_link() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         // The fixture `gh` handles list/create and merged-state calls without GitHub sign-in.
@@ -2239,6 +2239,8 @@ final class PlayhouseUITests: XCTestCase {
 
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 10), "The app must close its SwiftData container before seeding the archived store.")
+        let activePRURL = "https://github.com/playhouse-test/fixture/pull/1234"
+        try seedTaskPullRequest(taskID: activeTaskID, number: 1234, url: activePRURL)
         let prURL = "https://github.com/playhouse-test/fixture/pull/1234"
         let secondPRURL = "https://github.com/playhouse-test/fixture/pull/1235"
         try seedTaskPullRequest(taskID: taskID, number: 1234, url: prURL)
@@ -2251,11 +2253,11 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual((persisted["repositoryWorktrees"] as? [[String: Any]])?.count, 2)
 
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
-        let firstActiveLink = app.links["task-pr-link-\(activeTaskID)-501"]
+        let firstActiveLink = app.links["task-pr-link-\(activeTaskID)-1234"]
         let secondActiveLink = app.links["task-pr-link-\(activeTaskID)-502"]
         XCTAssertTrue(firstActiveLink.waitForExistence(timeout: 10))
         XCTAssertTrue(secondActiveLink.waitForExistence(timeout: 10), "The active task card should show each repository's created PR number.")
-        XCTAssertEqual(firstActiveLink.label, "#501")
+        XCTAssertEqual(firstActiveLink.label, "#1234")
         XCTAssertEqual(secondActiveLink.label, "#502")
         element("done-archive-button").click()
         XCTAssertTrue(element("done-archive-task-\(taskID)").waitForExistence(timeout: 10))
@@ -2263,8 +2265,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(prLink.waitForExistence(timeout: 10), "The Done archive should show the saved PR number as a link.")
         let secondPRLink = app.links["done-archive-pr-link-\(taskID)-1235"]
         XCTAssertTrue(secondPRLink.waitForExistence(timeout: 10), "The Done archive should show every repository's saved PR number.")
-        XCTAssertEqual(prLink.label, "#1,234")
-        XCTAssertEqual(secondPRLink.label, "#1,235")
+        XCTAssertEqual(prLink.label, "#1234")
+        XCTAssertEqual(secondPRLink.label, "#1235")
         assertHoverEmphasis(for: prLink)
         attachScreenshot(named: "Done archive shows the linked pull request")
     }

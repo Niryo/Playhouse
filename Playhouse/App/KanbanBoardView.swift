@@ -675,11 +675,13 @@ struct KanbanBoardView: View {
                 }
                 ForEach(linked, id: \.repositoryPath) { record in
                     if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
-                        Link("#\(number)", destination: url)
+                        Link(destination: url) {
+                            Text(verbatim: "#\(number)")
+                        }
                             .font(.system(size: 10, weight: .semibold, design: .monospaced))
                             .actionButtonHoverEmphasis(padding: 5)
                             .buttonHoverPointer()
-                            .help("Open pull request #\(number) in your browser")
+                            .help(Text(verbatim: "Open pull request #\(number) in your browser"))
                             .contentShape(Capsule())
                             .accessibilityIdentifier("done-archive-pr-link-\(task.id.uuidString)-\(number)")
                     }
@@ -1602,11 +1604,13 @@ private struct TaskCardView: View {
                     }
                     ForEach(linked, id: \.repositoryPath) { record in
                         if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
-                            Link("#\(number)", destination: url)
+                            Link(destination: url) {
+                                Text(verbatim: "#\(number)")
+                            }
                                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
                                 .actionButtonHoverEmphasis(padding: 5)
                                 .buttonHoverPointer()
-                                .help("Open pull request #\(number) in your browser")
+                                .help(Text(verbatim: "Open pull request #\(number) in your browser"))
                                 .contentShape(Capsule())
                                 .accessibilityIdentifier("task-pr-link-\(task.id.uuidString)-\(number)")
                         }
