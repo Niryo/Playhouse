@@ -1491,6 +1491,54 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(any(text.endswith("Tell me about volcanoes") for text in texts))
         self.assertTrue(any(text.endswith("One more thought about Saturn") for text in texts))
 
+    # case-contract: test_standalone_chat_answer_stays_final_around_close_turn | A standalone chat reports no task outcome, so it ends every turn with Playhouse's own chat page close-turn signal, which Claude runs after its answer and before its closing line. That answer and closing line form one final answer, not commentary, in the streamed final answer, fresh CLI/XPC history, and the visible transcript, so the response is never left buried inside the collapsed Worked for disclosure; text written before an ordinary tool earlier in the same turn still stays commentary there, and the close-turn command really runs and succeeds. This classification is Claude-specific because Playhouse derives each message's phase from Claude's tool stream, while Codex reports the phase in its own protocol and so cannot mis-file an answer on the same turn shape.
+    def test_standalone_chat_answer_stays_final_around_close_turn(self):
+        self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        executable = self.data_directory / "claude-fixture-chat-close-turn"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        chat_id = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["id"]
+
+        intent = "Let me check the newer release first."
+        answer = "Confirmed: 2.1.309 registers the new model and 2.1.308 does not."
+        final_answer = answer + "\n\nTell me if you want the upgrade command."
+
+        sent, events = self.call_cli(
+            "conversation", "send", chat_id, "--message", "Summarize the release notes.",
+            extra_environment=environment,
+        )
+        self.assert_success(sent)
+        self.assertEqual(
+            [event["payload"]["text"] for event in events if event["type"] == "assistant_final"], [final_answer],
+            "The page close-turn signal is Playhouse bookkeeping, so the answer and its closing line stay one final answer.",
+        )
+        progress = [event["payload"]["text"] for event in events if event["type"] == "assistant_progress"]
+        self.assertFalse(any(answer in text for text in progress),
+                         f"The answer must never be demoted to commentary by the close-turn signal: {progress}")
+        self.assertIn(intent, progress, "Text written before an ordinary tool still stays commentary.")
+
+        turns = [
+            turn for turn in json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
+            if not (turn.get("userText") or "").startswith("Classify the latest user message")
+        ]
+        self.assertEqual(len(turns[-1]["reportCommands"]), 1, "The fixture should run the chat page close-turn command.")
+        self.assertIn(" chat page close-turn ", turns[-1]["reportCommands"][0]["command"])
+        self.assertIn('"ok":true', turns[-1]["reportCommands"][0]["output"], turns[-1]["reportCommands"])
+
+        history = self.assert_success(self.call_cli("conversation", "history", chat_id, extra_environment=environment)[0])
+        assistant = [(message["phase"], message["text"]) for message in history["messages"] if message["role"] == "assistant"]
+        self.assertEqual(assistant, [("commentary", intent), ("final_answer", final_answer)],
+                         "A fresh history read keeps the answer and its closing line as one final answer.")
+
+        status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+        self.assertFalse(status["missedPreviousPageSignal"],
+                         "A close-turn signal that really ran must satisfy the page signal instead of falling back to the classifier.")
+
     # case-contract: test_standalone_chat_claude_fallback_classifier | When a standalone chat uses Claude, a missed page signal invokes the Haiku helper at low effort; a malformed result is rejected and retried, an unrelated later question and its assistant reply move to a new titled page, the UI keeps page evaluation visually quiet without blocking the primary answer, updates the transcript separator when classification completes, and holds a following send until the decision resolves, and appends the related follow-up in chronological order. The Claude-specific model and effort arguments are verified through the real CLI/XPC path. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes.
     def test_standalone_chat_claude_fallback_classifier(self):
         self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])

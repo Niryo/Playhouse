@@ -80,8 +80,9 @@ final class ClaudeSessionRunner {
     private var turnWaiter: CheckedContinuation<Void, Error>?
     private var planWasPresented = false
     private var pendingAssistantText: (id: String, text: String)?
-    /// Set when the pending answer text was followed only by Playhouse's outcome
-    /// call, so text Claude writes after that call extends the same answer.
+    /// Set when the pending answer text was followed only by Playhouse's
+    /// end-of-turn call — a task outcome, or a standalone chat's page
+    /// close-turn — so text Claude writes after it extends the same answer.
     private var pendingTextSpansOutcomeReport = false
     private var toolActivities: [String: ConversationActivity] = [:]
     private var activityStartedAtUptime: [String: UInt64] = [:]
@@ -778,8 +779,9 @@ final class ClaudeSessionRunner {
                 }
                 if name == "AskUserQuestion" || (name == "ExitPlanMode" && activeMode == .plan) { continue }
                 let input = block["input"] as? [String: Any] ?? [:]
-                // Playhouse's own progress and outcome reports are bookkeeping, not
-                // work, so they don't turn the answer written before them into commentary.
+                // Playhouse's own progress, outcome, and chat page reports are
+                // bookkeeping, not work, so they don't turn the answer written
+                // before them into commentary.
                 let report = ClaudeCodeClient.reportCommand(name: name, input: input)
                 if pendingAssistantText != nil, let report {
                     if report == .outcome { pendingTextSpansOutcomeReport = true }

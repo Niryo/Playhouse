@@ -4863,6 +4863,81 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Standalone chat pages keep separate sessions")
     }
 
+    // case-contract: test_standalone_chat_answer_stays_final_around_close_turn | A standalone chat reports no task outcome, so it ends every turn with Playhouse's own chat page close-turn signal, which Claude runs after its answer and before its closing line. That answer and closing line form one final answer, not commentary, in the streamed final answer, fresh CLI/XPC history, and the visible transcript, so the response is never left buried inside the collapsed Worked for disclosure; text written before an ordinary tool earlier in the same turn still stays commentary there, and the close-turn command really runs and succeeds. This classification is Claude-specific because Playhouse derives each message's phase from Claude's tool stream, while Codex reports the phase in its own protocol and so cannot mis-file an answer on the same turn shape.
+    func test_standalone_chat_answer_stays_final_around_close_turn() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-close-turn")
+        try FileManager.default.copyItem(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8).write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
+        )
+        claudeFixtureExecutable = executable.path
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        _ = try runCLI(["settings", "clear-parent"])
+        launchApp(defaultParent: nil)
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        _ = try runCLI(["chat", "open"])
+
+        let intent = "Let me check the newer release first."
+        let answer = "Confirmed: 2.1.309 registers the new model and 2.1.308 does not."
+        let closing = "Tell me if you want the upgrade command."
+        let prompt = "Summarize the release notes."
+        // Transcript messages are labeled groups.
+        func visibleTexts(containing text: String) -> XCUIElementQuery {
+            app.groups.matching(NSPredicate(format: "label CONTAINS %@", text))
+        }
+
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        composer.click()
+        composer.typeText(prompt)
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            self.fixtureTurnCount(executable, containing: prompt) > 0 && self.noTurnIsRunning()
+        }, timeout: 30), "The chat turn should finish.")
+        XCTAssertTrue(waitUntil({
+            self.element("codex-activity-disclosure").exists
+                && self.element("codex-activity-disclosure").label.hasPrefix("Worked for")
+        }, timeout: 20), "The settled chat turn should show its Worked for summary.")
+
+        // Settling re-renders the transcript (commentary folds into Worked for), so the answer can briefly be mid-layout.
+        XCTAssertTrue(visibleTexts(containing: answer).firstMatch.waitForExistence(timeout: 10),
+                      "The answer written before the close-turn signal must be the visible response, not collapsed commentary.")
+        XCTAssertTrue(visibleTexts(containing: closing).firstMatch.waitForExistence(timeout: 5),
+                      "The closing line Claude adds after the signal belongs to the same answer.")
+        XCTAssertEqual(visibleTexts(containing: intent).count, 0,
+                       "Text written before an ordinary tool stays collapsed commentary.")
+        attachScreenshot(named: "standalone-chat-answer-is-the-response")
+
+        element("codex-activity-disclosure").click()
+        let activityDetails = element("codex-activity-details")
+        XCTAssertTrue(activityDetails.waitForExistence(timeout: 5), "Worked for should expand.")
+        // A progress bubble carries its text as the element's value, not its label, so it is
+        // identified by the provider message it was built from.
+        func progressBubbles(forMessageID messageID: String) -> XCUIElementQuery {
+            activityDetails.staticTexts.matching(
+                NSPredicate(format: "identifier BEGINSWITH %@", "codex-progress-message-\(messageID)")
+            )
+        }
+        XCTAssertEqual(progressBubbles(forMessageID: "msg_chat_answer").count, 0,
+                       "The answer must never be demoted into a Worked for progress entry.")
+        let intentBubble = progressBubbles(forMessageID: "msg_chat_intent")
+        XCTAssertTrue(intentBubble.count > 0,
+                      "The text written before an ordinary tool belongs inside Worked for.")
+        XCTAssertTrue((intentBubble.firstMatch.value as? String ?? "").contains(intent),
+                      "The Worked for progress entry should carry the commentary Claude wrote before its tool call.")
+        attachScreenshot(named: "standalone-chat-worked-for-holds-only-commentary")
+        element("codex-activity-disclosure").click()
+
+        let status = try XCTUnwrap(try runCLI(["chat", "status"])["result"] as? [String: Any])
+        XCTAssertEqual(status["missedPreviousPageSignal"] as? Bool, false,
+                       "A close-turn signal that really ran must satisfy the page signal instead of falling back to the classifier.")
+    }
+
     // case-contract: test_standalone_chat_claude_fallback_classifier | When a standalone chat uses Claude, a missed page signal invokes the Haiku helper at low effort; a malformed result is rejected and retried, an unrelated later question and its assistant reply move to a new titled page, the UI keeps page evaluation visually quiet without blocking the primary answer, updates the transcript separator when classification completes, and holds a following send until the decision resolves, and appends the related follow-up in chronological order. The Claude-specific model and effort arguments are verified through the real CLI/XPC path. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes.
     func test_standalone_chat_claude_fallback_classifier() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-fallback")
