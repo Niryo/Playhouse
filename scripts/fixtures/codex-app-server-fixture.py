@@ -565,6 +565,10 @@ def main():
                  "supportedReasoningEfforts": ["low", "medium"]},
                 {"id": "gpt-5.6-luna", "displayName": "GPT-5.6 Luna", "isDefault": False,
                  "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]},
+                # Superseded in a family whose newest entry is not the default model, so a
+                # test can tell "followed the family forward" from "no selection loaded yet".
+                {"id": "gpt-5.6-sol", "displayName": "GPT-5.6 Sol", "isDefault": False,
+                 "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]},
             ]}})
         elif message.get("method") == "thread/goal/get":
             goal = json.loads(goal_path.read_text(encoding="utf-8")) if goal_path.is_file() else None

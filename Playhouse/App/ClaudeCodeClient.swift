@@ -1241,10 +1241,28 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
 
     func availableModels(workspace: ConversationWorkspaceContext) async throws -> [ConversationModelOption] {
         let response = try await withMetadataSession(workspace: workspace) { _ in [:] }
+        // Claude Code announces its newest release of a family only through the bare
+        // alias (`opus` resolving to `claude-opus-5-5`); there is no entry whose value
+        // is the concrete ID. Keying the option on `resolvedModel` gives that entry a
+        // parseable version, so the newest release is no longer discarded as an
+        // unversioned alias in favour of an older concrete model.
+        //
+        // The resolved name is also what `--model` receives. Claude Code accepts it even
+        // though it never offers it as a `value`: verified against CLI 2.1.309, where
+        // `--model claude-haiku-5-5` reported `canonicalModel: claude-haiku-5-5`.
+        var seenIDs = Set<String>()
         let models = (response.initialize["models"] as? [[String: Any]] ?? []).compactMap { item -> ConversationModelOption? in
             guard let value = item["value"] as? String, !value.isEmpty else { return nil }
+            let resolved = (item["resolvedModel"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            // "default" stays a placeholder rather than a model, so the picker still drops
+            // it. Keying it on its own value also keeps it out of the dedup below, where it
+            // would otherwise claim the resolved ID and evict the real entry for it.
+            let id = value == Self.defaultModelID ? value : (resolved ?? value)
+            // An alias and a concrete entry can resolve to the same model. Keep whichever
+            // arrives first, which carries Claude Code's own display name for the release.
+            guard seenIDs.insert(id).inserted else { return nil }
             let isPreferredDefault = value == Self.defaultModelID || value.lowercased().contains(Self.preferredDefaultModelID)
-            return ConversationModelOption(id: value, name: item["displayName"] as? String ?? value, isDefault: isPreferredDefault)
+            return ConversationModelOption(id: id, name: item["displayName"] as? String ?? id, isDefault: isPreferredDefault)
         }
         return models.isEmpty ? [ConversationModelOption(id: Self.defaultModelID, name: "Default", isDefault: true)] : models
     }

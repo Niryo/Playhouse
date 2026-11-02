@@ -4755,15 +4755,42 @@ final class ConversationManager {
         let task = try tasks.conversationSubject(taskID)
         let key = selectedModelKey(for: task.conversationProvider)
         if let selectedModelID = preferences.string(forKey: key) {
-            return selectedModelID
+            return supersededSelection(selectedModelID, provider: task.conversationProvider, key: key)
         }
 
         // One-time migration from the previous per-task preference.
         if let legacyModelID = task.conversationModelID {
-            preferences.set(legacyModelID, forKey: key)
-            return legacyModelID
+            // Resolve before persisting, so the migration writes the key once.
+            let modelID = supersededSelection(legacyModelID, provider: task.conversationProvider, key: nil)
+            preferences.set(modelID, forKey: key)
+            return modelID
         }
         return nil
+    }
+
+    /// A remembered model the provider no longer offers keeps running behind the
+    /// picker, so a selection superseded within its own family follows the family
+    /// forward, keeping sends and the composer on one model.
+    ///
+    /// This sits on the read rather than on the model refresh so that every consumer
+    /// converges at once: the composer primes from cache before `models(taskID:)`
+    /// returns, and a send reads the remembered ID without refreshing the list. The
+    /// write is idempotent — once the stored ID is one the provider offers, later
+    /// reads find nothing to supersede. `key` is nil when the caller persists the
+    /// result itself.
+    ///
+    /// The cache is the only source of truth here, so on the first launch after an
+    /// update a send issued before the first `models(taskID:)` fetch lands still uses
+    /// the remembered ID. That window closes on the next read and never clobbers a
+    /// selection, which is why an empty cache deliberately supersedes nothing.
+    private func supersededSelection(_ selectedModelID: String, provider: ConversationProvider, key: String?) -> String {
+        guard let models = try? cachedModels(provider: provider),
+              let replacement = models.supersedingModel(forSelectedID: selectedModelID) else { return selectedModelID }
+        if let key { preferences.set(replacement.id, forKey: key) }
+        PlayhouseDiagnostics.record("conversation.model.selection.superseded", fields: [
+            "provider": provider.rawValue, "from": selectedModelID, "to": replacement.id
+        ])
+        return replacement.id
     }
 
     func setEffort(taskID: UUID, effort: ConversationEffort) async throws -> BoardTaskRecord {
