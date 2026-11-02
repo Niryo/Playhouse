@@ -6891,7 +6891,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         probe = self.data_directory / "codex-question-ownership-probe"
         core = ["BoardTask", "ConversationSubject", "WorkspaceSupport", "WorkspaceChanges", "CodexAppServerClient",
-                "ConversationModel", "ClaudeCodeClient", "ConversationTranscriptStore",
+                "ConversationModel", "ClaudeCodeClient", "ProcessCPUSampler", "ConversationTranscriptStore",
                 "StandaloneChatStore", "BridgeCore"]
         command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone"]
         for framework in ("Foundation", "AppKit", "SwiftUI", "SwiftData", "Combine"):
@@ -8263,6 +8263,98 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_failure(response, "invalid_argument")
         self.assertEqual(
             self.assert_success(self.call_cli("settings", "get")[0])["tokenUsageColorMax"], 2400,
+            "A rejected maximum should leave the stored one alone.",
+        )
+
+    # case-contract: test_task_cpu_usage_reports_claude_process_tree_load | A newly created Claude task reports cpu-usage as not running before any turn starts. While a real Claude Code fixture turn burns CPU in a real child process, two successive `task cpu-usage` reads establish a baseline and then a plausible non-zero percentage for the task's process tree, the task card's CPU bar reads cool green against the default multi-core ceiling and hot red once the ceiling is lowered to match that load, and the reading returns to not-running once the turn completes.
+    def test_task_cpu_usage_reports_claude_process_tree_load(self):
+        environment = self.install_claude_fixture("claude-fixture-cpu-usage")
+        environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU"] = "1"
+        environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU_SECONDS"] = "6"
+        task_id = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Claude CPU usage", "--root", self.primary, "--provider", "claude"
+        )[0])["id"]
+
+        idle = self.assert_success(self.call_cli("task", "cpu-usage", task_id)[0])
+        self.assertIsNone(idle["cpuPercent"], "A task with no turn yet has nothing to sample.")
+        self.assertEqual(idle["reason"], "not_running")
+
+        send_failures = []
+
+        def send_turn():
+            try:
+                self.call_cli(
+                    "conversation", "send", task_id, "--message", "Tell me a story.",
+                    timeout=30, extra_environment=environment,
+                )
+            except Exception as error:
+                send_failures.append(error)
+
+        sender = threading.Thread(target=send_turn, daemon=True)
+        sender.start()
+        deadline = time.monotonic() + 10
+        session_id = None
+        while time.monotonic() < deadline:
+            active = self.assert_success(self.call_cli("task", "get", task_id)[0])
+            session_id = active.get("claudeSessionID")
+            if session_id:
+                break
+            time.sleep(0.1)
+        self.assertTrue(session_id, "The Claude fixture turn should start a session while it burns CPU.")
+
+        # The Claude process doesn't necessarily become sample-able in the same
+        # instant its session ID is persisted, so it can take a read or two
+        # before a read establishes a baseline (reported as not-running, same
+        # as a genuinely idle task, since there is nothing yet to diff
+        # against) that the next read can turn into a measured percentage;
+        # poll instead of assuming a fixed pair of reads lines up with that.
+        established_baseline = False
+        second = None
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            reading = self.assert_success(self.call_cli("task", "cpu-usage", task_id)[0])
+            if reading["cpuPercent"] is not None:
+                second = reading
+                break
+            established_baseline = True
+            time.sleep(0.3)
+        self.assertTrue(established_baseline, "At least one earlier read should have sampled the process tree first.")
+        self.assertIsNotNone(second, "A busy process tree should eventually report a measured percentage.")
+        self.assertGreater(second["cpuPercent"], 0, "A CPU-burning child process should register non-zero usage.")
+
+        sender.join(timeout=20)
+        self.assertFalse(sender.is_alive(), "The Claude fixture turn should complete.")
+        self.assertFalse(send_failures, f"The Claude turn should succeed: {send_failures}")
+
+        finished = self.assert_success(self.call_cli("task", "cpu-usage", task_id)[0])
+        self.assertIsNone(finished["cpuPercent"], "A finished turn is no longer running.")
+        self.assertEqual(finished["reason"], "not_running")
+
+    # case-contract: test_task_cpu_usage_absent_for_codex | A Codex task never reports a numeric CPU percentage from `task cpu-usage`, always citing unsupported_provider, because Codex multiplexes every task's turns inside one shared app-server process with no OS-level way to attribute CPU to a single task.
+    def test_task_cpu_usage_absent_for_codex(self):
+        task_id = self.create_task(title="Codex CPU usage", roots=[self.primary], provider="codex")["id"]
+        self.complete_fixture_turn(task_id, executable_name="codex-fixture-cpu-usage")
+        result = self.assert_success(self.call_cli("task", "cpu-usage", task_id)[0])
+        self.assertIsNone(result["cpuPercent"], "Codex tasks never get a numeric CPU reading.")
+        self.assertEqual(result["reason"], "unsupported_provider")
+
+    # case-contract: test_settings_cpu_usage_color_max_round_trip | The CPU usage color maximum defaults to one fully busy core per logical CPU, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting.
+    def test_settings_cpu_usage_color_max_round_trip(self):
+        settings = self.assert_success(self.call_cli("settings", "get")[0])
+        expected_default = (os.cpu_count() or 1) * 100
+        self.assertEqual(settings["cpuUsageColorMax"], expected_default, "The bar's scale tops out at one busy core per logical CPU by default.")
+
+        updated = self.assert_success(self.call_cli("settings", "set-cpu-usage-color-max", "250")[0])
+        self.assertEqual(updated["cpuUsageColorMax"], 250)
+        self.assertEqual(
+            self.assert_success(self.call_cli("settings", "get")[0])["cpuUsageColorMax"], 250,
+            "The edited maximum should survive a fresh read.",
+        )
+
+        response, _ = self.call_cli("settings", "set-cpu-usage-color-max", "0", expected_status=2)
+        self.assert_failure(response, "invalid_argument")
+        self.assertEqual(
+            self.assert_success(self.call_cli("settings", "get")[0])["cpuUsageColorMax"], 250,
             "A rejected maximum should leave the stored one alone.",
         )
 

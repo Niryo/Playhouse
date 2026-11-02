@@ -11511,6 +11511,132 @@ final class PlayhouseUITests: XCTestCase {
         )
     }
 
+    // case-contract: test_task_cpu_usage_reports_claude_process_tree_load | A newly created Claude task reports cpu-usage as not running before any turn starts. While a real Claude Code fixture turn burns CPU in a real child process, two successive `task cpu-usage` reads establish a baseline and then a plausible non-zero percentage for the task's process tree, the task card's CPU bar reads cool green against the default multi-core ceiling and hot red once the ceiling is lowered to match that load, and the reading returns to not-running once the turn completes.
+    func test_task_cpu_usage_reports_claude_process_tree_load() throws {
+        var environment = try installClaudeFixture(named: "claude-fixture-ui-cpu-usage")
+        environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU"] = "1"
+        environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU_SECONDS"] = "25"
+        launchApp(defaultParent: fixture.parent.path)
+        let taskID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Claude CPU usage", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        XCTAssertTrue(app.buttons["Claude CPU usage"].waitForExistence(timeout: 10))
+
+        let bar = element("task-cpu-usage-bar-\(taskID)")
+        let card = element("task-card-\(taskID)")
+        XCTAssertFalse(bar.exists, "A task with no turn yet should show no CPU bar.")
+
+        let process = try startCLIProcess(
+            ["conversation", "send", taskID, "--message", "Tell me a story."],
+            extraEnvironment: environment
+        )
+        defer {
+            if process.process.isRunning {
+                process.process.terminate()
+                process.process.waitUntilExit()
+            }
+        }
+
+        XCTAssertTrue(waitUntil({
+            (try? self.runCLI(["task", "get", taskID])["result"] as? [String: Any])?["claudeSessionID"] != nil
+        }, timeout: 10), "The Claude fixture turn should start a session while it burns CPU.")
+
+        XCTAssertTrue(bar.waitForExistence(timeout: 10), "A busy Claude task should show its left-edge CPU bar.")
+        attachScreenshot(named: "Task card shows a busy Claude task's CPU bar")
+        // Against the default, core-count-scaled ceiling, one burning core is a
+        // small fraction of the total, so the bar should still read cool green
+        // — this is what the gradient-reveal fill must get right at low usage.
+        // Sampled off the stable card (not the thin, continuously-animating bar
+        // sub-view) restricted to its left edge, since the bar's own element
+        // identity can transiently drop out of the accessibility tree between
+        // an existence check and a screenshot fetch mid-animation.
+        XCTAssertTrue(waitUntil({ self.isGreenDominant(card, leftEdgeFraction: 0.06) }, timeout: 10), "One burning core against the default multi-core ceiling should still read cool green.")
+        attachScreenshot(named: "CPU bar reads green against the default multi-core ceiling")
+
+        // A low ceiling guarantees the same load now reads clearly hot,
+        // regardless of how many cores this machine has.
+        _ = try runCLI(["settings", "set-cpu-usage-color-max", "50"])
+        XCTAssertTrue(waitUntil({ self.isRedDominant(card, leftEdgeFraction: 0.06) }, timeout: 10), "A single burning core should read hot against a 50% ceiling.")
+        attachScreenshot(named: "CPU bar reads hot once usage reaches the lowered ceiling")
+
+        _ = try finishCLIProcess(process)
+        XCTAssertTrue(waitUntil({ !bar.exists }, timeout: 15), "The bar should disappear once the turn completes.")
+    }
+
+    // case-contract: test_task_cpu_usage_absent_for_codex | A Codex task never reports a numeric CPU percentage from `task cpu-usage`, always citing unsupported_provider, because Codex multiplexes every task's turns inside one shared app-server process with no OS-level way to attribute CPU to a single task.
+    func test_task_cpu_usage_absent_for_codex() throws {
+        var environment = try installClaudeFixture(named: "claude-fixture-ui-cpu-usage-contrast")
+        environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU"] = "1"
+        environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU_SECONDS"] = "25"
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Codex CPU usage", roots: [fixture.primary.path])
+        let codexTaskID = try taskID(named: "Codex CPU usage")
+        let claudeTaskID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Claude CPU usage contrast", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        XCTAssertTrue(app.buttons["Codex CPU usage"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Claude CPU usage contrast"].waitForExistence(timeout: 10))
+
+        let codexBar = element("task-cpu-usage-bar-\(codexTaskID)")
+        let claudeBar = element("task-cpu-usage-bar-\(claudeTaskID)")
+
+        let process = try startCLIProcess(
+            ["conversation", "send", claudeTaskID, "--message", "Tell me a story."],
+            extraEnvironment: environment
+        )
+        defer {
+            if process.process.isRunning {
+                process.process.terminate()
+                process.process.waitUntilExit()
+            }
+        }
+        XCTAssertTrue(claudeBar.waitForExistence(timeout: 10), "A busy Claude task should show its CPU bar.")
+        XCTAssertFalse(codexBar.exists, "A Codex task should never show a CPU bar: its turns share one process with no per-task attribution.")
+        attachScreenshot(named: "A Claude task's CPU bar beside a Codex card with none")
+
+        let codexUsage = try XCTUnwrap(try runCLI(["task", "cpu-usage", codexTaskID])["result"] as? [String: Any])
+        XCTAssertTrue(codexUsage["cpuPercent"] == nil || codexUsage["cpuPercent"] is NSNull, "Codex tasks never get a numeric CPU reading.")
+        XCTAssertEqual(codexUsage["reason"] as? String, "unsupported_provider")
+
+        _ = try finishCLIProcess(process)
+    }
+
+    // case-contract: test_settings_cpu_usage_color_max_round_trip | The CPU usage color maximum defaults to one fully busy core per logical CPU, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting.
+    func test_settings_cpu_usage_color_max_round_trip() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        let expectedDefault = ProcessInfo.processInfo.activeProcessorCount * 100
+        XCTAssertEqual(
+            (try runCLI(["settings", "get"])["result"] as? [String: Any])?["cpuUsageColorMax"] as? Int, expectedDefault,
+            "The bar's scale tops out at one busy core per logical CPU by default."
+        )
+
+        app.typeKey(",", modifierFlags: .command)
+        let preferences = settingsWindow
+        XCTAssertTrue(preferences.waitForExistence(timeout: 10), "Workspace Settings did not open.")
+        let maxField = preferences.descendants(matching: .any)
+            .matching(identifier: "cpu-usage-color-max-field").firstMatch
+        XCTAssertTrue(maxField.waitForExistence(timeout: 5), "Settings should expose the CPU usage maximum.")
+        XCTAssertEqual(maxField.value as? String, expectedDefault.formatted(), "The field should show the stored maximum.")
+        attachScreenshot(named: "Workspace Settings exposes the CPU usage color maximum")
+        maxField.click()
+        maxField.typeKey("a", modifierFlags: .command)
+        maxField.typeText("250\r")
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["settings", "get"])["result"] as? [String: Any])?["cpuUsageColorMax"] as? Int) == 250
+        }, timeout: 10), "An edited maximum should save through the same settings manager the CLI reads.")
+        app.typeKey("w", modifierFlags: .command)
+        XCTAssertTrue(waitUntil({ !preferences.exists }, timeout: 5))
+
+        assertCLIError(
+            try runCLI(["settings", "set-cpu-usage-color-max", "0"], expectedStatus: 2),
+            code: "invalid_argument"
+        )
+        XCTAssertEqual(
+            (try runCLI(["settings", "get"])["result"] as? [String: Any])?["cpuUsageColorMax"] as? Int, 250,
+            "A rejected maximum should leave the stored one alone."
+        )
+    }
+
     /// The real provider selected for opt-in live UI cases, or nil for the
     /// deterministic fixture suite. The runner writes it to the marker file.
     private var liveProvider: String? {
@@ -12076,15 +12202,21 @@ final class PlayhouseUITests: XCTestCase {
     }
 
     /// The usage dot is one flat hue, so the dominant channel says where on the
-    /// green-to-red heatmap it currently sits.
-    private func isGreenDominant(_ element: XCUIElement) -> Bool {
+    /// green-to-red heatmap it currently sits. `leftEdgeFraction` restricts the
+    /// sample to a left-hand slice of `element`'s screenshot — used to read the
+    /// CPU bar's color off the stable task card instead of the thin animated
+    /// bar sub-view itself, whose identity can transiently drop out of the
+    /// accessibility tree between an existence check and a screenshot fetch.
+    private func isGreenDominant(_ element: XCUIElement, leftEdgeFraction: CGFloat = 1.0) -> Bool {
+        guard element.exists else { return false }
         let image = element.screenshot().image
-        return pixelCount(in: image) { $0.greenComponent > $0.redComponent + 0.15 } > 4
+        return pixelCount(in: image, maxXFraction: leftEdgeFraction) { $0.greenComponent > $0.redComponent + 0.15 } > 4
     }
 
-    private func isRedDominant(_ element: XCUIElement) -> Bool {
+    private func isRedDominant(_ element: XCUIElement, leftEdgeFraction: CGFloat = 1.0) -> Bool {
+        guard element.exists else { return false }
         let image = element.screenshot().image
-        return pixelCount(in: image) { $0.redComponent > $0.greenComponent + 0.15 } > 4
+        return pixelCount(in: image, maxXFraction: leftEdgeFraction) { $0.redComponent > $0.greenComponent + 0.15 } > 4
     }
 
     private func assertPixel(_ image: NSImage, normalizedX: CGFloat, normalizedY: CGFloat, rgb expected: (Int, Int, Int), accuracy: Int = 8, file: StaticString = #filePath, line: UInt = #line) {
@@ -12879,11 +13011,12 @@ final class PlayhouseUITests: XCTestCase {
     }
 
     /// Counts pixels matching `matches`, sampling every `step` pixels; 0 when the image cannot be read.
-    private func pixelCount(in image: NSImage, step: Int = 1, where matches: (NSColor) -> Bool) -> Int {
+    private func pixelCount(in image: NSImage, step: Int = 1, maxXFraction: CGFloat = 1.0, where matches: (NSColor) -> Bool) -> Int {
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return 0 }
         let bitmap = NSBitmapImageRep(cgImage: cgImage)
         var count = 0
-        for x in stride(from: 0, to: cgImage.width, by: step) {
+        let maxX = Int(CGFloat(cgImage.width) * maxXFraction)
+        for x in stride(from: 0, to: maxX, by: step) {
             for y in stride(from: 0, to: cgImage.height, by: step) {
                 guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
                 if matches(color) { count += 1 }

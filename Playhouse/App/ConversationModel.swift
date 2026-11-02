@@ -622,6 +622,57 @@ struct ConversationRuntimeSnapshot: Codable, Equatable {
     }
 }
 
+/// Live CPU usage attributed to each Claude Code task's process tree, keyed
+/// by thread/session ID. Codex tasks never appear here: Codex multiplexes
+/// every task's turns inside one shared `app-server` process, so there is no
+/// OS-level way to attribute CPU to an individual Codex task.
+struct TaskCPUUsageSnapshot: Codable, Equatable {
+    var percentByThreadID: [String: Double] = [:]
+
+    /// See `ConversationRuntimeSnapshot.current(dataDirectory:)` for why
+    /// `dataDirectory` scopes the snapshot to one isolated client set.
+    @MainActor
+    static func current(dataDirectory: String? = nil) async -> TaskCPUUsageSnapshot {
+        let scope = dataDirectory.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
+        var pidsByThreadID: [String: pid_t] = [:]
+        for client in ClaudeCodeClient.allSharedPrimaryClients where scope == nil || client.runtimeScope == scope {
+            pidsByThreadID.merge(client.activeProcessIdentifiersByThreadID) { current, _ in current }
+        }
+        var snapshot = TaskCPUUsageSnapshot()
+        for (threadID, pid) in pidsByThreadID {
+            if let percent = await TaskCPUUsageSampler.shared.sample(threadID: threadID, rootPID: pid) {
+                snapshot.percentByThreadID[threadID] = percent
+            }
+        }
+        return snapshot
+    }
+
+    /// Emits a CPU snapshot every few seconds, yielding only on change.
+    /// Sampled far less often than `ConversationRuntimeSnapshot` (pure
+    /// in-memory bookkeeping, cheap at 100ms) because walking process trees
+    /// via libproc for every active task is materially more expensive and
+    /// must not become a meaningful CPU cost on its own.
+    @MainActor
+    static func changes(dataDirectory: String? = nil) -> AsyncStream<TaskCPUUsageSnapshot> {
+        AsyncStream { continuation in
+            let task = Task { @MainActor in
+                var last: TaskCPUUsageSnapshot?
+                while !Task.isCancelled {
+                    let snapshot = await current(dataDirectory: dataDirectory)
+                    if snapshot != last {
+                        last = snapshot
+                        continuation.yield(snapshot)
+                    }
+                    try? await Task.sleep(for: .seconds(sampleIntervalSeconds))
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private static let sampleIntervalSeconds: Double = 4
+}
+
 /// One client per provider, shared by a window or a single bridge request.
 @MainActor
 struct ConversationClients {

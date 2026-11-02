@@ -41,6 +41,23 @@ TURN_USAGE = {
 TURN_USAGE_TOTAL = sum(TURN_USAGE.values())
 
 
+def maybe_burn_cpu():
+    """Spends real, measurable CPU as a child process of this fixture while
+    the turn stays active, so a bridge test can assert a non-zero CPU
+    percentage for the task's process tree. No-op unless
+    PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU is set. Additive only: leaves every
+    other fixture behavior unchanged.
+    """
+    if os.environ.get("PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU") != "1":
+        return
+    seconds = float(os.environ.get("PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU_SECONDS", "10"))
+    burner = subprocess.Popen([
+        sys.executable, "-c",
+        f"import time\nend = time.time() + {seconds}\nwhile time.time() < end:\n    pass\n",
+    ])
+    burner.wait()
+
+
 def write(value):
     if isinstance(value, dict) and value.get("type") == "result" and "usage" not in value:
         value = {**value, "usage": dict(TURN_USAGE)}
@@ -699,6 +716,7 @@ def main():
                 if "playhouse internal outcome nudge:" not in prior.get("userText", "").lower()
             ), "")
             preserve_no_outcome = any(marker in previous_prompt for marker in ("please inspect the workspace", "start the checks"))
+            maybe_burn_cpu()
             turn["reportCommands"] = respond(user_text, instructions, preserve_no_outcome=preserve_no_outcome)
             history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else {"turns": []}
             history["turns"].append(turn)

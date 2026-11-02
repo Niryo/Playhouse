@@ -1326,6 +1326,9 @@ private struct KanbanTaskDropDelegate: DropDelegate {
 private struct TaskCardView: View {
     @AppStorage(WorkspaceSettings.tokenUsageColorMaxKey, store: WorkspaceSettings.preferencesStore)
     private var tokenUsageColorMax = WorkspaceSettings.defaultTokenUsageColorMax
+    @AppStorage(WorkspaceSettings.cpuUsageColorMaxKey, store: WorkspaceSettings.preferencesStore)
+    private var cpuUsageColorMax = WorkspaceSettings.defaultCPUUsageColorMax
+    @EnvironmentObject private var cpuUsageModel: TaskCPUUsageModel
     let task: BoardTask
     let onOpen: () -> Void
     let onRename: () -> Void
@@ -1431,6 +1434,31 @@ private struct TaskCardView: View {
             .accessibilityHint("Open task")
             .accessibilityIdentifier("task-card-\(task.id.uuidString)")
         }
+        .overlay(alignment: .leading) {
+            if let fraction = cpuFraction {
+                GeometryReader { proxy in
+                    // The gradient is rendered at the track's full height so a
+                    // given y-position always maps to the same color, then
+                    // masked down to the filled portion — a copy of the
+                    // gradient squeezed into just the fill height would remap
+                    // the whole green...red range into that sliver and show
+                    // red even at low usage.
+                    CPUUsageHeatmap.gradient
+                        .opacity(0.15)
+                    CPUUsageHeatmap.gradient
+                        .mask(alignment: .bottom) {
+                            Rectangle().frame(height: proxy.size.height * fraction)
+                        }
+                }
+                .frame(width: 4)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .padding(.vertical, 1)
+                .animation(.easeInOut(duration: 1.2), value: fraction)
+                .allowsHitTesting(false)
+                .accessibilityIdentifier("task-cpu-usage-bar-\(task.id.uuidString)")
+                .accessibilityLabel(CPUUsageHeatmap.label(percent: cpuPercent ?? 0))
+            }
+        }
         .accessibilityElement(children: .contain)
         .contextMenu {
             if let onMoveToDone {
@@ -1456,6 +1484,17 @@ private struct TaskCardView: View {
 
     private var linkedPullRequests: [RepositoryWorktreeRecord] {
         task.repositoryWorktrees.filter { $0.pullRequestNumber != nil && $0.pullRequestURL != nil }
+    }
+
+    /// `nil` for Codex tasks (no per-task CPU attribution is possible — see
+    /// `TaskCPUUsageSnapshot`) or a Claude task with no sample yet.
+    private var cpuPercent: Double? {
+        guard task.conversationProvider == .claude else { return nil }
+        return cpuUsageModel.percent(threadID: task.claudeSessionID)
+    }
+
+    private var cpuFraction: Double? {
+        cpuPercent.map { CPUUsageHeatmap.fraction(percent: $0, max: cpuUsageColorMax) }
     }
 
     private var hasRepositoriesMissingPullRequests: Bool {

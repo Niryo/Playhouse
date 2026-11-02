@@ -230,3 +230,46 @@ final class ConversationRuntimeModel: ObservableObject {
     func pendingUserInputRequest(forThread threadID: String) -> ConversationUserInputRequest? { snapshot.pendingUserInput[threadID] }
     func isObservingGoal(threadID: String) -> Bool { snapshot.goal.observedThreadIDs.contains(threadID) }
 }
+
+/// Live CPU usage per Claude Code task, sampled daemon-side and streamed
+/// here the same way `ConversationRuntimeModel` follows turn state. There is
+/// no per-task value for Codex tasks (see `TaskCPUUsageSnapshot`).
+@MainActor
+final class TaskCPUUsageModel: ObservableObject {
+    @Published private(set) var snapshot = TaskCPUUsageSnapshot()
+    let client: DaemonClient
+    private var subscription: Task<Void, Never>?
+
+    init(client: DaemonClient) {
+        self.client = client
+    }
+
+    func start() {
+        guard subscription == nil else { return }
+        subscription = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                do {
+                    try await self.client.call("conversation.cpuUsage.subscribe") { event in
+                        guard event.type == "cpu_usage_state",
+                              let next = try? event.payload.decoded(TaskCPUUsageSnapshot.self) else { return }
+                        self.snapshot = next
+                    }
+                } catch {
+                    PlayhouseDiagnostics.record("conversation.cpuUsage.subscription_failed", fields: PlayhouseDiagnostics.errorFields(error))
+                }
+                self.snapshot = TaskCPUUsageSnapshot()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    func stop() {
+        subscription?.cancel()
+        subscription = nil
+    }
+
+    func percent(threadID: String?) -> Double? {
+        threadID.flatMap { snapshot.percentByThreadID[$0] }
+    }
+}

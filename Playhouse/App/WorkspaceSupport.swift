@@ -63,6 +63,8 @@ enum WorkspaceSettings {
     static let defaultConversationProviderKey = "defaultConversationProvider"
     static let tokenUsageColorMaxKey = "tokenUsageColorMax"
     static let defaultTokenUsageColorMax = TokenUsageHeatmap.defaultColorMax
+    static let cpuUsageColorMaxKey = "cpuUsageColorMax"
+    static let defaultCPUUsageColorMax = CPUUsageHeatmap.defaultColorMax
 
     static var preferencesStore: UserDefaults {
         #if DEBUG
@@ -1471,8 +1473,10 @@ struct WorkspaceSettingsView: View {
     @AppStorage(WorkspaceSettings.defaultParentFolderKey, store: WorkspaceSettings.preferencesStore) private var defaultParentFolderPath = ""
     @State private var appearance = WorkspaceSettings.preferencesStore.string(forKey: WorkspaceSettings.appearanceKey) ?? "dark"
     @State private var tokenUsageColorMax = WorkspaceSettingsManager().tokenUsageColorMax
+    @State private var cpuUsageColorMax = WorkspaceSettingsManager().cpuUsageColorMax
     @State private var pickerError: String?
     @State private var tokenUsageError: String?
+    @State private var cpuUsageError: String?
 
     private var parentFolderURL: URL? {
         WorkspaceSettings.validDirectoryURL(for: defaultParentFolderPath)
@@ -1518,6 +1522,30 @@ struct WorkspaceSettingsView: View {
                     .frame(width: 120)
                     .accessibilityIdentifier("token-usage-color-max-field")
                     Text("tokens")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+            }
+            Section("CPU usage") {
+                Text("A Claude task's left-edge bar warms from green to red as the task's process tree's CPU use approaches this percentage. Not available for Codex tasks.")
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 10) {
+                    Text("Red at")
+                    TextField("Percent", value: Binding(
+                        get: { cpuUsageColorMax },
+                        set: { value in
+                            do {
+                                try WorkspaceSettingsManager().setCPUUsageColorMax(value)
+                                cpuUsageColorMax = value
+                            } catch {
+                                cpuUsageError = error.localizedDescription
+                            }
+                        }
+                    ), format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 120)
+                    .accessibilityIdentifier("cpu-usage-color-max-field")
+                    Text("%")
                         .foregroundStyle(.secondary)
                     Spacer()
                 }
@@ -1573,6 +1601,8 @@ struct WorkspaceSettingsView: View {
                 }
                 let updatedMax = WorkspaceSettingsManager().tokenUsageColorMax
                 if updatedMax != tokenUsageColorMax { tokenUsageColorMax = updatedMax }
+                let updatedCPUMax = WorkspaceSettingsManager().cpuUsageColorMax
+                if updatedCPUMax != cpuUsageColorMax { cpuUsageColorMax = updatedCPUMax }
                 try? await Task.sleep(for: .milliseconds(250))
             }
         }
@@ -1598,6 +1628,16 @@ struct WorkspaceSettingsView: View {
             .help("Dismiss token usage setting error")
         } message: {
             Text(tokenUsageError ?? "Please try again.")
+        }
+        .alert("Couldn't save CPU usage setting", isPresented: Binding(
+            get: { cpuUsageError != nil },
+            set: { if !$0 { cpuUsageError = nil } }
+        )) {
+            Button("OK", role: .cancel) { cpuUsageError = nil }
+            .buttonHoverPointer()
+            .help("Dismiss CPU usage setting error")
+        } message: {
+            Text(cpuUsageError ?? "Please try again.")
         }
     }
 
