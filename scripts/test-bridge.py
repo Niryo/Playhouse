@@ -411,14 +411,18 @@ class PlayhouseBridgeTests(unittest.TestCase):
                             and event.get("taskID") == task["id"]), None)
         self.assertIsNotNone(failed_send, "The stopped provider turn should settle through the send failure path.")
         self.assertIsNone(persisted.get("statusMessage"))
+        # The window keeps the turn's activity section open for exactly as long as
+        # the daemon reports the turn active, which the runtime reads above assert.
+        # The fold itself is SwiftUI state with no CLI-observable surface, so the
+        # paired UI case asserts it directly once the daemon state above holds.
 
-    # case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles.
+    # case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles. The turn's activity section renders open for as long as the daemon reports the turn active, and folds once the stop settles with no final answer.
     def test_codex_stop_interrupts_thinking_turn_and_waits_for_response(self):
         self.assert_user_stop_pauses_provider_turn(
             "Codex stop while thinking", "codex", "PLAYHOUSE_E2E_CODEX_EXECUTABLE", "codex-app-server-fixture.py"
         )
 
-    # case-contract: test_claude_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Claude reasoning immediately moves the task to Waiting Response and sends Claude's session-scoped control interrupt. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles.
+    # case-contract: test_claude_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Claude reasoning immediately moves the task to Waiting Response and sends Claude's session-scoped control interrupt. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles. The turn's activity section renders open for as long as the daemon reports the turn active, and folds once the stop settles with no final answer.
     def test_claude_stop_interrupts_thinking_turn_and_waits_for_response(self):
         self.assert_user_stop_pauses_provider_turn(
             "Claude stop while thinking", "claude", "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE", "claude-code-fixture.py"
@@ -1491,6 +1495,54 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(any(text.endswith("Tell me about volcanoes") for text in texts))
         self.assertTrue(any(text.endswith("One more thought about Saturn") for text in texts))
 
+    # case-contract: test_standalone_chat_answer_stays_final_around_close_turn | A standalone chat reports no task outcome, so it ends every turn with Playhouse's own chat page close-turn signal, which Claude runs after its answer and before its closing line. That answer and closing line form one final answer, not commentary, in the streamed final answer, fresh CLI/XPC history, and the visible transcript, so the response is never left buried inside the collapsed Worked for disclosure; text written before an ordinary tool earlier in the same turn still stays commentary there, and the close-turn command really runs and succeeds. This classification is Claude-specific because Playhouse derives each message's phase from Claude's tool stream, while Codex reports the phase in its own protocol and so cannot mis-file an answer on the same turn shape.
+    def test_standalone_chat_answer_stays_final_around_close_turn(self):
+        self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        executable = self.data_directory / "claude-fixture-chat-close-turn"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        chat_id = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["id"]
+
+        intent = "Let me check the newer release first."
+        answer = "Confirmed: 2.1.309 registers the new model and 2.1.308 does not."
+        final_answer = answer + "\n\nTell me if you want the upgrade command."
+
+        sent, events = self.call_cli(
+            "conversation", "send", chat_id, "--message", "Summarize the release notes.",
+            extra_environment=environment,
+        )
+        self.assert_success(sent)
+        self.assertEqual(
+            [event["payload"]["text"] for event in events if event["type"] == "assistant_final"], [final_answer],
+            "The page close-turn signal is Playhouse bookkeeping, so the answer and its closing line stay one final answer.",
+        )
+        progress = [event["payload"]["text"] for event in events if event["type"] == "assistant_progress"]
+        self.assertFalse(any(answer in text for text in progress),
+                         f"The answer must never be demoted to commentary by the close-turn signal: {progress}")
+        self.assertIn(intent, progress, "Text written before an ordinary tool still stays commentary.")
+
+        turns = [
+            turn for turn in json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
+            if not (turn.get("userText") or "").startswith("Classify the latest user message")
+        ]
+        self.assertEqual(len(turns[-1]["reportCommands"]), 1, "The fixture should run the chat page close-turn command.")
+        self.assertIn(" chat page close-turn ", turns[-1]["reportCommands"][0]["command"])
+        self.assertIn('"ok":true', turns[-1]["reportCommands"][0]["output"], turns[-1]["reportCommands"])
+
+        history = self.assert_success(self.call_cli("conversation", "history", chat_id, extra_environment=environment)[0])
+        assistant = [(message["phase"], message["text"]) for message in history["messages"] if message["role"] == "assistant"]
+        self.assertEqual(assistant, [("commentary", intent), ("final_answer", final_answer)],
+                         "A fresh history read keeps the answer and its closing line as one final answer.")
+
+        status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+        self.assertFalse(status["missedPreviousPageSignal"],
+                         "A close-turn signal that really ran must satisfy the page signal instead of falling back to the classifier.")
+
     # case-contract: test_standalone_chat_claude_fallback_classifier | When a standalone chat uses Claude, a missed page signal invokes the Haiku helper at low effort; a malformed result is rejected and retried, an unrelated later question and its assistant reply move to a new titled page, the UI keeps page evaluation visually quiet without blocking the primary answer, updates the transcript separator when classification completes, and holds a following send until the decision resolves, and appends the related follow-up in chronological order. The Claude-specific model and effort arguments are verified through the real CLI/XPC path. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes.
     def test_standalone_chat_claude_fallback_classifier(self):
         self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
@@ -2519,7 +2571,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), branch_head)
         self.assertTrue(self.branch_exists(self.primary, branch))
 
-    # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
+    # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
     def test_task_pr_create_reports_real_gh_failure(self):
         task = self.create_repo_task(
             "PR failure", [self.primary], merge_targets={self.primary: "main"}
@@ -6046,7 +6098,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         history, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(history)["messages"], [])
 
-    # case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the submitted user message remains visible in the transcript. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
+    # case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the submitted user message remains visible in the transcript. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. Working for renders open while the turn runs, so its progress is visible without a click, and it is still open after leaving and reopening the task mid-turn; every in-flight call is readable from mid-turn history. A collapse the reader performs mid-turn is honored and survives the activity updates that follow, and the final answer closes the section back into a clean collapsed Worked for. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
     def test_conversation_shows_mcp_and_dynamic_tool_activity(self):
         task_id = self.create_task(title="Tool activity")['id']
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -6095,6 +6147,12 @@ class PlayhouseBridgeTests(unittest.TestCase):
             held_history, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
             held_messages = self.assert_success(held_history)["messages"]
             self.assertIn("Show tool activity.", [message["text"] for message in held_messages], "The submitted user message should remain in persisted history while the provider turn is held active.")
+            # The turn's activity section renders open before the final answer, so every
+            # in-flight call must be readable mid-turn, not only once the turn settles.
+            held_activities = {row["id"]: row for row in self.assert_success(held_history)["activities"]}
+            self.assertTrue(expected_tool_ids.issubset(held_activities), f"Every in-flight tool call should be readable mid-turn; got {sorted(held_activities)}.")
+            for tool_id in expected_tool_ids:
+                self.assertEqual(held_activities[tool_id]["status"], "inProgress", f"{tool_id} should still read as in progress while the turn is held.")
             self.assertEqual(active_rows["item_fixture_mcp_call"]["toolKind"], "mcp")
             self.assertEqual(active_rows["item_fixture_dynamic_call"]["toolKind"], "dynamic")
             self.assertEqual(active_rows["item_fixture_dynamic_legacy"]["toolKind"], "dynamic")
@@ -6270,7 +6328,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         reloaded_messages = self.assert_success(reloaded_response)["messages"]
         self.assertEqual([message["text"] for message in reloaded_messages], [message["text"] for message in messages])
 
-    # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs. A fresh `conversation subagent-history` read returns the completed child's stored conversation content.
+    # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, Working for renders open and active agents appear as individual named rows outside it, with available path/model/reasoning metadata and started-working wording; a mid-turn collapse the reader performs is honored. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs. A fresh `conversation subagent-history` read returns the completed child's stored conversation content.
     def test_conversation_shows_subagent_delegation(self):
         task_id = self.create_task(title="Subagent delegation")["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -7852,7 +7910,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(any(message["text"] == "Answers received: " + expected_reply
                             for message in delivered_history["messages"]))
 
-    # case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; a turn running when the window quits cleanly or is killed keeps running in the bridge daemon, stays In Progress with its prompt visible after relaunch, finishes, and allows a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
+    # case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; a turn running when the window quits cleanly or is killed keeps running in the bridge daemon, stays In Progress with its prompt visible after relaunch, finishes, and allows a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. The live turn's activity section renders open and folds away when the interrupted turn settles without an answer, on the conversation that stayed open; the interrupted turn adds no final answer and keeps the activity it reported. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
     def test_codex_interrupted_turn_blocks_with_reason_and_can_retry(self):
         task_id = self.create_task("Interrupted turn", roots=[self.primary])["id"]
         self.complete_fixture_turn(task_id, message="Create the conversation thread before interruption.")
@@ -7878,6 +7936,23 @@ class PlayhouseBridgeTests(unittest.TestCase):
         blocked = self.assert_success(task)
         self.assertEqual(blocked["status"], "Blocked")
         self.assertIn("interrupted", blocked["statusMessage"].lower())
+        # The window folds its activity section on the settled turn rather than on
+        # an answer, and keeps the section rendered because the turn still has the
+        # activity it reported. Assert both from the turn's own stream: Codex
+        # activities are not persisted by Playhouse, so a history read would reach
+        # the real provider rather than this fixture.
+        self.assertEqual(
+            [event for event in events if event.get("type") == "assistant_final"], [],
+            "An interrupted turn should settle without a final answer of its own.",
+        )
+        reported_activities = [
+            event.get("payload", {}).get("activity", {}) for event in events
+            if event.get("type") == "activity"
+        ]
+        self.assertIn(
+            "item_fixture_interrupted_command", [activity.get("id") for activity in reported_activities],
+            "The interrupted turn should report the activity that keeps the window's section rendered.",
+        )
         diagnostic_lines = [
             json.loads(line)
             for line in (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8").splitlines()

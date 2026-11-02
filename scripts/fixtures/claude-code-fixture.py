@@ -25,6 +25,9 @@ INSPECTION_INTENT = "I'll inspect the workspace first."
 INSPECTION_ANSWER = "Inspection done: the workspace is ready."
 UNANSWERED_FIRST = "Starting the checks."
 UNANSWERED_LAST = "Checks are running; results will follow."
+CHAT_INTENT = "Let me check the newer release first."
+CHAT_ANSWER = "Confirmed: 2.1.309 registers the new model and 2.1.308 does not."
+CHAT_CLOSING = "Tell me if you want the upgrade command."
 SIMPLE_ANSWER = "OK."
 PENDING_QUESTION_SUCCESS_MARKER = "finish while a structured question remains pending"
 
@@ -272,6 +275,11 @@ def respond(user_text, instructions, preserve_no_outcome=False):
             "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
         }})
     elif "hold until stopped" in user_text.lower() or "hold-until-stopped" in user_text.lower():
+        # Report one in-progress tool use before holding, so a user-initiated Stop
+        # with no final answer still keeps the window's activity section mounted,
+        # and the fold it performs on settle is distinguishable from the section
+        # simply never having rendered.
+        assistant("msg_stop_command", [{"type": "tool_use", "id": "toolu_stop_command", "name": "Bash", "input": {"command": "git status --short"}}])
         ready = Path(str(sys.argv[0]) + ".interrupt-ready")
         ready.write_text("The Claude fixture turn is active and waiting for an interrupt.\n", encoding="utf-8")
         deadline = time.monotonic() + 30
@@ -384,6 +392,18 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         text("msg_comments", answer)
     elif user_text.rstrip().endswith("What happened earlier?"):
         text("msg_recovered", SIMPLE_ANSWER)
+    elif "release notes" in user_text.lower():
+        # A standalone chat has no outcome to report, so it ends every turn with
+        # its page signal instead. That signal runs in the same place a task
+        # outcome does: after the answer, before Claude's closing line.
+        text("msg_chat_intent", CHAT_INTENT)
+        run_tool("toolu_chat_read", "Read", {"file_path": os.path.join(os.getcwd(), "README.md")})
+        text("msg_chat_answer", CHAT_ANSWER)
+        close_turn = report_command(instructions, " chat page close-turn ")
+        if close_turn:
+            commands.append({"command": close_turn,
+                             "output": run_tool("toolu_close_turn", "Bash", {"command": close_turn}, close_turn)})
+        text("msg_chat_closing", CHAT_CLOSING)
     elif "story" in user_text.lower():
         text("msg_story", STORY)
         progress_clear = report_command(instructions, " task progress clear ")
