@@ -2720,6 +2720,42 @@ final class BoardTaskManager {
         )
     }
 
+    /// `reason` explains a `nil` percent: `"unsupported_provider"` for Codex
+    /// (its tasks share one process across every thread, so CPU can't be
+    /// attributed per task) or `"not_running"` for an idle/not-yet-sampled
+    /// Claude task.
+    struct TaskCPUUsageResult: Codable {
+        var cpuPercent: Double?
+        var reason: String?
+
+        // Synthesized Encodable would use encodeIfPresent for the optional
+        // properties and omit `cpuPercent`/`reason` entirely when nil, but the
+        // CLI/UI contract reads an explicit `null` to distinguish "idle" from
+        // a missing field, so both keys are always written.
+        enum CodingKeys: String, CodingKey {
+            case cpuPercent
+            case reason
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(cpuPercent, forKey: .cpuPercent)
+            try container.encode(reason, forKey: .reason)
+        }
+    }
+
+    func cpuUsage(_ id: UUID, dataDirectory: String? = nil) async throws -> TaskCPUUsageResult {
+        let task = try requireSubject(id)
+        guard task.conversationProvider == .claude else {
+            return TaskCPUUsageResult(cpuPercent: nil, reason: "unsupported_provider")
+        }
+        guard let threadID = task.claudeSessionID,
+              let percent = await TaskCPUUsageSnapshot.current(dataDirectory: dataDirectory).percentByThreadID[threadID] else {
+            return TaskCPUUsageResult(cpuPercent: nil, reason: "not_running")
+        }
+        return TaskCPUUsageResult(cpuPercent: percent, reason: nil)
+    }
+
     func answeredAsyncQuestionIDs(taskID: UUID) throws -> [String] {
         try requireSubject(taskID).answeredAsyncQuestionIDs
     }
@@ -3518,6 +3554,27 @@ final class WorkspaceSettingsManager {
         }
         defaults.set(value, forKey: WorkspaceSettings.tokenUsageColorMaxKey)
         PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "tokenUsageColorMax", "value": String(value)])
+    }
+
+    /// The CPU percent a task's usage bar reaches full red at. Defaults to
+    /// one fully busy core per logical CPU (the Activity Monitor convention).
+    var cpuUsageColorMax: Int {
+        let stored = defaults.integer(forKey: WorkspaceSettings.cpuUsageColorMaxKey)
+        return stored > 0 ? stored : WorkspaceSettings.defaultCPUUsageColorMax
+    }
+
+    func setCPUUsageColorMax(_ value: Int) throws {
+        PlayhouseDiagnostics.record("settings.write.started", fields: ["setting": "cpuUsageColorMax", "value": String(value)])
+        guard value > 0 else {
+            PlayhouseDiagnostics.record("settings.write.failed", fields: [
+                "setting": "cpuUsageColorMax",
+                "value": String(value),
+                "errorCode": "invalid_argument"
+            ])
+            throw BridgeCommandError(code: "invalid_argument", message: "The CPU usage color maximum must be greater than zero.")
+        }
+        defaults.set(value, forKey: WorkspaceSettings.cpuUsageColorMaxKey)
+        PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "cpuUsageColorMax", "value": String(value)])
     }
 
     /// The provider new tasks start with. Codex until the user chooses otherwise.
@@ -6798,6 +6855,33 @@ final class PlayhouseBridgeRuntime {
             }
         }
 
+        // CPU samples also live only in this process's memory (the real PIDs).
+        if request.command == "conversation.cpuUsage" || request.command == "conversation.cpuUsage.subscribe" {
+            let runtimeScope: String?
+            #if DEBUG
+            runtimeScope = request.dataDirectory
+            #else
+            runtimeScope = nil
+            #endif
+            do {
+                let result: BridgeValue
+                if request.command == "conversation.cpuUsage" {
+                    result = try Self.value(await TaskCPUUsageSnapshot.current(dataDirectory: runtimeScope))
+                } else {
+                    for await snapshot in TaskCPUUsageSnapshot.changes(dataDirectory: runtimeScope) {
+                        if Task.isCancelled { break }
+                        eventHandler(BridgeEvent(requestID: request.id, type: "cpu_usage_state", payload: try Self.value(snapshot)))
+                    }
+                    result = .object(["subscribed": .boolean(false)])
+                }
+                await PlayhouseDiagnostics.endBatch()
+                return .success(request, result: result)
+            } catch {
+                await PlayhouseDiagnostics.endBatch()
+                return .failure(request, code: "operation_failed", message: error.localizedDescription)
+            }
+        }
+
         do {
             let dataDirectory: String?
             #if DEBUG
@@ -6878,6 +6962,9 @@ final class PlayhouseBridgeRuntime {
             case "task.token-usage":
                 let taskID = try request.requiredUUID("taskID")
                 result = try Self.value(taskManager.tokenUsageSummary(taskID))
+            case "task.cpu-usage":
+                let taskID = try request.requiredUUID("taskID")
+                result = try Self.value(await taskManager.cpuUsage(taskID, dataDirectory: dataDirectory))
             case "task.move":
                 let taskID = try request.requiredUUID("taskID")
                 let status = try request.requiredString("status")
@@ -7107,11 +7194,15 @@ final class PlayhouseBridgeRuntime {
                     "lastSelectedRepositories": .array(settings.lastSelectedRepositories.map(BridgeValue.string)),
                     "appearance": .string(settings.appearance),
                     "defaultProvider": .string(settings.defaultConversationProvider.rawValue),
-                    "tokenUsageColorMax": .integer(settings.tokenUsageColorMax)
+                    "tokenUsageColorMax": .integer(settings.tokenUsageColorMax),
+                    "cpuUsageColorMax": .integer(settings.cpuUsageColorMax)
                 ])
             case "settings.set-token-usage-color-max":
                 try settings.setTokenUsageColorMax(request.requiredInt("max"))
                 result = .object(["tokenUsageColorMax": .integer(settings.tokenUsageColorMax)])
+            case "settings.set-cpu-usage-color-max":
+                try settings.setCPUUsageColorMax(request.requiredInt("max"))
+                result = .object(["cpuUsageColorMax": .integer(settings.cpuUsageColorMax)])
             case "settings.set-default-provider":
                 try settings.setDefaultConversationProvider(request.requiredString("provider"))
                 result = .object(["defaultProvider": .string(settings.defaultConversationProvider.rawValue)])

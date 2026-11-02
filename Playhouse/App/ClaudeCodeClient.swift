@@ -578,6 +578,8 @@ final class ClaudeSessionRunner {
     private func stopProcess() {
         guard let process else { return }
         self.process = nil
+        let threadID = sessionID
+        Task { await TaskCPUUsageSampler.shared.forget(threadID: threadID) }
         let stopped = ClientError.processExited("Playhouse stopped Claude Code.")
         for continuation in pendingControlRequests.values { continuation.resume(throwing: stopped) }
         pendingControlRequests.removeAll()
@@ -1414,6 +1416,18 @@ final class ClaudeCodeClient: ObservableObject, ConversationProviderClient {
 
     var pendingUserInputsSnapshot: [String: ConversationUserInputRequest] {
         runners.compactMapValues(\.pendingUserInputRequest)
+    }
+
+    /// Process IDs of every turn-active session's own Claude Code process,
+    /// keyed by thread/session ID. Used to attribute CPU usage per task;
+    /// idle sessions are excluded since there's nothing meaningful to sample.
+    var activeProcessIdentifiersByThreadID: [String: pid_t] {
+        var result: [String: pid_t] = [:]
+        for (threadID, runner) in runners where isTurnActive(threadID: threadID) {
+            let pid = runner.processIdentifier
+            if pid > 0 { result[threadID] = pid }
+        }
+        return result
     }
 
     var interruptedThreadIDsSnapshot: Set<String> { interruptedThreadIDs }

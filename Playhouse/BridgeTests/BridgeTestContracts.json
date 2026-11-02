@@ -430,5 +430,17 @@
   {
     "id": "test_settings_token_usage_color_max_round_trip",
     "expectation": "The token usage color maximum defaults to one million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's usage dot re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling."
+  },
+  {
+    "id": "test_task_cpu_usage_reports_claude_process_tree_load",
+    "expectation": "A newly created Claude task reports cpu-usage as not running before any turn starts. While a real Claude Code fixture turn burns CPU in a real child process, two successive `task cpu-usage` reads establish a baseline and then a plausible non-zero percentage for the task's process tree, the task card's CPU bar reads cool green against the default multi-core ceiling and hot red once the ceiling is lowered to match that load, and the reading returns to not-running once the turn completes."
+  },
+  {
+    "id": "test_task_cpu_usage_absent_for_codex",
+    "expectation": "A Codex task never reports a numeric CPU percentage from `task cpu-usage`, always citing unsupported_provider, because Codex multiplexes every task's turns inside one shared app-server process with no OS-level way to attribute CPU to a single task."
+  },
+  {
+    "id": "test_settings_cpu_usage_color_max_round_trip",
+    "expectation": "The CPU usage color maximum defaults to one fully busy core per logical CPU, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting."
   }
 ]

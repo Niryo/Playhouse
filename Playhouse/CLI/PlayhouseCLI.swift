@@ -111,6 +111,9 @@ enum PlayhouseCLI {
             case "token-usage":
                 let id = try firstPositional(tail)
                 return BridgeRequest(command: "task.token-usage", arguments: ["taskID": .string(id)])
+            case "cpu-usage":
+                let id = try firstPositional(tail)
+                return BridgeRequest(command: "task.cpu-usage", arguments: ["taskID": .string(id)])
             case "move":
                 guard (2...3).contains(tail.count), tail.count == 2 || tail[2] == "--allow-unmerged" else {
                     throw CLIError.usage("Use: playhouse task move <task-id> <status> [--allow-unmerged]")
@@ -388,6 +391,11 @@ enum PlayhouseCLI {
                     throw CLIError.usage("Use: playhouse settings set-token-usage-color-max <tokens>")
                 }
                 return BridgeRequest(command: "settings.set-token-usage-color-max", arguments: ["max": .integer(max)])
+            case "set-cpu-usage-color-max":
+                guard rest.count == 2, let max = Int(rest[1]) else {
+                    throw CLIError.usage("Use: playhouse settings set-cpu-usage-color-max <percent>")
+                }
+                return BridgeRequest(command: "settings.set-cpu-usage-color-max", arguments: ["max": .integer(max)])
             case "set-parent":
                 guard rest.count == 2 else { throw CLIError.usage("Use: playhouse settings set-parent <path>") }
                 return BridgeRequest(command: "settings.set-parent", arguments: ["path": .string(rest[1])])
@@ -671,8 +679,9 @@ enum PlayhouseCLI {
       playhouse chat page close-turn <chat-id> --continues <true|false> [--new-title <title>] [--summary-hint <text>]
       playhouse workspace suggest --parent <path>
       playhouse workspace repos list
-      playhouse settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>|set-token-usage-color-max <tokens>
+      playhouse settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>|set-token-usage-color-max <tokens>|set-cpu-usage-color-max <percent>
       playhouse task token-usage <task-id>
+      playhouse task cpu-usage <task-id>
       playhouse conversation history <task-id>
       playhouse conversation present-image <task-id> --image <path> [--caption <text>]
       playhouse conversation queue <task-id> --message <text>

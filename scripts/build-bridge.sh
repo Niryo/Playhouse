@@ -46,6 +46,7 @@ shared_sources=(
   "${repository_root}/Playhouse/App/CodexAppServerClient.swift"
   "${repository_root}/Playhouse/App/ConversationModel.swift"
   "${repository_root}/Playhouse/App/ClaudeCodeClient.swift"
+  "${repository_root}/Playhouse/App/ProcessCPUSampler.swift"
   "${repository_root}/Playhouse/App/ConversationTranscriptStore.swift"
   "${repository_root}/Playhouse/App/StandaloneChatStore.swift"
   "${repository_root}/Playhouse/App/BridgeCore.swift"

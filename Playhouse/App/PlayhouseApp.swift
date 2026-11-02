@@ -8,6 +8,7 @@ struct PlayhouseApp: App {
     private let modelContainer: ModelContainer
     private let appPreferences: UserDefaults
     @StateObject private var conversationRuntime: ConversationRuntimeModel
+    @StateObject private var cpuUsageModel: TaskCPUUsageModel
 
     private var windowTitle: String {
         let configuredTitle = ProcessInfo.processInfo.environment["PLAYHOUSE_WINDOW_TITLE"]?
@@ -22,10 +23,13 @@ struct PlayhouseApp: App {
         let environment = ProcessInfo.processInfo.environment
         let runtime = ConversationRuntimeModel(client: DaemonClient())
         _conversationRuntime = StateObject(wrappedValue: runtime)
+        let cpuUsage = TaskCPUUsageModel(client: DaemonClient())
+        _cpuUsageModel = StateObject(wrappedValue: cpuUsage)
         // The bridge daemon owns every provider turn, so quitting the window
         // doesn't stop one; it just stops watching.
-        PlayhouseApplicationDelegate.terminationHandler = { [weak runtime] in
+        PlayhouseApplicationDelegate.terminationHandler = { [weak runtime, weak cpuUsage] in
             runtime?.stop()
+            cpuUsage?.stop()
         }
         #if DEBUG
         if let suiteName = environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"],
@@ -78,6 +82,7 @@ struct PlayhouseApp: App {
         MainWindowView()
             .modelContainer(modelContainer)
             .environmentObject(conversationRuntime)
+            .environmentObject(cpuUsageModel)
             .defaultAppStorage(appPreferences)
     }
 }
@@ -109,6 +114,7 @@ private struct MainWindowView: View {
     @AppStorage(WorkspaceSettings.appearanceKey, store: WorkspaceSettings.preferencesStore) private var appearance = "dark"
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var conversationRuntime: ConversationRuntimeModel
+    @EnvironmentObject private var cpuUsageModel: TaskCPUUsageModel
     @State private var lifecycleError: String?
     @State private var isLifecycleReady = false
 
@@ -137,6 +143,7 @@ private struct MainWindowView: View {
                     dataDirectory: ProcessInfo.processInfo.environment["PLAYHOUSE_DATA_DIRECTORY"]
                 )
                 conversationRuntime.start()
+                cpuUsageModel.start()
                 isLifecycleReady = true
             } catch {
                 lifecycleError = error.localizedDescription
