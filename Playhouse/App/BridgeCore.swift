@@ -4028,7 +4028,7 @@ final class ConversationManager {
                     : codex.activities.filter { $0.turnID.map(Self.sensitiveCodexTurnIDs(transcript).contains) != true },
                 diff: Self.shouldHideCodexDiff(transcript, codex: codex) ? nil : codex.diff,
                 answeredAsyncQuestionIDs: answered,
-                pendingUserInputRequest: transcript.pendingUserInputRequest
+                pendingUserInputRequest: visiblePendingUserInputRequest(taskID: taskID, transcript: transcript)
             )
         }
         // Codex can't list a thread before its first turn, so a mixed transcript
@@ -4067,7 +4067,7 @@ final class ConversationManager {
             activities: transcript.pendingSensitiveUserInputRedaction == true ? [] : composed.activities,
             diff: transcript.pendingSensitiveUserInputRedaction == true ? nil : composed.diff,
             answeredAsyncQuestionIDs: answered,
-            pendingUserInputRequest: transcript.pendingUserInputRequest,
+            pendingUserInputRequest: visiblePendingUserInputRequest(taskID: taskID, transcript: transcript),
             providerBoundaries: composed.providerBoundaries
         )
     }
@@ -4170,6 +4170,9 @@ final class ConversationManager {
 
         \(answerLines.joined(separator: "\n\n"))
         """
+        // The answered question stays saved for redaction and retry, but history
+        // hides it while this send applies it. The request is cleared before the
+        // reservation is released, so a reader never sees it come back on success.
         _ = try await send(
             taskID: taskID,
             text: recoveryPrompt,
@@ -4178,25 +4181,28 @@ final class ConversationManager {
             onUpdate: onUpdate,
             sensitiveUserInputAnswerValues: sensitiveValues,
             requiresSensitiveAnswerRedaction: requiresSensitiveAnswerRedaction,
-            hideSensitiveRecoveryPrompt: true
-        )
-        if requiresSensitiveAnswerRedaction {
-            try transcripts.mutate(taskID) { transcript in
-                let recoveryTurnIDs = Set(transcript.sensitiveCodexTurnIDs ?? []).subtracting(sensitiveCodexTurnIDsBeforeRecovery)
-                var storedMessages = transcript.sensitiveCodexTurnMessages ?? [:]
-                for turnID in recoveryTurnIDs {
-                    storedMessages[turnID] = storedMessages[turnID]?.map { message in
-                        guard message.role == .assistant else { return message }
-                        var hidden = message
-                        hidden.text = "[Response to private answer hidden]"
-                        hidden.asyncQuestions = nil
-                        return hidden
+            hideSensitiveRecoveryPrompt: true,
+            applyingUserInputRequestID: request.id,
+            onUserInputApplied: { [self] in
+                if requiresSensitiveAnswerRedaction {
+                    try transcripts.mutate(taskID) { transcript in
+                        let recoveryTurnIDs = Set(transcript.sensitiveCodexTurnIDs ?? []).subtracting(sensitiveCodexTurnIDsBeforeRecovery)
+                        var storedMessages = transcript.sensitiveCodexTurnMessages ?? [:]
+                        for turnID in recoveryTurnIDs {
+                            storedMessages[turnID] = storedMessages[turnID]?.map { message in
+                                guard message.role == .assistant else { return message }
+                                var hidden = message
+                                hidden.text = "[Response to private answer hidden]"
+                                hidden.asyncQuestions = nil
+                                return hidden
+                            }
+                        }
+                        transcript.sensitiveCodexTurnMessages = storedMessages
                     }
                 }
-                transcript.sensitiveCodexTurnMessages = storedMessages
+                try clearPendingUserInputRequest(taskID: taskID, requestID: request.id)
             }
-        }
-        try clearPendingUserInputRequest(taskID: taskID, requestID: request.id)
+        )
         return true
     }
 
@@ -4251,6 +4257,16 @@ final class ConversationManager {
             guard transcript.pendingUserInputRequest?.id == requestID else { return }
             transcript.pendingUserInputRequest = nil
         }
+    }
+
+    /// Hides a saved question while the recovery turn holding the task's turn
+    /// reservation applies its answer. Without the reservation that recovery
+    /// ended or crashed, so the question is shown again for retry.
+    private func visiblePendingUserInputRequest(taskID: UUID, transcript: ConversationTranscript) -> ConversationUserInputRequest? {
+        guard let request = transcript.pendingUserInputRequest else { return nil }
+        guard transcript.applyingUserInputRequestID == request.id,
+              (try? tasks.hasConversationTurnReservation(taskID)) == true else { return request }
+        return nil
     }
 
     /// Publishes an image produced by an agent as a durable assistant message.
@@ -5035,7 +5051,7 @@ final class ConversationManager {
 
     /// The question persisted for this conversation, readable without its provider.
     func savedUserInputRequest(taskID: UUID) throws -> ConversationUserInputRequest? {
-        try transcripts.read(taskID).pendingUserInputRequest
+        visiblePendingUserInputRequest(taskID: taskID, transcript: try transcripts.read(taskID))
     }
 
     func queuedMessages(taskID: UUID) throws -> [QueuedConversationMessage] {
@@ -5141,7 +5157,9 @@ final class ConversationManager {
         sensitiveUserInputAnswerValues: [String] = [],
         requiresSensitiveAnswerRedaction: Bool = false,
         hideSensitiveRecoveryPrompt: Bool = false,
-        hideInternalOutcomeReminder: Bool = false
+        hideInternalOutcomeReminder: Bool = false,
+        applyingUserInputRequestID: String? = nil,
+        onUserInputApplied: (() throws -> Void)? = nil
     ) async throws -> ConversationHistory {
         let streamUpdate = onUpdate
         let onUpdate: (ConversationUpdate) -> Void = { update in
@@ -5169,6 +5187,18 @@ final class ConversationManager {
         let history: ConversationHistory
         do {
             history = try await tasks.withConversationTurnReservation(taskID) {
+                // Only the reservation holder owns the applying marker: take it for
+                // a recovery, or drop one a crashed recovery left behind.
+                try self.transcripts.mutate(taskID) { transcript in
+                    transcript.applyingUserInputRequestID = applyingUserInputRequestID
+                }
+                defer {
+                    if applyingUserInputRequestID != nil {
+                        try? self.transcripts.mutate(taskID) { transcript in
+                            transcript.applyingUserInputRequestID = nil
+                        }
+                    }
+                }
                 do {
                     self.lastReportedTurnOutcomeByTaskID.removeValue(forKey: taskID)
                     if let standaloneChatManager {
@@ -5300,6 +5330,7 @@ final class ConversationManager {
                         }
                         _ = try await self.tasks.setLifecycleStatus(taskID, to: .blocked, message: reason)
                     }
+                    try onUserInputApplied?()
                     self.lastReportedTurnOutcomeByTaskID.removeValue(forKey: taskID)
                     try? await self.tasks.clearPendingSubmittedPrompt(taskID)
                     if let standaloneChatManager, let signalBefore,

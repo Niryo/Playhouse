@@ -9744,7 +9744,7 @@ final class PlayhouseUITests: XCTestCase {
         assertTaskVisible("Empty Claude question", inColumn: "Blocked")
     }
 
-    // case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from Playhouse history, clears pending state, and returns to Waiting Response.
+    // case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from Playhouse history, clears pending state, and returns to Waiting Response. While the recovery turn applying the answer runs, the answered question is no longer pending in history or shown in the reopened conversation, and the task is In Progress; if that recovery dies mid-turn, the question returns for retry with the task in Waiting Response, and answering again succeeds.
     func test_claude_pending_question_recovers_after_provider_process_restarts() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-restart-question")
         try FileManager.default.copyItem(
@@ -9787,12 +9787,57 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
         assertTaskVisible("Restart-safe Claude question", inColumn: "Waiting Response")
         openTask(named: "Restart-safe Claude question")
+        let recoveryPause = URL(fileURLWithPath: executable.path + ".recovery-pause")
+        let recoveryReady = URL(fileURLWithPath: executable.path + ".recovery-ready")
+        let recoveryRelease = URL(fileURLWithPath: executable.path + ".recovery-release")
+        try "Hold the recovery turn open.\n".write(to: recoveryPause, atomically: true, encoding: .utf8)
+        defer { try? "Release after assertion failure.\n".write(to: recoveryRelease, atomically: true, encoding: .utf8) }
+        element("ai-question-option-question-1-Green").click()
+        element("submit-ai-answers-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: recoveryReady.path) }, timeout: 15),
+                      "The fixture should hold the recovery turn open.")
+        XCTAssertTrue(waitUntil({ !self.element("conversation-user-input-request").exists }, timeout: 5),
+                      "The answered question card should leave while its recovery turn runs.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+        attachScreenshot(named: "Answered question card hidden while its recovery turn runs")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        openTask(named: "Restart-safe Claude question")
+        XCTAssertTrue(waitUntil({ self.transcriptContains("Ask a restart-safe structured question.") }, timeout: 10),
+                      "The reopened conversation should load its saved history.")
+        XCTAssertFalse(waitUntil({ self.element("conversation-user-input-request").exists }, timeout: 2),
+                       "Reopening the task mid-recovery must not bring back the answered question.")
+        let applyingHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        XCTAssertNil(applyingHistory["pendingUserInputRequest"] as? [String: Any])
+        XCTAssertFalse(transcriptContains("Recovered answer: Green."))
+        attachScreenshot(named: "Reopened task mid-recovery keeps the answered question hidden")
+
+        // The bridge daemon owns the recovery turn; killing it mid-turn must bring
+        // the question back for retry.
+        let status = try XCTUnwrap(try runCLI(["status"])["result"] as? [String: Any])
+        let daemonPID = try XCTUnwrap(status["processID"] as? Int)
+        XCTAssertEqual(kill(pid_t(daemonPID), SIGKILL), 0, "The test should stop the daemon running the recovery turn.")
+        XCTAssertTrue(waitUntil({ kill(pid_t(daemonPID), 0) != 0 }, timeout: 5), "The killed daemon should exit.")
+        try "Release the orphaned recovery turn.\n".write(to: recoveryRelease, atomically: true, encoding: .utf8)
+        for marker in [recoveryPause, recoveryReady, recoveryRelease] {
+            try? FileManager.default.removeItem(at: marker)
+        }
+        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 15),
+                      "A failed recovery should restore its question card in the open window.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        openTask(named: "Restart-safe Claude question")
+        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10),
+                      "A recovery interrupted mid-turn should show its question again after reopening.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+        attachScreenshot(named: "Question returns for retry after the recovery dies mid-turn")
         element("ai-question-option-question-1-Green").click()
         element("submit-ai-answers-button").click()
         XCTAssertTrue(waitUntil({ self.transcriptContains("Recovered answer: Green.") }, timeout: 15))
         XCTAssertFalse(element("conversation-user-input-request").exists)
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Answer: Green")).firstMatch.exists)
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+        attachScreenshot(named: "Retried answer applied and the question cleared")
     }
 
     // case-contract: test_claude_pending_plan_mode_question_recovers_in_plan_mode | A Claude AskUserQuestion asked during a Plan mode turn persists its mode; after its provider process ends, answering resumes the saved Claude session in Plan mode rather than silently downgrading to Code mode, relaunching the recovery turn with --permission-mode plan.
