@@ -1526,6 +1526,33 @@ struct TaskConversationView: View {
                             .lineLimit(3)
                             .accessibilityIdentifier("task-status-message")
                     }
+
+                    // The agent's self-reported progress otherwise only reaches the
+                    // Kanban card, so a task can look stalled in its own conversation
+                    // even while work is actively continuing between tool calls.
+                    if let progressLabel = task.progressLabel, !progressLabel.isEmpty {
+                        let progressType = TaskProgressType(rawValue: task.progressTypeRawValue ?? "")
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: progressType?.symbol ?? "sparkle")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Color.accentColor)
+                                .accessibilityHidden(true)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(progressLabel)
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(WorkspaceTheme.conversationText)
+                                if let progressDetail = task.progressDetail, !progressDetail.isEmpty {
+                                    Text(progressDetail)
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
+                            }
+                        }
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("conversation-progress-report")
+                        .accessibilityLabel([progressLabel, task.progressDetail].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", "))
+                    }
                 }
 
             }
