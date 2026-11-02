@@ -141,7 +141,7 @@
   },
   {
     "id": "test_task_repository_removal_preserves_state_on_dirty_worktree",
-    "expectation": "Removing the only pending repository leaves the task with no workspace and preserves the source repository; removing a pending repository preserves other context folders; removing a clean managed worktree through the GUI waits for an active turn, while the task repository API removes it from context immediately and defers clean worktree deletion until the turn releases; a bridge service restart preserves the cleanup intent and a fresh request completes removal; if the active turn writes files before release, deferred cleanup preserves that worktree and its changes; a dirty worktree rejects removal and preserves its task record and files."
+    "expectation": "Removing one of two pending repositories leaves the remaining repository in task context and remembered settings, while preserving the removed source repository; the next task restores only the remaining remembered repository. Removing a pending repository preserves other context folders; removing a clean managed worktree through the GUI waits for an active turn, while the task repository API removes it from context immediately and defers clean worktree deletion until the turn releases; a bridge service restart preserves the cleanup intent and a fresh request completes removal; if the active turn writes files before release, deferred cleanup preserves that worktree and its changes; a dirty worktree rejects removal and preserves its task record and files."
   },
   {
     "id": "test_task_delete_removes_task_and_later_lookup_is_not_found",

@@ -5401,11 +5401,9 @@ struct TaskConversationView: View {
     private func removeConversationRepository(_ repository: RepositoryWorktreeRecord) {
         Task { @MainActor in
             do {
-                _ = try await BoardTaskManager(modelContext: modelContext).removeRepository(
-                    task.id,
-                    repositoryPath: repository.repositoryPath,
-                    duringActiveConversation: true
-                )
+                _ = try await WorkspaceManager(
+                    taskManager: BoardTaskManager(modelContext: modelContext)
+                ).removeRepository(repository.repositoryPath, from: task.id)
                 repositoryBeingEdited = nil
                 errorMessage = nil
                 await refreshWorkspaceChanges()
