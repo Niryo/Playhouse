@@ -677,12 +677,10 @@ struct KanbanBoardView: View {
                     if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
                         Link("#\(number)", destination: url)
                             .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .frame(minWidth: 30, minHeight: 30)
-                            .actionButtonHoverEmphasis()
+                            .actionButtonHoverEmphasis(padding: 5)
                             .buttonHoverPointer()
                             .help("Open pull request #\(number) in your browser")
-                            .frame(width: 30, height: 30)
-                            .contentShape(Rectangle())
+                            .contentShape(Capsule())
                             .accessibilityIdentifier("done-archive-pr-link-\(task.id.uuidString)-\(number)")
                     }
                 }
@@ -1606,12 +1604,10 @@ private struct TaskCardView: View {
                         if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
                             Link("#\(number)", destination: url)
                                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                .frame(minWidth: 30, minHeight: 30)
-                                .actionButtonHoverEmphasis(padding: 10)
+                                .actionButtonHoverEmphasis(padding: 5)
                                 .buttonHoverPointer()
                                 .help("Open pull request #\(number) in your browser")
-                                .frame(width: 30, height: 30)
-                                .contentShape(Rectangle())
+                                .contentShape(Capsule())
                                 .accessibilityIdentifier("task-pr-link-\(task.id.uuidString)-\(number)")
                         }
                     }
