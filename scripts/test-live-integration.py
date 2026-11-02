@@ -595,7 +595,15 @@ def scenario_claude_capabilities(ws):
     require(version_tuple(claude["version"]) >= version_tuple(MINIMUM_CLAUDE_VERSION), f"Claude Code {claude['version']} is older than {MINIMUM_CLAUDE_VERSION}.")
     require(claude["supportsGoals"] is False and capabilities["codex"]["supportsGoals"] is True, "Goal support should be Codex-only.")
     models = ws.run_cli("conversation", "models", task_id)["models"]
-    require(any(model["id"] == "default" and model["isDefault"] for model in models), f"Claude models should include the default alias: {models}")
+    # The picker drops the `default` placeholder and every superseded version, so a live
+    # list is the newest concrete release of each family, one of them flagged default.
+    require(not any(model["id"] == "default" for model in models), f"The default placeholder is not a selectable model: {models}")
+    require(any(model["isDefault"] for model in models), f"Claude models should flag a default choice: {models}")
+    # Keep in sync with ModelVersion.isAlias in ConversationModel.swift: asserting an
+    # alias this product does not itself drop would fail on behavior that is correct today.
+    bare_aliases = {"default", "opus", "sonnet", "haiku"}
+    require(not any(model["id"] in bare_aliases for model in models),
+            f"Live Claude models should be the resolved concrete IDs, not bare aliases: {models}")
     return "native capability report"
 
 

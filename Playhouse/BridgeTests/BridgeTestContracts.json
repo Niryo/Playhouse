@@ -393,7 +393,7 @@
   },
   {
     "id": "test_conversation_models_keep_newest_version_per_family",
-    "expectation": "The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Alias-only Claude entries are omitted. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control."
+    "expectation": "The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Claude Code names its newest release only through an alias entry's resolved model, so that resolved version supersedes the older concrete Opus 5 and keeps Claude Code's own display name. Alias entries with no resolved model are omitted. A remembered selection the filtered list no longer offers moves to its family's newest offered model and is written back, surviving a later refresh whose list no longer offers that family, while a still-offered selection is left alone. A remembered bare alias migrates to its family's offered release, but a dated snapshot pinned through the CLI is left in place because its family's undated release is not a higher version. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control."
   },
   {
     "id": "test_conversation_effort_dispatches_to_codex",
@@ -401,7 +401,7 @@
   },
   {
     "id": "test_conversation_effort_dispatches_to_claude",
-    "expectation": "Claude's model picker omits Default and aliases, showing Opus 5.5 as the concrete latest choice. Selecting it changes the prompt and reply label to Claude · Opus 5.5, and later model changes preserve the old reply's model attribution. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh."
+    "expectation": "Claude's model picker omits Default and aliases, showing Opus 5.5 resolved from Claude Code's bare alias entry as the concrete latest choice in place of the older Opus 5. Selecting it changes the prompt and reply label to Claude · Opus 5.5, and later model changes preserve the old reply's model attribution. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh."
   },
   {
     "id": "test_conversation_models_cache_and_refresh",

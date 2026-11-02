@@ -6673,7 +6673,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         retained_after_failure, _ = self.call_cli("conversation", "models", unavailable_task_id, "--cached")
         self.assertEqual(self.assert_success(retained_after_failure)["models"], initial_unavailable_models)
 
-    # case-contract: test_conversation_models_keep_newest_version_per_family | The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Alias-only Claude entries are omitted. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control.
+    # case-contract: test_conversation_models_keep_newest_version_per_family | The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Claude Code names its newest release only through an alias entry's resolved model, so that resolved version supersedes the older concrete Opus 5 and keeps Claude Code's own display name. Alias entries with no resolved model are omitted. A remembered selection the filtered list no longer offers moves to its family's newest offered model and is written back, surviving a later refresh whose list no longer offers that family, while a still-offered selection is left alone. A remembered bare alias migrates to its family's offered release, but a dated snapshot pinned through the CLI is left in place because its family's undated release is not a higher version. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control.
     def test_conversation_models_keep_newest_version_per_family(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-model-versions"
@@ -6687,6 +6687,20 @@ class PlayhouseBridgeTests(unittest.TestCase):
         models = self.assert_success(self.call_cli("conversation", "models", task_id, extra_environment=environment)[0])["models"]
         self.assertEqual([model["id"] for model in models], ["gpt-6-luna", "gpt-6-sol", "gpt-6-mini"])
         self.assertNotIn("gpt-5.6-luna", [model["id"] for model in models])
+
+        # A remembered model the filtered list no longer offers follows its family forward.
+        # The Sol family is used because its newest entry is not the default model, so the
+        # paired UI case cannot mistake an unloaded composer for a superseded selection.
+        self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-5.6-sol")[0])
+        self.assertEqual(
+            self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"], "gpt-6-sol",
+            "A superseded selection should move to its family's newest offered model.",
+        )
+        self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-6-mini")[0])
+        self.assertEqual(
+            self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"], "gpt-6-mini",
+            "A selection the provider still offers must be left alone.",
+        )
 
         # The same shared filter removes Claude's Default/Opus aliases and collapses dated duplicates.
         claude_fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
@@ -6706,6 +6720,57 @@ class PlayhouseBridgeTests(unittest.TestCase):
             [model["id"] for model in claude_models],
             ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-6"],
         )
+        # Claude Code only names its newest release through the alias entry's resolvedModel,
+        # so the alias must become that concrete model rather than losing to the older
+        # claude-opus-5 that does carry a value of its own.
+        self.assertNotIn("claude-opus-5", [model["id"] for model in claude_models])
+        self.assertEqual(
+            next(model["name"] for model in claude_models if model["id"] == "claude-opus-5-5"), "Opus 5.5",
+            "The resolved alias should keep Claude Code's display name for the release.",
+        )
+        # A dated snapshot is a deliberate pin only the CLI can set. Its own family's
+        # undated release carries the same version numbers, so the pin stays put.
+        self.assert_success(self.call_cli("conversation", "model", claude_task_id, "set", "claude-opus-5-5-20251001")[0])
+        self.assertEqual(
+            self.assert_success(self.call_cli("conversation", "model", claude_task_id)[0])["modelID"],
+            "claude-opus-5-5-20251001",
+            "A pinned dated snapshot must not be rewritten to its family's undated release.",
+        )
+        # A bare alias remembered by an older Playhouse build has no version to compare
+        # against, so it migrates to whatever its family now offers.
+        self.assert_success(self.call_cli("conversation", "model", claude_task_id, "set", "opus")[0])
+        self.assertEqual(
+            self.assert_success(self.call_cli("conversation", "model", claude_task_id)[0])["modelID"], "claude-opus-5-5",
+            "A remembered bare alias should migrate to its family's offered release.",
+        )
+
+        # The real user migration: a remembered claude-opus-5 moves to claude-opus-5-5 and
+        # is written back. Re-reading alone cannot prove the write, because the read
+        # re-derives the same answer while the cache still offers a superseding entry. So
+        # refresh the cache with a list that has no Opus family at all: only a persisted
+        # migration survives that, a re-derived one falls back to the stale claude-opus-5.
+        self.assert_success(self.call_cli("conversation", "model", claude_task_id, "set", "claude-opus-5")[0])
+        self.assertEqual(
+            self.assert_success(self.call_cli("conversation", "model", claude_task_id)[0])["modelID"], "claude-opus-5-5",
+            "A remembered Claude model superseded by its alias's resolved release should move forward.",
+        )
+        models_override = Path(str(claude_executable) + ".models-override")
+        models_override.write_text(json.dumps([
+            {"value": "sonnet", "resolvedModel": "claude-sonnet-5-5", "displayName": "Sonnet 5.5"},
+            {"value": "haiku", "resolvedModel": "claude-haiku-4-6", "displayName": "Haiku 4.6"},
+        ]), encoding="utf-8")
+        try:
+            opusless_models = self.assert_success(
+                self.call_cli("conversation", "models", claude_task_id, extra_environment=claude_environment)[0]
+            )["models"]
+            self.assertEqual([model["id"] for model in opusless_models], ["claude-sonnet-5-5", "claude-haiku-4-6"])
+            self.assertEqual(
+                self.assert_success(self.call_cli("conversation", "model", claude_task_id)[0])["modelID"], "claude-opus-5-5",
+                "The superseded selection must have been persisted, not re-derived on every read.",
+            )
+        finally:
+            models_override.unlink()
+
         aliases_fixture = self.data_directory / "claude-fixture-model-versions-aliases-only"
         shutil.copyfile(claude_fixture, aliases_fixture)
         aliases_fixture.chmod(0o755)
@@ -6766,7 +6831,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(assistants[-1]["modelID"], "gpt-6-luna")
         self.assertEqual(assistants[-1]["createdAt"], "2026-10-26T12:34:00Z")
 
-    # case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 as the concrete latest choice. Selecting it changes the prompt and reply label to Claude · Opus 5.5, and later model changes preserve the old reply's model attribution. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
+    # case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 resolved from Claude Code's bare alias entry as the concrete latest choice in place of the older Opus 5. Selecting it changes the prompt and reply label to Claude · Opus 5.5, and later model changes preserve the old reply's model attribution. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
     def test_conversation_effort_dispatches_to_claude(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-effort"

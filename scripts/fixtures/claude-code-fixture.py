@@ -655,21 +655,26 @@ def main():
                     write({"type": "result", "subtype": "error", "is_error": True,
                            "result": "No conversation found with session ID"})
                     return 1
+                # Claude Code announces the newest release of a family only through the
+                # bare alias, which names the concrete model in `resolvedModel`; no entry
+                # has that concrete name as its own value.
                 models = [
-                    {"value": "default", "displayName": "Default"},
-                    {"value": "opus", "displayName": "Opus"},
-                    {"value": "claude-opus-4-8", "displayName": "Opus 4.8"},
-                    {"value": "claude-opus-5-5", "displayName": "Opus 5.5"},
-                    {"value": "claude-opus-5-5-20251001", "displayName": "Opus 5.5 (2025-10-01)"},
-                    {"value": "sonnet", "displayName": "Sonnet"},
-                    {"value": "claude-sonnet-4-6", "displayName": "Sonnet 4.6"},
-                    {"value": "claude-sonnet-5-5", "displayName": "Sonnet 5.5"},
-                    {"value": "haiku", "displayName": "Haiku"},
-                    {"value": "claude-haiku-4-5-20251001", "displayName": "Haiku 4.5"},
-                    {"value": "claude-haiku-4-6", "displayName": "Haiku 4.6"},
+                    {"value": "default", "resolvedModel": "claude-opus-5-5", "displayName": "Default"},
+                    {"value": "opus", "resolvedModel": "claude-opus-5-5", "displayName": "Opus 5.5"},
+                    {"value": "claude-opus-5-5-20251001", "resolvedModel": "claude-opus-5-5-20251001",
+                     "displayName": "Opus 5.5 (2025-10-01)"},
+                    {"value": "claude-opus-5", "resolvedModel": "claude-opus-5", "displayName": "Opus 5"},
+                    {"value": "claude-opus-4-8", "resolvedModel": "claude-opus-4-8", "displayName": "Opus 4.8"},
+                    {"value": "sonnet", "resolvedModel": "claude-sonnet-5-5", "displayName": "Sonnet 5.5"},
+                    {"value": "claude-sonnet-4-6", "resolvedModel": "claude-sonnet-4-6", "displayName": "Sonnet 4.6"},
+                    {"value": "haiku", "resolvedModel": "claude-haiku-4-6", "displayName": "Haiku 4.6"},
+                    {"value": "claude-haiku-4-5-20251001", "resolvedModel": "claude-haiku-4-5-20251001",
+                     "displayName": "Haiku 4.5"},
                 ]
                 if os.environ.get("PLAYHOUSE_CLAUDE_MODEL_LIST") == "aliases-only" or "aliases-only" in Path(sys.argv[0]).name:
-                    models = models[:2] + models[5:6] + models[8:9]
+                    # A release that reports bare aliases with no resolved model at all.
+                    models = [{"value": model["value"], "displayName": model["displayName"].split(" ")[0]}
+                              for model in models if "-" not in model["value"]]
                 # Tests seed Playhouse's model cache through a real discovery of this list.
                 models_override = Path(str(sys.argv[0]) + ".models-override")
                 if models_override.exists():

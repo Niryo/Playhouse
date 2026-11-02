@@ -191,6 +191,40 @@ extension Array where Element == ConversationModelOption {
             return retainedFamilies.insert(family).inserted
         }
     }
+
+    /// The entry that supersedes a remembered selection the filtered list no longer
+    /// offers, so a saved choice such as `claude-opus-5` follows its family forward
+    /// instead of silently continuing to run an older model than the picker shows.
+    /// Returns nil when the selection is still offered or the family only moved backwards.
+    ///
+    /// Only a strictly higher version number moves a selection, not merely a preferred
+    /// one. That protects a dated snapshot such as `claude-opus-5-5-20251001`, which only
+    /// the CLI can select: its family's undated `claude-opus-5-5` carries the same numbers
+    /// and so leaves the pin in place, while a genuinely newer `claude-opus-6` still wins.
+    /// The mirror case holds a selection still: an undated ID whose family now offers only
+    /// a same-numbered snapshot stays put, unofferable but never silently re-pointed.
+    ///
+    /// Callers pass a `newestVersionPerFamily()` result, which holds one entry per
+    /// family; the newest-of-family pick below keeps the answer well defined on a raw
+    /// provider list too.
+    func supersedingModel(forSelectedID selectedID: String) -> ConversationModelOption? {
+        guard !selectedID.isEmpty, !contains(where: { $0.id == selectedID }) else { return nil }
+        let family = ModelVersion.familyName(for: selectedID)
+        let candidates = compactMap { model -> (ConversationModelOption, ModelVersion)? in
+            guard ModelVersion.familyName(for: model.id) == family,
+                  let version = ModelVersion(id: model.id) else { return nil }
+            return (model, version)
+        }
+        guard let (candidate, candidateVersion) = candidates.max(by: {
+            $1.1.isPreferred(over: $0.1, id: $1.0.id, otherID: $0.0.id)
+        }) else { return nil }
+        // A selection with no parseable version is a bare alias left by an older
+        // Playhouse release, such as `opus`. There is nothing to compare, and the
+        // family's offered entry is exactly what that alias used to mean, so it
+        // always migrates rather than lingering as an ID the picker cannot show.
+        guard let selectedVersion = ModelVersion(id: selectedID) else { return candidate }
+        return selectedVersion.numbers.lexicographicallyPrecedes(candidateVersion.numbers) ? candidate : nil
+    }
 }
 
 private struct VersionedModel {
@@ -238,6 +272,13 @@ private struct ModelVersion {
         return version.family
     }
 
+    /// Only reachable for a provider release that reports a bare alias with no
+    /// resolved model at all. An alias that names its resolved model arrives here
+    /// already keyed on that concrete ID, so it is compared by version like any
+    /// other entry rather than being dropped as unversioned.
+    ///
+    /// The list is deliberately narrow: an unlisted bare alias is retained rather
+    /// than hidden. `scripts/test-live-integration.py` asserts against the same set.
     static func isAlias(_ id: String) -> Bool {
         let normalizedID = id.lowercased().hasPrefix("claude-") ? String(id.dropFirst("claude-".count)).lowercased() : id.lowercased()
         return ["opus", "sonnet", "haiku", "default"].contains(normalizedID)

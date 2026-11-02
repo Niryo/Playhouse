@@ -9230,7 +9230,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("goal-clear-button").exists)
     }
 
-    // case-contract: test_conversation_models_keep_newest_version_per_family | The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Alias-only Claude entries are omitted. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control.
+    // case-contract: test_conversation_models_keep_newest_version_per_family | The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Claude Code names its newest release only through an alias entry's resolved model, so that resolved version supersedes the older concrete Opus 5 and keeps Claude Code's own display name. Alias entries with no resolved model are omitted. A remembered selection the filtered list no longer offers moves to its family's newest offered model and is written back, surviving a later refresh whose list no longer offers that family, while a still-offered selection is left alone. A remembered bare alias migrates to its family's offered release, but a dated snapshot pinned through the CLI is left in place because its family's undated release is not a higher version. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control.
     func test_conversation_models_keep_newest_version_per_family() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -9258,6 +9258,20 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(app.buttons["model-option-gpt-5.6-luna"].exists, "The older GPT-5.6 Luna model should be hidden from the picker.")
         XCTAssertFalse(app.buttons["model-option-default"].exists, "The default pseudo-model should not appear in the picker.")
         modelPicker.click()
+
+        // A remembered model the filtered list no longer offers follows its family
+        // forward, so the composer and the next send agree on one model. The Sol family
+        // is used deliberately: GPT-6 Luna is the fixture's default model, so a composer
+        // that had not yet loaded a selection would display it and hide a regression.
+        XCTAssertNotNil(try runCLI(["conversation", "model", taskID, "set", "gpt-5.6-sol"])["result"],
+            "Seeding the superseded selection should succeed.")
+        openTask(named: "Model versions")
+        XCTAssertTrue(waitUntil({ modelPicker.label.contains("GPT-6 Sol") }, timeout: 10),
+            "A superseded selection should move the composer to its family's newest offered model.")
+        attachScreenshot(named: "Composer follows a superseded model forward to GPT-6 Sol")
+        XCTAssertEqual(
+            (try runCLI(["conversation", "model", taskID])["result"] as? [String: Any])?["modelID"] as? String, "gpt-6-sol",
+            "The bridge should report the same forwarded model the composer shows.")
 
         let claudeExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         let aliasesExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui-aliases-only")
@@ -9661,7 +9675,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(effort["effort"] as? String, "xhigh")
     }
 
-    // case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 as the concrete latest choice. Selecting it changes the prompt and reply label to Claude · Opus 5.5, and later model changes preserve the old reply's model attribution. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
+    // case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 resolved from Claude Code's bare alias entry as the concrete latest choice in place of the older Opus 5. Selecting it changes the prompt and reply label to Claude · Opus 5.5, and later model changes preserve the old reply's model attribution. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
     func test_conversation_effort_dispatches_to_claude() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
@@ -9676,13 +9690,21 @@ final class PlayhouseUITests: XCTestCase {
         let picker = element("model-picker-menu")
         XCTAssertTrue(picker.waitForExistence(timeout: 10))
         picker.click()
+        XCTAssertTrue(app.buttons["model-option-claude-opus-5-5"].waitForExistence(timeout: 5),
+            "The model popover should list the latest concrete Opus model.")
         XCTAssertFalse(app.buttons["model-option-default"].exists, "The Claude Default pseudo-model should not appear in the menu.")
         XCTAssertFalse(app.buttons["model-option-opus"].exists, "The versioned Opus model should replace its alias.")
+        XCTAssertFalse(app.buttons["model-option-claude-opus-5"].exists,
+            "The alias resolving to Opus 5.5 should supersede the older concrete Opus 5 entry.")
         XCTAssertTrue(app.buttons["model-option-claude-opus-5-5"].exists, "The latest concrete Opus model should remain selectable.")
+        // The open popover is the state the fix is about: the newest release of each
+        // family, which Claude Code names only through its alias entries. Popovers are
+        // separate windows, so the whole screen is captured.
+        attachScreenshot(named: "Claude model list shows the newest version of each family", fullScreen: true)
         app.buttons["model-option-claude-opus-5-5"].click()
         picker.click()
         XCTAssertTrue(app.staticTexts["Send a message to Claude · Opus 5.5."].waitForExistence(timeout: 10))
-        attachScreenshot(named: "Claude model list shows only versioned model families")
+        attachScreenshot(named: "Composer shows the selected Claude Opus 5.5 model")
         picker.click()
         let slider = element("model-effort-slider")
         XCTAssertTrue(slider.waitForExistence(timeout: 5))
