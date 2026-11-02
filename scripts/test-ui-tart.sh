@@ -4,7 +4,10 @@ set -euo pipefail
 repository_root="${PLAYHOUSE_UI_TART_REPOSITORY_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 script_path="${repository_root}/scripts/test-ui-tart.sh"
 vm_name="${PLAYHOUSE_UI_TART_VM:-playhouse-ui}"
-artifact_root="${PLAYHOUSE_UI_TART_ARTIFACTS:-${TMPDIR:-/tmp}/playhouse-ui-tart-artifacts}"
+# This directory is bind-mounted into the VM at boot, so it must resolve to the
+# same path for every checkout. A TMPDIR-derived default is per-login-session on
+# macOS and would make a running VM usable only by the session that started it.
+artifact_root="${PLAYHOUSE_UI_TART_ARTIFACTS:-/tmp/playhouse-ui-tart-artifacts}"
 export PLAYHOUSE_UI_LOCK_TIMEOUT_SECONDS="${PLAYHOUSE_UI_LOCK_TIMEOUT_SECONDS:-120}"
 
 # Hold the host checkout's UI-test lock for the entire VM run.
@@ -118,7 +121,7 @@ if ((${#ui_cases[@]} == 0)); then
 fi
 
 # Repository locks are worktree-local, while a Tart VM is shared host-wide.
-# Serialize ownership checks, startup, execution, and cleanup for each VM.
+# Serialize startup, reuse, execution, and cleanup for each VM.
 if [[ "${PLAYHOUSE_UI_TART_VM_LOCKED:-0}" != "1" ]]; then
 	vm_lock_name="${vm_name//\//_}"
 	runner="${PLAYHOUSE_UI_TART_IMMUTABLE_PATH:-${script_path}}"
@@ -137,34 +140,44 @@ if ! tart list --quiet | rg -Fxq -- "$vm_name"; then
 fi
 
 run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+# The artifact root is a predictable path under sticky /tmp and the whole
+# checkout is copied through it, so it must be a private directory we own.
+if [[ -L "$artifact_root" ]]; then
+	printf 'Refusing to use a symlink as the Tart artifact root: %s\n' "$artifact_root" >&2
+	exit 74
+fi
+mkdir -p "$artifact_root"
+if [[ ! -O "$artifact_root" ]]; then
+	printf 'Refusing to use a Tart artifact root owned by another user: %s\n' "$artifact_root" >&2
+	exit 74
+fi
+chmod 700 "$artifact_root"
 run_artifacts="${artifact_root}/${run_id}"
 mkdir -p "$run_artifacts"
 launch_log="${run_artifacts}/tart-run.log"
 vm_pid=""
 vm_started=0
-# VM ownership is global per host VM, not per checkout's TMPDIR. A
-# TMPDIR-scoped marker lets two worktrees both believe they own the same
-# persistent VM and causes Tart guest transport collisions.
-session_marker="${PLAYHOUSE_UI_TART_SESSION_MARKER:-/tmp/playhouse-ui-tart-${vm_name}.session}"
-session_value="${repository_root}"$'\n'"${artifact_root}"
-session_marker_owned=0
-if [[ -L "$session_marker" ]]; then
-	printf 'Refusing to use a symlink as the Tart session marker: %s\n' "$session_marker" >&2
-	exit 74
-fi
+# A kept-alive VM carries no checkout-specific state: the artifact mount is the
+# same path for every checkout, per-run artifacts are namespaced by run_id, and
+# the guest source snapshot is a fixed shared path. Any run holding the VM lock
+# may therefore reuse whatever is already running.
+vm_attached=0
 
 cleanup() {
 	status=$?
 	trap - EXIT INT TERM
-	if (( vm_started == 1 && session_marker_owned == 0 )) ||
-		(( keep_vm == 0 )) && (( vm_started == 1 || session_marker_owned == 1 )); then
+	# Stop a VM this run touched when it never became usable, or when asked to.
+	if { (( vm_started == 1 && vm_attached == 0 )) || (( keep_vm == 0 )); } &&
+		(( vm_started == 1 || vm_attached == 1 )); then
 		tart stop "$vm_name" >/dev/null 2>&1 || true
 		if [[ -n "$vm_pid" ]]; then
 			wait "$vm_pid" 2>/dev/null || true
 		fi
 	fi
-	if (( session_marker_owned == 1 && keep_vm == 0 )); then
-		rm -f "$session_marker"
+	# The host transfer copy is only needed until the guest snapshots it; drop it
+	# on every exit so full checkouts do not accumulate under the shared /tmp root.
+	if [[ -n "${source_sync_root:-}" ]]; then
+		rm -rf -- "$source_sync_root" || true
 	fi
 	if (( status != 0 )) && [[ -f "$launch_log" ]]; then
 		printf '\nTart VM launch log: %s\n' "$launch_log" >&2
@@ -174,39 +187,13 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-if tart list --format json | python3 -c '
-import json
-import sys
-
-name = sys.argv[1]
-for vm in json.load(sys.stdin):
-    if vm.get("Name", vm.get("name")) == name and vm.get("Running", vm.get("running", False)):
-        raise SystemExit(0)
-raise SystemExit(1)
-' "$vm_name"; then
-	if [[ ! -f "$session_marker" ]] || [[ "$(cat "$session_marker")" != "$session_value" ]]; then
-		printf 'Tart VM %q is running but was not retained by this checkout/artifact session.\n' "$vm_name" >&2
-		printf 'Stop it manually, then start a new --keep-vm session.\n' >&2
-		exit 1
-	fi
-	session_marker_owned=1
-	printf 'Reusing already-running Tart VM %s.\n' "$vm_name"
-else
-	if [[ -e "$session_marker" ]]; then
-		if [[ "$(cat "$session_marker" 2>/dev/null || true)" != "$session_value" ]]; then
-			printf 'Refusing to remove an unrelated Tart session marker: %s\n' "$session_marker" >&2
-			exit 74
-		fi
-		printf 'Discarding the retained-session marker because the Tart VM is stopped.\n'
-		rm -f "$session_marker"
-	fi
+start_vm() {
 	printf 'Starting Tart VM %s for UI run %s...\n' "$vm_name" "$run_id"
 	tart_display_args=(--no-graphics)
 	if (( show_vm == 1 )); then
 		tart_display_args=(--vnc)
 	fi
 	python3 - "$launch_log" "${tart_display_args[@]}" \
-		--dir="source:${repository_root}:ro" \
 		--dir="artifacts:${artifact_root}" \
 		"$vm_name" <<'PY' &
 import subprocess
@@ -238,38 +225,65 @@ with open(log_path, "ab", buffering=0) as log_file:
 PY
 	vm_pid=$!
 	vm_started=1
-fi
-guest_ready=0
-for _ in $(seq 1 180); do
-	if tart exec "$vm_name" /usr/bin/true >/dev/null 2>&1; then
-		guest_ready=1
-		break
-	fi
-	if (( vm_started == 1 )) && ! kill -0 "$vm_pid" 2>/dev/null; then
-		printf 'Tart VM exited before the guest agent became available.\n' >&2
+}
+
+wait_for_guest() {
+	local guest_ready=0
+	for _ in $(seq 1 180); do
+		if tart exec "$vm_name" /usr/bin/true >/dev/null 2>&1; then
+			guest_ready=1
+			break
+		fi
+		if (( vm_started == 1 )) && ! kill -0 "$vm_pid" 2>/dev/null; then
+			printf 'Tart VM exited before the guest agent became available.\n' >&2
+			exit 1
+		fi
+		sleep 2
+	done
+	if (( guest_ready == 0 )); then
+		printf 'Timed out waiting for Tart guest agent in VM %q.\n' "$vm_name" >&2
 		exit 1
 	fi
-	sleep 2
-done
-if (( guest_ready == 0 )); then
-	printf 'Timed out waiting for Tart guest agent in VM %q.\n' "$vm_name" >&2
-	exit 1
-fi
-if (( keep_vm == 1 )); then
-	if ! session_marker_tmp="$(mktemp "${session_marker}.tmp.XXXXXX")"; then
-		printf 'Could not create the Tart session marker temporary file.\n' >&2
-		keep_vm=0
-		exit 74
+}
+
+guest_shares_artifact_root() {
+	tart exec "$vm_name" /bin/test -d "/Volumes/My Shared Files/artifacts/${run_id}" >/dev/null 2>&1
+}
+
+if tart list --format json | python3 -c '
+import json
+import sys
+
+name = sys.argv[1]
+for vm in json.load(sys.stdin):
+    if vm.get("Name", vm.get("name")) == name and vm.get("Running", vm.get("running", False)):
+        raise SystemExit(0)
+raise SystemExit(1)
+' "$vm_name"; then
+	vm_attached=1
+	printf 'Reusing already-running Tart VM %s.\n' "$vm_name"
+	wait_for_guest
+	# Directory shares are fixed at boot. This run's freshly created artifact
+	# directory is visible in the guest only if the VM shares this artifact root;
+	# otherwise it was booted by an older runner or with a different
+	# PLAYHOUSE_UI_TART_ARTIFACTS. The VM lock is held, so no run is using it.
+	if ! guest_shares_artifact_root; then
+		printf 'Running Tart VM %s does not share %s (booted by another runner); restarting it with this artifact root.\n' "$vm_name" "$artifact_root"
+		vm_attached=0
+		tart stop "$vm_name" >/dev/null 2>&1 || true
+		start_vm
+		wait_for_guest
+		# A failed stop leaves the old VM answering; never run against its share.
+		if ! guest_shares_artifact_root; then
+			printf 'Tart VM %s still does not share %s after a restart. Stop it with `tart stop %s` and rerun.\n' "$vm_name" "$artifact_root" "$vm_name" >&2
+			exit 74
+		fi
 	fi
-	if ! printf '%s\n' "$session_value" > "$session_marker_tmp" ||
-		! mv -f "$session_marker_tmp" "$session_marker"; then
-		rm -f "$session_marker_tmp"
-		printf 'Could not write the Tart session marker; stopping the newly started VM.\n' >&2
-		keep_vm=0
-		exit 74
-	fi
-	session_marker_owned=1
+else
+	start_vm
+	wait_for_guest
 fi
+vm_attached=1
 
 if (( show_vm == 1 )); then
 	if [[ ! -t 0 ]]; then
@@ -336,6 +350,9 @@ fi
 artifact_root="/Volumes/My Shared Files/artifacts"
 source_root="${artifact_root}/${run_id}/source"
 snapshot_root="${HOME}/PlayhouseUITestRuns/${run_id}"
+# Deliberately a fixed path, not per-run: test-ui.sh keys the guest's reusable
+# Xcode DerivedData off this directory, so a per-run path would cold-build every
+# time. It is checkout-agnostic, and the host-wide VM lock serializes runs.
 source_snapshot_root="${HOME}/PlayhouseUITestRuns/SourceSnapshot"
 source_snapshot_owner="${HOME}/PlayhouseUITestRuns/.source-snapshot-owner"
 source_snapshot_owner_contents="Playhouse Tart owns this reusable source snapshot (v1)."
@@ -361,6 +378,7 @@ if ! mkdir -p "$guest_artifacts"; then
 fi
 if [[ ! -d "$source_root/Playhouse.xcodeproj" ]]; then
 	printf 'Shared source directory is unavailable or missing Playhouse.xcodeproj: %s\n' "$source_root" >&2
+	printf 'The running VM was likely started outside this runner or with a different PLAYHOUSE_UI_TART_ARTIFACTS; stop it with `tart stop` and rerun.\n' >&2
 	exit 2
 fi
 if ! xcode-select -p >/dev/null 2>&1; then

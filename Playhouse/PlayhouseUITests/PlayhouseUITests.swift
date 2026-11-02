@@ -2003,7 +2003,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Done preserves the task worktree without merging")
     }
 
-    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
+    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
     func test_task_pr_create_reports_real_gh_failure() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -2043,10 +2043,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(createButton.waitForExistence(timeout: 5))
         assertHoverEmphasis(for: createButton)
         XCTAssertEqual(createButton.label, "PR. Create a pull request for each repository linked to this completed task")
-        createButton.hover()
-        attachScreenshot(named: "Completed task PR action remains available in the archive", fullScreen: true)
-        movePointerToHelpRunway(below: createButton)
-        Thread.sleep(forTimeInterval: 0.5)
+        assertNativeHelpText(for: createButton, equals: "Create a pull request for each repository linked to this completed task")
+        attachScreenshot(named: "Completed task PR action shows its help text in the archive", fullScreen: true)
+        dismissNativeHelpText(named: "Create a pull request for each repository linked to this completed task")
         let operationLock = try TaskOperationLockBarrier(dataDirectory: dataDirectory, taskID: taskID)
         var operationLockReleased = false
         defer { if !operationLockReleased { try? operationLock.release() } }
@@ -2075,7 +2074,98 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(current["status"] as? String, "Done")
     }
 
-    // case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects conflicts without mutation and blocks PR creation until conflicts are resolved in the task worktree; CLI/XPC resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI verifies PR creation directs the user to resolve conflicts in the task worktree and leaves unresolved conflicts uncommitted and unpublished.
+    // case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a small Auto PR switch in place of the manual PR button, defaulting to off; the switch disappears once a pull request is linked or the task leaves the working states. Selecting Auto PR persists and is reflected across a fresh read. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. The last switch choice is remembered: tasks created after turning it on start on, and tasks created after turning it off start off. Toggling Auto PR for an unknown task is rejected.
+    func test_task_auto_pr_toggle_creates_pull_request_on_review() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Auto PR toggle UI", "--repo", fixture.primary.path,
+            "--merge-target", "\(fixture.primary.path)=main",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        XCTAssertTrue(element("task-card-\(taskID)").waitForExistence(timeout: 5))
+        XCTAssertFalse(element("task-auto-pr-toggle-\(taskID)").exists, "A Backlog task has no working-state PR controls yet.")
+
+        openTask(named: "Auto PR toggle UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Auto PR toggle UI", whileTurnHeld: {
+            self.element("back-to-board-button").click()
+            let toggle = self.element("task-auto-pr-toggle-\(taskID)")
+            XCTAssertTrue(toggle.waitForExistence(timeout: 5), "An in-progress task with no linked PR should show the Auto PR switch.")
+            XCTAssertFalse(self.element("task-create-pr-\(taskID)").exists, "The switch replaces the manual PR button while the task is in progress.")
+            XCTAssertGreaterThanOrEqual(toggle.frame.height, 30, "The Auto PR switch should keep a comfortable hit target.")
+            XCTAssertEqual(toggle.value as? String, "off")
+            XCTAssertFalse(try XCTUnwrap(self.taskRecord(id: taskID)?["autoCreatePullRequestOnReview"] as? Bool), "Auto PR must default to off.")
+            self.attachScreenshot(named: "Working task shows the Auto PR switch defaulting to off", fullScreen: true)
+
+            toggle.click()
+            XCTAssertTrue(self.waitUntil({
+                (try? self.taskRecord(id: taskID)?["autoCreatePullRequestOnReview"] as? Bool) == true
+            }, timeout: 5), "Turning Auto PR on should persist immediately.")
+            XCTAssertTrue(self.waitUntil({ (toggle.value as? String) == "on" }, timeout: 5), "The switch should show its on state.")
+            self.attachScreenshot(named: "Turning the Auto PR switch on persists", fullScreen: true)
+
+            let record = try XCTUnwrap((self.taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+            let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String), isDirectory: true)
+            let remoteRoot = self.dataDirectory.appendingPathComponent("auto-pr-remotes", isDirectory: true)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: remoteRoot.path), "Each UI case should start with an isolated bare remote fixture.")
+            try FileManager.default.createDirectory(at: remoteRoot, withIntermediateDirectories: true)
+            try WorkspaceFixture.ownerContents.write(to: remoteRoot.appendingPathComponent(WorkspaceFixture.ownerMarker), atomically: true, encoding: .utf8)
+            let remote = remoteRoot.appendingPathComponent("repository-0.git", isDirectory: true)
+            try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+            try self.runGit(remote, "init", "--bare")
+            try self.runGit(worktree, "remote", "add", "origin", remote.path)
+            try self.runGit(worktree, "push", "origin", "main")
+
+            self.openTask(named: "Auto PR toggle UI")
+        })
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"] != nil
+        }, timeout: 15), "Auto PR should create the pull request itself once the task reaches Review.")
+        element("back-to-board-button").click()
+        let prLink = app.links["task-pr-link-\(taskID)-501"]
+        XCTAssertTrue(prLink.waitForExistence(timeout: 10), "The auto-created PR number should appear on the card without the user clicking the PR button.")
+        XCTAssertFalse(element("task-auto-pr-toggle-\(taskID)").exists, "The toggle gives way to the linked PR once one exists.")
+        attachScreenshot(named: "Auto PR created the pull request automatically once the task reached Review", fullScreen: true)
+
+        let stickyOn = try XCTUnwrap(try runCLI(["task", "create", "--title", "Sticky Auto PR on UI", "--root", fixture.primary.path])["result"] as? [String: Any])
+        XCTAssertEqual(stickyOn["autoCreatePullRequestOnReview"] as? Bool, true, "A task created after turning the switch on in the UI should start on.")
+        let stickyOnID = try XCTUnwrap(stickyOn["id"] as? String)
+        _ = try runCLI(["task", "pr", "auto", stickyOnID, "off"])
+        let stickyOff = try XCTUnwrap(try runCLI(["task", "create", "--title", "Sticky Auto PR off UI", "--root", fixture.primary.path])["result"] as? [String: Any])
+        XCTAssertEqual(stickyOff["autoCreatePullRequestOnReview"] as? Bool, false, "A task created after turning the switch off should start off.")
+
+        let manualCreated = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Manual PR toggle default UI", "--repo", fixture.secondary.path,
+            "--merge-target", "\(fixture.secondary.path)=main",
+        ])["result"] as? [String: Any])
+        let manualTaskID = try XCTUnwrap(manualCreated["id"] as? String)
+        XCTAssertFalse(manualCreated["autoCreatePullRequestOnReview"] as? Bool ?? true, "Auto PR must default to off so existing manual tasks are unaffected.")
+        let missing = try runCLI(["task", "pr", "auto", "00000000-0000-0000-0000-000000000000", "on"], expectedStatus: 3)
+        XCTAssertEqual((missing["error"] as? [String: Any])?["code"] as? String, "not_found")
+        openTask(named: "Manual PR toggle default UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Manual PR toggle default UI")
+        element("back-to-board-button").click()
+        XCTAssertEqual(try taskRecord(id: manualTaskID)?["status"] as? String, "Review")
+        XCTAssertNil((try taskRecord(id: manualTaskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"], "With Auto PR off, reaching Review must not create a pull request by itself.")
+        let manualButton = element("task-create-pr-\(manualTaskID)")
+        XCTAssertTrue(manualButton.waitForExistence(timeout: 5), "Auto PR off must leave the existing manual PR button in place.")
+        let manualRecord = try XCTUnwrap((try taskRecord(id: manualTaskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let manualWorktree = URL(fileURLWithPath: try XCTUnwrap(manualRecord["worktreePath"] as? String), isDirectory: true)
+        let manualRemoteRoot = dataDirectory.appendingPathComponent("manual-pr-remotes", isDirectory: true)
+        try FileManager.default.createDirectory(at: manualRemoteRoot, withIntermediateDirectories: true)
+        try WorkspaceFixture.ownerContents.write(to: manualRemoteRoot.appendingPathComponent(WorkspaceFixture.ownerMarker), atomically: true, encoding: .utf8)
+        let manualRemote = manualRemoteRoot.appendingPathComponent("repository-0.git", isDirectory: true)
+        try FileManager.default.createDirectory(at: manualRemote, withIntermediateDirectories: true)
+        try runGit(manualRemote, "init", "--bare")
+        try runGit(manualWorktree, "remote", "add", "origin", manualRemote.path)
+        try runGit(manualWorktree, "push", "origin", "main")
+        manualButton.click()
+        let manualPRLink = app.links["task-pr-link-\(manualTaskID)-502"]
+        XCTAssertTrue(manualPRLink.waitForExistence(timeout: 10), "The manual PR flow must still work unchanged when Auto PR stays off.")
+    }
+
+    // case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects merge conflicts without mutation, and PR creation still publishes the task branch and reaches the normal GitHub CLI path; conflicts do not block PR creation. CLI/XPC resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI confirms PR creation proceeds for a conflicted branch and the existing Fix Conflicts action still appears once the PR is linked.
     func test_task_pr_conflicts_detect_without_mutation() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -2121,24 +2211,24 @@ final class PlayhouseUITests: XCTestCase {
         let prButton = element("task-create-pr-\(taskID)")
         XCTAssertTrue(prButton.waitForExistence(timeout: 5))
         prButton.click()
-        let blockedAlert = app.sheets.matching(NSPredicate(format: "label == %@", "alert")).firstMatch
-        XCTAssertTrue(blockedAlert.waitForExistence(timeout: 10), "PR creation should direct the user to resolve conflicts in the task worktree.")
-        let alertTitle = blockedAlert.staticTexts.matching(
-            NSPredicate(format: "value == %@", "Pull request operation failed")
-        ).firstMatch
-        XCTAssertTrue(alertTitle.exists, "The conflict sheet should identify the failed pull request operation.")
-        let conflictGuidance = blockedAlert.staticTexts.matching(
+        let failureAlert = app.sheets.matching(NSPredicate(format: "label == %@", "alert")).firstMatch
+        XCTAssertTrue(failureAlert.waitForExistence(timeout: 10), "The local bare remote should reach the normal GitHub CLI failure after the task branch is published.")
+        let conflictGuidance = failureAlert.staticTexts.matching(
             NSPredicate(format: "value BEGINSWITH %@", "Resolve conflicts")
         ).firstMatch
-        XCTAssertTrue(conflictGuidance.exists, "The conflict sheet should direct the user to resolve conflicts in the task worktree.")
-        blockedAlert.buttons["OK"].click()
-        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), branchHead, "Blocked PR creation must leave the task branch unchanged.")
+        XCTAssertFalse(conflictGuidance.exists, "Conflicts must no longer block PR creation.")
+        let ghGuidance = failureAlert.staticTexts.matching(
+            NSPredicate(format: "value CONTAINS %@", "GitHub CLI")
+        ).firstMatch
+        XCTAssertTrue(ghGuidance.exists, "The failure should come from the normal GitHub CLI path, not a conflict preflight.")
+        failureAlert.buttons["OK"].click()
+        XCTAssertEqual(try runGitOutput(worktree, "rev-parse", "HEAD"), branchHead)
         XCTAssertEqual(try runGitOutput(fixture.primary, "rev-parse", "main"), targetHead)
         XCTAssertEqual(
             try runGitOutput(fixture.primary, "ls-remote", "--heads", "origin", try XCTUnwrap(completedRecord["branch"] as? String))
                 .trimmingCharacters(in: .whitespacesAndNewlines),
-            "",
-            "Blocked PR creation must not publish the task branch."
+            "refs/heads/\(try XCTUnwrap(completedRecord["branch"] as? String))\t\(branchHead)",
+            "A conflicted task branch should still be published for PR creation."
         )
         XCTAssertTrue(waitUntil({ prButton.isEnabled }, timeout: 10))
         XCTAssertNil((try taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"])
@@ -2146,7 +2236,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertNil(finalRecord["pullRequestNumber"])
     }
 
-    // case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC creates PRs for two repositories, verifies the first PR persists when the second creation fails, retries only the missing repository, confirms each gh create call targets the corresponding repository worktree, and confirms both saved numbers on fresh reads. The UI labels active-card and Done-archive multi-repository creation actions PRs, clicks the active action, verifies the partial-success retry action, confirms the gh create calls target both repository worktrees and retry only the failed one, then shows the exact created PR numbers on the active task and every linked number in the Done archive. Hovering the outer padded edge of each PR link triggers its feedback.
+    // case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC creates PRs for two repositories, verifies the first PR persists when the second creation fails, retries only the missing repository, confirms each gh create call targets the corresponding repository worktree, and confirms both saved numbers on fresh reads. The UI labels active-card and Done-archive multi-repository creation actions PRs, clicks the active action, verifies the partial-success retry action, confirms the gh create calls target both repository worktrees and retry only the failed one, then shows exact PR numbers on the active task and Done archive, including four-digit values without grouping separators. Hovering the outer padded edge of each PR link triggers its feedback.
     func test_done_archive_displays_existing_pull_request_link() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         // The fixture `gh` handles list/create and merged-state calls without GitHub sign-in.
@@ -2240,32 +2330,34 @@ final class PlayhouseUITests: XCTestCase {
 
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 10), "The app must close its SwiftData container before seeding the archived store.")
-        let prURL = "https://github.com/playhouse-test/fixture/pull/123"
-        let secondPRURL = "https://github.com/playhouse-test/fixture/pull/124"
-        try seedTaskPullRequest(taskID: taskID, number: 123, url: prURL)
-        try seedTaskPullRequest(taskID: taskID, number: 124, url: secondPRURL, repositoryIndex: 1)
+        let activePRURL = "https://github.com/playhouse-test/fixture/pull/1234"
+        try seedTaskPullRequest(taskID: activeTaskID, number: 1234, url: activePRURL)
+        let prURL = "https://github.com/playhouse-test/fixture/pull/1234"
+        let secondPRURL = "https://github.com/playhouse-test/fixture/pull/1235"
+        try seedTaskPullRequest(taskID: taskID, number: 1234, url: prURL)
+        try seedTaskPullRequest(taskID: taskID, number: 1235, url: secondPRURL, repositoryIndex: 1)
         let persisted = try XCTUnwrap(taskRecord(id: taskID))
         XCTAssertEqual(persisted["status"] as? String, "Done")
         let record = try XCTUnwrap((persisted["repositoryWorktrees"] as? [[String: Any]])?.first)
-        XCTAssertEqual(record["pullRequestNumber"] as? Int, 123)
+        XCTAssertEqual(record["pullRequestNumber"] as? Int, 1234)
         XCTAssertEqual(record["pullRequestURL"] as? String, prURL)
         XCTAssertEqual((persisted["repositoryWorktrees"] as? [[String: Any]])?.count, 2)
 
         launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
-        let firstActiveLink = app.links["task-pr-link-\(activeTaskID)-501"]
+        let firstActiveLink = app.links["task-pr-link-\(activeTaskID)-1234"]
         let secondActiveLink = app.links["task-pr-link-\(activeTaskID)-502"]
         XCTAssertTrue(firstActiveLink.waitForExistence(timeout: 10))
         XCTAssertTrue(secondActiveLink.waitForExistence(timeout: 10), "The active task card should show each repository's created PR number.")
-        XCTAssertEqual(firstActiveLink.label, "#501")
+        XCTAssertEqual(firstActiveLink.label, "#1234")
         XCTAssertEqual(secondActiveLink.label, "#502")
         element("done-archive-button").click()
         XCTAssertTrue(element("done-archive-task-\(taskID)").waitForExistence(timeout: 10))
-        let prLink = app.links["done-archive-pr-link-\(taskID)-123"]
+        let prLink = app.links["done-archive-pr-link-\(taskID)-1234"]
         XCTAssertTrue(prLink.waitForExistence(timeout: 10), "The Done archive should show the saved PR number as a link.")
-        let secondPRLink = app.links["done-archive-pr-link-\(taskID)-124"]
+        let secondPRLink = app.links["done-archive-pr-link-\(taskID)-1235"]
         XCTAssertTrue(secondPRLink.waitForExistence(timeout: 10), "The Done archive should show every repository's saved PR number.")
-        XCTAssertEqual(prLink.label, "#123")
-        XCTAssertEqual(secondPRLink.label, "#124")
+        XCTAssertEqual(prLink.label, "#1234")
+        XCTAssertEqual(secondPRLink.label, "#1235")
         assertHoverEmphasis(for: prLink)
         attachScreenshot(named: "Done archive shows the linked pull request")
     }
@@ -3588,24 +3680,34 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Concurrent repository removal rejects a stale settings save")
     }
 
-    // case-contract: test_task_repository_removal_preserves_state_on_dirty_worktree | Removing the only pending repository leaves the task with no workspace and preserves the source repository; removing a pending repository preserves other context folders; removing a clean managed worktree through the GUI waits for an active turn, while the task repository API removes it from context immediately and defers clean worktree deletion until the turn releases; a bridge service restart preserves the cleanup intent and a fresh request completes removal; if the active turn writes files before release, deferred cleanup preserves that worktree and its changes; a dirty worktree rejects removal and preserves its task record and files.
+    // case-contract: test_task_repository_removal_preserves_state_on_dirty_worktree | Removing one of two pending repositories leaves the remaining repository in task context and remembered settings, while preserving the removed source repository; the next task restores only the remaining remembered repository. Removing a pending repository preserves other context folders; removing a clean managed worktree through the GUI waits for an active turn, while the task repository API removes it from context immediately and defers clean worktree deletion until the turn releases; a bridge service restart preserves the cleanup intent and a fresh request completes removal; if the active turn writes files before release, deferred cleanup preserves that worktree and its changes; a dirty worktree rejects removal and preserves its task record and files.
     func test_task_repository_removal_preserves_state_on_dirty_worktree() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
 
-        let soleTitle = "Sole repository removal through UI"
-        let sole = try runCLI(["task", "create", "--title", soleTitle, "--repo", fixture.primary.path])["result"] as? [String: Any]
+        let soleTitle = "Two repository removal through UI"
+        let sole = try runCLI(["task", "create", "--title", soleTitle, "--repo", fixture.primary.path, "--repo", fixture.secondary.path])["result"] as? [String: Any]
         let soleID = try XCTUnwrap(sole?["id"] as? String)
         openTask(named: soleTitle)
         element("conversation-repository-badge-primary").click()
         element("remove-conversation-repository-button").click()
         XCTAssertTrue(waitUntil({
             guard let result = try? self.taskRecord(id: soleID),
-                  let records = result["repositoryWorktrees"] as? [Any] else { return false }
-            return records.isEmpty
-        }, timeout: 10), "Removing the only pending repository should leave the task without a workspace.")
-        XCTAssertEqual(try taskRecord(id: soleID)?["workspaceRoots"] as? [String], [])
+                  let records = result["repositoryWorktrees"] as? [[String: Any]] else { return false }
+            return records.count == 1 && records[0]["repositoryPath"] as? String == self.fixture.secondary.path
+        }, timeout: 10), "Removing one pending repository should preserve the other attachment.")
+        XCTAssertEqual(try taskRecord(id: soleID)?["workspaceRoots"] as? [String], [fixture.secondary.path])
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.primary.path))
+        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["lastSelectedRepositories"] as? [String], [fixture.secondary.path])
+
+        element("back-to-board-button").click()
+        element("new-task-button").click()
+        let restoredTitle = element("empty-conversation-repository-title")
+        XCTAssertTrue(restoredTitle.waitForExistence(timeout: 5), "A new task should restore the remaining remembered repository.")
+        XCTAssertEqual(accessibleLabelOrValue(of: restoredTitle), "secondary")
+        XCTAssertTrue(element("conversation-repository-badge-secondary").exists)
+        XCTAssertFalse(element("conversation-repository-badge-primary").exists)
+        attachScreenshot(named: "New task restores only the repository that remains selected")
 
         element("back-to-board-button").click()
         let pendingTitle = "Pending repository removal through UI"
@@ -4872,6 +4974,81 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Standalone chat pages keep separate sessions")
     }
 
+    // case-contract: test_standalone_chat_answer_stays_final_around_close_turn | A standalone chat reports no task outcome, so it ends every turn with Playhouse's own chat page close-turn signal, which Claude runs after its answer and before its closing line. That answer and closing line form one final answer, not commentary, in the streamed final answer, fresh CLI/XPC history, and the visible transcript, so the response is never left buried inside the collapsed Worked for disclosure; text written before an ordinary tool earlier in the same turn still stays commentary there, and the close-turn command really runs and succeeds. This classification is Claude-specific because Playhouse derives each message's phase from Claude's tool stream, while Codex reports the phase in its own protocol and so cannot mis-file an answer on the same turn shape.
+    func test_standalone_chat_answer_stays_final_around_close_turn() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-close-turn")
+        try FileManager.default.copyItem(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("Playhouse test owns this Claude Code protocol fixture (v1).\n".utf8).write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner")
+        )
+        claudeFixtureExecutable = executable.path
+        _ = try runCLI(["settings", "set-default-provider", "claude"])
+        _ = try runCLI(["settings", "clear-parent"])
+        launchApp(defaultParent: nil)
+        element("chat-sidebar-button").click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        _ = try runCLI(["chat", "open"])
+
+        let intent = "Let me check the newer release first."
+        let answer = "Confirmed: 2.1.309 registers the new model and 2.1.308 does not."
+        let closing = "Tell me if you want the upgrade command."
+        let prompt = "Summarize the release notes."
+        // Transcript messages are labeled groups.
+        func visibleTexts(containing text: String) -> XCUIElementQuery {
+            app.groups.matching(NSPredicate(format: "label CONTAINS %@", text))
+        }
+
+        let composer = element("message-composer")
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        composer.click()
+        composer.typeText(prompt)
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({
+            self.fixtureTurnCount(executable, containing: prompt) > 0 && self.noTurnIsRunning()
+        }, timeout: 30), "The chat turn should finish.")
+        XCTAssertTrue(waitUntil({
+            self.element("codex-activity-disclosure").exists
+                && self.element("codex-activity-disclosure").label.hasPrefix("Worked for")
+        }, timeout: 20), "The settled chat turn should show its Worked for summary.")
+
+        // Settling re-renders the transcript (commentary folds into Worked for), so the answer can briefly be mid-layout.
+        XCTAssertTrue(visibleTexts(containing: answer).firstMatch.waitForExistence(timeout: 10),
+                      "The answer written before the close-turn signal must be the visible response, not collapsed commentary.")
+        XCTAssertTrue(visibleTexts(containing: closing).firstMatch.waitForExistence(timeout: 5),
+                      "The closing line Claude adds after the signal belongs to the same answer.")
+        XCTAssertEqual(visibleTexts(containing: intent).count, 0,
+                       "Text written before an ordinary tool stays collapsed commentary.")
+        attachScreenshot(named: "standalone-chat-answer-is-the-response")
+
+        element("codex-activity-disclosure").click()
+        let activityDetails = element("codex-activity-details")
+        XCTAssertTrue(activityDetails.waitForExistence(timeout: 5), "Worked for should expand.")
+        // A progress bubble carries its text as the element's value, not its label, so it is
+        // identified by the provider message it was built from.
+        func progressBubbles(forMessageID messageID: String) -> XCUIElementQuery {
+            activityDetails.staticTexts.matching(
+                NSPredicate(format: "identifier BEGINSWITH %@", "codex-progress-message-\(messageID)")
+            )
+        }
+        XCTAssertEqual(progressBubbles(forMessageID: "msg_chat_answer").count, 0,
+                       "The answer must never be demoted into a Worked for progress entry.")
+        let intentBubble = progressBubbles(forMessageID: "msg_chat_intent")
+        XCTAssertTrue(intentBubble.count > 0,
+                      "The text written before an ordinary tool belongs inside Worked for.")
+        XCTAssertTrue((intentBubble.firstMatch.value as? String ?? "").contains(intent),
+                      "The Worked for progress entry should carry the commentary Claude wrote before its tool call.")
+        attachScreenshot(named: "standalone-chat-worked-for-holds-only-commentary")
+        element("codex-activity-disclosure").click()
+
+        let status = try XCTUnwrap(try runCLI(["chat", "status"])["result"] as? [String: Any])
+        XCTAssertEqual(status["missedPreviousPageSignal"] as? Bool, false,
+                       "A close-turn signal that really ran must satisfy the page signal instead of falling back to the classifier.")
+    }
+
     // case-contract: test_standalone_chat_claude_fallback_classifier | When a standalone chat uses Claude, a missed page signal invokes the Haiku helper at low effort; a malformed result is rejected and retried, an unrelated later question and its assistant reply move to a new titled page, the UI keeps page evaluation visually quiet without blocking the primary answer, updates the transcript separator when classification completes, and holds a following send until the decision resolves, and appends the related follow-up in chronological order. The Claude-specific model and effort arguments are verified through the real CLI/XPC path. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes.
     func test_standalone_chat_claude_fallback_classifier() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-chat-page-fallback")
@@ -5570,6 +5747,8 @@ final class PlayhouseUITests: XCTestCase {
             let visibleThinking = NSPredicate(format: "label CONTAINS %@ OR label CONTAINS %@", "Thinking", "Running")
             let thinkingExpectation = XCTNSPredicateExpectation(predicate: visibleThinking, object: reopenedActivity)
             XCTAssertEqual(XCTWaiter.wait(for: [thinkingExpectation], timeout: 30), .completed, "An active turn should remain visibly active after leaving and reopening the task.")
+            XCTAssertTrue(waitUntil({ reopenedActivity.value as? String == "Expanded, down chevron" }, timeout: 15),
+                          "Reopening a task mid-turn should land on the same open section instead of hiding the work behind Working for.")
 
             let activityDisclosure = element("codex-activity-disclosure")
             guard activityDisclosure.waitForExistence(timeout: 60) else {
@@ -5589,16 +5768,22 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertEqual(
                 XCTWaiter.wait(for: [runningActivityExpectation], timeout: 60),
                 .completed,
-                "The collapsed activity title should report the current running-task count."
+                "The activity title should report the current running-task count."
             )
-            attachScreenshot(named: "Running response with collapsed Codex activity")
             let activityRow = app.descendants(matching: .any)
                 .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "codex-activity-row-", "sleep 90; printf PAUSE_TEST_FINISHED"))
                 .firstMatch
-            XCTAssertFalse(activityRow.exists, "Activity details should stay collapsed until opened.")
+            XCTAssertTrue(activityRow.waitForExistence(timeout: 30), "A live turn should show its running command row without the reader opening anything.")
+            attachScreenshot(named: "Running chat composer and open Codex activity")
+            // The open section is a default, not a lock. The running row keeps the
+            // live slot outside the section, so the chevron is what folds here.
             activityDisclosure.click()
-            XCTAssertTrue(activityRow.waitForExistence(timeout: 30), "Opening activity details should show the running command row.")
-            attachScreenshot(named: "Running chat composer and expanded Codex activity")
+            XCTAssertTrue(waitUntil({ activityDisclosure.value as? String == "Collapsed, right chevron" }, timeout: 10),
+                          "A reader's mid-turn collapse should be honored.")
+            activityDisclosure.click()
+            XCTAssertTrue(waitUntil({ activityDisclosure.value as? String == "Expanded, down chevron" }, timeout: 10),
+                          "Reopening the section mid-turn should restore the open chevron.")
+            XCTAssertTrue(activityRow.waitForExistence(timeout: 30), "The running command row should remain available.")
 
             pauseButton.click()
             let continueButton = element("continue-response-button")
@@ -5653,6 +5838,10 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue((thinking["activeThreadIDs"] as? [String] ?? []).contains(threadID), "The daemon should report the window's thinking turn as active.")
         XCTAssertTrue((thinking["interruptibleThreadIDs"] as? [String] ?? []).contains(threadID), "The daemon should report the window's thinking turn as interruptible.")
 
+        let stopActivity = element("codex-activity-disclosure")
+        XCTAssertTrue(stopActivity.waitForExistence(timeout: 10), "A thinking turn should surface its activity section.")
+        XCTAssertTrue(waitUntil({ stopActivity.value as? String == "Expanded, down chevron" }, timeout: 10),
+                      "A thinking turn should show its work instead of hiding it behind Working for.")
         let stop = element("pause-response-button")
         XCTAssertTrue(waitUntil({ stop.isEnabled }, timeout: 10), "Stop should be enabled while the provider turn is active, before any text is written.")
         stop.click()
@@ -5669,17 +5858,26 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("continue-response-button").waitForExistence(timeout: 15), "The stopped turn should reset the composer to its resumable state.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         XCTAssertNil(try taskRecord(id: taskID)?["statusMessage"] as? String, "A user-requested stop should not leave a failure reason.")
+        // A user-initiated Stop settles with no final answer and no Blocked reason,
+        // distinct from both the answered and the interrupted-with-reason folds
+        // covered elsewhere. The fixture's reported activity keeps the section
+        // mounted, so the fold here is distinguishable from the section never
+        // having rendered.
+        let reopenedActivity = element("codex-activity-disclosure")
+        XCTAssertTrue(waitUntil({ reopenedActivity.value as? String == "Collapsed, right chevron" }, timeout: 10),
+                      "A user-initiated Stop should fold its activity section away once the daemon reports the turn no longer active.")
+        XCTAssertTrue(reopenedActivity.exists, "The stopped turn's activity section should stay available, just folded.")
         let settled = try XCTUnwrap(try runCLI(["conversation", "runtime"])["result"] as? [String: Any])
         XCTAssertFalse((settled["activeThreadIDs"] as? [String] ?? []).contains(threadID), "A stopped turn is no longer active in the daemon.")
         XCTAssertTrue((settled["interruptedThreadIDs"] as? [String] ?? []).contains(threadID), "The daemon should remember that the window paused the turn.")
     }
 
-    // case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles.
+    // case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles. The turn's activity section renders open for as long as the daemon reports the turn active, and folds once the stop settles with no final answer.
     func test_codex_stop_interrupts_thinking_turn_and_waits_for_response() throws {
         try exerciseStopDuringThinking(provider: "codex", title: "Codex stop while thinking")
     }
 
-    // case-contract: test_claude_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Claude reasoning immediately moves the task to Waiting Response and sends Claude's session-scoped control interrupt. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles.
+    // case-contract: test_claude_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Claude reasoning immediately moves the task to Waiting Response and sends Claude's session-scoped control interrupt. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles. The turn's activity section renders open for as long as the daemon reports the turn active, and folds once the stop settles with no final answer.
     func test_claude_stop_interrupts_thinking_turn_and_waits_for_response() throws {
         try exerciseStopDuringThinking(provider: "claude", title: "Claude stop while thinking")
     }
@@ -8049,7 +8247,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
     }
 
-    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the submitted user message remains visible in the transcript. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
+    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the submitted user message remains visible in the transcript. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. Working for renders open while the turn runs, so its progress is visible without a click, and it is still open after leaving and reopening the task mid-turn; every in-flight call is readable from mid-turn history. A collapse the reader performs mid-turn is honored and survives the activity updates that follow, and the final answer closes the section back into a clean collapsed Worked for. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
     func test_conversation_shows_mcp_and_dynamic_tool_activity() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-tool-activity").path
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
@@ -8077,11 +8275,12 @@ final class PlayhouseUITests: XCTestCase {
         let latestActiveRow = element("codex-activity-row-item_fixture_active_long_command")
         XCTAssertTrue(latestActiveRow.waitForExistence(timeout: 10), "The latest active process should appear outside Working for.")
         XCTAssertLessThan(latestActiveRow.frame.height, 45, "The long active command should remain a single truncated line.")
-        XCTAssertFalse(element("codex-activity-row-item_fixture_mcp_call").exists)
-        XCTAssertFalse(element("codex-activity-row-item_fixture_dynamic_call").exists)
-        element("codex-activity-disclosure").click()
+        let activityDisclosure = element("codex-activity-disclosure")
+        XCTAssertTrue(waitUntil({ activityDisclosure.value as? String == "Expanded, down chevron" }, timeout: 10),
+                      "A turn in flight should show its work instead of hiding it behind Working for.")
         let activityDetails = element("codex-activity-details")
-        XCTAssertTrue(activityDetails.waitForExistence(timeout: 5), "Expanded Working for should contain tool activity rows.")
+        XCTAssertTrue(activityDetails.waitForExistence(timeout: 5), "Working for should already list this turn's tool activity.")
+        attachScreenshot(named: "Working for stays open while the turn runs")
         // Activity rows are groups; their details and durations are child texts.
         func rowText(_ id: String) -> String {
             [element("codex-activity-row-\(id)").label,
@@ -8110,9 +8309,43 @@ final class PlayhouseUITests: XCTestCase {
         }
         XCTAssertTrue(mcpRow.label.contains("In progress"))
         XCTAssertTrue(dynamicRow.label.contains("In progress"))
+        // Leaving and reopening the task mid-turn lands on the same open section,
+        // with this turn's calls still readable; a cold reopen cannot reconstruct
+        // the live elapsed-time display the continuously-open window shows above,
+        // so this checks status and content, not the running duration.
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        openTask(named: "Tool activity")
+        XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 20))
+        XCTAssertTrue(waitUntil({ activityDisclosure.value as? String == "Expanded, down chevron" }, timeout: 15),
+                      "Reopening a task mid-turn should land on the same open section instead of hiding the work behind Working for.")
+        XCTAssertTrue(activityDetails.waitForExistence(timeout: 10), "The reopened live turn should render its progress without a click.")
+        XCTAssertTrue(mcpRow.waitForExistence(timeout: 10), "Reopening mid-turn should still show in-flight calls inside Working for.")
+        XCTAssertTrue(dynamicRow.waitForExistence(timeout: 5))
+        XCTAssertTrue(legacyDynamicRow.waitForExistence(timeout: 5))
+        XCTAssertTrue(mcpRow.label.contains("In progress"), "A reopened in-flight call should still read as in progress.")
+        XCTAssertTrue(latestActiveRow.waitForExistence(timeout: 10), "The reopened window should still show the latest active process outside Working for.")
+        XCTAssertFalse(commandRow.exists, "The active command should stay outside expanded Working for after reopening.")
+        // The open section is a default, not a lock: a reader can fold it mid-turn,
+        // and it must stay folded across the activity updates that follow.
+        activityDisclosure.click()
+        XCTAssertTrue(waitUntil({ !activityDetails.exists }, timeout: 5), "Collapsing mid-turn should hide this turn's activity rows.")
+        XCTAssertFalse(element("codex-activity-row-item_fixture_mcp_call").exists)
+        XCTAssertFalse(element("codex-activity-row-item_fixture_dynamic_call").exists)
+        attachScreenshot(named: "A reader can fold the section while the turn runs")
         try "Finish the newest call first.\n".write(to: toolReleaseLatest, atomically: true, encoding: .utf8)
-        XCTAssertTrue(waitUntil({ latestActiveRow.label.contains("Completed") }, timeout: 10))
+        // The finished command leaves the live slot outside the section; while the
+        // section is folded it is rendered nowhere, which is the observable signal
+        // that the update landed.
+        XCTAssertTrue(waitUntil({ !latestActiveRow.exists }, timeout: 10),
+                      "The completed command should leave the live activity slot to the still-running calls.")
+        XCTAssertEqual(activityDisclosure.value as? String, "Collapsed, right chevron",
+                       "An activity update arriving mid-turn must not reopen a section the reader folded.")
+        XCTAssertFalse(activityDetails.exists, "The reader's mid-turn collapse should survive the completing command.")
+        activityDisclosure.click()
+        XCTAssertTrue(activityDetails.waitForExistence(timeout: 5), "Expanded Working for should contain tool activity rows.")
         XCTAssertTrue(waitUntil({ commandRow.waitForExistence(timeout: 0.1) }, timeout: 10), "A completed command should move inside Working for.")
+        XCTAssertTrue(commandRow.label.contains("Completed"), "The command should read Completed once the section is reopened.")
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").count, 1)
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").count, 1)
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").count, 1)
@@ -8129,6 +8362,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ activityRowShows("item_fixture_active_long_command", "Completed") }, timeout: 15), "The long command should complete inside Working for.")
         // The final answer folds the turn's activity into Worked for; reopen it once settled.
         XCTAssertTrue(waitUntil({ self.element("codex-activity-disclosure").exists && self.element("codex-activity-disclosure").label.hasPrefix("Worked for") }, timeout: 30), "The turn should settle into Worked for.")
+        XCTAssertEqual(element("codex-activity-disclosure").value as? String, "Collapsed, right chevron",
+                       "The final answer should fold the open section back into a clean Worked for.")
+        attachScreenshot(named: "Worked for closes when the final answer arrives")
         var activityDetailsReopenCount = 0
         XCTAssertTrue(waitUntil({
             if !self.element("codex-activity-details").exists, activityDetailsReopenCount < 3 {
@@ -8370,7 +8606,7 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 10), "Upward scrolling must still reveal earlier messages after an in-place reload.")
     }
 
-    // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs. A fresh `conversation subagent-history` read returns the completed child's stored conversation content.
+    // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, Working for renders open and active agents appear as individual named rows outside it, with available path/model/reasoning metadata and started-working wording; a mid-turn collapse the reader performs is honored. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs. A fresh `conversation subagent-history` read returns the completed child's stored conversation content.
     func test_conversation_shows_subagent_delegation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".playhouse-bridge-fixture")
@@ -8409,10 +8645,12 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: subagentReady.path) }, timeout: 20), "The fixture should expose the active child interval before completion.")
         let activityDisclosure = element("codex-activity-disclosure")
         XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 10), "Active child work should appear in conversation activity.")
-        XCTAssertEqual(activityDisclosure.value as? String, "Collapsed, right chevron",
-                       "Active agent rows should be presented while Working for is collapsed.")
+        // Every activity in flight here renders outside the section, so the open
+        // section has nothing inside it yet; its state is the chevron, not content.
+        XCTAssertTrue(waitUntil({ activityDisclosure.value as? String == "Expanded, down chevron" }, timeout: 10),
+                      "A turn in flight should show its work instead of hiding it behind Working for.")
         let activeChildButton = element("codex-subagent-row-00000000-0000-0000-0000-000000000002")
-        XCTAssertTrue(activeChildButton.waitForExistence(timeout: 10), "The running child should appear as a clickable timeline row while Codex activity is collapsed.")
+        XCTAssertTrue(activeChildButton.waitForExistence(timeout: 10), "The running child should appear as a clickable timeline row beside the open Codex activity.")
         XCTAssertEqual(activityDisclosure.descendants(matching: .any).matching(identifier: "codex-subagent-row-00000000-0000-0000-0000-000000000002").count, 0,
                        "Active agents should not be nested inside Working for.")
         XCTAssertTrue(activeChildButton.label.contains("Sandbox review"))
@@ -8422,8 +8660,17 @@ final class PlayhouseUITests: XCTestCase {
         assertSubagentIconArtwork(agentIcon)
         let secondActiveChildButton = element("codex-subagent-row-00000000-0000-0000-0000-000000000003")
         XCTAssertTrue(secondActiveChildButton.waitForExistence(timeout: 5),
-                      "Every active agent should remain visible outside the collapsed Codex activity section.")
+                      "Every active agent should remain visible outside the Codex activity section.")
+        // The open section is a default, not a lock: folding it mid-turn sticks.
         activityDisclosure.click()
+        XCTAssertTrue(waitUntil({ activityDisclosure.value as? String == "Collapsed, right chevron" }, timeout: 5),
+                      "A reader should still be able to fold the open section while the turn runs.")
+        // Folding the section is what proves the active agents render outside it.
+        XCTAssertTrue(activeChildButton.exists && secondActiveChildButton.exists,
+                      "Active agents render outside the section, so folding it must not hide them.")
+        activityDisclosure.click()
+        XCTAssertTrue(waitUntil({ activityDisclosure.value as? String == "Expanded, down chevron" }, timeout: 5),
+                      "Reopening the section mid-turn should restore the open chevron.")
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-subagent-row-00000000-0000-0000-0000-000000000002").count, 1,
                        "The interacted update should update the single timeline row instead of creating a duplicate.")
         let childMetadata = subagentRowMetadata(activeChildButton)
@@ -9086,7 +9333,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(element("goal-clear-button").exists)
     }
 
-    // case-contract: test_conversation_models_keep_newest_version_per_family | The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Alias-only Claude entries are omitted. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control.
+    // case-contract: test_conversation_models_keep_newest_version_per_family | The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Claude Code names its newest release only through an alias entry's resolved model, so that resolved version supersedes the older concrete Opus 5 and keeps Claude Code's own display name. Alias entries with no resolved model are omitted. A remembered selection the filtered list no longer offers moves to its family's newest offered model and is written back, surviving a later refresh whose list no longer offers that family, while a still-offered selection is left alone. A remembered bare alias migrates to its family's offered release, but a dated snapshot pinned through the CLI is left in place because its family's undated release is not a higher version. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control.
     func test_conversation_models_keep_newest_version_per_family() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -9114,6 +9361,20 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertFalse(app.buttons["model-option-gpt-5.6-luna"].exists, "The older GPT-5.6 Luna model should be hidden from the picker.")
         XCTAssertFalse(app.buttons["model-option-default"].exists, "The default pseudo-model should not appear in the picker.")
         modelPicker.click()
+
+        // A remembered model the filtered list no longer offers follows its family
+        // forward, so the composer and the next send agree on one model. The Sol family
+        // is used deliberately: GPT-6 Luna is the fixture's default model, so a composer
+        // that had not yet loaded a selection would display it and hide a regression.
+        XCTAssertNotNil(try runCLI(["conversation", "model", taskID, "set", "gpt-5.6-sol"])["result"],
+            "Seeding the superseded selection should succeed.")
+        openTask(named: "Model versions")
+        XCTAssertTrue(waitUntil({ modelPicker.label.contains("GPT-6 Sol") }, timeout: 10),
+            "A superseded selection should move the composer to its family's newest offered model.")
+        attachScreenshot(named: "Composer follows a superseded model forward to GPT-6 Sol")
+        XCTAssertEqual(
+            (try runCLI(["conversation", "model", taskID])["result"] as? [String: Any])?["modelID"] as? String, "gpt-6-sol",
+            "The bridge should report the same forwarded model the composer shows.")
 
         let claudeExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         let aliasesExecutable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui-aliases-only")
@@ -9517,7 +9778,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(effort["effort"] as? String, "xhigh")
     }
 
-    // case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 as the concrete latest choice. Selecting it changes the prompt and reply label to Claude · Opus 5.5, and later model changes preserve the old reply's model attribution. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
+    // case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 resolved from Claude Code's bare alias entry as the concrete latest choice in place of the older Opus 5. Selecting it changes the prompt and reply label to Claude · Opus 5.5, and later model changes preserve the old reply's model attribution. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
     func test_conversation_effort_dispatches_to_claude() throws {
         let executable = WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
@@ -9532,13 +9793,21 @@ final class PlayhouseUITests: XCTestCase {
         let picker = element("model-picker-menu")
         XCTAssertTrue(picker.waitForExistence(timeout: 10))
         picker.click()
+        XCTAssertTrue(app.buttons["model-option-claude-opus-5-5"].waitForExistence(timeout: 5),
+            "The model popover should list the latest concrete Opus model.")
         XCTAssertFalse(app.buttons["model-option-default"].exists, "The Claude Default pseudo-model should not appear in the menu.")
         XCTAssertFalse(app.buttons["model-option-opus"].exists, "The versioned Opus model should replace its alias.")
+        XCTAssertFalse(app.buttons["model-option-claude-opus-5"].exists,
+            "The alias resolving to Opus 5.5 should supersede the older concrete Opus 5 entry.")
         XCTAssertTrue(app.buttons["model-option-claude-opus-5-5"].exists, "The latest concrete Opus model should remain selectable.")
+        // The open popover is the state the fix is about: the newest release of each
+        // family, which Claude Code names only through its alias entries. Popovers are
+        // separate windows, so the whole screen is captured.
+        attachScreenshot(named: "Claude model list shows the newest version of each family", fullScreen: true)
         app.buttons["model-option-claude-opus-5-5"].click()
         picker.click()
         XCTAssertTrue(app.staticTexts["Send a message to Claude · Opus 5.5."].waitForExistence(timeout: 10))
-        attachScreenshot(named: "Claude model list shows only versioned model families")
+        attachScreenshot(named: "Composer shows the selected Claude Opus 5.5 model")
         picker.click()
         let slider = element("model-effort-slider")
         XCTAssertTrue(slider.waitForExistence(timeout: 5))
@@ -9600,7 +9869,7 @@ final class PlayhouseUITests: XCTestCase {
         assertTaskVisible("Empty Claude question", inColumn: "Blocked")
     }
 
-    // case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from Playhouse history, clears pending state, and returns to Waiting Response.
+    // case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from Playhouse history, clears pending state, and returns to Waiting Response. While the recovery turn applying the answer runs, the answered question is no longer pending in history or shown in the reopened conversation, and the task is In Progress; if that recovery dies mid-turn, the question returns for retry with the task in Waiting Response, and answering again succeeds.
     func test_claude_pending_question_recovers_after_provider_process_restarts() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-restart-question")
         try FileManager.default.copyItem(
@@ -9643,12 +9912,57 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
         assertTaskVisible("Restart-safe Claude question", inColumn: "Waiting Response")
         openTask(named: "Restart-safe Claude question")
+        let recoveryPause = URL(fileURLWithPath: executable.path + ".recovery-pause")
+        let recoveryReady = URL(fileURLWithPath: executable.path + ".recovery-ready")
+        let recoveryRelease = URL(fileURLWithPath: executable.path + ".recovery-release")
+        try "Hold the recovery turn open.\n".write(to: recoveryPause, atomically: true, encoding: .utf8)
+        defer { try? "Release after assertion failure.\n".write(to: recoveryRelease, atomically: true, encoding: .utf8) }
+        element("ai-question-option-question-1-Green").click()
+        element("submit-ai-answers-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: recoveryReady.path) }, timeout: 15),
+                      "The fixture should hold the recovery turn open.")
+        XCTAssertTrue(waitUntil({ !self.element("conversation-user-input-request").exists }, timeout: 5),
+                      "The answered question card should leave while its recovery turn runs.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "In Progress")
+        attachScreenshot(named: "Answered question card hidden while its recovery turn runs")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        openTask(named: "Restart-safe Claude question")
+        XCTAssertTrue(waitUntil({ self.transcriptContains("Ask a restart-safe structured question.") }, timeout: 10),
+                      "The reopened conversation should load its saved history.")
+        XCTAssertFalse(waitUntil({ self.element("conversation-user-input-request").exists }, timeout: 2),
+                       "Reopening the task mid-recovery must not bring back the answered question.")
+        let applyingHistory = try XCTUnwrap(try runCLI(["conversation", "history", taskID])["result"] as? [String: Any])
+        XCTAssertNil(applyingHistory["pendingUserInputRequest"] as? [String: Any])
+        XCTAssertFalse(transcriptContains("Recovered answer: Green."))
+        attachScreenshot(named: "Reopened task mid-recovery keeps the answered question hidden")
+
+        // The bridge daemon owns the recovery turn; killing it mid-turn must bring
+        // the question back for retry.
+        let status = try XCTUnwrap(try runCLI(["status"])["result"] as? [String: Any])
+        let daemonPID = try XCTUnwrap(status["processID"] as? Int)
+        XCTAssertEqual(kill(pid_t(daemonPID), SIGKILL), 0, "The test should stop the daemon running the recovery turn.")
+        XCTAssertTrue(waitUntil({ kill(pid_t(daemonPID), 0) != 0 }, timeout: 5), "The killed daemon should exit.")
+        try "Release the orphaned recovery turn.\n".write(to: recoveryRelease, atomically: true, encoding: .utf8)
+        for marker in [recoveryPause, recoveryReady, recoveryRelease] {
+            try? FileManager.default.removeItem(at: marker)
+        }
+        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 15),
+                      "A failed recovery should restore its question card in the open window.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 5))
+        openTask(named: "Restart-safe Claude question")
+        XCTAssertTrue(element("conversation-user-input-request").waitForExistence(timeout: 10),
+                      "A recovery interrupted mid-turn should show its question again after reopening.")
+        XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+        attachScreenshot(named: "Question returns for retry after the recovery dies mid-turn")
         element("ai-question-option-question-1-Green").click()
         element("submit-ai-answers-button").click()
         XCTAssertTrue(waitUntil({ self.transcriptContains("Recovered answer: Green.") }, timeout: 15))
         XCTAssertFalse(element("conversation-user-input-request").exists)
         XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Answer: Green")).firstMatch.exists)
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
+        attachScreenshot(named: "Retried answer applied and the question cleared")
     }
 
     // case-contract: test_claude_pending_plan_mode_question_recovers_in_plan_mode | A Claude AskUserQuestion asked during a Plan mode turn persists its mode; after its provider process ends, answering resumes the saved Claude session in Plan mode rather than silently downgrading to Code mode, relaunching the recovery turn with --permission-mode plan.
@@ -9758,10 +10072,13 @@ final class PlayhouseUITests: XCTestCase {
         var expandedWorkedFor = false
         XCTAssertTrue(
             waitUntil({
-                // The final answer folds agent rows into a collapsed Worked for.
-                if !subagentRow.exists, !expandedWorkedFor, self.element("codex-activity-disclosure").exists,
-                   self.element("codex-activity-disclosure").label.hasPrefix("Worked for") {
-                    self.element("codex-activity-disclosure").click()
+                // The final answer folds agent rows into a collapsed Worked for;
+                // expand only when it is actually collapsed.
+                let disclosure = self.element("codex-activity-disclosure")
+                if !subagentRow.exists, !expandedWorkedFor, disclosure.exists,
+                   disclosure.label.hasPrefix("Worked for"),
+                   (disclosure.value as? String ?? "").hasPrefix("Collapsed") {
+                    disclosure.click()
                     expandedWorkedFor = true
                 }
                 return self.app.descendants(matching: .any).matching(NSPredicate(
@@ -9822,9 +10139,19 @@ final class PlayhouseUITests: XCTestCase {
             waitUntil({ self.transcriptContains("The background check failed.") }, timeout: 15),
             "The parent's answer should remain visible for a failed agent turn."
         )
-        element("codex-activity-disclosure").click()
+        // The section is open while the turn runs and folds into Worked for once the
+        // answer lands, so expand only when it is actually collapsed.
         let failedAgentRow = element("codex-subagent-row-toolu_background_agent")
-        XCTAssertTrue(waitUntil({ failedAgentRow.label.contains("failed") }, timeout: 15), failedAgentRow.label)
+        var failedExpandAttempts = 0
+        XCTAssertTrue(waitUntil({
+            if !failedAgentRow.exists, failedExpandAttempts < 3,
+               (self.element("codex-activity-disclosure").value as? String ?? "").hasPrefix("Collapsed") {
+                self.element("codex-activity-disclosure").click()
+                failedExpandAttempts += 1
+                return false
+            }
+            return failedAgentRow.label.contains("failed")
+        }, timeout: 15), failedAgentRow.label)
         XCTAssertFalse(element(reportIdentifier).exists, "A failed agent summary must not appear as a successful assistant result.")
         XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 20))
         XCTAssertLessThan(
@@ -10074,6 +10401,116 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Parked turn finished after the steered follow-up")
     }
 
+    // case-contract: test_claude_settles_turn_after_consumed_wake_notification | When Claude Code starts the provider turn that would deliver a finished background task's notification and then says nothing at all, Playhouse settles that turn on its own instead of leaving it open and the task In Progress forever: a follow-up queued while the turn was still parked stays queued through the silent wake, the send finishes and the task reaches Review, and that follow-up is then delivered in its own turn rather than stranded in the queue. A woken turn that is alive and merely slow to speak is not cut off by that backstop: it stays quiet past the grace a consumed notification gets and still ends the turn on its own answer.
+    func test_claude_settles_turn_after_consumed_wake_notification() throws {
+        let executable = dataDirectory.appendingPathComponent("claude-fixture-consumed-wake")
+        try FileManager.default.copyItem(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
+            to: executable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"),
+            atomically: true,
+            encoding: .utf8
+        )
+        claudeFixtureExecutable = executable.path
+        let pause = URL(fileURLWithPath: executable.path + ".consumed-wake-pause")
+        let parked = URL(fileURLWithPath: executable.path + ".consumed-wake-ready")
+        let release = URL(fileURLWithPath: executable.path + ".consumed-wake-release")
+        let woken = URL(fileURLWithPath: executable.path + ".consumed-wake-woken")
+        try Data().write(to: pause, options: .atomic)
+        defer {
+            try? Data("Release the consumed-wake fixture pause.\n".utf8).write(to: release, options: .atomic)
+            try? FileManager.default.removeItem(at: pause)
+        }
+        // Short graces keep the case inside the runner's time allowance; which
+        // silence settles the turn and which one waits for Claude does not
+        // depend on their lengths.
+        let graceEnvironment = [
+            "PLAYHOUSE_E2E_CLAUDE_WAKE_GRACE_SECONDS": "4",
+            "PLAYHOUSE_E2E_CLAUDE_WOKEN_SILENCE_GRACE_SECONDS": "24",
+            "PLAYHOUSE_E2E_CLAUDE_SLOW_WOKEN_SILENCE_SECONDS": "8",
+        ]
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude consumed wake", "--root", fixture.primary.path, "--provider", "claude"
+        ]) ["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        let slowCreated = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Claude slow woken turn", "--root", fixture.primary.path, "--provider", "claude"
+        ]) ["result"] as? [String: Any])
+        let slowTaskID = try XCTUnwrap(slowCreated["id"] as? String)
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: graceEnvironment)
+        openTask(named: "Claude consumed wake")
+        element("message-composer").click()
+        element("message-composer").typeText("Park a shell and then consumed wake notification.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: parked.path) }, timeout: 20),
+                      "The fixture should park the turn after its result while the shell runs.")
+        XCTAssertTrue(waitUntil({ self.element("pause-response-button").exists }, timeout: 10),
+                      "The parked turn must read as the active turn while the shell runs.")
+
+        // The turn is still active, so this follow-up queues rather than sends;
+        // only a settled turn can ever deliver it.
+        let stranded = "Then tell the story of the VM run."
+        let composer = element("message-composer")
+        composer.click()
+        composer.typeText(stranded)
+        composer.typeKey(.return, modifierFlags: [])
+        let queued = try runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]]
+        let queuedID = try XCTUnwrap(queued?.first(where: { $0["text"] as? String == stranded })?["id"] as? String)
+        XCTAssertTrue(element("queued-message-text-\(queuedID)").waitForExistence(timeout: 10),
+                      "A follow-up sent while the parked turn is active must wait in the queue.")
+
+        try Data("Release the consumed-wake fixture pause.\n".utf8).write(to: release, options: .atomic)
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: woken.path) }, timeout: 20),
+                      "The fixture should start the woken turn and then stay silent.")
+        XCTAssertTrue(element("pause-response-button").exists,
+                      "The silently consumed wake leaves the turn active until Playhouse's own grace period settles it.")
+        XCTAssertTrue(element("queued-message-text-\(queuedID)").exists,
+                      "A stranded turn takes no further input, so the follow-up is still waiting here.")
+        attachScreenshot(named: "Turn still active and the follow-up still queued after the silently consumed wake")
+
+        // Only the woken-turn silence grace can end this turn, so wait past it.
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 60),
+                      "Playhouse must settle a turn stranded by a silently consumed wake instead of leaving it active forever.")
+        XCTAssertTrue(transcriptContains("WAKE SHELL STARTED"),
+                      "Settling a stranded turn must keep the answer it already gave.")
+        attachScreenshot(named: "Playhouse settled the stranded turn by itself")
+
+        XCTAssertTrue(waitUntil({ self.transcriptContains("BISCUIT-7") }, timeout: 60),
+                      "A follow-up queued while the turn was stranded must be delivered once Playhouse settles it.")
+        XCTAssertTrue(waitUntil({
+            (try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])??
+                .contains { $0["id"] as? String == queuedID } == false
+        }, timeout: 30), "The delivered follow-up must leave the queue.")
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["task", "get", taskID])["result"] as? [String: Any])??["status"] as? String) == "Review"
+        }, timeout: 60), "A task whose turn was stranded must not stay In Progress once Playhouse settles it.")
+        attachScreenshot(named: "Delivered follow-up answered and the task out of In Progress")
+
+        // A woken turn that is alive and merely slow to speak must not be cut
+        // off by that same backstop: it gets its own, far longer grace.
+        let announced = URL(fileURLWithPath: executable.path + ".slow-woken-announced")
+        openTask(named: "Claude slow woken turn")
+        element("message-composer").click()
+        element("message-composer").typeText("Park a shell and then a slow woken turn.")
+        element("send-message-button").click()
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: announced.path) }, timeout: 30),
+                      "The fixture should announce the woken turn before going quiet.")
+        XCTAssertTrue(element("pause-response-button").exists,
+                      "A woken turn that has only just announced itself is still the active turn.")
+        attachScreenshot(named: "Slow woken turn announced itself and is still the active turn while it stays quiet")
+        XCTAssertTrue(waitUntil({ self.transcriptContains("SLOW WOKEN HANDLED") }, timeout: 60),
+                      "A woken turn quiet past the consumed-notification grace must still end on its own answer.")
+        XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 30),
+                      "Claude's own answer ends the slow woken turn.")
+        attachScreenshot(named: "Slow woken turn answered instead of being cut off by the backstop")
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["task", "get", slowTaskID])["result"] as? [String: Any])??["status"] as? String) == "Review"
+        }, timeout: 60), "The slow woken turn's own completed outcome should move its task to Review.")
+    }
+
     // case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, Playhouse returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics.
     func test_claude_private_recovery_failure_fails_closed() throws {
         let executable = dataDirectory.appendingPathComponent("claude-fixture-recovery-failure")
@@ -10183,9 +10620,14 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(providerHistory.contains("Green"))
         XCTAssertTrue(providerHistory.contains("fixture-secret"))
         let immediateActivityDisclosure = element("codex-activity-disclosure")
-        if immediateActivityDisclosure.exists { immediateActivityDisclosure.click() }
+        // The section is open during a turn and collapsed once it settles; expand only
+        // when collapsed, so the redaction check always inspects expanded details.
+        XCTAssertTrue(expandActivityDetails(immediateActivityDisclosure),
+            "The redaction check must inspect expanded activity details, not a collapsed section.")
         XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "fixture-secret")).firstMatch.exists,
             "Playhouse conversation content and expanded activity details must redact the re-entered secret.")
+        XCTAssertEqual(immediateActivityDisclosure.value as? String, "Expanded, down chevron",
+            "The section must still be open, so the redaction check above was not vacuous.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
@@ -10196,9 +10638,12 @@ final class PlayhouseUITests: XCTestCase {
             "After restart, history should hide the assistant response from a secret recovery turn.")
         XCTAssertTrue(transcriptMessage("[Private answer sent after restart]").exists)
         let persistedActivityDisclosure = element("codex-activity-disclosure")
-        if persistedActivityDisclosure.exists { persistedActivityDisclosure.click() }
+        XCTAssertTrue(expandActivityDetails(persistedActivityDisclosure),
+            "The reloaded redaction check must inspect expanded activity details.")
         XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "fixture-secret")).firstMatch.exists,
             "The secret must remain redacted from messages, activities, and diffs after Playhouse reloads provider history.")
+        XCTAssertEqual(persistedActivityDisclosure.value as? String, "Expanded, down chevron",
+            "The reloaded section must still be open, so the redaction check above was not vacuous.")
 
         let followUpComposer = element("message-composer")
         followUpComposer.click()
@@ -10902,7 +11347,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(deliveredAnswered["itemIDs"] as? [String], ["item_playhouse_async_question"], "The delivered async answer should be recorded as answered.")
     }
 
-    // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; a turn running when the window quits cleanly or is killed keeps running in the bridge daemon, stays In Progress with its prompt visible after relaunch, finishes, and allows a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
+    // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; a turn running when the window quits cleanly or is killed keeps running in the bridge daemon, stays In Progress with its prompt visible after relaunch, finishes, and allows a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. The live turn's activity section renders open and folds away when the interrupted turn settles without an answer, on the conversation that stayed open; the interrupted turn adds no final answer and keeps the activity it reported. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
     func test_codex_interrupted_turn_blocks_with_reason_and_can_retry() throws {
         _ = try runCLI(["task", "create", "--title", "Interrupted turn", "--root", fixture.primary.path])
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-interrupted").path
@@ -10912,6 +11357,14 @@ final class PlayhouseUITests: XCTestCase {
         element("message-composer").typeText("Start work that will be interrupted.")
         element("send-message-button").click()
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        let interruptedActivity = element("codex-activity-disclosure")
+        XCTAssertTrue(interruptedActivity.waitForExistence(timeout: 10), "A live turn should surface its activity section.")
+        XCTAssertTrue(waitUntil({ interruptedActivity.value as? String == "Expanded, down chevron" }, timeout: 10),
+                      "A turn in flight should show its work instead of hiding it behind Working for.")
+        // The lone reported activity is still running, so it occupies the live slot
+        // outside the section; the open section itself has nothing inside it yet.
+        XCTAssertTrue(element("codex-activity-row-item_fixture_interrupted_command").waitForExistence(timeout: 10),
+                      "The live turn should render its reported activity without a click.")
         let interruptedID = try taskID(named: "Interrupted turn")
         let queuedText = "Follow up after I review the interrupted turn."
         let queued = try runCLI(["conversation", "queue", interruptedID, "--message", queuedText])["result"] as? [String: Any]
@@ -10921,6 +11374,15 @@ final class PlayhouseUITests: XCTestCase {
         element("submit-ai-answers-button").click()
 
         XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10))
+        // The turn settles with no answer. Its reported activity keeps the section
+        // mounted on the same conversation, so it must be folded rather than gone:
+        // asserting the section still exists is what makes the collapse meaningful.
+        XCTAssertTrue(waitUntil({ interruptedActivity.value as? String == "Collapsed, right chevron" }, timeout: 10),
+                      "An interrupted turn should fold its activity section away instead of resting open.")
+        XCTAssertTrue(interruptedActivity.exists, "The interrupted turn's activity section should stay available, just folded.")
+        XCTAssertFalse(element("codex-activity-details").exists, "A settled interrupted turn should not rest on expanded activity details.")
+        XCTAssertFalse(element("pause-response-button").exists, "The interrupted turn should no longer be responding.")
+        attachScreenshot(named: "Activity folds away when an interrupted turn settles")
         XCTAssertTrue(app.staticTexts["Follow-up needs your action"].waitForExistence(timeout: 10), "An interrupted turn must retain its queued message for an explicit retry.")
         let blocked = try XCTUnwrap(taskRecord(named: "Interrupted turn"))
         XCTAssertEqual(blocked["status"] as? String, "Blocked")
@@ -11511,6 +11973,210 @@ final class PlayhouseUITests: XCTestCase {
         )
     }
 
+    // case-contract: test_task_cpu_usage_reports_claude_process_tree_load | A newly created Claude task reports cpu-usage as not running before any turn starts. While a real Claude Code fixture turn burns CPU in a real child process, two successive `task cpu-usage` reads establish a baseline and then a plausible non-zero percentage for the task's process tree, the task card's CPU bar reads cool green against the default multi-core ceiling and hot red once the ceiling is lowered to match that load, and the reading returns to not-running once the turn completes.
+    func test_task_cpu_usage_reports_claude_process_tree_load() throws {
+        var environment = try installClaudeFixture(named: "claude-fixture-ui-cpu-usage")
+        environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU"] = "1"
+        environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU_SECONDS"] = "25"
+        launchApp(defaultParent: fixture.parent.path)
+        let taskID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Claude CPU usage", "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        XCTAssertTrue(app.buttons["Claude CPU usage"].waitForExistence(timeout: 10))
+
+        let bar = element("task-cpu-usage-bar-\(taskID)")
+        let card = element("task-card-\(taskID)")
+        XCTAssertFalse(bar.exists, "A task with no turn yet should show no CPU bar.")
+
+        let process = try startCLIProcess(
+            ["conversation", "send", taskID, "--message", "Tell me a story."],
+            extraEnvironment: environment
+        )
+        defer {
+            if process.process.isRunning {
+                process.process.terminate()
+                process.process.waitUntilExit()
+            }
+        }
+
+        XCTAssertTrue(waitUntil({
+            (try? self.runCLI(["task", "get", taskID])["result"] as? [String: Any])?["claudeSessionID"] != nil
+        }, timeout: 10), "The Claude fixture turn should start a session while it burns CPU.")
+
+        XCTAssertTrue(bar.waitForExistence(timeout: 10), "A busy Claude task should show its left-edge CPU bar.")
+        attachScreenshot(named: "Task card shows a busy Claude task's CPU bar")
+        // Against the default, core-count-scaled ceiling, one burning core is a
+        // small fraction of the total, so the bar should still read cool green
+        // — this is what the gradient-reveal fill must get right at low usage.
+        // Sampled off the stable card (not the thin, continuously-animating bar
+        // sub-view) restricted to its left edge, since the bar's own element
+        // identity can transiently drop out of the accessibility tree between
+        // an existence check and a screenshot fetch mid-animation.
+        XCTAssertTrue(waitUntil({ self.isGreenDominant(card, leftEdgeFraction: 0.06) }, timeout: 10), "One burning core against the default multi-core ceiling should still read cool green.")
+        attachScreenshot(named: "CPU bar reads green against the default multi-core ceiling")
+
+        // A low ceiling guarantees the same load now reads clearly hot,
+        // regardless of how many cores this machine has.
+        _ = try runCLI(["settings", "set-cpu-usage-color-max", "50"])
+        XCTAssertTrue(waitUntil({ self.isRedDominant(card, leftEdgeFraction: 0.06) }, timeout: 10), "A single burning core should read hot against a 50% ceiling.")
+        attachScreenshot(named: "CPU bar reads hot once usage reaches the lowered ceiling")
+
+        _ = try finishCLIProcess(process)
+        XCTAssertTrue(waitUntil({ !bar.exists }, timeout: 15), "The bar should disappear once the turn completes.")
+    }
+
+    // case-contract: test_task_cpu_usage_attributes_codex_load_by_worktree | Two Codex tasks rooted in different repository folders share one real fixture app-server. Before any turn each reports cpu-usage as not running. While task A's turn runs a real CPU-burning child process in A's folder and task B's concurrent turn runs an idle child in B's folder, both children belong to the same app-server process; once a baseline is sampled, `task cpu-usage` attributes a plausible non-zero percentage to A and a near-zero one to B, and the task cards show A's CPU bar reading hot against a lowered ceiling beside B's visible but empty bar. Both readings return to not-running once the turns complete.
+    func test_task_cpu_usage_attributes_codex_load_by_worktree() throws {
+        let executable = dataDirectory.appendingPathComponent("codex-fixture-cpu-attribution")
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8)
+            .write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
+        let environment = ["PLAYHOUSE_E2E_CODEX_EXECUTABLE": executable.path]
+        launchApp(defaultParent: fixture.parent.path)
+        let busyID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Codex busy worktree", "--root", fixture.primary.path, "--provider", "codex",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        let idleID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", "Codex idle worktree", "--root", fixture.secondary.path, "--provider", "codex",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        XCTAssertTrue(app.buttons["Codex busy worktree"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Codex idle worktree"].waitForExistence(timeout: 10))
+
+        let busyBar = element("task-cpu-usage-bar-\(busyID)")
+        let idleBar = element("task-cpu-usage-bar-\(idleID)")
+        let busyCard = element("task-card-\(busyID)")
+        let idleCard = element("task-card-\(idleID)")
+        for taskID in [busyID, idleID] {
+            let before = try XCTUnwrap(try runCLI(["task", "cpu-usage", taskID])["result"] as? [String: Any])
+            XCTAssertTrue(before["cpuPercent"] == nil || before["cpuPercent"] is NSNull, "A Codex task with no turn yet has nothing to sample.")
+            XCTAssertEqual(before["reason"] as? String, "not_running")
+        }
+        XCTAssertFalse(busyBar.exists, "A Codex task with no turn yet should show no CPU bar.")
+        XCTAssertFalse(idleBar.exists, "A Codex task with no turn yet should show no CPU bar.")
+
+        let busy = try startCLIProcess(["conversation", "send", busyID, "--message", "Please burn cpu for 25 seconds."], extraEnvironment: environment)
+        let idle = try startCLIProcess(["conversation", "send", idleID, "--message", "Please idle cpu for 25 seconds."], extraEnvironment: environment)
+        defer {
+            for running in [busy, idle] where running.process.isRunning {
+                running.process.terminate()
+                running.process.waitUntilExit()
+            }
+            // A failed assertion must not leave the daemon-side burn running into later cases.
+            if let burner = cpuAttributionChild(executable: executable, kind: "burn") {
+                kill(burner.pid, SIGTERM)
+            }
+        }
+
+        var children: [String: (pid: Int32, parentPID: Int32, workingDirectory: String)] = [:]
+        XCTAssertTrue(waitUntil({
+            children = [:]
+            for kind in ["burn", "idle"] {
+                if let child = self.cpuAttributionChild(executable: executable, kind: kind) { children[kind] = child }
+            }
+            return children.count == 2
+        }, timeout: 15), "Both tasks' turns should be running their command children.")
+        XCTAssertEqual(children["burn"]?.parentPID, children["idle"]?.parentPID, "Both tasks' commands should run under one shared app-server.")
+        XCTAssertEqual(children["burn"].map { URL(fileURLWithPath: $0.workingDirectory).resolvingSymlinksInPath().path },
+                       fixture.primary.resolvingSymlinksInPath().path, "The busy command runs in its task's folder.")
+        XCTAssertEqual(children["idle"].map { URL(fileURLWithPath: $0.workingDirectory).resolvingSymlinksInPath().path },
+                       fixture.secondary.resolvingSymlinksInPath().path, "The idle command runs in its task's folder.")
+
+        XCTAssertTrue(busyBar.waitForExistence(timeout: 15), "The busy Codex task should show its left-edge CPU bar.")
+        XCTAssertTrue(idleBar.waitForExistence(timeout: 15), "A running Codex task with an idle command still shows its (empty) CPU bar.")
+        attachScreenshot(named: "Busy and idle Codex task cards both show a CPU bar")
+
+        var readings: [String: [String: Any]] = [:]
+        XCTAssertTrue(waitUntil({
+            for taskID in [busyID, idleID] {
+                readings[taskID] = (try? self.runCLI(["task", "cpu-usage", taskID]))?["result"] as? [String: Any]
+            }
+            return [busyID, idleID].allSatisfy { readings[$0]?["cpuPercent"] is Double }
+        }, timeout: 10), "Both running Codex tasks should be sampled: \(readings)")
+        Thread.sleep(forTimeInterval: 1)
+        let busyReading = try XCTUnwrap(try runCLI(["task", "cpu-usage", busyID])["result"] as? [String: Any])
+        let idleReading = try XCTUnwrap(try runCLI(["task", "cpu-usage", idleID])["result"] as? [String: Any])
+        let busyPercent = try XCTUnwrap(busyReading["cpuPercent"] as? Double, "\(busyReading)")
+        let idlePercent = try XCTUnwrap(idleReading["cpuPercent"] as? Double, "A running Codex task with an idle command still reports a value: \(idleReading)")
+        XCTAssertGreaterThan(busyPercent, 20, "The busy-looping command's CPU should be attributed to its own task.")
+        XCTAssertLessThan(busyPercent, Double(ProcessInfo.processInfo.activeProcessorCount * 100 + 50), "One busy loop can't exceed every core.")
+        XCTAssertLessThan(idlePercent, 5, "The other task's busy command must not leak into the idle task's reading.")
+        // The bars' own labels carry the streamed reading: the idle card's
+        // bar is present but empty, the busy card's is not.
+        XCTAssertTrue(waitUntil({ idleBar.exists && idleBar.label == "CPU 0%" }, timeout: 10), "The idle Codex task's bar should read 0%, got \(idleBar.label)")
+        XCTAssertTrue(waitUntil({
+            busyBar.exists && busyBar.label.hasPrefix("CPU ") && busyBar.label != "CPU 0%"
+        }, timeout: 10), "The busy Codex task's bar should report its load, got \(busyBar.label)")
+
+        // A ceiling below one busy core makes the busy task's bar read
+        // clearly hot while the idle task's bar stays empty. Sampled off each
+        // stable card's left edge, as in the Claude case.
+        _ = try runCLI(["settings", "set-cpu-usage-color-max", "50"])
+        XCTAssertTrue(waitUntil({ self.isRedDominant(busyCard, leftEdgeFraction: 0.06) }, timeout: 10), "The busy Codex task should read hot against a 50% ceiling.")
+        XCTAssertTrue(idleBar.exists, "The idle Codex task keeps its bar while its turn runs.")
+        XCTAssertFalse(isRedDominant(idleCard, leftEdgeFraction: 0.06), "The idle Codex task's bar should stay empty, not inherit the busy task's load.")
+        attachScreenshot(named: "Busy Codex task's bar reads hot beside the idle task's empty bar")
+
+        _ = try finishCLIProcess(busy)
+        _ = try finishCLIProcess(idle)
+        XCTAssertTrue(waitUntil({ !busyBar.exists && !idleBar.exists }, timeout: 15), "Both bars should disappear once the turns complete.")
+        for taskID in [busyID, idleID] {
+            let finished = try XCTUnwrap(try runCLI(["task", "cpu-usage", taskID])["result"] as? [String: Any])
+            XCTAssertTrue(finished["cpuPercent"] == nil || finished["cpuPercent"] is NSNull, "A finished Codex turn is no longer running.")
+            XCTAssertEqual(finished["reason"] as? String, "not_running")
+        }
+        attachScreenshot(named: "Both Codex task cards drop their CPU bars once the turns finish")
+    }
+
+    /// The pid, parent pid and working directory a running CPU-attribution
+    /// fixture child recorded for itself. The sandboxed UI runner can't list
+    /// the daemon's descendants with `ps`, so the child reports them.
+    private func cpuAttributionChild(executable: URL, kind: String) -> (pid: Int32, parentPID: Int32, workingDirectory: String)? {
+        let record = URL(fileURLWithPath: executable.path + ".cpu-child-\(kind).json")
+        guard let data = try? Data(contentsOf: record),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let pid = (object["pid"] as? NSNumber)?.int32Value,
+              let parentPID = (object["parentPID"] as? NSNumber)?.int32Value,
+              let workingDirectory = object["workingDirectory"] as? String else { return nil }
+        return (pid, parentPID, workingDirectory)
+    }
+
+    // case-contract: test_settings_cpu_usage_color_max_round_trip | The CPU usage color maximum defaults to one fully busy core per logical CPU, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting.
+    func test_settings_cpu_usage_color_max_round_trip() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        let expectedDefault = ProcessInfo.processInfo.activeProcessorCount * 100
+        XCTAssertEqual(
+            (try runCLI(["settings", "get"])["result"] as? [String: Any])?["cpuUsageColorMax"] as? Int, expectedDefault,
+            "The bar's scale tops out at one busy core per logical CPU by default."
+        )
+
+        app.typeKey(",", modifierFlags: .command)
+        let preferences = settingsWindow
+        XCTAssertTrue(preferences.waitForExistence(timeout: 10), "Workspace Settings did not open.")
+        let maxField = preferences.descendants(matching: .any)
+            .matching(identifier: "cpu-usage-color-max-field").firstMatch
+        XCTAssertTrue(maxField.waitForExistence(timeout: 5), "Settings should expose the CPU usage maximum.")
+        XCTAssertEqual(maxField.value as? String, expectedDefault.formatted(), "The field should show the stored maximum.")
+        attachScreenshot(named: "Workspace Settings exposes the CPU usage color maximum")
+        maxField.click()
+        maxField.typeKey("a", modifierFlags: .command)
+        maxField.typeText("250\r")
+        XCTAssertTrue(waitUntil({
+            ((try? self.runCLI(["settings", "get"])["result"] as? [String: Any])?["cpuUsageColorMax"] as? Int) == 250
+        }, timeout: 10), "An edited maximum should save through the same settings manager the CLI reads.")
+        app.typeKey("w", modifierFlags: .command)
+        XCTAssertTrue(waitUntil({ !preferences.exists }, timeout: 5))
+
+        assertCLIError(
+            try runCLI(["settings", "set-cpu-usage-color-max", "0"], expectedStatus: 2),
+            code: "invalid_argument"
+        )
+        XCTAssertEqual(
+            (try runCLI(["settings", "get"])["result"] as? [String: Any])?["cpuUsageColorMax"] as? Int, 250,
+            "A rejected maximum should leave the stored one alone."
+        )
+    }
+
     /// The real provider selected for opt-in live UI cases, or nil for the
     /// deterministic fixture suite. The runner writes it to the marker file.
     private var liveProvider: String? {
@@ -12076,15 +12742,21 @@ final class PlayhouseUITests: XCTestCase {
     }
 
     /// The usage dot is one flat hue, so the dominant channel says where on the
-    /// green-to-red heatmap it currently sits.
-    private func isGreenDominant(_ element: XCUIElement) -> Bool {
+    /// green-to-red heatmap it currently sits. `leftEdgeFraction` restricts the
+    /// sample to a left-hand slice of `element`'s screenshot — used to read the
+    /// CPU bar's color off the stable task card instead of the thin animated
+    /// bar sub-view itself, whose identity can transiently drop out of the
+    /// accessibility tree between an existence check and a screenshot fetch.
+    private func isGreenDominant(_ element: XCUIElement, leftEdgeFraction: CGFloat = 1.0) -> Bool {
+        guard element.exists else { return false }
         let image = element.screenshot().image
-        return pixelCount(in: image) { $0.greenComponent > $0.redComponent + 0.15 } > 4
+        return pixelCount(in: image, maxXFraction: leftEdgeFraction) { $0.greenComponent > $0.redComponent + 0.15 } > 4
     }
 
-    private func isRedDominant(_ element: XCUIElement) -> Bool {
+    private func isRedDominant(_ element: XCUIElement, leftEdgeFraction: CGFloat = 1.0) -> Bool {
+        guard element.exists else { return false }
         let image = element.screenshot().image
-        return pixelCount(in: image) { $0.redComponent > $0.greenComponent + 0.15 } > 4
+        return pixelCount(in: image, maxXFraction: leftEdgeFraction) { $0.redComponent > $0.greenComponent + 0.15 } > 4
     }
 
     private func assertPixel(_ image: NSImage, normalizedX: CGFloat, normalizedY: CGFloat, rgb expected: (Int, Int, Int), accuracy: Int = 8, file: StaticString = #filePath, line: UInt = #line) {
@@ -12178,6 +12850,25 @@ final class PlayhouseUITests: XCTestCase {
         assertPixel(logoImage, normalizedX: 0.50, normalizedY: 0.35, rgb: (245, 179, 124), accuracy: 35, file: file, line: line)
         assertPixel(logoImage, normalizedX: 0.20, normalizedY: 0.80, rgb: (177, 54, 171), accuracy: 35, file: file, line: line)
         assertPixel(logoImage, normalizedX: 0.80, normalizedY: 0.80, rgb: (240, 82, 121), accuracy: 30, file: file, line: line)
+    }
+
+    /// The activity section renders open while a turn runs and collapses once it
+    /// settles, so a test that needs the details open must expand only when the
+    /// disclosure is actually collapsed; clicking blindly can close it instead.
+    /// Reports whether the section ended up open, so a caller can assert that its
+    /// own check really inspected an open section. The chevron is the anchor, not
+    /// the details container: when every activity in flight renders outside the
+    /// section, an open section has no children and does not resolve.
+    @discardableResult
+    private func expandActivityDetails(_ disclosure: XCUIElement? = nil, timeout: TimeInterval = 10) -> Bool {
+        let control = disclosure ?? element("codex-activity-disclosure")
+        guard control.exists else { return false }
+        return waitUntil({
+            let value = control.value as? String ?? ""
+            if value.hasPrefix("Expanded") { return true }
+            if value.hasPrefix("Collapsed") { control.click() }
+            return (control.value as? String ?? "").hasPrefix("Expanded")
+        }, timeout: timeout)
     }
 
     /// An agent row's metadata line, read from the row's button beside its icon.
@@ -12879,11 +13570,12 @@ final class PlayhouseUITests: XCTestCase {
     }
 
     /// Counts pixels matching `matches`, sampling every `step` pixels; 0 when the image cannot be read.
-    private func pixelCount(in image: NSImage, step: Int = 1, where matches: (NSColor) -> Bool) -> Int {
+    private func pixelCount(in image: NSImage, step: Int = 1, maxXFraction: CGFloat = 1.0, where matches: (NSColor) -> Bool) -> Int {
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return 0 }
         let bitmap = NSBitmapImageRep(cgImage: cgImage)
         var count = 0
-        for x in stride(from: 0, to: cgImage.width, by: step) {
+        let maxX = Int(CGFloat(cgImage.width) * maxXFraction)
+        for x in stride(from: 0, to: maxX, by: step) {
             for y in stride(from: 0, to: cgImage.height, by: step) {
                 guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
                 if matches(color) { count += 1 }

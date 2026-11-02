@@ -191,6 +191,40 @@ extension Array where Element == ConversationModelOption {
             return retainedFamilies.insert(family).inserted
         }
     }
+
+    /// The entry that supersedes a remembered selection the filtered list no longer
+    /// offers, so a saved choice such as `claude-opus-5` follows its family forward
+    /// instead of silently continuing to run an older model than the picker shows.
+    /// Returns nil when the selection is still offered or the family only moved backwards.
+    ///
+    /// Only a strictly higher version number moves a selection, not merely a preferred
+    /// one. That protects a dated snapshot such as `claude-opus-5-5-20251001`, which only
+    /// the CLI can select: its family's undated `claude-opus-5-5` carries the same numbers
+    /// and so leaves the pin in place, while a genuinely newer `claude-opus-6` still wins.
+    /// The mirror case holds a selection still: an undated ID whose family now offers only
+    /// a same-numbered snapshot stays put, unofferable but never silently re-pointed.
+    ///
+    /// Callers pass a `newestVersionPerFamily()` result, which holds one entry per
+    /// family; the newest-of-family pick below keeps the answer well defined on a raw
+    /// provider list too.
+    func supersedingModel(forSelectedID selectedID: String) -> ConversationModelOption? {
+        guard !selectedID.isEmpty, !contains(where: { $0.id == selectedID }) else { return nil }
+        let family = ModelVersion.familyName(for: selectedID)
+        let candidates = compactMap { model -> (ConversationModelOption, ModelVersion)? in
+            guard ModelVersion.familyName(for: model.id) == family,
+                  let version = ModelVersion(id: model.id) else { return nil }
+            return (model, version)
+        }
+        guard let (candidate, candidateVersion) = candidates.max(by: {
+            $1.1.isPreferred(over: $0.1, id: $1.0.id, otherID: $0.0.id)
+        }) else { return nil }
+        // A selection with no parseable version is a bare alias left by an older
+        // Playhouse release, such as `opus`. There is nothing to compare, and the
+        // family's offered entry is exactly what that alias used to mean, so it
+        // always migrates rather than lingering as an ID the picker cannot show.
+        guard let selectedVersion = ModelVersion(id: selectedID) else { return candidate }
+        return selectedVersion.numbers.lexicographicallyPrecedes(candidateVersion.numbers) ? candidate : nil
+    }
 }
 
 private struct VersionedModel {
@@ -238,6 +272,13 @@ private struct ModelVersion {
         return version.family
     }
 
+    /// Only reachable for a provider release that reports a bare alias with no
+    /// resolved model at all. An alias that names its resolved model arrives here
+    /// already keyed on that concrete ID, so it is compared by version like any
+    /// other entry rather than being dropped as unversioned.
+    ///
+    /// The list is deliberately narrow: an unlisted bare alias is retained rather
+    /// than hidden. `scripts/test-live-integration.py` asserts against the same set.
     static func isAlias(_ id: String) -> Bool {
         let normalizedID = id.lowercased().hasPrefix("claude-") ? String(id.dropFirst("claude-".count)).lowercased() : id.lowercased()
         return ["opus", "sonnet", "haiku", "default"].contains(normalizedID)
@@ -620,6 +661,66 @@ struct ConversationRuntimeSnapshot: Codable, Equatable {
             continuation.onTermination = { _ in task.cancel() }
         }
     }
+}
+
+/// Live CPU usage of each turn-active task, keyed by thread/session ID. A
+/// Claude task owns its own Claude Code process, so its value is that
+/// process tree's load. Codex multiplexes every task's turns inside one
+/// shared `app-server` process, so a Codex task's value is the share of that
+/// app-server's tree attributed to it by working directory (see
+/// `CodexProcessAttribution`).
+struct TaskCPUUsageSnapshot: Codable, Equatable {
+    var percentByThreadID: [String: Double] = [:]
+
+    /// See `ConversationRuntimeSnapshot.current(dataDirectory:)` for why
+    /// `dataDirectory` scopes the snapshot to one isolated client set.
+    @MainActor
+    static func current(dataDirectory: String? = nil) async -> TaskCPUUsageSnapshot {
+        let scope = dataDirectory.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
+        var pidsByThreadID: [String: pid_t] = [:]
+        for client in ClaudeCodeClient.allSharedPrimaryClients where scope == nil || client.runtimeScope == scope {
+            pidsByThreadID.merge(client.activeProcessIdentifiersByThreadID) { current, _ in current }
+        }
+        var snapshot = TaskCPUUsageSnapshot()
+        for (threadID, pid) in pidsByThreadID {
+            if let percent = await TaskCPUUsageSampler.shared.sample(threadID: threadID, rootPID: pid) {
+                snapshot.percentByThreadID[threadID] = percent
+            }
+        }
+        for client in CodexAppServerClient.allSharedClients where scope == nil || client.runtimeScope == scope {
+            guard let pid = client.appServerProcessIdentifier else { continue }
+            let percents = await TaskCPUUsageSampler.shared.sampleCodexAppServer(
+                rootPID: pid, rootsByThreadID: client.activeThreadWorkspaceRootsByThreadID
+            )
+            snapshot.percentByThreadID.merge(percents) { current, _ in current }
+        }
+        return snapshot
+    }
+
+    /// Emits a CPU snapshot every few seconds, yielding only on change.
+    /// Sampled far less often than `ConversationRuntimeSnapshot` (pure
+    /// in-memory bookkeeping, cheap at 100ms) because walking process trees
+    /// via libproc for every active task is materially more expensive and
+    /// must not become a meaningful CPU cost on its own.
+    @MainActor
+    static func changes(dataDirectory: String? = nil) -> AsyncStream<TaskCPUUsageSnapshot> {
+        AsyncStream { continuation in
+            let task = Task { @MainActor in
+                var last: TaskCPUUsageSnapshot?
+                while !Task.isCancelled {
+                    let snapshot = await current(dataDirectory: dataDirectory)
+                    if snapshot != last {
+                        last = snapshot
+                        continuation.yield(snapshot)
+                    }
+                    try? await Task.sleep(for: .seconds(sampleIntervalSeconds))
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private static let sampleIntervalSeconds: Double = 4
 }
 
 /// One client per provider, shared by a window or a single bridge request.

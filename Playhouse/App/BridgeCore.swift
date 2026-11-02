@@ -859,6 +859,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let repositoryWorktrees: [RepositoryWorktreeRecord]
     let contextFolders: [String]
     let draftImageDataURLs: [String]?
+    let autoCreatePullRequestOnReview: Bool
 
     /// Accepts any conversation owner: a board task, or the standalone chat, which reports
     /// empty workspace roots and worktrees because it has none.
@@ -881,6 +882,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         repositoryWorktrees = task.repositoryWorktrees
         contextFolders = task.contextFolderPaths
         draftImageDataURLs = includeDraftImages ? task.draftImageDataURLs : nil
+        autoCreatePullRequestOnReview = task.autoCreatePullRequestOnReview
     }
 }
 
@@ -1638,7 +1640,7 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex) async throws -> BoardTaskRecord {
+    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex, autoCreatePullRequestOnReview: Bool = false) async throws -> BoardTaskRecord {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty else { throw PlayhouseManagerError.invalidTitle }
         let folders = try Self.normalizeOptionalRoots(contextFolders)
@@ -1656,6 +1658,7 @@ final class BoardTaskManager {
         let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: roots, conversationProvider: provider)
         task.repositoryWorktrees = worktrees
         task.contextFolderPaths = folders
+        task.autoCreatePullRequestOnReview = autoCreatePullRequestOnReview
         return try await withRepositoryAllocationLocks(worktrees.map(\.repositoryPath)) {
             try validateRepositoryAssignments(worktrees, excludingTaskID: nil)
             modelContext.insert(task)
@@ -2164,11 +2167,16 @@ final class BoardTaskManager {
         }
     }
 
-    func createPullRequests(_ id: UUID, clients: ConversationClients, settingsManager: WorkspaceSettingsManager? = nil) async throws -> BoardTaskRecord {
-        let conflicts = try await pullRequestConflictRepositories(id)
-        if !conflicts.isEmpty {
-            throw BridgeCommandError(code: "conflicts_require_confirmation", message: "Pull request conflicts were found. Resolve conflicts in the task worktree before creating pull requests.")
+    func setAutoCreatePullRequestOnReview(_ id: UUID, enabled: Bool) async throws -> BoardTaskRecord {
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            task.autoCreatePullRequestOnReview = enabled
+            try await saveTaskContext(taskID: id)
+            return BoardTaskRecord(task: task)
         }
+    }
+
+    func createPullRequests(_ id: UUID, clients: ConversationClients, settingsManager: WorkspaceSettingsManager? = nil) async throws -> BoardTaskRecord {
         let lookup = try await withTaskOperationLock(id) {
             let initialTask = try requireTask(id)
             let originalRecords = initialTask.repositoryWorktrees
@@ -2718,6 +2726,39 @@ final class BoardTaskManager {
                     lhs.totalTokens != rhs.totalTokens ? lhs.totalTokens > rhs.totalTokens : lhs.id < rhs.id
                 }
         )
+    }
+
+    /// `reason` explains a `nil` percent: `"not_running"` for an idle or
+    /// not-yet-sampled task of either provider. A turn-active Codex task
+    /// reports its working-directory share of the shared app-server's tree
+    /// (see `TaskCPUUsageSnapshot`), `0` when none of it is attributable.
+    struct TaskCPUUsageResult: Codable {
+        var cpuPercent: Double?
+        var reason: String?
+
+        // Synthesized Encodable would use encodeIfPresent for the optional
+        // properties and omit `cpuPercent`/`reason` entirely when nil, but the
+        // CLI/UI contract reads an explicit `null` to distinguish "idle" from
+        // a missing field, so both keys are always written.
+        enum CodingKeys: String, CodingKey {
+            case cpuPercent
+            case reason
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(cpuPercent, forKey: .cpuPercent)
+            try container.encode(reason, forKey: .reason)
+        }
+    }
+
+    func cpuUsage(_ id: UUID, dataDirectory: String? = nil) async throws -> TaskCPUUsageResult {
+        let task = try requireSubject(id)
+        guard let threadID = task.activeConversationID,
+              let percent = await TaskCPUUsageSnapshot.current(dataDirectory: dataDirectory).percentByThreadID[threadID] else {
+            return TaskCPUUsageResult(cpuPercent: nil, reason: "not_running")
+        }
+        return TaskCPUUsageResult(cpuPercent: percent, reason: nil)
     }
 
     func answeredAsyncQuestionIDs(taskID: UUID) throws -> [String] {
@@ -3520,6 +3561,27 @@ final class WorkspaceSettingsManager {
         PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "tokenUsageColorMax", "value": String(value)])
     }
 
+    /// The CPU percent a task's usage bar reaches full red at. Defaults to
+    /// one fully busy core per logical CPU (the Activity Monitor convention).
+    var cpuUsageColorMax: Int {
+        let stored = defaults.integer(forKey: WorkspaceSettings.cpuUsageColorMaxKey)
+        return stored > 0 ? stored : WorkspaceSettings.defaultCPUUsageColorMax
+    }
+
+    func setCPUUsageColorMax(_ value: Int) throws {
+        PlayhouseDiagnostics.record("settings.write.started", fields: ["setting": "cpuUsageColorMax", "value": String(value)])
+        guard value > 0 else {
+            PlayhouseDiagnostics.record("settings.write.failed", fields: [
+                "setting": "cpuUsageColorMax",
+                "value": String(value),
+                "errorCode": "invalid_argument"
+            ])
+            throw BridgeCommandError(code: "invalid_argument", message: "The CPU usage color maximum must be greater than zero.")
+        }
+        defaults.set(value, forKey: WorkspaceSettings.cpuUsageColorMaxKey)
+        PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "cpuUsageColorMax", "value": String(value)])
+    }
+
     /// The provider new tasks start with. Codex until the user chooses otherwise.
     var defaultConversationProvider: ConversationProvider {
         let value = defaults.string(forKey: WorkspaceSettings.defaultConversationProviderKey)
@@ -3539,6 +3601,16 @@ final class WorkspaceSettingsManager {
         }
         defaults.set(provider.rawValue, forKey: WorkspaceSettings.defaultConversationProviderKey)
         PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "defaultConversationProvider", "value": provider.rawValue])
+    }
+
+    /// The Auto PR switch position new tasks start with: whatever the user last chose on any task.
+    var autoCreatePullRequestDefault: Bool {
+        defaults.bool(forKey: WorkspaceSettings.autoCreatePullRequestDefaultKey)
+    }
+
+    func setAutoCreatePullRequestDefault(_ enabled: Bool) {
+        defaults.set(enabled, forKey: WorkspaceSettings.autoCreatePullRequestDefaultKey)
+        PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "autoCreatePullRequestDefault", "value": String(enabled)])
     }
 
     var defaultParentFolderURL: URL? {
@@ -3975,7 +4047,7 @@ final class ConversationManager {
                     : codex.activities.filter { $0.turnID.map(Self.sensitiveCodexTurnIDs(transcript).contains) != true },
                 diff: Self.shouldHideCodexDiff(transcript, codex: codex) ? nil : codex.diff,
                 answeredAsyncQuestionIDs: answered,
-                pendingUserInputRequest: transcript.pendingUserInputRequest
+                pendingUserInputRequest: visiblePendingUserInputRequest(taskID: taskID, transcript: transcript)
             )
         }
         // Codex can't list a thread before its first turn, so a mixed transcript
@@ -4014,7 +4086,7 @@ final class ConversationManager {
             activities: transcript.pendingSensitiveUserInputRedaction == true ? [] : composed.activities,
             diff: transcript.pendingSensitiveUserInputRedaction == true ? nil : composed.diff,
             answeredAsyncQuestionIDs: answered,
-            pendingUserInputRequest: transcript.pendingUserInputRequest,
+            pendingUserInputRequest: visiblePendingUserInputRequest(taskID: taskID, transcript: transcript),
             providerBoundaries: composed.providerBoundaries
         )
     }
@@ -4117,6 +4189,9 @@ final class ConversationManager {
 
         \(answerLines.joined(separator: "\n\n"))
         """
+        // The answered question stays saved for redaction and retry, but history
+        // hides it while this send applies it. The request is cleared before the
+        // reservation is released, so a reader never sees it come back on success.
         _ = try await send(
             taskID: taskID,
             text: recoveryPrompt,
@@ -4125,25 +4200,28 @@ final class ConversationManager {
             onUpdate: onUpdate,
             sensitiveUserInputAnswerValues: sensitiveValues,
             requiresSensitiveAnswerRedaction: requiresSensitiveAnswerRedaction,
-            hideSensitiveRecoveryPrompt: true
-        )
-        if requiresSensitiveAnswerRedaction {
-            try transcripts.mutate(taskID) { transcript in
-                let recoveryTurnIDs = Set(transcript.sensitiveCodexTurnIDs ?? []).subtracting(sensitiveCodexTurnIDsBeforeRecovery)
-                var storedMessages = transcript.sensitiveCodexTurnMessages ?? [:]
-                for turnID in recoveryTurnIDs {
-                    storedMessages[turnID] = storedMessages[turnID]?.map { message in
-                        guard message.role == .assistant else { return message }
-                        var hidden = message
-                        hidden.text = "[Response to private answer hidden]"
-                        hidden.asyncQuestions = nil
-                        return hidden
+            hideSensitiveRecoveryPrompt: true,
+            applyingUserInputRequestID: request.id,
+            onUserInputApplied: { [self] in
+                if requiresSensitiveAnswerRedaction {
+                    try transcripts.mutate(taskID) { transcript in
+                        let recoveryTurnIDs = Set(transcript.sensitiveCodexTurnIDs ?? []).subtracting(sensitiveCodexTurnIDsBeforeRecovery)
+                        var storedMessages = transcript.sensitiveCodexTurnMessages ?? [:]
+                        for turnID in recoveryTurnIDs {
+                            storedMessages[turnID] = storedMessages[turnID]?.map { message in
+                                guard message.role == .assistant else { return message }
+                                var hidden = message
+                                hidden.text = "[Response to private answer hidden]"
+                                hidden.asyncQuestions = nil
+                                return hidden
+                            }
+                        }
+                        transcript.sensitiveCodexTurnMessages = storedMessages
                     }
                 }
-                transcript.sensitiveCodexTurnMessages = storedMessages
+                try clearPendingUserInputRequest(taskID: taskID, requestID: request.id)
             }
-        }
-        try clearPendingUserInputRequest(taskID: taskID, requestID: request.id)
+        )
         return true
     }
 
@@ -4198,6 +4276,16 @@ final class ConversationManager {
             guard transcript.pendingUserInputRequest?.id == requestID else { return }
             transcript.pendingUserInputRequest = nil
         }
+    }
+
+    /// Hides a saved question while the recovery turn holding the task's turn
+    /// reservation applies its answer. Without the reservation that recovery
+    /// ended or crashed, so the question is shown again for retry.
+    private func visiblePendingUserInputRequest(taskID: UUID, transcript: ConversationTranscript) -> ConversationUserInputRequest? {
+        guard let request = transcript.pendingUserInputRequest else { return nil }
+        guard transcript.applyingUserInputRequestID == request.id,
+              (try? tasks.hasConversationTurnReservation(taskID)) == true else { return request }
+        return nil
     }
 
     /// Publishes an image produced by an agent as a durable assistant message.
@@ -4686,15 +4774,42 @@ final class ConversationManager {
         let task = try tasks.conversationSubject(taskID)
         let key = selectedModelKey(for: task.conversationProvider)
         if let selectedModelID = preferences.string(forKey: key) {
-            return selectedModelID
+            return supersededSelection(selectedModelID, provider: task.conversationProvider, key: key)
         }
 
         // One-time migration from the previous per-task preference.
         if let legacyModelID = task.conversationModelID {
-            preferences.set(legacyModelID, forKey: key)
-            return legacyModelID
+            // Resolve before persisting, so the migration writes the key once.
+            let modelID = supersededSelection(legacyModelID, provider: task.conversationProvider, key: nil)
+            preferences.set(modelID, forKey: key)
+            return modelID
         }
         return nil
+    }
+
+    /// A remembered model the provider no longer offers keeps running behind the
+    /// picker, so a selection superseded within its own family follows the family
+    /// forward, keeping sends and the composer on one model.
+    ///
+    /// This sits on the read rather than on the model refresh so that every consumer
+    /// converges at once: the composer primes from cache before `models(taskID:)`
+    /// returns, and a send reads the remembered ID without refreshing the list. The
+    /// write is idempotent — once the stored ID is one the provider offers, later
+    /// reads find nothing to supersede. `key` is nil when the caller persists the
+    /// result itself.
+    ///
+    /// The cache is the only source of truth here, so on the first launch after an
+    /// update a send issued before the first `models(taskID:)` fetch lands still uses
+    /// the remembered ID. That window closes on the next read and never clobbers a
+    /// selection, which is why an empty cache deliberately supersedes nothing.
+    private func supersededSelection(_ selectedModelID: String, provider: ConversationProvider, key: String?) -> String {
+        guard let models = try? cachedModels(provider: provider),
+              let replacement = models.supersedingModel(forSelectedID: selectedModelID) else { return selectedModelID }
+        if let key { preferences.set(replacement.id, forKey: key) }
+        PlayhouseDiagnostics.record("conversation.model.selection.superseded", fields: [
+            "provider": provider.rawValue, "from": selectedModelID, "to": replacement.id
+        ])
+        return replacement.id
     }
 
     func setEffort(taskID: UUID, effort: ConversationEffort) async throws -> BoardTaskRecord {
@@ -4982,7 +5097,7 @@ final class ConversationManager {
 
     /// The question persisted for this conversation, readable without its provider.
     func savedUserInputRequest(taskID: UUID) throws -> ConversationUserInputRequest? {
-        try transcripts.read(taskID).pendingUserInputRequest
+        visiblePendingUserInputRequest(taskID: taskID, transcript: try transcripts.read(taskID))
     }
 
     func queuedMessages(taskID: UUID) throws -> [QueuedConversationMessage] {
@@ -5088,7 +5203,9 @@ final class ConversationManager {
         sensitiveUserInputAnswerValues: [String] = [],
         requiresSensitiveAnswerRedaction: Bool = false,
         hideSensitiveRecoveryPrompt: Bool = false,
-        hideInternalOutcomeReminder: Bool = false
+        hideInternalOutcomeReminder: Bool = false,
+        applyingUserInputRequestID: String? = nil,
+        onUserInputApplied: (() throws -> Void)? = nil
     ) async throws -> ConversationHistory {
         let streamUpdate = onUpdate
         let onUpdate: (ConversationUpdate) -> Void = { update in
@@ -5116,6 +5233,18 @@ final class ConversationManager {
         let history: ConversationHistory
         do {
             history = try await tasks.withConversationTurnReservation(taskID) {
+                // Only the reservation holder owns the applying marker: take it for
+                // a recovery, or drop one a crashed recovery left behind.
+                try self.transcripts.mutate(taskID) { transcript in
+                    transcript.applyingUserInputRequestID = applyingUserInputRequestID
+                }
+                defer {
+                    if applyingUserInputRequestID != nil {
+                        try? self.transcripts.mutate(taskID) { transcript in
+                            transcript.applyingUserInputRequestID = nil
+                        }
+                    }
+                }
                 do {
                     self.lastReportedTurnOutcomeByTaskID.removeValue(forKey: taskID)
                     if let standaloneChatManager {
@@ -5247,6 +5376,7 @@ final class ConversationManager {
                         }
                         _ = try await self.tasks.setLifecycleStatus(taskID, to: .blocked, message: reason)
                     }
+                    try onUserInputApplied?()
                     self.lastReportedTurnOutcomeByTaskID.removeValue(forKey: taskID)
                     try? await self.tasks.clearPendingSubmittedPrompt(taskID)
                     if let standaloneChatManager, let signalBefore,
@@ -6400,7 +6530,19 @@ final class ConversationManager {
                             message: BoardTaskManager.reviewSyncBlockedMessage(syncError)
                         )
                     } else {
-                        _ = try await tasks.setLifecycleStatus(taskID, to: .review)
+                        let reviewRecord = try await tasks.setLifecycleStatus(taskID, to: .review)
+                        if reviewRecord.autoCreatePullRequestOnReview,
+                           reviewRecord.repositoryWorktrees.contains(where: { !$0.isPending && ($0.pullRequestNumber == nil || $0.pullRequestURL == nil) }) {
+                            phase = "review-auto-pr"
+                            do {
+                                _ = try await tasks.createPullRequests(taskID, clients: clients, settingsManager: settingsManager)
+                            } catch {
+                                PlayhouseDiagnostics.record("task.review.auto_pr.failed", fields: [
+                                    "taskID": taskID.uuidString,
+                                    "error": error.localizedDescription
+                                ])
+                            }
+                        }
                     }
                 case .waitingResponse:
                     _ = try await tasks.setLifecycleStatus(taskID, to: .waitingResponse)
@@ -6798,6 +6940,33 @@ final class PlayhouseBridgeRuntime {
             }
         }
 
+        // CPU samples also live only in this process's memory (the real PIDs).
+        if request.command == "conversation.cpuUsage" || request.command == "conversation.cpuUsage.subscribe" {
+            let runtimeScope: String?
+            #if DEBUG
+            runtimeScope = request.dataDirectory
+            #else
+            runtimeScope = nil
+            #endif
+            do {
+                let result: BridgeValue
+                if request.command == "conversation.cpuUsage" {
+                    result = try Self.value(await TaskCPUUsageSnapshot.current(dataDirectory: runtimeScope))
+                } else {
+                    for await snapshot in TaskCPUUsageSnapshot.changes(dataDirectory: runtimeScope) {
+                        if Task.isCancelled { break }
+                        eventHandler(BridgeEvent(requestID: request.id, type: "cpu_usage_state", payload: try Self.value(snapshot)))
+                    }
+                    result = .object(["subscribed": .boolean(false)])
+                }
+                await PlayhouseDiagnostics.endBatch()
+                return .success(request, result: result)
+            } catch {
+                await PlayhouseDiagnostics.endBatch()
+                return .failure(request, code: "operation_failed", message: error.localizedDescription)
+            }
+        }
+
         do {
             let dataDirectory: String?
             #if DEBUG
@@ -6871,13 +7040,19 @@ final class PlayhouseBridgeRuntime {
                 let roots = try request.requiredStrings("roots")
                 let repositories = try request.repositorySpecs("repositories")
                 let provider = try request.arguments["provider"]?.string.map(ConversationProvider.parse) ?? settings.defaultConversationProvider
-                result = try Self.value(await taskManager.create(title: title, repositories: repositories, contextFolders: roots, provider: provider))
+                result = try Self.value(await taskManager.create(
+                    title: title, repositories: repositories, contextFolders: roots, provider: provider,
+                    autoCreatePullRequestOnReview: settings.autoCreatePullRequestDefault
+                ))
             case "task.get", "task.show":
                 let taskID = try request.requiredUUID("taskID")
                 result = try Self.value(taskManager.get(taskID))
             case "task.token-usage":
                 let taskID = try request.requiredUUID("taskID")
                 result = try Self.value(taskManager.tokenUsageSummary(taskID))
+            case "task.cpu-usage":
+                let taskID = try request.requiredUUID("taskID")
+                result = try Self.value(await taskManager.cpuUsage(taskID, dataDirectory: dataDirectory))
             case "task.move":
                 let taskID = try request.requiredUUID("taskID")
                 let status = try request.requiredString("status")
@@ -6886,6 +7061,10 @@ final class PlayhouseBridgeRuntime {
                     to: status,
                     allowUnmergedPullRequests: request.arguments["allowUnmergedPullRequests"]?.bool ?? false
                 ))
+            case "task.pr.auto":
+                let enabled = request.arguments["enabled"]?.bool ?? false
+                result = try Self.value(await taskManager.setAutoCreatePullRequestOnReview(request.requiredUUID("taskID"), enabled: enabled))
+                settings.setAutoCreatePullRequestDefault(enabled)
             case "task.pr.create":
                 result = try Self.value(await taskManager.createPullRequests(
                     request.requiredUUID("taskID"),
@@ -7107,11 +7286,15 @@ final class PlayhouseBridgeRuntime {
                     "lastSelectedRepositories": .array(settings.lastSelectedRepositories.map(BridgeValue.string)),
                     "appearance": .string(settings.appearance),
                     "defaultProvider": .string(settings.defaultConversationProvider.rawValue),
-                    "tokenUsageColorMax": .integer(settings.tokenUsageColorMax)
+                    "tokenUsageColorMax": .integer(settings.tokenUsageColorMax),
+                    "cpuUsageColorMax": .integer(settings.cpuUsageColorMax)
                 ])
             case "settings.set-token-usage-color-max":
                 try settings.setTokenUsageColorMax(request.requiredInt("max"))
                 result = .object(["tokenUsageColorMax": .integer(settings.tokenUsageColorMax)])
+            case "settings.set-cpu-usage-color-max":
+                try settings.setCPUUsageColorMax(request.requiredInt("max"))
+                result = .object(["cpuUsageColorMax": .integer(settings.cpuUsageColorMax)])
             case "settings.set-default-provider":
                 try settings.setDefaultConversationProvider(request.requiredString("provider"))
                 result = .object(["defaultProvider": .string(settings.defaultConversationProvider.rawValue)])

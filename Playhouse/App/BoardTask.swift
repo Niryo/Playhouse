@@ -68,6 +68,36 @@ enum TokenUsageHeatmap {
     }
 }
 
+/// The gradient a running task's live CPU usage bar fills from the bottom:
+/// green at 0%, red once a task's process tree reaches the configured
+/// ceiling. Unlike `TokenUsageHeatmap`'s single interpolated color, this bar
+/// is a thermometer-style gauge, so the gradient itself is fixed and only
+/// the filled height (the revealed fraction) changes.
+enum CPUUsageHeatmap {
+    /// One fully busy core per logical CPU, matching the Activity Monitor
+    /// convention where 100% == one core. See `TokenUsageHeatmap.defaultColorMax`
+    /// for why this lives here rather than in `WorkspaceSettings`.
+    static var defaultColorMax: Int { max(1, ProcessInfo.processInfo.activeProcessorCount) * 100 }
+
+    static func fraction(percent: Double, max: Int) -> Double {
+        let ceiling = max > 0 ? Double(max) : Double(defaultColorMax)
+        return Swift.min(1, Swift.max(0, percent / ceiling))
+    }
+
+    static let gradient = LinearGradient(
+        colors: [
+            Color(hue: 0.33, saturation: 0.7, brightness: 0.75),
+            Color(hue: 0.0, saturation: 0.7, brightness: 0.75)
+        ],
+        startPoint: .bottom,
+        endPoint: .top
+    )
+
+    static func label(percent: Double) -> String {
+        "CPU \(Int(percent.rounded()))%"
+    }
+}
+
 /// The agent runtime that executes a task's conversation turns.
 enum ConversationProvider: String, Codable, CaseIterable, Identifiable, Sendable {
     case codex
@@ -144,6 +174,9 @@ final class BoardTask {
     var totalOutputTokens: Int = 0
     var totalCacheReadTokens: Int = 0
     var totalCacheCreationTokens: Int = 0
+    /// When true, moving this task to Review automatically creates its pull request(s)
+    /// instead of waiting for the user to click the manual "PR" control.
+    var autoCreatePullRequestOnReview: Bool = false
     /// Legacy marker from when the standalone chat was a hidden board task. Nothing reads it
     /// for behavior; it exists so `migrateLegacyStandaloneChatTasks()` can find those rows and
     /// convert them to `StandaloneChat`. The original column name is preserved so the migration

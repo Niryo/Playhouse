@@ -25,6 +25,9 @@ INSPECTION_INTENT = "I'll inspect the workspace first."
 INSPECTION_ANSWER = "Inspection done: the workspace is ready."
 UNANSWERED_FIRST = "Starting the checks."
 UNANSWERED_LAST = "Checks are running; results will follow."
+CHAT_INTENT = "Let me check the newer release first."
+CHAT_ANSWER = "Confirmed: 2.1.309 registers the new model and 2.1.308 does not."
+CHAT_CLOSING = "Tell me if you want the upgrade command."
 SIMPLE_ANSWER = "OK."
 PENDING_QUESTION_SUCCESS_MARKER = "finish while a structured question remains pending"
 
@@ -39,6 +42,23 @@ TURN_USAGE = {
     "cache_creation_input_tokens": 100,
 }
 TURN_USAGE_TOTAL = sum(TURN_USAGE.values())
+
+
+def maybe_burn_cpu():
+    """Spends real, measurable CPU as a child process of this fixture while
+    the turn stays active, so a bridge test can assert a non-zero CPU
+    percentage for the task's process tree. No-op unless
+    PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU is set. Additive only: leaves every
+    other fixture behavior unchanged.
+    """
+    if os.environ.get("PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU") != "1":
+        return
+    seconds = float(os.environ.get("PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU_SECONDS", "10"))
+    burner = subprocess.Popen([
+        sys.executable, "-c",
+        f"import time\nend = time.time() + {seconds}\nwhile time.time() < end:\n    pass\n",
+    ])
+    burner.wait()
 
 
 def write(value):
@@ -216,6 +236,16 @@ def respond(user_text, instructions, preserve_no_outcome=False):
             commands.append({"command": command, "output": run_tool("toolu_outcome_reminder", "Bash", {"command": command}, command)})
     elif "answer to the pending question from the prior playhouse session" in user_text.lower():
         answer = user_text.split("Answer: ", 1)[-1].splitlines()[0].strip()
+        recovery_pause = Path(str(sys.argv[0]) + ".recovery-pause")
+        if recovery_pause.exists():
+            # Hold the recovery turn open so tests can inspect it mid-turn.
+            recovery_release = Path(str(sys.argv[0]) + ".recovery-release")
+            Path(str(sys.argv[0]) + ".recovery-ready").write_text("The recovery turn is running.\n", encoding="utf-8")
+            recovery_deadline = time.monotonic() + 30
+            while not recovery_release.exists() and time.monotonic() < recovery_deadline:
+                time.sleep(0.02)
+            if not recovery_release.exists():
+                raise TimeoutError("The test did not release the recovery turn.")
         text("msg_recovered_question_answer", f"Recovered answer: {answer}.")
     elif "ask a restart-safe structured question" in user_text.lower():
         question_input = {
@@ -255,6 +285,11 @@ def respond(user_text, instructions, preserve_no_outcome=False):
             "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
         }})
     elif "hold until stopped" in user_text.lower() or "hold-until-stopped" in user_text.lower():
+        # Report one in-progress tool use before holding, so a user-initiated Stop
+        # with no final answer still keeps the window's activity section mounted,
+        # and the fold it performs on settle is distinguishable from the section
+        # simply never having rendered.
+        assistant("msg_stop_command", [{"type": "tool_use", "id": "toolu_stop_command", "name": "Bash", "input": {"command": "git status --short"}}])
         ready = Path(str(sys.argv[0]) + ".interrupt-ready")
         ready.write_text("The Claude fixture turn is active and waiting for an interrupt.\n", encoding="utf-8")
         deadline = time.monotonic() + 30
@@ -367,6 +402,18 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         text("msg_comments", answer)
     elif user_text.rstrip().endswith("What happened earlier?"):
         text("msg_recovered", SIMPLE_ANSWER)
+    elif "release notes" in user_text.lower():
+        # A standalone chat has no outcome to report, so it ends every turn with
+        # its page signal instead. That signal runs in the same place a task
+        # outcome does: after the answer, before Claude's closing line.
+        text("msg_chat_intent", CHAT_INTENT)
+        run_tool("toolu_chat_read", "Read", {"file_path": os.path.join(os.getcwd(), "README.md")})
+        text("msg_chat_answer", CHAT_ANSWER)
+        close_turn = report_command(instructions, " chat page close-turn ")
+        if close_turn:
+            commands.append({"command": close_turn,
+                             "output": run_tool("toolu_close_turn", "Bash", {"command": close_turn}, close_turn)})
+        text("msg_chat_closing", CHAT_CLOSING)
     elif "story" in user_text.lower():
         text("msg_story", STORY)
         progress_clear = report_command(instructions, " task progress clear ")
@@ -501,6 +548,93 @@ def respond(user_text, instructions, preserve_no_outcome=False):
             parent_request_started("msg_background_woken", woken=True)
             text("msg_background_woken", "BACKGROUND HANDLED")
             write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+    elif "consumed wake notification" in user_text.lower():
+        # Mirrors the observed stranding sequence: a background shell parks the
+        # answered turn, the shell's notification arrives, and Claude Code
+        # starts the provider turn that would deliver it — `system init` — but
+        # then says nothing at all, because it consumed the notification
+        # without a new parent request. No answer and no result of that turn
+        # ever arrive, so Playhouse alone has to settle this turn instead of
+        # leaving the task In Progress forever.
+        tool_id = "toolu_consumed_wake"
+        task_id = "bgshell-consumed-wake-1"
+        assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": "Bash", "input": {
+            "command": "sleep 1; echo WAKE", "description": "Consumed wake shell", "run_in_background": True,
+        }}])
+        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tool_id, "is_error": False,
+             "content": f"Command running in background with ID: {task_id}."},
+        ]}})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
+            {"task_id": task_id, "run_id": "fixture-run-1", "task_type": "local_bash", "description": "Consumed wake shell"},
+        ]})
+        write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "description": "Consumed wake shell", "task_type": "local_bash"})
+        text("msg_consumed_wake_started", "WAKE SHELL STARTED")
+        outcome = report_command(instructions, " task outcome ", "completed")
+        if outcome:
+            commands.append({"command": outcome,
+                             "output": run_tool("toolu_consumed_wake_outcome", "Bash", {"command": outcome}, outcome)})
+        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+        background_result_sent = True
+        complete_command(current_command_uuid)
+        wait_for_release("consumed-wake", "The parent result is out while the background shell runs.")
+        write({"type": "system", "subtype": "task_updated", "task_id": task_id, "run_id": "fixture-run-1",
+               "patch": {"status": "completed", "end_time": 0}})
+        write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "status": "completed", "output_file": "",
+               "summary": 'Background command "Consumed wake shell" completed (exit code 0)'})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+        # The woken provider turn starts and then goes quiet: no parent request,
+        # no answer, no result of its own, ever.
+        write({"type": "system", "subtype": "init"})
+        Path(str(sys.argv[0]) + ".consumed-wake-woken").write_text(
+            "The woken turn started and consumed the notification silently.\n", encoding="utf-8"
+        )
+    elif "slow woken turn" in user_text.lower():
+        # The same announcement, but from a woken turn that is alive and merely
+        # slow to speak: it stays silent well past the grace Playhouse gives a
+        # consumed notification, then answers. Cutting it off there would lose
+        # the background task's report, so this turn must end on Claude's own
+        # answer rather than on Playhouse's backstop.
+        tool_id = "toolu_slow_woken"
+        task_id = "bgshell-slow-woken-1"
+        assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": "Bash", "input": {
+            "command": "sleep 1; echo SLOW", "description": "Slow woken shell", "run_in_background": True,
+        }}])
+        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tool_id, "is_error": False,
+             "content": f"Command running in background with ID: {task_id}."},
+        ]}})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
+            {"task_id": task_id, "run_id": "fixture-run-1", "task_type": "local_bash", "description": "Slow woken shell"},
+        ]})
+        write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "description": "Slow woken shell", "task_type": "local_bash"})
+        text("msg_slow_woken_started", "SLOW SHELL STARTED")
+        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+        background_result_sent = True
+        complete_command(current_command_uuid)
+        write({"type": "system", "subtype": "task_updated", "task_id": task_id, "run_id": "fixture-run-1",
+               "patch": {"status": "completed", "end_time": 0}})
+        write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "status": "completed", "output_file": "",
+               "summary": 'Background command "Slow woken shell" completed (exit code 0)'})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+        write({"type": "system", "subtype": "init"})
+        Path(str(sys.argv[0]) + ".slow-woken-announced").write_text(
+            "The woken turn started and is about to go quiet for a while.\n", encoding="utf-8"
+        )
+        time.sleep(float(os.environ.get("PLAYHOUSE_E2E_CLAUDE_SLOW_WOKEN_SILENCE_SECONDS", "6")))
+        # Only `parent_request_started` without a second `init`: this turn was
+        # already announced above, it is just finally speaking.
+        parent_request_started("msg_slow_woken_answer")
+        text("msg_slow_woken_answer", "SLOW WOKEN HANDLED")
+        outcome = report_command(instructions, " task outcome ", "completed")
+        if outcome:
+            commands.append({"command": outcome,
+                             "output": run_tool("toolu_slow_woken_outcome", "Bash", {"command": outcome}, outcome)})
+        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
     elif "parked background shell" in user_text.lower():
         # Mirrors a turn Claude Code has already answered while a background
         # shell keeps running: the parent result is out, no notification has
@@ -618,21 +752,26 @@ def main():
                     write({"type": "result", "subtype": "error", "is_error": True,
                            "result": "No conversation found with session ID"})
                     return 1
+                # Claude Code announces the newest release of a family only through the
+                # bare alias, which names the concrete model in `resolvedModel`; no entry
+                # has that concrete name as its own value.
                 models = [
-                    {"value": "default", "displayName": "Default"},
-                    {"value": "opus", "displayName": "Opus"},
-                    {"value": "claude-opus-4-8", "displayName": "Opus 4.8"},
-                    {"value": "claude-opus-5-5", "displayName": "Opus 5.5"},
-                    {"value": "claude-opus-5-5-20251001", "displayName": "Opus 5.5 (2025-10-01)"},
-                    {"value": "sonnet", "displayName": "Sonnet"},
-                    {"value": "claude-sonnet-4-6", "displayName": "Sonnet 4.6"},
-                    {"value": "claude-sonnet-5-5", "displayName": "Sonnet 5.5"},
-                    {"value": "haiku", "displayName": "Haiku"},
-                    {"value": "claude-haiku-4-5-20251001", "displayName": "Haiku 4.5"},
-                    {"value": "claude-haiku-4-6", "displayName": "Haiku 4.6"},
+                    {"value": "default", "resolvedModel": "claude-opus-5-5", "displayName": "Default"},
+                    {"value": "opus", "resolvedModel": "claude-opus-5-5", "displayName": "Opus 5.5"},
+                    {"value": "claude-opus-5-5-20251001", "resolvedModel": "claude-opus-5-5-20251001",
+                     "displayName": "Opus 5.5 (2025-10-01)"},
+                    {"value": "claude-opus-5", "resolvedModel": "claude-opus-5", "displayName": "Opus 5"},
+                    {"value": "claude-opus-4-8", "resolvedModel": "claude-opus-4-8", "displayName": "Opus 4.8"},
+                    {"value": "sonnet", "resolvedModel": "claude-sonnet-5-5", "displayName": "Sonnet 5.5"},
+                    {"value": "claude-sonnet-4-6", "resolvedModel": "claude-sonnet-4-6", "displayName": "Sonnet 4.6"},
+                    {"value": "haiku", "resolvedModel": "claude-haiku-4-6", "displayName": "Haiku 4.6"},
+                    {"value": "claude-haiku-4-5-20251001", "resolvedModel": "claude-haiku-4-5-20251001",
+                     "displayName": "Haiku 4.5"},
                 ]
                 if os.environ.get("PLAYHOUSE_CLAUDE_MODEL_LIST") == "aliases-only" or "aliases-only" in Path(sys.argv[0]).name:
-                    models = models[:2] + models[5:6] + models[8:9]
+                    # A release that reports bare aliases with no resolved model at all.
+                    models = [{"value": model["value"], "displayName": model["displayName"].split(" ")[0]}
+                              for model in models if "-" not in model["value"]]
                 # Tests seed Playhouse's model cache through a real discovery of this list.
                 models_override = Path(str(sys.argv[0]) + ".models-override")
                 if models_override.exists():
@@ -699,6 +838,7 @@ def main():
                 if "playhouse internal outcome nudge:" not in prior.get("userText", "").lower()
             ), "")
             preserve_no_outcome = any(marker in previous_prompt for marker in ("please inspect the workspace", "start the checks"))
+            maybe_burn_cpu()
             turn["reportCommands"] = respond(user_text, instructions, preserve_no_outcome=preserve_no_outcome)
             history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else {"turns": []}
             history["turns"].append(turn)

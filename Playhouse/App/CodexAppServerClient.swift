@@ -844,6 +844,32 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         pendingUserInputs.mapValues(\.request)
     }
 
+    /// The running app-server's OS process ID. Every thread on this client
+    /// shares it, so CPU is attributed per thread from its descendants'
+    /// working directories (see `CodexProcessAttribution`), not from this PID.
+    var appServerProcessIdentifier: pid_t? {
+        guard let process, process.isRunning, process.processIdentifier > 0 else { return nil }
+        return process.processIdentifier
+    }
+
+    /// The workspace (`cwd` first, then the runtime roots) each turn-active
+    /// thread was started or resumed with on this app-server, keyed by
+    /// thread ID. A thread still starting has no parameters yet and maps to
+    /// no roots, but still counts as active.
+    var activeThreadWorkspaceRootsByThreadID: [String: [String]] {
+        var result: [String: [String]] = [:]
+        for threadID in activeThreadIDsSnapshot {
+            guard let parameters = resumedThreadParameters[threadID] else {
+                result[threadID] = []
+                continue
+            }
+            var roots = [parameters.cwd]
+            for root in parameters.roots where !roots.contains(root) { roots.append(root) }
+            result[threadID] = roots
+        }
+        return result
+    }
+
     var interruptedThreadIDsSnapshot: Set<String> { interruptedThreadIDs }
 
     var observedGoalThreadIDs: [String] {
@@ -2040,6 +2066,10 @@ enum TaskProgressReportInstructions {
     static let executableName = "playhouse-cli"
     static let progressSubcommand = "task progress"
     static let outcomeSubcommand = "task outcome"
+    /// Standalone chat's end-of-turn page signal. A chat has no board status, so
+    /// it reports this instead of an outcome, and it runs in the same place: after
+    /// the answer, often with a closing line still to come.
+    static let chatPageCloseTurnSubcommand = "chat page close-turn"
 
     enum ReportCommand { case progress, outcome }
 
@@ -2047,6 +2077,7 @@ enum TaskProgressReportInstructions {
     static func reportCommand(in shellCommand: String) -> ReportCommand? {
         guard shellCommand.contains(executableName) else { return nil }
         if shellCommand.contains(" \(outcomeSubcommand) ") { return .outcome }
+        if shellCommand.contains(" \(chatPageCloseTurnSubcommand) ") { return .outcome }
         if shellCommand.contains(" \(progressSubcommand) ") { return .progress }
         return nil
     }

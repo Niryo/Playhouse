@@ -66,7 +66,13 @@ def control_end(source: str, kind: str, start: int) -> int | None:
     opening_paren = source.find("(", start, start + 80)
     opening_brace = source.find("{", start, start + 350)
     if kind == "Link":
-        return matching(source, "(", ")", opening_paren) if opening_paren >= 0 else None
+        end = matching(source, "(", ")", opening_paren) if opening_paren >= 0 else None
+        if end is None:
+            return None
+        next_token = skip_space(source, end + 1)
+        if next_token < len(source) and source[next_token] == "{":
+            return matching(source, "{", "}", next_token)
+        return end
 
     if kind == "Button" and opening_paren >= 0 and (opening_brace < 0 or opening_paren < opening_brace):
         end = matching(source, "(", ")", opening_paren)

@@ -411,14 +411,18 @@ class PlayhouseBridgeTests(unittest.TestCase):
                             and event.get("taskID") == task["id"]), None)
         self.assertIsNotNone(failed_send, "The stopped provider turn should settle through the send failure path.")
         self.assertIsNone(persisted.get("statusMessage"))
+        # The window keeps the turn's activity section open for exactly as long as
+        # the daemon reports the turn active, which the runtime reads above assert.
+        # The fold itself is SwiftUI state with no CLI-observable surface, so the
+        # paired UI case asserts it directly once the daemon state above holds.
 
-    # case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles.
+    # case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles. The turn's activity section renders open for as long as the daemon reports the turn active, and folds once the stop settles with no final answer.
     def test_codex_stop_interrupts_thinking_turn_and_waits_for_response(self):
         self.assert_user_stop_pauses_provider_turn(
             "Codex stop while thinking", "codex", "PLAYHOUSE_E2E_CODEX_EXECUTABLE", "codex-app-server-fixture.py"
         )
 
-    # case-contract: test_claude_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Claude reasoning immediately moves the task to Waiting Response and sends Claude's session-scoped control interrupt. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles.
+    # case-contract: test_claude_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Claude reasoning immediately moves the task to Waiting Response and sends Claude's session-scoped control interrupt. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles. The turn's activity section renders open for as long as the daemon reports the turn active, and folds once the stop settles with no final answer.
     def test_claude_stop_interrupts_thinking_turn_and_waits_for_response(self):
         self.assert_user_stop_pauses_provider_turn(
             "Claude stop while thinking", "claude", "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE", "claude-code-fixture.py"
@@ -708,7 +712,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
             task = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         return task
 
-    def complete_fixture_turn(self, task_id, executable_name="codex-fixture", message="Complete this task.", expected_status="Review"):
+    def complete_fixture_turn(self, task_id, executable_name="codex-fixture", message="Complete this task.", expected_status="Review", extra_environment=None):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / executable_name
         hold_marker = Path(str(executable) + ".hold-release")
@@ -720,6 +724,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         executable.chmod(0o755)
         environment = {
             "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable),
+            **(extra_environment or {}),
         }
         command = [
             "conversation", "send", task_id, "--message", message,
@@ -1490,6 +1495,54 @@ class PlayhouseBridgeTests(unittest.TestCase):
         texts = [message["text"] for message in visible["messages"]]
         self.assertTrue(any(text.endswith("Tell me about volcanoes") for text in texts))
         self.assertTrue(any(text.endswith("One more thought about Saturn") for text in texts))
+
+    # case-contract: test_standalone_chat_answer_stays_final_around_close_turn | A standalone chat reports no task outcome, so it ends every turn with Playhouse's own chat page close-turn signal, which Claude runs after its answer and before its closing line. That answer and closing line form one final answer, not commentary, in the streamed final answer, fresh CLI/XPC history, and the visible transcript, so the response is never left buried inside the collapsed Worked for disclosure; text written before an ordinary tool earlier in the same turn still stays commentary there, and the close-turn command really runs and succeeds. This classification is Claude-specific because Playhouse derives each message's phase from Claude's tool stream, while Codex reports the phase in its own protocol and so cannot mis-file an answer on the same turn shape.
+    def test_standalone_chat_answer_stays_final_around_close_turn(self):
+        self.assert_success(self.call_cli("settings", "set-default-provider", "claude")[0])
+        self.assert_success(self.call_cli("settings", "clear-parent")[0])
+        executable = self.data_directory / "claude-fixture-chat-close-turn"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
+        chat_id = self.assert_success(self.call_cli("chat", "open", extra_environment=environment)[0])["id"]
+
+        intent = "Let me check the newer release first."
+        answer = "Confirmed: 2.1.309 registers the new model and 2.1.308 does not."
+        final_answer = answer + "\n\nTell me if you want the upgrade command."
+
+        sent, events = self.call_cli(
+            "conversation", "send", chat_id, "--message", "Summarize the release notes.",
+            extra_environment=environment,
+        )
+        self.assert_success(sent)
+        self.assertEqual(
+            [event["payload"]["text"] for event in events if event["type"] == "assistant_final"], [final_answer],
+            "The page close-turn signal is Playhouse bookkeeping, so the answer and its closing line stay one final answer.",
+        )
+        progress = [event["payload"]["text"] for event in events if event["type"] == "assistant_progress"]
+        self.assertFalse(any(answer in text for text in progress),
+                         f"The answer must never be demoted to commentary by the close-turn signal: {progress}")
+        self.assertIn(intent, progress, "Text written before an ordinary tool still stays commentary.")
+
+        turns = [
+            turn for turn in json.loads(Path(str(executable) + ".history").read_text(encoding="utf-8"))["turns"]
+            if not (turn.get("userText") or "").startswith("Classify the latest user message")
+        ]
+        self.assertEqual(len(turns[-1]["reportCommands"]), 1, "The fixture should run the chat page close-turn command.")
+        self.assertIn(" chat page close-turn ", turns[-1]["reportCommands"][0]["command"])
+        self.assertIn('"ok":true', turns[-1]["reportCommands"][0]["output"], turns[-1]["reportCommands"])
+
+        history = self.assert_success(self.call_cli("conversation", "history", chat_id, extra_environment=environment)[0])
+        assistant = [(message["phase"], message["text"]) for message in history["messages"] if message["role"] == "assistant"]
+        self.assertEqual(assistant, [("commentary", intent), ("final_answer", final_answer)],
+                         "A fresh history read keeps the answer and its closing line as one final answer.")
+
+        status = self.assert_success(self.call_cli("chat", "status", extra_environment=environment)[0])
+        self.assertFalse(status["missedPreviousPageSignal"],
+                         "A close-turn signal that really ran must satisfy the page signal instead of falling back to the classifier.")
 
     # case-contract: test_standalone_chat_claude_fallback_classifier | When a standalone chat uses Claude, a missed page signal invokes the Haiku helper at low effort; a malformed result is rejected and retried, an unrelated later question and its assistant reply move to a new titled page, the UI keeps page evaluation visually quiet without blocking the primary answer, updates the transcript separator when classification completes, and holds a following send until the decision resolves, and appends the related follow-up in chronological order. The Claude-specific model and effort arguments are verified through the real CLI/XPC path. An explicit page start during a pending fallback cancels its stale result, keeps the missed turn on its original page, and clears the warning. If all helper results are invalid, the pending decision remains durable, blocks the next provider send, and retries after the helper recovers; the UI keeps the unresolved state visually quiet and sends successfully once recovery completes.
     def test_standalone_chat_claude_fallback_classifier(self):
@@ -2519,7 +2572,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), branch_head)
         self.assertTrue(self.branch_exists(self.primary, branch))
 
-    # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
+    # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
     def test_task_pr_create_reports_real_gh_failure(self):
         task = self.create_repo_task(
             "PR failure", [self.primary], merge_targets={self.primary: "main"}
@@ -2565,6 +2618,158 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIsNone(record.get("pullRequestNumber"))
         self.assertIsNone(record.get("pullRequestURL"))
         self.assertEqual(current["status"], "Done")
+
+    # case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a small Auto PR switch in place of the manual PR button, defaulting to off; the switch disappears once a pull request is linked or the task leaves the working states. Selecting Auto PR persists and is reflected across a fresh read. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. The last switch choice is remembered: tasks created after turning it on start on, and tasks created after turning it off start off. Toggling Auto PR for an unknown task is rejected.
+    def test_task_auto_pr_toggle_creates_pull_request_on_review(self):
+        missing, _ = self.call_cli("task", "pr", "auto", str(uuid.uuid4()), "on", expected_status=3)
+        self.assert_failure(missing, "not_found")
+
+        def remove_fixture_origin(repository, expected_url):
+            # A worktree shares its source repository's git config, so adding
+            # "origin" there leaks into every other task worktree of that
+            # repository; remove it only if it still matches what this case set.
+            current = subprocess.run(
+                ["git", "-C", str(repository), "remote", "get-url", "origin"],
+                check=False, capture_output=True, text=True,
+            )
+            if current.returncode == 0 and current.stdout.strip() == str(expected_url):
+                self.run_git(repository, "remote", "remove", "origin")
+
+        task = self.create_repo_task("Auto PR toggle", [self.primary], merge_targets={self.primary: "main"})
+        self.assertFalse(task["autoCreatePullRequestOnReview"], "Auto PR must default to off so existing tasks are unaffected.")
+        enabled = self.assert_success(self.call_cli("task", "pr", "auto", task["id"], "on")[0])
+        self.assertTrue(enabled["autoCreatePullRequestOnReview"])
+        reread = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertTrue(reread["autoCreatePullRequestOnReview"], "The toggle should persist across a fresh CLI connection.")
+
+        remote_root = self.data_directory / "auto-pr-remotes"
+        remote_root.mkdir()
+        (remote_root / ".playhouse-test-owner").write_text("Playhouse bridge test owns these PR remotes.\n", encoding="utf-8")
+        remote = remote_root / "auto-pr.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+
+        gh_directory = self.data_directory / "auto-pr-gh-fixture"
+        gh_directory.mkdir()
+        gh = gh_directory / "gh"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "gh-fixture.sh", gh)
+        gh.chmod(0o755)
+        gh_state = gh_directory / "state"
+        gh_state.write_text("", encoding="utf-8")
+        create_log = gh_directory / "create-calls"
+        gh_environment = {
+            "PATH": f"{gh_directory}:{os.environ.get('PATH', '')}",
+            "PLAYHOUSE_E2E_GH_STATE_PATH": str(gh_state),
+            "PLAYHOUSE_E2E_GH_CALL_LOG": str(gh_directory / "view-calls"),
+            "PLAYHOUSE_E2E_GH_CREATE_LOG": str(create_log),
+            "PLAYHOUSE_E2E_GH_CREATE_FIRST_NUMBER": "701",
+        }
+
+        # Mirrors complete_fixture_turn's own driving loop (a 90s deadline accommodates
+        # real repository worktree preparation), but adds the remote the first time the
+        # turn holds so the real `gh`/`git` publish path can succeed when the outcome
+        # reports completed with Auto PR on.
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-auto-pr"
+        hold_marker = Path(str(executable) + ".hold-release")
+        hold_marker.touch()
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        turn_environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable), **gh_environment}
+        command = ["conversation", "send", task["id"], "--message", "Complete this task.", "--answer", "color=Blue", "--answer", "token=fixture-secret"]
+        active = Path(str(executable) + ".turn-active")
+        release = Path(str(executable) + ".turn-release")
+        active.unlink(missing_ok=True)
+        release.unlink(missing_ok=True)
+        process = self.start_cli(*command, extra_environment=turn_environment)
+        try:
+            deadline = time.monotonic() + 90
+            remote_added = False
+            outcome_count = 0
+            while process.poll() is None and time.monotonic() < deadline:
+                if active.exists() and not release.exists():
+                    if outcome_count == 0:
+                        # The first hold is the real task turn: make the worktree
+                        # publishable, then report its outcome so Auto PR's
+                        # subsequent pull-request-summary turn (a separate,
+                        # task-outcome-less fixture activation on the same
+                        # executable) has something real to describe.
+                        materialized = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+                        record = materialized["repositoryWorktrees"][0]
+                        self.assertFalse(record["isPending"], "The worktree must be ready by the time the turn is active.")
+                        self.addCleanup(remove_fixture_origin, self.primary, remote)
+                        self.run_git(Path(record["worktreePath"]), "remote", "add", "origin", str(remote))
+                        self.run_git(Path(record["worktreePath"]), "push", "origin", "main")
+                        remote_added = True
+                        response, _ = self.call_cli("task", "outcome", task["id"], "completed", extra_environment=gh_environment)
+                        self.assertEqual(self.assert_success(response)["outcome"], "completed")
+                        outcome_count += 1
+                        # Auto PR's own pull-request-summary turn reuses this same
+                        # executable next; without the hold marker it takes the
+                        # fixture's normal default-answer path instead of pausing
+                        # again for an outcome nothing will ever report.
+                        hold_marker.unlink(missing_ok=True)
+                    release.write_text("Release the fixture turn.\n", encoding="utf-8")
+                time.sleep(0.02)
+            self.assertGreater(outcome_count, 0, "The fixture should hold the turn until its explicit outcome is reported.")
+            self.assertTrue(remote_added, "The remote must be added before the outcome is reported.")
+            response, _ = self.finish_cli(process, command)
+            self.assert_success(response)
+        finally:
+            if process.poll() is None:
+                release.write_text("Release the fixture turn.\n", encoding="utf-8")
+                process.communicate(timeout=20)
+            active.unlink(missing_ok=True)
+            release.unlink(missing_ok=True)
+            hold_marker.unlink(missing_ok=True)
+
+        reviewed = self.assert_success(self.call_cli("task", "get", task["id"])[0])
+        self.assertEqual(reviewed["status"], "Review")
+        self.assertEqual(reviewed["repositoryWorktrees"][0]["pullRequestNumber"], 701)
+        self.assertEqual(reviewed["repositoryWorktrees"][0]["pullRequestURL"], "https://github.com/playhouse-test/fixture/pull/701")
+        create_events = create_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(
+            sum(line.startswith("created\t") for line in create_events), 1,
+            "Auto PR should create the pull request exactly once without the user clicking anything.",
+        )
+
+        sticky_on = self.create_task("Sticky Auto PR on")
+        self.assertTrue(sticky_on["autoCreatePullRequestOnReview"], "A task created after turning Auto PR on should start on.")
+        turned_off = self.assert_success(self.call_cli("task", "pr", "auto", sticky_on["id"], "off")[0])
+        self.assertFalse(turned_off["autoCreatePullRequestOnReview"])
+        sticky_off = self.create_task("Sticky Auto PR off")
+        self.assertFalse(sticky_off["autoCreatePullRequestOnReview"], "A task created after turning Auto PR off should start off.")
+
+        manual_task = self.create_repo_task("Manual PR toggle default", [self.secondary], merge_targets={self.secondary: "main"})
+        self.assertFalse(manual_task["autoCreatePullRequestOnReview"])
+        self.complete_fixture_turn(manual_task["id"], executable_name="codex-fixture-manual-pr")
+        manual_reviewed = self.assert_success(self.call_cli("task", "get", manual_task["id"])[0])
+        self.assertEqual(manual_reviewed["status"], "Review")
+        self.assertIsNone(
+            manual_reviewed["repositoryWorktrees"][0].get("pullRequestNumber"),
+            "With Auto PR off, reaching Review must not create a pull request by itself.",
+        )
+
+        manual_remote_root = self.data_directory / "manual-pr-remotes"
+        manual_remote_root.mkdir()
+        (manual_remote_root / ".playhouse-test-owner").write_text("Playhouse bridge test owns these PR remotes.\n", encoding="utf-8")
+        manual_remote = manual_remote_root / "manual-pr.git"
+        subprocess.run(["git", "init", "--bare", str(manual_remote)], check=True, capture_output=True, text=True)
+        manual_worktree_path = Path(manual_reviewed["repositoryWorktrees"][0]["worktreePath"])
+        self.addCleanup(remove_fixture_origin, self.secondary, manual_remote)
+        self.run_git(manual_worktree_path, "remote", "add", "origin", str(manual_remote))
+        self.run_git(manual_worktree_path, "push", "origin", "main")
+        manual_create_environment = {
+            "PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(self.data_directory / "codex-fixture-manual-pr"),
+            **gh_environment,
+        }
+        manual_created = self.assert_success(self.call_cli("task", "pr", "create", manual_task["id"], extra_environment=manual_create_environment)[0])
+        self.assertEqual(
+            manual_created["repositoryWorktrees"][0]["pullRequestNumber"], 702,
+            "The manual create flow must still work unchanged when Auto PR stays off.",
+        )
 
     # case-contract: test_review_pr_conflicts_probe_and_verify | Separate Review task cards probe their linked pull requests concurrently on app focus, with refreshes limited to one per 20 seconds, with focus events during cooldown coalesced into one trailing refresh. A conflicting PR or a mergeable PR whose remote head is not pushed locally retains the imported conflict action with its indicator artwork beside its PR link; the UI renders the artwork inside the action, keeps it beside the PR link, and gives both controls hit targets of at least 30×30 points. Clicking the conflict action sends the corrected request in the task conversation. CLI and UI use the same GitHub mergeability and head checks, retry once when resolution remains unconfirmed, and clear the action only after GitHub confirms the pushed head.
     def test_review_pr_conflicts_probe_and_verify(self):
@@ -2626,7 +2831,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         verification, _ = self.call_cli("task", "pr", "verify", task["id"], extra_environment=environment)
         self.assertEqual(self.assert_success(verification)["status"], "resolved")
 
-    # case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects conflicts without mutation and blocks PR creation until conflicts are resolved in the task worktree; CLI/XPC resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI verifies PR creation directs the user to resolve conflicts in the task worktree and leaves unresolved conflicts uncommitted and unpublished.
+    # case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects merge conflicts without mutation, and PR creation still publishes the task branch and reaches the normal GitHub CLI path; conflicts do not block PR creation. CLI/XPC resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI confirms PR creation proceeds for a conflicted branch and the existing Fix Conflicts action still appears once the PR is linked.
     def test_task_pr_conflicts_detect_without_mutation(self):
         task = self.create_repo_task("PR conflict detection", [self.primary], merge_targets={self.primary: "main"}, materialize=True)
         record = task["repositoryWorktrees"][0]
@@ -2654,15 +2859,15 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(self.primary, "rev-parse", "main").strip(), target_head)
         self.assertEqual((worktree / conflict_path).read_text(encoding="utf-8"), "task branch version\n")
         self.assertEqual(target_file.read_text(encoding="utf-8"), "target branch version\n")
-        requires_ui, _ = self.call_cli("task", "pr", "create", task["id"], expected_status=1)
-        self.assert_failure(requires_ui, "conflicts_require_confirmation")
+        pr_attempt, _ = self.call_cli("task", "pr", "create", task["id"], expected_status=1)
+        self.assert_failure(pr_attempt, "operation_failed")
+        self.assertNotIn("conflicts_require_confirmation", json.dumps(pr_attempt))
+        self.assertNotIn("Pull request conflicts were found", pr_attempt["error"]["message"])
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD").strip(), branch_head)
         task_branch_ref = f"refs/heads/{record['branch']}"
-        kept_remote_branch = subprocess.run(
-            ["git", "--git-dir", str(remote), "show-ref", "--verify", "--quiet", task_branch_ref],
-            check=False, capture_output=True, text=True,
-        )
-        self.assertEqual(kept_remote_branch.returncode, 1, "A blocked PR creation must not publish the task branch.")
+        published_branch_head = self.run_git(remote, "rev-parse", task_branch_ref).strip()
+        self.assertEqual(published_branch_head, branch_head, "A conflict must not block publishing the task branch for PR creation.")
+        subprocess.run(["git", "--git-dir", str(remote), "update-ref", "-d", task_branch_ref], check=True, capture_output=True, text=True)
         self.run_git(worktree, "fetch", "origin", "main")
         merge = subprocess.run(
             ["git", "-C", str(worktree), "merge", "--no-commit", "--no-ff", "FETCH_HEAD"],
@@ -2876,24 +3081,24 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review")
         self.run_git(self.primary, "remote", "remove", "origin")
 
-    # case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC creates PRs for two repositories, verifies the first PR persists when the second creation fails, retries only the missing repository, confirms each gh create call targets the corresponding repository worktree, and confirms both saved numbers on fresh reads. The UI labels active-card and Done-archive multi-repository creation actions PRs, clicks the active action, verifies the partial-success retry action, confirms the gh create calls target both repository worktrees and retry only the failed one, then shows the exact created PR numbers on the active task and every linked number in the Done archive. Hovering the outer padded edge of each PR link triggers its feedback.
+    # case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC creates PRs for two repositories, verifies the first PR persists when the second creation fails, retries only the missing repository, confirms each gh create call targets the corresponding repository worktree, and confirms both saved numbers on fresh reads. The UI labels active-card and Done-archive multi-repository creation actions PRs, clicks the active action, verifies the partial-success retry action, confirms the gh create calls target both repository worktrees and retry only the failed one, then shows exact PR numbers on the active task and Done archive, including four-digit values without grouping separators. Hovering the outer padded edge of each PR link triggers its feedback.
     def test_done_archive_displays_existing_pull_request_link(self):
         task = self.create_repo_task("Archived linked PR", [self.primary, self.secondary], materialize=True)
         completed, _ = self.call_cli("task", "move", task["id"], "Done")
         self.assertEqual(self.assert_success(completed)["status"], "Done")
-        url = self.seed_done_task_pull_request(task["id"])
-        second_url = self.seed_done_task_pull_request(task["id"], number=124, repository_index=1)
+        url = self.seed_done_task_pull_request(task["id"], number=1234)
+        second_url = self.seed_done_task_pull_request(task["id"], number=1235, repository_index=1)
 
         current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(current["status"], "Done")
         record = current["repositoryWorktrees"][0]
-        self.assertEqual(record["pullRequestNumber"], 123)
+        self.assertEqual(record["pullRequestNumber"], 1234)
         self.assertEqual(record["pullRequestURL"], url)
-        self.assertEqual(current["repositoryWorktrees"][1]["pullRequestNumber"], 124)
+        self.assertEqual(current["repositoryWorktrees"][1]["pullRequestNumber"], 1235)
         self.assertEqual(current["repositoryWorktrees"][1]["pullRequestURL"], second_url)
         archived = next(item for item in self.assert_success(self.call_cli("board", "list")[0])["tasks"] if item["id"] == task["id"])
-        self.assertEqual(archived["repositoryWorktrees"][0]["pullRequestNumber"], 123)
-        self.assertEqual(archived["repositoryWorktrees"][1]["pullRequestNumber"], 124)
+        self.assertEqual(archived["repositoryWorktrees"][0]["pullRequestNumber"], 1234)
+        self.assertEqual(archived["repositoryWorktrees"][1]["pullRequestNumber"], 1235)
 
         creating = self.create_repo_task("Create PRs for every repository", [self.primary, self.secondary], materialize=True)
         self.clear_task_provider_session(creating["id"])
@@ -3836,15 +4041,17 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(fresh_record["workspaceRoots"], [str(self.custom)])
         self.assertEqual(fresh_record["contextFolders"], [str(self.custom)])
 
-    # case-contract: test_task_repository_removal_preserves_state_on_dirty_worktree | Removing the only pending repository leaves the task with no workspace and preserves the source repository; removing a pending repository preserves other context folders; removing a clean managed worktree through the GUI waits for an active turn, while the task repository API removes it from context immediately and defers clean worktree deletion until the turn releases; a bridge service restart preserves the cleanup intent and a fresh request completes removal; if the active turn writes files before release, deferred cleanup preserves that worktree and its changes; a dirty worktree rejects removal and preserves its task record and files.
+    # case-contract: test_task_repository_removal_preserves_state_on_dirty_worktree | Removing one of two pending repositories leaves the remaining repository in task context and remembered settings, while preserving the removed source repository; the next task restores only the remaining remembered repository. Removing a pending repository preserves other context folders; removing a clean managed worktree through the GUI waits for an active turn, while the task repository API removes it from context immediately and defers clean worktree deletion until the turn releases; a bridge service restart preserves the cleanup intent and a fresh request completes removal; if the active turn writes files before release, deferred cleanup preserves that worktree and its changes; a dirty worktree rejects removal and preserves its task record and files.
     def test_task_repository_removal_preserves_state_on_dirty_worktree(self):
-        sole = self.create_repo_task("Sole repository removal", [self.primary])
+        sole = self.create_repo_task("Two repository removal", [self.primary, self.secondary])
         sole_removed, _ = self.call_cli("task", "repository", "remove", sole["id"], "--repo", self.primary)
         sole_result = self.assert_success(sole_removed)
-        self.assertEqual(sole_result["repositoryWorktrees"], [])
-        self.assertEqual(sole_result["workspaceRoots"], [])
+        self.assertEqual([item["repositoryPath"] for item in sole_result["repositoryWorktrees"]], [str(self.secondary)])
+        self.assertEqual(sole_result["workspaceRoots"], [str(self.secondary)])
         self.assertEqual(sole_result["contextFolders"], [])
         self.assertTrue(self.primary.is_dir(), "Removing a pending repository must preserve its source repository.")
+        remembered, _ = self.call_cli("settings", "get")
+        self.assertEqual(self.assert_success(remembered)["lastSelectedRepositories"], [str(self.secondary)])
 
         pending = self.create_repo_task("Pending repository removal", [self.primary], roots=[self.custom])
         pending_id = pending["id"]
@@ -3854,6 +4061,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(pending_result["contextFolders"], [str(self.custom)])
         self.assertEqual(pending_result["workspaceRoots"], [str(self.custom)])
         self.assertTrue(self.primary.is_dir(), "Removing a pending repository must preserve its source repository.")
+        remembered, _ = self.call_cli("settings", "get")
+        self.assertEqual(self.assert_success(remembered)["lastSelectedRepositories"], [])
 
         clean_active = self.create_repo_task("Clean active repository removal", [self.alternate], roots=[self.custom])
         clean_active_id = clean_active["id"]
@@ -6046,7 +6255,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         history, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(history)["messages"], [])
 
-    # case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the submitted user message remains visible in the transcript. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
+    # case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the submitted user message remains visible in the transcript. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. Working for renders open while the turn runs, so its progress is visible without a click, and it is still open after leaving and reopening the task mid-turn; every in-flight call is readable from mid-turn history. A collapse the reader performs mid-turn is honored and survives the activity updates that follow, and the final answer closes the section back into a clean collapsed Worked for. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
     def test_conversation_shows_mcp_and_dynamic_tool_activity(self):
         task_id = self.create_task(title="Tool activity")['id']
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -6095,6 +6304,12 @@ class PlayhouseBridgeTests(unittest.TestCase):
             held_history, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
             held_messages = self.assert_success(held_history)["messages"]
             self.assertIn("Show tool activity.", [message["text"] for message in held_messages], "The submitted user message should remain in persisted history while the provider turn is held active.")
+            # The turn's activity section renders open before the final answer, so every
+            # in-flight call must be readable mid-turn, not only once the turn settles.
+            held_activities = {row["id"]: row for row in self.assert_success(held_history)["activities"]}
+            self.assertTrue(expected_tool_ids.issubset(held_activities), f"Every in-flight tool call should be readable mid-turn; got {sorted(held_activities)}.")
+            for tool_id in expected_tool_ids:
+                self.assertEqual(held_activities[tool_id]["status"], "inProgress", f"{tool_id} should still read as in progress while the turn is held.")
             self.assertEqual(active_rows["item_fixture_mcp_call"]["toolKind"], "mcp")
             self.assertEqual(active_rows["item_fixture_dynamic_call"]["toolKind"], "dynamic")
             self.assertEqual(active_rows["item_fixture_dynamic_legacy"]["toolKind"], "dynamic")
@@ -6270,7 +6485,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         reloaded_messages = self.assert_success(reloaded_response)["messages"]
         self.assertEqual([message["text"] for message in reloaded_messages], [message["text"] for message in messages])
 
-    # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs. A fresh `conversation subagent-history` read returns the completed child's stored conversation content.
+    # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, Working for renders open and active agents appear as individual named rows outside it, with available path/model/reasoning metadata and started-working wording; a mid-turn collapse the reader performs is honored. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs. A fresh `conversation subagent-history` read returns the completed child's stored conversation content.
     def test_conversation_shows_subagent_delegation(self):
         task_id = self.create_task(title="Subagent delegation")["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -6615,7 +6830,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         retained_after_failure, _ = self.call_cli("conversation", "models", unavailable_task_id, "--cached")
         self.assertEqual(self.assert_success(retained_after_failure)["models"], initial_unavailable_models)
 
-    # case-contract: test_conversation_models_keep_newest_version_per_family | The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Alias-only Claude entries are omitted. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control.
+    # case-contract: test_conversation_models_keep_newest_version_per_family | The model picker removes the Default entry, superseded aliases, older versions, and duplicate snapshots, keeping only the newest concrete version in each family. GPT-6 Luna replaces GPT-5.6 Luna, and Claude Opus 5.5 replaces the Opus alias and older snapshots. Claude Code names its newest release only through an alias entry's resolved model, so that resolved version supersedes the older concrete Opus 5 and keeps Claude Code's own display name. Alias entries with no resolved model are omitted. A remembered selection the filtered list no longer offers moves to its family's newest offered model and is written back, surviving a later refresh whose list no longer offers that family, while a still-offered selection is left alone. A remembered bare alias migrates to its family's offered release, but a dated snapshot pinned through the CLI is left in place because its family's undated release is not a higher version. The shared CLI/XPC list applies the same filtering to Codex and Claude, and the visible picker matches the Codex list. The model popover opens above its composer control.
     def test_conversation_models_keep_newest_version_per_family(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
         executable = self.data_directory / "codex-fixture-model-versions"
@@ -6629,6 +6844,20 @@ class PlayhouseBridgeTests(unittest.TestCase):
         models = self.assert_success(self.call_cli("conversation", "models", task_id, extra_environment=environment)[0])["models"]
         self.assertEqual([model["id"] for model in models], ["gpt-6-luna", "gpt-6-sol", "gpt-6-mini"])
         self.assertNotIn("gpt-5.6-luna", [model["id"] for model in models])
+
+        # A remembered model the filtered list no longer offers follows its family forward.
+        # The Sol family is used because its newest entry is not the default model, so the
+        # paired UI case cannot mistake an unloaded composer for a superseded selection.
+        self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-5.6-sol")[0])
+        self.assertEqual(
+            self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"], "gpt-6-sol",
+            "A superseded selection should move to its family's newest offered model.",
+        )
+        self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-6-mini")[0])
+        self.assertEqual(
+            self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"], "gpt-6-mini",
+            "A selection the provider still offers must be left alone.",
+        )
 
         # The same shared filter removes Claude's Default/Opus aliases and collapses dated duplicates.
         claude_fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
@@ -6648,6 +6877,57 @@ class PlayhouseBridgeTests(unittest.TestCase):
             [model["id"] for model in claude_models],
             ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-6"],
         )
+        # Claude Code only names its newest release through the alias entry's resolvedModel,
+        # so the alias must become that concrete model rather than losing to the older
+        # claude-opus-5 that does carry a value of its own.
+        self.assertNotIn("claude-opus-5", [model["id"] for model in claude_models])
+        self.assertEqual(
+            next(model["name"] for model in claude_models if model["id"] == "claude-opus-5-5"), "Opus 5.5",
+            "The resolved alias should keep Claude Code's display name for the release.",
+        )
+        # A dated snapshot is a deliberate pin only the CLI can set. Its own family's
+        # undated release carries the same version numbers, so the pin stays put.
+        self.assert_success(self.call_cli("conversation", "model", claude_task_id, "set", "claude-opus-5-5-20251001")[0])
+        self.assertEqual(
+            self.assert_success(self.call_cli("conversation", "model", claude_task_id)[0])["modelID"],
+            "claude-opus-5-5-20251001",
+            "A pinned dated snapshot must not be rewritten to its family's undated release.",
+        )
+        # A bare alias remembered by an older Playhouse build has no version to compare
+        # against, so it migrates to whatever its family now offers.
+        self.assert_success(self.call_cli("conversation", "model", claude_task_id, "set", "opus")[0])
+        self.assertEqual(
+            self.assert_success(self.call_cli("conversation", "model", claude_task_id)[0])["modelID"], "claude-opus-5-5",
+            "A remembered bare alias should migrate to its family's offered release.",
+        )
+
+        # The real user migration: a remembered claude-opus-5 moves to claude-opus-5-5 and
+        # is written back. Re-reading alone cannot prove the write, because the read
+        # re-derives the same answer while the cache still offers a superseding entry. So
+        # refresh the cache with a list that has no Opus family at all: only a persisted
+        # migration survives that, a re-derived one falls back to the stale claude-opus-5.
+        self.assert_success(self.call_cli("conversation", "model", claude_task_id, "set", "claude-opus-5")[0])
+        self.assertEqual(
+            self.assert_success(self.call_cli("conversation", "model", claude_task_id)[0])["modelID"], "claude-opus-5-5",
+            "A remembered Claude model superseded by its alias's resolved release should move forward.",
+        )
+        models_override = Path(str(claude_executable) + ".models-override")
+        models_override.write_text(json.dumps([
+            {"value": "sonnet", "resolvedModel": "claude-sonnet-5-5", "displayName": "Sonnet 5.5"},
+            {"value": "haiku", "resolvedModel": "claude-haiku-4-6", "displayName": "Haiku 4.6"},
+        ]), encoding="utf-8")
+        try:
+            opusless_models = self.assert_success(
+                self.call_cli("conversation", "models", claude_task_id, extra_environment=claude_environment)[0]
+            )["models"]
+            self.assertEqual([model["id"] for model in opusless_models], ["claude-sonnet-5-5", "claude-haiku-4-6"])
+            self.assertEqual(
+                self.assert_success(self.call_cli("conversation", "model", claude_task_id)[0])["modelID"], "claude-opus-5-5",
+                "The superseded selection must have been persisted, not re-derived on every read.",
+            )
+        finally:
+            models_override.unlink()
+
         aliases_fixture = self.data_directory / "claude-fixture-model-versions-aliases-only"
         shutil.copyfile(claude_fixture, aliases_fixture)
         aliases_fixture.chmod(0o755)
@@ -6708,7 +6988,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(assistants[-1]["modelID"], "gpt-6-luna")
         self.assertEqual(assistants[-1]["createdAt"], "2026-10-26T12:34:00Z")
 
-    # case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 as the concrete latest choice. Selecting it changes the prompt and reply label to Claude · Opus 5.5, and later model changes preserve the old reply's model attribution. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
+    # case-contract: test_conversation_effort_dispatches_to_claude | Claude's model picker omits Default and aliases, showing Opus 5.5 resolved from Claude Code's bare alias entry as the concrete latest choice in place of the older Opus 5. Selecting it changes the prompt and reply label to Claude · Opus 5.5, and later model changes preserve the old reply's model attribution. The selected effort persists through CLI/XPC reads and reaches Claude Code as CLAUDE_CODE_EFFORT_LEVEL; the UI selects Extra High and sends a Claude fixture turn whose recorded environment value is xhigh.
     def test_conversation_effort_dispatches_to_claude(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-effort"
@@ -6891,7 +7171,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         probe = self.data_directory / "codex-question-ownership-probe"
         core = ["BoardTask", "ConversationSubject", "WorkspaceSupport", "WorkspaceChanges", "CodexAppServerClient",
-                "ConversationModel", "ClaudeCodeClient", "ConversationTranscriptStore",
+                "ConversationModel", "ClaudeCodeClient", "ProcessCPUSampler", "ConversationTranscriptStore",
                 "StandaloneChatStore", "BridgeCore"]
         command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone"]
         for framework in ("Foundation", "AppKit", "SwiftUI", "SwiftData", "Combine"):
@@ -7046,7 +7326,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIn("question", failed.get("error", {}).get("message", "").lower())
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Blocked")
 
-    # case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from Playhouse history, clears pending state, and returns to Waiting Response.
+    # case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from Playhouse history, clears pending state, and returns to Waiting Response. While the recovery turn applying the answer runs, the answered question is no longer pending in history or shown in the reopened conversation, and the task is In Progress; if that recovery dies mid-turn, the question returns for retry with the task in Waiting Response, and answering again succeeds.
     def test_claude_pending_question_recovers_after_provider_process_restarts(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-restart-question"
@@ -7078,6 +7358,57 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse(rejected.get("ok", True), rejected)
         still_pending, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(still_pending).get("pendingUserInputRequest"), pending)
+        recovery_pause = Path(str(executable) + ".recovery-pause")
+        recovery_ready = Path(str(executable) + ".recovery-ready")
+        recovery_release = Path(str(executable) + ".recovery-release")
+        recovery_pause.write_text("Hold the recovery turn open.\n", encoding="utf-8")
+        answer_process = self.start_cli(
+            "conversation", "answer-user-input", task_id, pending["id"], "--answer", "question-1=Green",
+            extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)},
+        )
+        try:
+            deadline = time.monotonic() + 20
+            while not recovery_ready.exists() and answer_process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(recovery_ready.exists(), "The fixture should hold the recovery turn open.")
+            applying = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+            self.assertIsNone(
+                applying.get("pendingUserInputRequest"),
+                "An answered question must not stay pending while its recovery turn runs.",
+            )
+            self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress")
+            # Kill the bridge daemon that owns the recovery turn before it can clean up.
+            send_started = [
+                event for event in self.diagnostic_events()
+                if event.get("event") == "conversation.send.started" and event.get("taskID") == task_id
+            ][-1]
+            bridge_pid = int(send_started["clientPID"])
+            try:
+                os.kill(bridge_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            exit_deadline = time.monotonic() + 5
+            while time.monotonic() < exit_deadline:
+                try:
+                    os.kill(bridge_pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("The bridge daemon owning the recovery turn should exit.")
+            answer_process.communicate(timeout=30)
+        finally:
+            recovery_release.write_text("Release the orphaned recovery turn.\n", encoding="utf-8")
+            if answer_process.poll() is None:
+                answer_process.communicate(timeout=30)
+        crashed = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+        self.assertEqual(
+            crashed.get("pendingUserInputRequest"), pending,
+            "A recovery that dies mid-turn must show its question again for retry.",
+        )
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
+        for marker in (recovery_pause, recovery_ready, recovery_release):
+            marker.unlink(missing_ok=True)
         accepted, _ = self.call_cli(
             "conversation", "answer-user-input", task_id, pending["id"], "--answer", "question-1=Green",
             extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)},
@@ -7476,6 +7807,129 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "The woken parent turn's answer still ends the turn.",
         )
 
+    # case-contract: test_claude_settles_turn_after_consumed_wake_notification | When Claude Code starts the provider turn that would deliver a finished background task's notification and then says nothing at all, Playhouse settles that turn on its own instead of leaving it open and the task In Progress forever: a follow-up queued while the turn was still parked stays queued through the silent wake, the send finishes and the task reaches Review, and that follow-up is then delivered in its own turn rather than stranded in the queue. A woken turn that is alive and merely slow to speak is not cut off by that backstop: it stays quiet past the grace a consumed notification gets and still ends the turn on its own answer.
+    def test_claude_settles_turn_after_consumed_wake_notification(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / "claude-fixture-consumed-wake"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        # Short graces keep the case fast; which silence settles the turn and
+        # which one waits for Claude does not depend on their lengths.
+        env = {
+            "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable),
+            "PLAYHOUSE_E2E_CLAUDE_WAKE_GRACE_SECONDS": "4",
+            "PLAYHOUSE_E2E_CLAUDE_WOKEN_SILENCE_GRACE_SECONDS": "24",
+            "PLAYHOUSE_E2E_CLAUDE_SLOW_WOKEN_SILENCE_SECONDS": "8",
+        }
+        created, _ = self.call_cli(
+            "task", "create", "--title", "Claude consumed wake", "--root", self.primary, "--provider", "claude"
+        )
+        task_id = self.assert_success(created)["id"]
+        pause = Path(f"{executable}.consumed-wake-pause")
+        parked = Path(f"{executable}.consumed-wake-ready")
+        release = Path(f"{executable}.consumed-wake-release")
+        woken = Path(f"{executable}.consumed-wake-woken")
+        pause.write_text("Playhouse test owns this Claude fixture marker.\n", encoding="utf-8")
+        command = ("conversation", "send", task_id, "--message", "Park a shell and then consumed wake notification.")
+        process = self.start_cli(*command, extra_environment=env)
+        try:
+            deadline = time.monotonic() + 20
+            while not parked.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(parked.exists(), "The fixture should park the turn after its result while the shell runs.")
+            # The turn is still the active turn here, so this follow-up queues
+            # rather than sending, and only a settled turn can ever deliver it.
+            stranded = self.assert_success(self.call_cli(
+                "conversation", "queue", task_id, "--message", "Then tell the story of the VM run.",
+            )[0])
+            self.assertIn(
+                stranded["id"],
+                [item["id"] for item in self.assert_success(self.call_cli("conversation", "queue-list", task_id)[0])],
+                "A follow-up sent while the parked turn is active must wait in the queue.",
+            )
+            release.write_text("Playhouse test owns this Claude fixture marker.\n", encoding="utf-8")
+            deadline = time.monotonic() + 20
+            while not woken.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(woken.exists(), "The fixture should start the woken turn and then stay silent.")
+            self.assertIsNone(
+                process.poll(),
+                "The silent wake must not end the send before Playhouse's own grace period settles the turn.",
+            )
+            response, _ = self.finish_cli(process, command, timeout=120)
+        finally:
+            if process.poll() is None:
+                process.communicate(timeout=30)
+        self.assert_success(response)
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        self.assertIn(
+            "WAKE SHELL STARTED",
+            [message["text"] for message in history["messages"] if message["role"] == "assistant"],
+            "Settling a stranded turn must keep the answer it already gave.",
+        )
+        deadline = time.monotonic() + 60
+        remaining = None
+        while time.monotonic() < deadline:
+            remaining = [
+                item["id"] for item
+                in self.assert_success(self.call_cli("conversation", "queue-list", task_id)[0])
+            ]
+            if stranded["id"] not in remaining:
+                break
+            time.sleep(0.2)
+        self.assertNotIn(
+            stranded["id"], remaining or [],
+            "A follow-up queued while the turn was stranded must be delivered once Playhouse settles it.",
+        )
+        deadline = time.monotonic() + 60
+        status = None
+        while time.monotonic() < deadline:
+            status = self.assert_success(self.call_cli("task", "get", task_id)[0])["status"]
+            if status == "Review":
+                break
+            time.sleep(0.2)
+        self.assertEqual(
+            status, "Review",
+            "A task whose turn was stranded by a silent wake must not stay In Progress once Playhouse settles it.",
+        )
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        self.assertTrue(
+            any(
+                "BISCUIT-7" in (message["text"] or "")
+                for message in history["messages"] if message["role"] == "assistant"
+            ),
+            "The delivered follow-up's own answer belongs in the conversation.",
+        )
+
+        # A woken turn that is alive and merely slow to speak must not be cut
+        # off by that same backstop: it gets its own, far longer grace.
+        slow_created, _ = self.call_cli(
+            "task", "create", "--title", "Claude slow woken turn", "--root", self.primary, "--provider", "claude"
+        )
+        slow_id = self.assert_success(slow_created)["id"]
+        announced = Path(f"{executable}.slow-woken-announced")
+        slow_command = ("conversation", "send", slow_id, "--message", "Park a shell and then a slow woken turn.")
+        slow_process = self.start_cli(*slow_command, extra_environment=env)
+        try:
+            deadline = time.monotonic() + 30
+            while not announced.exists() and slow_process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(announced.exists(), "The fixture should announce the woken turn before going quiet.")
+            slow_response, _ = self.finish_cli(slow_process, slow_command, timeout=120)
+        finally:
+            if slow_process.poll() is None:
+                slow_process.communicate(timeout=30)
+        self.assert_success(slow_response)
+        slow_history = self.assert_success(self.call_cli("conversation", "history", slow_id, extra_environment=env)[0])
+        self.assertEqual(
+            [message["text"] for message in slow_history["messages"] if message["role"] == "assistant"][-1],
+            "SLOW WOKEN HANDLED",
+            "A woken turn that stays quiet past the consumed-notification grace must still end on its own answer.",
+        )
+
     # case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, Playhouse returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics.
     def test_claude_private_recovery_failure_fails_closed(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
@@ -7852,7 +8306,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(any(message["text"] == "Answers received: " + expected_reply
                             for message in delivered_history["messages"]))
 
-    # case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; a turn running when the window quits cleanly or is killed keeps running in the bridge daemon, stays In Progress with its prompt visible after relaunch, finishes, and allows a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
+    # case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; a turn running when the window quits cleanly or is killed keeps running in the bridge daemon, stays In Progress with its prompt visible after relaunch, finishes, and allows a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. The live turn's activity section renders open and folds away when the interrupted turn settles without an answer, on the conversation that stayed open; the interrupted turn adds no final answer and keeps the activity it reported. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
     def test_codex_interrupted_turn_blocks_with_reason_and_can_retry(self):
         task_id = self.create_task("Interrupted turn", roots=[self.primary])["id"]
         self.complete_fixture_turn(task_id, message="Create the conversation thread before interruption.")
@@ -7878,6 +8332,23 @@ class PlayhouseBridgeTests(unittest.TestCase):
         blocked = self.assert_success(task)
         self.assertEqual(blocked["status"], "Blocked")
         self.assertIn("interrupted", blocked["statusMessage"].lower())
+        # The window folds its activity section on the settled turn rather than on
+        # an answer, and keeps the section rendered because the turn still has the
+        # activity it reported. Assert both from the turn's own stream: Codex
+        # activities are not persisted by Playhouse, so a history read would reach
+        # the real provider rather than this fixture.
+        self.assertEqual(
+            [event for event in events if event.get("type") == "assistant_final"], [],
+            "An interrupted turn should settle without a final answer of its own.",
+        )
+        reported_activities = [
+            event.get("payload", {}).get("activity", {}) for event in events
+            if event.get("type") == "activity"
+        ]
+        self.assertIn(
+            "item_fixture_interrupted_command", [activity.get("id") for activity in reported_activities],
+            "The interrupted turn should report the activity that keeps the window's section rendered.",
+        )
         diagnostic_lines = [
             json.loads(line)
             for line in (self.data_directory / "Diagnostics.jsonl").read_text(encoding="utf-8").splitlines()
@@ -8263,6 +8734,160 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assert_failure(response, "invalid_argument")
         self.assertEqual(
             self.assert_success(self.call_cli("settings", "get")[0])["tokenUsageColorMax"], 2400,
+            "A rejected maximum should leave the stored one alone.",
+        )
+
+    # case-contract: test_task_cpu_usage_reports_claude_process_tree_load | A newly created Claude task reports cpu-usage as not running before any turn starts. While a real Claude Code fixture turn burns CPU in a real child process, two successive `task cpu-usage` reads establish a baseline and then a plausible non-zero percentage for the task's process tree, the task card's CPU bar reads cool green against the default multi-core ceiling and hot red once the ceiling is lowered to match that load, and the reading returns to not-running once the turn completes.
+    def test_task_cpu_usage_reports_claude_process_tree_load(self):
+        environment = self.install_claude_fixture("claude-fixture-cpu-usage")
+        environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU"] = "1"
+        environment["PLAYHOUSE_E2E_CLAUDE_FIXTURE_BURN_CPU_SECONDS"] = "6"
+        task_id = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Claude CPU usage", "--root", self.primary, "--provider", "claude"
+        )[0])["id"]
+
+        idle = self.assert_success(self.call_cli("task", "cpu-usage", task_id)[0])
+        self.assertIsNone(idle["cpuPercent"], "A task with no turn yet has nothing to sample.")
+        self.assertEqual(idle["reason"], "not_running")
+
+        send_failures = []
+
+        def send_turn():
+            try:
+                self.call_cli(
+                    "conversation", "send", task_id, "--message", "Tell me a story.",
+                    timeout=30, extra_environment=environment,
+                )
+            except Exception as error:
+                send_failures.append(error)
+
+        sender = threading.Thread(target=send_turn, daemon=True)
+        sender.start()
+        deadline = time.monotonic() + 10
+        session_id = None
+        while time.monotonic() < deadline:
+            active = self.assert_success(self.call_cli("task", "get", task_id)[0])
+            session_id = active.get("claudeSessionID")
+            if session_id:
+                break
+            time.sleep(0.1)
+        self.assertTrue(session_id, "The Claude fixture turn should start a session while it burns CPU.")
+
+        # The Claude process doesn't necessarily become sample-able in the same
+        # instant its session ID is persisted, so it can take a read or two
+        # before a read establishes a baseline (reported as not-running, same
+        # as a genuinely idle task, since there is nothing yet to diff
+        # against) that the next read can turn into a measured percentage;
+        # poll instead of assuming a fixed pair of reads lines up with that.
+        established_baseline = False
+        second = None
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            reading = self.assert_success(self.call_cli("task", "cpu-usage", task_id)[0])
+            if reading["cpuPercent"] is not None:
+                second = reading
+                break
+            established_baseline = True
+            time.sleep(0.3)
+        self.assertTrue(established_baseline, "At least one earlier read should have sampled the process tree first.")
+        self.assertIsNotNone(second, "A busy process tree should eventually report a measured percentage.")
+        self.assertGreater(second["cpuPercent"], 0, "A CPU-burning child process should register non-zero usage.")
+
+        sender.join(timeout=20)
+        self.assertFalse(sender.is_alive(), "The Claude fixture turn should complete.")
+        self.assertFalse(send_failures, f"The Claude turn should succeed: {send_failures}")
+
+        finished = self.assert_success(self.call_cli("task", "cpu-usage", task_id)[0])
+        self.assertIsNone(finished["cpuPercent"], "A finished turn is no longer running.")
+        self.assertEqual(finished["reason"], "not_running")
+
+    def cpu_attribution_child(self, executable, kind):
+        """The {pid, parentPID, workingDirectory} a running CPU-attribution fixture child recorded for itself."""
+        record = Path(f"{executable}.cpu-child-{kind}.json")
+        return json.loads(record.read_text(encoding="utf-8")) if record.is_file() else None
+
+    # case-contract: test_task_cpu_usage_attributes_codex_load_by_worktree | Two Codex tasks rooted in different repository folders share one real fixture app-server. Before any turn each reports cpu-usage as not running. While task A's turn runs a real CPU-burning child process in A's folder and task B's concurrent turn runs an idle child in B's folder, both children belong to the same app-server process; once a baseline is sampled, `task cpu-usage` attributes a plausible non-zero percentage to A and a near-zero one to B, and the task cards show A's CPU bar reading hot against a lowered ceiling beside B's visible but empty bar. Both readings return to not-running once the turns complete.
+    def test_task_cpu_usage_attributes_codex_load_by_worktree(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-cpu-attribution"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        busy_id = self.create_task(title="Codex busy worktree", roots=[self.primary], provider="codex")["id"]
+        idle_id = self.create_task(title="Codex idle worktree", roots=[self.secondary], provider="codex")["id"]
+        for task_id in (busy_id, idle_id):
+            before = self.assert_success(self.call_cli("task", "cpu-usage", task_id)[0])
+            self.assertIsNone(before["cpuPercent"], "A Codex task with no turn yet has nothing to sample.")
+            self.assertEqual(before["reason"], "not_running")
+
+        busy = self.start_cli("conversation", "send", busy_id, "--message", "Please burn cpu for 25 seconds.", extra_environment=environment)
+        idle = self.start_cli("conversation", "send", idle_id, "--message", "Please idle cpu for 25 seconds.", extra_environment=environment)
+        try:
+            deadline = time.monotonic() + 15
+            children = {}
+            while time.monotonic() < deadline and len(children) < 2:
+                children = {kind: child for kind in ("burn", "idle") if (child := self.cpu_attribution_child(executable, kind))}
+                time.sleep(0.1)
+            self.assertEqual(set(children), {"burn", "idle"}, "Both tasks' turns should be running their command children.")
+            self.assertEqual(children["burn"]["parentPID"], children["idle"]["parentPID"], "Both tasks' commands should run under one shared app-server.")
+            self.assertEqual(os.path.realpath(children["burn"]["workingDirectory"]), os.path.realpath(self.primary), "The busy command runs in its task's folder.")
+            self.assertEqual(os.path.realpath(children["idle"]["workingDirectory"]), os.path.realpath(self.secondary), "The idle command runs in its task's folder.")
+
+            # The first read only establishes the baseline (reported as not
+            # running), so poll until both tasks have a measured value, then
+            # let the idle child's own start-up CPU fall out of the window.
+            readings = {}
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                readings = {task_id: self.assert_success(self.call_cli("task", "cpu-usage", task_id)[0]) for task_id in (busy_id, idle_id)}
+                if all(reading["cpuPercent"] is not None for reading in readings.values()):
+                    break
+                time.sleep(0.3)
+            self.assertTrue(all(reading["cpuPercent"] is not None for reading in readings.values()), f"Both running Codex tasks should be sampled: {readings}")
+            time.sleep(1)
+            busy_reading = self.assert_success(self.call_cli("task", "cpu-usage", busy_id)[0])
+            idle_reading = self.assert_success(self.call_cli("task", "cpu-usage", idle_id)[0])
+            self.assertIsNone(busy_reading["reason"])
+            self.assertIsNone(idle_reading["reason"], "A running Codex task with an idle command still reports a value, not not-running.")
+            self.assertGreater(busy_reading["cpuPercent"], 20, "The busy-looping command's CPU should be attributed to its own task.")
+            self.assertLess(busy_reading["cpuPercent"], (os.cpu_count() or 1) * 100 + 50, "One busy loop can't exceed every core.")
+            self.assertLess(idle_reading["cpuPercent"], 5, "The other task's busy command must not leak into the idle task's reading.")
+
+            self.finish_cli(busy, ["conversation", "send", busy_id], timeout=45)
+            self.finish_cli(idle, ["conversation", "send", idle_id], timeout=45)
+        finally:
+            for process in (busy, idle):
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate(timeout=10)
+            # A failed assertion must not leave the daemon-side burn running into later cases.
+            if burner := self.cpu_attribution_child(executable, "burn"):
+                subprocess.run(["/bin/kill", str(burner["pid"])], check=False, capture_output=True)
+        for task_id in (busy_id, idle_id):
+            finished = self.assert_success(self.call_cli("task", "cpu-usage", task_id)[0])
+            self.assertIsNone(finished["cpuPercent"], "A finished Codex turn is no longer running.")
+            self.assertEqual(finished["reason"], "not_running")
+
+    # case-contract: test_settings_cpu_usage_color_max_round_trip | The CPU usage color maximum defaults to one fully busy core per logical CPU, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting.
+    def test_settings_cpu_usage_color_max_round_trip(self):
+        settings = self.assert_success(self.call_cli("settings", "get")[0])
+        expected_default = (os.cpu_count() or 1) * 100
+        self.assertEqual(settings["cpuUsageColorMax"], expected_default, "The bar's scale tops out at one busy core per logical CPU by default.")
+
+        updated = self.assert_success(self.call_cli("settings", "set-cpu-usage-color-max", "250")[0])
+        self.assertEqual(updated["cpuUsageColorMax"], 250)
+        self.assertEqual(
+            self.assert_success(self.call_cli("settings", "get")[0])["cpuUsageColorMax"], 250,
+            "The edited maximum should survive a fresh read.",
+        )
+
+        response, _ = self.call_cli("settings", "set-cpu-usage-color-max", "0", expected_status=2)
+        self.assert_failure(response, "invalid_argument")
+        self.assertEqual(
+            self.assert_success(self.call_cli("settings", "get")[0])["cpuUsageColorMax"], 250,
             "A rejected maximum should leave the stored one alone.",
         )
 

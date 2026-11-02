@@ -102,6 +102,9 @@ protocol ConversationSubject: AnyObject, Observable {
     var workspaceRootPaths: [String] { get }
     var repositoryWorktrees: [RepositoryWorktreeRecord] { get }
     var contextFolderPaths: [String] { get }
+    /// Whether moving this subject to Review should create its pull request(s)
+    /// automatically. Always false for a standalone chat, which has no repositories.
+    var autoCreatePullRequestOnReview: Bool { get }
 
     /// Which creature this is, derived from the model's type rather than stored on a row.
     ///
@@ -254,6 +257,7 @@ extension StandaloneChat: ConversationSubject {
     var workspaceRootPaths: [String] { [] }
     var repositoryWorktrees: [RepositoryWorktreeRecord] { [] }
     var contextFolderPaths: [String] { [] }
+    var autoCreatePullRequestOnReview: Bool { false }
     var isStandaloneChat: Bool { true }
 }
 

@@ -376,8 +376,138 @@ def follow_turn_items(finished):
     return items
 
 
+CPU_ATTRIBUTION_TURN = re.compile(r"\b(burn|idle) cpu for (\d+(?:\.\d+)?) seconds\b", re.IGNORECASE)
+
+
+def run_cpu_attribution_server():
+    """A small evented app-server for per-task CPU attribution tests.
+
+    Unlike the default fixture, which runs one held turn at a time, this one
+    keeps several threads' turns running at once on one process, the way a
+    single shared `codex app-server` does. Every thread gets its own ID. A
+    turn whose message says "burn cpu for N seconds" or "idle cpu for N
+    seconds" runs one real child process in the turn's own `cwd` (a busy
+    loop or a sleep); the turn reports its outcome and completes when that
+    child exits. Other turns (titles, outcome nudges) complete immediately.
+    """
+    threads = {}
+    running = {}
+    buffer = b""
+
+    def finish(thread_id, turn_id, text, status="completed"):
+        threads[thread_id]["items"].append({"turnId": turn_id, "item": {
+            "id": f"item_{turn_id}_answer", "type": "agentMessage", "phase": "final_answer", "text": text,
+        }})
+        write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+            "threadId": thread_id, "turnId": turn_id, "item": threads[thread_id]["items"][-1]["item"],
+        }})
+        write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+            "threadId": thread_id, "turn": {"id": turn_id, "status": status},
+        }})
+
+    def report_outcome(thread_id):
+        instructions = threads[thread_id].get("instructions") or ""
+        line = next((line.strip() for line in instructions.splitlines() if " task outcome " in line), None)
+        if line:
+            subprocess.run(shlex.split(line.replace("<completed|in-progress|waiting-response>", "completed")),
+                           capture_output=True, text=True, timeout=60)
+
+    def handle(message):
+        method = message.get("method")
+        params = message.get("params", {})
+        if "id" not in message:
+            return
+        reply = lambda result: write({"jsonrpc": "2.0", "id": message["id"], "result": result})
+        if method == "initialize":
+            reply({"serverInfo": {"name": "playhouse-cpu-fixture", "version": "1"}})
+        elif method == "model/list":
+            reply({"data": [{"id": "gpt-6-luna", "displayName": "GPT-6 Luna", "isDefault": True,
+                             "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]}]})
+        elif method in ("thread/start", "thread/resume"):
+            thread_id = params.get("threadId") or str(uuid.uuid4())
+            thread = threads.setdefault(thread_id, {"items": []})
+            thread["instructions"] = params.get("developerInstructions") or thread.get("instructions")
+            reply({"thread": {"id": thread_id}, "model": params.get("model", "gpt-6-luna")})
+        elif method == "thread/read":
+            reply({"thread": {"id": params.get("threadId"), "turns": []}})
+        elif method == "thread/turns/list":
+            reply({"data": [], "nextCursor": None})
+        elif method == "thread/items/list":
+            reply({"data": threads.get(params.get("threadId"), {}).get("items", []), "nextCursor": None})
+        elif method == "turn/start":
+            thread_id = params.get("threadId")
+            thread = threads.setdefault(thread_id, {"items": []})
+            thread["instructions"] = (params.get("collaborationMode", {}).get("settings", {}).get("developerInstructions")
+                                      or thread.get("instructions"))
+            turn_id = f"turn-{uuid.uuid4()}"
+            text = next((item.get("text") for item in params.get("input", []) if item.get("type") == "text"), "") or ""
+            thread["items"].append({"turnId": turn_id, "item": {
+                "id": f"item_{turn_id}_user", "type": "userMessage", "content": [{"type": "text", "text": text}],
+            }})
+            reply({"turn": {"id": turn_id, "status": "inProgress"}})
+            match = CPU_ATTRIBUTION_TURN.search(text)
+            if not match:
+                finish(thread_id, turn_id, "Generated fixture title" if text.startswith("Write a concise task title") else "Done.")
+                return
+            seconds = float(match.group(2))
+            # The child records its own real PID, parent PID and working
+            # directory beside the fixture, so tests (including the sandboxed
+            # UI runner, which can't list other processes) can verify where
+            # and under which app-server it runs.
+            record = ("import json, os, sys, time\n"
+                      "path = sys.argv[3] + '.cpu-child-' + sys.argv[2] + '.json'\n"
+                      "open(path + '.tmp', 'w').write(json.dumps("
+                      "{'pid': os.getpid(), 'parentPID': os.getppid(), 'workingDirectory': os.getcwd()}))\n"
+                      "os.replace(path + '.tmp', path)\n")
+            code = record + (f"end = time.time() + {seconds}\nwhile time.time() < end:\n    pass\n"
+                             if match.group(1).lower() == "burn" else f"time.sleep({seconds})\n")
+            # The trailing arguments label the child and name its record file.
+            child = subprocess.Popen(
+                [sys.executable, "-c", code, "playhouse-cpu-attribution", match.group(1).lower(), sys.argv[0]],
+                cwd=params.get("cwd") or os.getcwd(),
+            )
+            running[thread_id] = (turn_id, child, match.group(1).lower())
+        elif method == "turn/interrupt":
+            reply({})
+            thread_id = params.get("threadId")
+            if thread_id in running:
+                turn_id, child, _ = running.pop(thread_id)
+                child.kill()
+                child.wait()
+                finish(thread_id, turn_id, "Interrupted.", status="interrupted")
+        else:
+            reply({})
+
+    while True:
+        ready, _, _ = select.select([sys.stdin.fileno()], [], [], 0.05)
+        if ready:
+            chunk = os.read(sys.stdin.fileno(), 65536)
+            if not chunk:
+                break
+            buffer += chunk
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                handle(message)
+        for thread_id, (turn_id, child, kind) in list(running.items()):
+            if child.poll() is not None:
+                del running[thread_id]
+                # A record exists only while its child runs, so cleanup never signals a reused PID.
+                Path(f"{sys.argv[0]}.cpu-child-{'burn' if kind == 'burn' else 'idle'}.json").unlink(missing_ok=True)
+                report_outcome(thread_id)
+                finish(thread_id, turn_id, f"Finished the {kind} command.")
+    for _, child, _ in running.values():
+        child.kill()
+    return 0
+
+
 def main():
     global THREAD_ID, TURN_ID
+    if "-cpu-attribution" in os.path.basename(sys.argv[0]):
+        return run_cpu_attribution_server()
     _ = None
     ack_deadline = None
     action_item = None
@@ -565,6 +695,10 @@ def main():
                  "supportedReasoningEfforts": ["low", "medium"]},
                 {"id": "gpt-5.6-luna", "displayName": "GPT-5.6 Luna", "isDefault": False,
                  "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]},
+                # Superseded in a family whose newest entry is not the default model, so a
+                # test can tell "followed the family forward" from "no selection loaded yet".
+                {"id": "gpt-5.6-sol", "displayName": "GPT-5.6 Sol", "isDefault": False,
+                 "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]},
             ]}})
         elif message.get("method") == "thread/goal/get":
             goal = json.loads(goal_path.read_text(encoding="utf-8")) if goal_path.is_file() else None
@@ -714,6 +848,25 @@ def main():
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
                 return
+            is_pull_request_summary_request = (turn_message or "").startswith("Write a very concise GitHub pull request description.")
+            if is_pull_request_summary_request:
+                # A one-shot helper turn (Auto PR's pull-request description), not an
+                # interactive conversation: answer directly instead of asking a question.
+                write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": TURN_ID, "status": "inProgress"}}})
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": THREAD_ID,
+                    "item": {
+                        "id": "item_playhouse_pr_summary",
+                        "type": "agentMessage",
+                        "phase": "final_answer",
+                        "text": "Fixture pull request summary.",
+                    },
+                }})
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": THREAD_ID,
+                    "turn": {"id": TURN_ID, "status": "completed"},
+                }})
+                return
             image_inputs = [item for item in turn_input if item.get("type") == "image"]
             turn_history = {
                 "userMessage": turn_message,
@@ -820,6 +973,19 @@ def main():
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
             elif mode.endswith("-hold-interrupt") or mode.endswith("-hold-reject-interrupt"):
+                # Report one activity before holding, so a user-initiated Stop with
+                # no final answer still keeps the window's activity section mounted
+                # and the fold it performs on settle is distinguishable from the
+                # section simply never having rendered.
+                write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID,
+                    "item": {
+                        "id": "item_fixture_stop_command",
+                        "type": "commandExecution",
+                        "command": "git status --short",
+                        "cwd": os.environ.get("PLAYHOUSE_FIXTURE_WORKSPACE", os.getcwd()),
+                    },
+                }})
                 active = Path(str(sys.argv[0]) + ".interrupt-ready")
                 active.write_text("The fixture turn is active and waiting for an interrupt.\n", encoding="utf-8")
                 deadline = time.monotonic() + 30
@@ -1251,6 +1417,8 @@ def main():
                     release = Path(str(sys.argv[0]) + ".tool-release")
                     ready.unlink(missing_ok=True)
                     release.unlink(missing_ok=True)
+                    Path(str(sys.argv[0]) + ".tool-active-command-completed").unlink(missing_ok=True)
+                    Path(str(sys.argv[0]) + ".tool-others-completed").unlink(missing_ok=True)
                     ready.write_text("Tool lifecycle starts are visible.\n", encoding="utf-8")
                     release_latest = Path(str(sys.argv[0]) + ".tool-release-latest")
                     release_latest.unlink(missing_ok=True)
@@ -1264,6 +1432,12 @@ def main():
                     write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
                         **active_command_item, "status": "completed", "durationMs": 37,
                     }}})
+                    # A concurrent `thread/items/list` read (a second CLI call, or a
+                    # reopened window resubscribing to this same thread) rebuilds its
+                    # snapshot from scratch rather than sharing this process's live
+                    # state; mark what has actually completed so that snapshot can
+                    # tell genuinely in-progress items from settled ones.
+                    Path(str(sys.argv[0]) + ".tool-active-command-completed").write_text("done\n", encoding="utf-8")
                     while not release.exists() and time.monotonic() < deadline:
                         drain_pending_stdin()
                         time.sleep(0.02)
@@ -1281,6 +1455,7 @@ def main():
                     write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
                         **dynamic_item, "status": "failed", "success": False, "durationMs": 37,
                     }}})
+                    Path(str(sys.argv[0]) + ".tool-others-completed").write_text("done\n", encoding="utf-8")
                 for action_item in diagnostic_action_items(os.environ.get("PLAYHOUSE_FIXTURE_WORKSPACE", os.getcwd())):
                     write({"jsonrpc": "2.0", "method": "item/started", "params": {
                         "threadId": THREAD_ID, "item": {**action_item, "status": "inProgress"},
@@ -1518,6 +1693,19 @@ def main():
                     "turn": {"id": TURN_ID, "status": turn_status, **turn_error},
                 }})
             else:
+                if mode.endswith("-interrupted"):
+                    # An interrupted turn keeps the activity it already reported, so
+                    # the window still renders its activity section after the turn
+                    # settles and can be checked for folding rather than vanishing.
+                    write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                        "threadId": THREAD_ID, "turnId": TURN_ID,
+                        "item": {
+                            "id": "item_fixture_interrupted_command",
+                            "type": "commandExecution",
+                            "command": "git status --short",
+                            "cwd": os.environ.get("PLAYHOUSE_FIXTURE_WORKSPACE", os.getcwd()),
+                        },
+                    }})
                 question_request(901)
         elif message.get("id") in {901, 902} or message.get("id") in question_contexts:
             if "-question-isolation-" in mode:
@@ -1797,13 +1985,51 @@ def main():
                         {"id": f"item_long_history_assistant_{index}", "type": "agentMessage", "phase": "final_answer", "text": f"Long history assistant {index:02d}."},
                     ])
             if mode.endswith("-tool-activity"):
-                contents.extend([
-                    {"id": "item_fixture_mcp_call", "type": "mcpToolCall", "server": "fixture-server", "tool": "lookup", "status": "completed", "arguments": {"token": "RAW_ARGUMENT_SECRET"}, "result": {"content": [{"type": "text", "text": "RAW_RESULT_SECRET"}]}},
-                    {"id": "item_fixture_dynamic_call", "type": "dynamicToolCall", "tool": "summarize", "status": "failed", "arguments": {"prompt": "RAW_ARGUMENT_SECRET"}, "success": False, "durationMs": 37},
-                    {"id": "item_fixture_dynamic_legacy", "type": "dynamicToolCall", "tool": "legacySummary", "status": "completed", "arguments": {"input": "RAW_ARGUMENT_SECRET"}, "success": True, "contentItems": [{"type": "inputText", "text": "RAW_RESULT_SECRET"}]},
-                    {"id": "item_user_fixture_later", "type": "userMessage", "content": [{"type": "text", "text": "A later turn starts."}]},
-                    {"id": "item_assistant_fixture_later", "type": "agentMessage", "text": "Later turn response."},
-                ])
+                # A concurrent `thread/items/list` read — a second CLI call, or a
+                # window reopening the same thread mid-turn — rebuilds its snapshot
+                # from scratch rather than sharing the held turn's live state.
+                # `turn/create`'s own generic handling already saved this turn to
+                # `saved_history["turns"]` before this mode's branch ever runs, so
+                # the `elif saved_history.get("turns")` reconstruction above has
+                # already populated `contents` with a fabricated final answer for
+                # it ("Answers received: ..."). That would make a still-open turn
+                # read as already answered, so start this mode's own reconstruction
+                # fresh instead of extending that bogus content.
+                contents = [{"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": "Show tool activity."}]}]
+                # Read the completion markers the held turn writes so this snapshot
+                # reports the calls still in progress accurately, instead of
+                # always answering with their eventual terminal state.
+                others_completed = Path(str(sys.argv[0]) + ".tool-others-completed").is_file()
+                latest_completed = Path(str(sys.argv[0]) + ".tool-active-command-completed").is_file()
+                if others_completed:
+                    contents.extend([
+                        {"id": "item_fixture_mcp_call", "type": "mcpToolCall", "server": "fixture-server", "tool": "lookup", "status": "completed", "arguments": {"token": "RAW_ARGUMENT_SECRET"}, "result": {"content": [{"type": "text", "text": "RAW_RESULT_SECRET"}]}},
+                        {"id": "item_fixture_dynamic_call", "type": "dynamicToolCall", "tool": "summarize", "status": "failed", "arguments": {"prompt": "RAW_ARGUMENT_SECRET"}, "success": False, "durationMs": 37},
+                        {"id": "item_fixture_dynamic_legacy", "type": "dynamicToolCall", "tool": "legacySummary", "status": "completed", "arguments": {"input": "RAW_ARGUMENT_SECRET"}, "success": True, "contentItems": [{"type": "inputText", "text": "RAW_RESULT_SECRET"}]},
+                    ])
+                else:
+                    contents.extend([
+                        {"id": "item_fixture_mcp_call", "type": "mcpToolCall", "server": "fixture-server", "tool": "lookup", "status": "inProgress", "arguments": {"token": "RAW_ARGUMENT_SECRET"}},
+                        {"id": "item_fixture_dynamic_call", "type": "dynamicToolCall", "tool": "summarize", "status": "inProgress", "arguments": {"prompt": "RAW_ARGUMENT_SECRET"}},
+                        {"id": "item_fixture_dynamic_legacy", "type": "dynamicToolCall", "tool": "legacySummary", "status": "inProgress", "arguments": {"input": "RAW_ARGUMENT_SECRET"}},
+                    ])
+                contents.append({
+                    "id": "item_fixture_active_long_command", "type": "commandExecution",
+                    "command": "long-command-name " + "argument-" * 40, "cwd": "/tmp/playhouse-fixture",
+                    **({"status": "completed", "durationMs": 37} if latest_completed else {"status": "inProgress"}),
+                })
+                if others_completed and latest_completed:
+                    # A `userMessage` item resets the client's in-progress activity
+                    # tracking, so reporting "a later turn starts" while the held
+                    # turn's own commandExecution is still open would make that
+                    # live activity unreadable from this same reconstruction. Only
+                    # include it once the turn has genuinely settled, matching the
+                    # real sequencing this item exists to exercise (later-turn
+                    # items following the calls in history).
+                    contents.extend([
+                        {"id": "item_user_fixture_later", "type": "userMessage", "content": [{"type": "text", "text": "A later turn starts."}]},
+                        {"id": "item_assistant_fixture_later", "type": "agentMessage", "text": "Later turn response."},
+                    ])
             if mode.endswith("-markdown"):
                 saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
                 contents = [

@@ -86,6 +86,11 @@ struct ConversationTranscript: Codable, Equatable {
     /// ID is useful only while its provider process is alive; this durable copy
     /// lets the UI restore the question and continue the saved session later.
     var pendingUserInputRequest: ConversationUserInputRequest?
+    /// The pending request whose answer a recovery turn is applying. Only the
+    /// send holding the task's turn reservation sets it, and history hides the
+    /// request only while that reservation is held, so a crash mid-recovery
+    /// shows the question again.
+    var applyingUserInputRequestID: String?
     struct UserInputRepair: Codable, Equatable {
         let sourceTaskID: UUID
         let request: ConversationUserInputRequest

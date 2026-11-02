@@ -111,6 +111,9 @@ enum PlayhouseCLI {
             case "token-usage":
                 let id = try firstPositional(tail)
                 return BridgeRequest(command: "task.token-usage", arguments: ["taskID": .string(id)])
+            case "cpu-usage":
+                let id = try firstPositional(tail)
+                return BridgeRequest(command: "task.cpu-usage", arguments: ["taskID": .string(id)])
             case "move":
                 guard (2...3).contains(tail.count), tail.count == 2 || tail[2] == "--allow-unmerged" else {
                     throw CLIError.usage("Use: playhouse task move <task-id> <status> [--allow-unmerged]")
@@ -121,9 +124,11 @@ enum PlayhouseCLI {
                 ])
             case "pr":
                 guard tail.count >= 2 else {
-                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync <task-id> [action]")
+                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync|auto <task-id> [action]")
                 }
                 switch tail[0] {
+                case "auto" where tail.count == 3 && (tail[2] == "on" || tail[2] == "off"):
+                    return BridgeRequest(command: "task.pr.auto", arguments: ["taskID": .string(tail[1]), "enabled": .boolean(tail[2] == "on")])
                 case "create" where tail.count == 2:
                     return BridgeRequest(command: "task.pr.create", arguments: ["taskID": .string(tail[1])])
                 case "conflicts" where tail.count == 2:
@@ -137,7 +142,7 @@ enum PlayhouseCLI {
                 case "sync" where tail.count == 2:
                     return BridgeRequest(command: "task.pr.sync", arguments: ["taskID": .string(tail[1])])
                 default:
-                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync <task-id> [resolve-and-push|resolve-only|keep]")
+                    throw CLIError.usage("Use: playhouse task pr create|conflicts|status|verify|resolve|sync <task-id> [resolve-and-push|resolve-only|keep], or playhouse task pr auto <task-id> on|off")
                 }
             case "progress":
                 guard let action = tail.first else { throw CLIError.usage("Use: playhouse task progress publish|custom|clear <task-id> ...") }
@@ -388,6 +393,11 @@ enum PlayhouseCLI {
                     throw CLIError.usage("Use: playhouse settings set-token-usage-color-max <tokens>")
                 }
                 return BridgeRequest(command: "settings.set-token-usage-color-max", arguments: ["max": .integer(max)])
+            case "set-cpu-usage-color-max":
+                guard rest.count == 2, let max = Int(rest[1]) else {
+                    throw CLIError.usage("Use: playhouse settings set-cpu-usage-color-max <percent>")
+                }
+                return BridgeRequest(command: "settings.set-cpu-usage-color-max", arguments: ["max": .integer(max)])
             case "set-parent":
                 guard rest.count == 2 else { throw CLIError.usage("Use: playhouse settings set-parent <path>") }
                 return BridgeRequest(command: "settings.set-parent", arguments: ["path": .string(rest[1])])
@@ -671,8 +681,9 @@ enum PlayhouseCLI {
       playhouse chat page close-turn <chat-id> --continues <true|false> [--new-title <title>] [--summary-hint <text>]
       playhouse workspace suggest --parent <path>
       playhouse workspace repos list
-      playhouse settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>|set-token-usage-color-max <tokens>
+      playhouse settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>|set-token-usage-color-max <tokens>|set-cpu-usage-color-max <percent>
       playhouse task token-usage <task-id>
+      playhouse task cpu-usage <task-id>
       playhouse conversation history <task-id>
       playhouse conversation present-image <task-id> --image <path> [--caption <text>]
       playhouse conversation queue <task-id> --message <text>
