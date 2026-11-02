@@ -538,6 +538,93 @@ def respond(user_text, instructions, preserve_no_outcome=False):
             parent_request_started("msg_background_woken", woken=True)
             text("msg_background_woken", "BACKGROUND HANDLED")
             write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+    elif "consumed wake notification" in user_text.lower():
+        # Mirrors the observed stranding sequence: a background shell parks the
+        # answered turn, the shell's notification arrives, and Claude Code
+        # starts the provider turn that would deliver it — `system init` — but
+        # then says nothing at all, because it consumed the notification
+        # without a new parent request. No answer and no result of that turn
+        # ever arrive, so Playhouse alone has to settle this turn instead of
+        # leaving the task In Progress forever.
+        tool_id = "toolu_consumed_wake"
+        task_id = "bgshell-consumed-wake-1"
+        assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": "Bash", "input": {
+            "command": "sleep 1; echo WAKE", "description": "Consumed wake shell", "run_in_background": True,
+        }}])
+        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tool_id, "is_error": False,
+             "content": f"Command running in background with ID: {task_id}."},
+        ]}})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
+            {"task_id": task_id, "run_id": "fixture-run-1", "task_type": "local_bash", "description": "Consumed wake shell"},
+        ]})
+        write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "description": "Consumed wake shell", "task_type": "local_bash"})
+        text("msg_consumed_wake_started", "WAKE SHELL STARTED")
+        outcome = report_command(instructions, " task outcome ", "completed")
+        if outcome:
+            commands.append({"command": outcome,
+                             "output": run_tool("toolu_consumed_wake_outcome", "Bash", {"command": outcome}, outcome)})
+        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+        background_result_sent = True
+        complete_command(current_command_uuid)
+        wait_for_release("consumed-wake", "The parent result is out while the background shell runs.")
+        write({"type": "system", "subtype": "task_updated", "task_id": task_id, "run_id": "fixture-run-1",
+               "patch": {"status": "completed", "end_time": 0}})
+        write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "status": "completed", "output_file": "",
+               "summary": 'Background command "Consumed wake shell" completed (exit code 0)'})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+        # The woken provider turn starts and then goes quiet: no parent request,
+        # no answer, no result of its own, ever.
+        write({"type": "system", "subtype": "init"})
+        Path(str(sys.argv[0]) + ".consumed-wake-woken").write_text(
+            "The woken turn started and consumed the notification silently.\n", encoding="utf-8"
+        )
+    elif "slow woken turn" in user_text.lower():
+        # The same announcement, but from a woken turn that is alive and merely
+        # slow to speak: it stays silent well past the grace Playhouse gives a
+        # consumed notification, then answers. Cutting it off there would lose
+        # the background task's report, so this turn must end on Claude's own
+        # answer rather than on Playhouse's backstop.
+        tool_id = "toolu_slow_woken"
+        task_id = "bgshell-slow-woken-1"
+        assistant(f"msg_{tool_id}", [{"type": "tool_use", "id": tool_id, "name": "Bash", "input": {
+            "command": "sleep 1; echo SLOW", "description": "Slow woken shell", "run_in_background": True,
+        }}])
+        write({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tool_id, "is_error": False,
+             "content": f"Command running in background with ID: {task_id}."},
+        ]}})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": [
+            {"task_id": task_id, "run_id": "fixture-run-1", "task_type": "local_bash", "description": "Slow woken shell"},
+        ]})
+        write({"type": "system", "subtype": "task_started", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "description": "Slow woken shell", "task_type": "local_bash"})
+        text("msg_slow_woken_started", "SLOW SHELL STARTED")
+        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
+        background_result_sent = True
+        complete_command(current_command_uuid)
+        write({"type": "system", "subtype": "task_updated", "task_id": task_id, "run_id": "fixture-run-1",
+               "patch": {"status": "completed", "end_time": 0}})
+        write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
+               "tool_use_id": tool_id, "status": "completed", "output_file": "",
+               "summary": 'Background command "Slow woken shell" completed (exit code 0)'})
+        write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+        write({"type": "system", "subtype": "init"})
+        Path(str(sys.argv[0]) + ".slow-woken-announced").write_text(
+            "The woken turn started and is about to go quiet for a while.\n", encoding="utf-8"
+        )
+        time.sleep(float(os.environ.get("PLAYHOUSE_E2E_CLAUDE_SLOW_WOKEN_SILENCE_SECONDS", "6")))
+        # Only `parent_request_started` without a second `init`: this turn was
+        # already announced above, it is just finally speaking.
+        parent_request_started("msg_slow_woken_answer")
+        text("msg_slow_woken_answer", "SLOW WOKEN HANDLED")
+        outcome = report_command(instructions, " task outcome ", "completed")
+        if outcome:
+            commands.append({"command": outcome,
+                             "output": run_tool("toolu_slow_woken_outcome", "Bash", {"command": outcome}, outcome)})
+        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
     elif "parked background shell" in user_text.lower():
         # Mirrors a turn Claude Code has already answered while a background
         # shell keeps running: the parent result is out, no notification has

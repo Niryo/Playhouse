@@ -53,11 +53,41 @@ final class ClaudeSessionRunner {
         /// delivered its notification to the parent, either in a new provider
         /// turn (`system init`) or in the running one's next request.
         var awaitingParentWake = false
+        /// Whether the `system init` of the provider turn Claude Code started
+        /// for the pending wake has already been counted, so repeated `init`
+        /// events for one wake can't owe several results. It also authorizes
+        /// the wake backstop to give that count back: only a wake whose woken
+        /// turn was counted here has a result to stop owing when it times out.
+        var countedWakeInit = false
     }
 
     /// How long a settled turn waits for Claude Code to deliver a finished
     /// background task before treating the notification as already consumed.
     nonisolated static let parentWakeGracePeriod: Duration = .seconds(15)
+
+    /// Tests shorten both backstop grace periods so a case does not spend the
+    /// product's wall clock waiting one out; what they check — which silence
+    /// settles the turn and which one waits for Claude — does not depend on the
+    /// lengths. Resolved per turn, inside the request that carries the
+    /// environment, rather than read from the backstop's detached task.
+    nonisolated static func graceOverride(_ name: String, default fallback: Duration) -> Duration {
+        guard let seconds = PlayhouseProcessEnvironment.current[name].flatMap(Double.init),
+              seconds.isFinite, seconds > 0, seconds < 86_400 else { return fallback }
+        return .milliseconds(Int(seconds * 1000))
+    }
+
+    /// How long a woken turn Claude Code announced with `system init` may stay
+    /// silent before Playhouse stops waiting for the result it owes. It is far
+    /// longer than `parentWakeGracePeriod` because this turn exists and may
+    /// simply be slow to speak — time to first token, or a retry backoff the
+    /// CLI never reports — and cutting a live turn off loses its notification,
+    /// while a turn that is really stranded only has to end eventually.
+    nonisolated static let wokenTurnSilenceGracePeriod: Duration = .seconds(120)
+
+    /// This turn's resolved grace periods, read once where the request's
+    /// environment is in scope.
+    private var wakeGrace: Duration = ClaudeSessionRunner.parentWakeGracePeriod
+    private var wokenSilenceGrace: Duration = ClaudeSessionRunner.wokenTurnSilenceGracePeriod
 
     let sessionID: String
     private let executable: String
@@ -179,6 +209,12 @@ final class ClaudeSessionRunner {
         hideSensitiveRecoveryPrompt: Bool
     ) async throws {
         activeMode = mode
+        wakeGrace = ClaudeSessionRunner.graceOverride(
+            "PLAYHOUSE_E2E_CLAUDE_WAKE_GRACE_SECONDS", default: ClaudeSessionRunner.parentWakeGracePeriod
+        )
+        wokenSilenceGrace = ClaudeSessionRunner.graceOverride(
+            "PLAYHOUSE_E2E_CLAUDE_WOKEN_SILENCE_GRACE_SECONDS", default: ClaudeSessionRunner.wokenTurnSilenceGracePeriod
+        )
         var providerPrompt = text
         var initialize: [String: Any]
         do {
@@ -293,7 +329,22 @@ final class ClaudeSessionRunner {
     /// as the active turn, so its input must still reach the running process.
     func sendSteerInput(text: String, imageDataURLs: [String]) throws -> Bool {
         guard isTurnActive, activeTurnID != nil, process?.isRunning == true,
-              !isTurnSettled || !turnCompletion.resultReceived || !pendingCommandUUIDs.isEmpty else { return false }
+              !isTurnSettled || !turnCompletion.resultReceived || !pendingCommandUUIDs.isEmpty else {
+            // A refusal is invisible to the user — the follow-up just stays
+            // queued — so record why the runtime turned it down.
+            PlayhouseDiagnostics.record("claude.turn.steer_rejected", fields: diagnosticFields([
+                "isTurnSettled": String(isTurnSettled),
+                "resultReceived": String(turnCompletion.resultReceived),
+                "pendingCommandCount": String(pendingCommandUUIDs.count),
+                "processRunning": String(process?.isRunning == true),
+                "outstandingBackgroundTaskCount": String(outstandingBackgroundTaskIDs.count),
+                "pendingBackgroundNotificationCount": String(pendingBackgroundTaskNotificationIDs.count),
+                "awaitingParentWake": String(turnCompletion.awaitingParentWake),
+                "resultCount": String(turnCompletion.resultCount),
+                "wokenTurnCount": String(turnCompletion.wokenTurnCount)
+            ]))
+            return false
+        }
         let uuid = UUID().uuidString.lowercased()
         pendingCommandUUIDs.insert(uuid)
         do {
@@ -850,10 +901,18 @@ final class ClaudeSessionRunner {
         switch subtype {
         case "init":
             // Claude Code starts a provider turn of its own to deliver a finished
-            // background task; that turn's result also belongs to this one.
-            if turnCompletion.awaitingParentWake {
-                setAwaitingParentWake(false)
+            // background task; that turn's result also belongs to this one. The
+            // wake itself stays pending until that turn's parent request starts,
+            // which is what clears it below: `init` alone means Claude Code has
+            // not delivered the notification yet, and a turn that counted the
+            // woken result here while clearing the wake could look settled with
+            // nothing running — stranding the turn open (no backstop is armed
+            // once the wake is clear) and making the runtime refuse steered
+            // input for a turn Playhouse still shows as active.
+            if turnCompletion.awaitingParentWake, !turnCompletion.countedWakeInit {
+                turnCompletion.countedWakeInit = true
                 turnCompletion.wokenTurnCount += 1
+                scheduleParentWakeBackstopIfNeeded()
             }
         case "background_tasks_changed":
             let tasks = message["tasks"] as? [[String: Any]] ?? []
@@ -1002,24 +1061,39 @@ final class ClaudeSessionRunner {
     /// timer started for one notification can't clear a later one.
     private func setAwaitingParentWake(_ awaiting: Bool) {
         turnCompletion.awaitingParentWake = awaiting
+        turnCompletion.countedWakeInit = false
         parentWakeBackstopGeneration += 1
     }
 
     /// When only an undelivered background notification holds a finished turn
     /// open, settle after a grace period: Claude Code normally starts the woken
     /// turn within milliseconds, and a notification it consumed without a new
-    /// request must not hold the task In Progress indefinitely.
+    /// request must not hold the task In Progress indefinitely. A woken turn
+    /// Claude Code announced with `system init` and then never spoke in is
+    /// covered too, on its own longer grace, so a turn whose expected woken
+    /// result never arrives still settles rather than staying active forever.
     private func scheduleParentWakeBackstopIfNeeded() {
         guard turnCompletion.awaitingParentWake, turnCompletion.resultError == nil,
-              turnCompletion.resultReceived, turnCompletion.resultCount > turnCompletion.wokenTurnCount,
+              turnCompletion.resultReceived,
               outstandingBackgroundTaskIDs.isEmpty, pendingBackgroundTaskNotificationIDs.isEmpty else { return }
         parentWakeBackstopGeneration += 1
         let generation = parentWakeBackstopGeneration
+        // A wake whose woken turn already announced itself gets the long grace:
+        // that turn exists, so silence may only mean it is slow to speak.
+        let announced = turnCompletion.countedWakeInit
+        let grace = announced ? wokenSilenceGrace : wakeGrace
         Task { @MainActor [weak self] in
-            try? await Task.sleep(for: ClaudeSessionRunner.parentWakeGracePeriod)
+            try? await Task.sleep(for: grace)
             guard let self, self.parentWakeBackstopGeneration == generation,
                   self.turnCompletion.awaitingParentWake else { return }
-            PlayhouseDiagnostics.record("claude.turn.parent_wake_timeout", fields: self.diagnosticFields([:]))
+            PlayhouseDiagnostics.record("claude.turn.parent_wake_timeout", fields: self.diagnosticFields([
+                "wokenTurnAnnounced": String(announced)
+            ]))
+            // The woken turn this wake was counted for never produced a result
+            // of its own, so the turn stops owing one. Without this the counted
+            // wake outlives the notification it belonged to and the turn can
+            // never satisfy `resultCount > wokenTurnCount` again.
+            if self.turnCompletion.countedWakeInit { self.turnCompletion.wokenTurnCount -= 1 }
             self.setAwaitingParentWake(false)
             self.completeTurnIfSettled()
         }

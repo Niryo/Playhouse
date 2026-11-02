@@ -7534,6 +7534,129 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "The woken parent turn's answer still ends the turn.",
         )
 
+    # case-contract: test_claude_settles_turn_after_consumed_wake_notification | When Claude Code starts the provider turn that would deliver a finished background task's notification and then says nothing at all, Playhouse settles that turn on its own instead of leaving it open and the task In Progress forever: a follow-up queued while the turn was still parked stays queued through the silent wake, the send finishes and the task reaches Review, and that follow-up is then delivered in its own turn rather than stranded in the queue. A woken turn that is alive and merely slow to speak is not cut off by that backstop: it stays quiet past the grace a consumed notification gets and still ends the turn on its own answer.
+    def test_claude_settles_turn_after_consumed_wake_notification(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
+        executable = self.data_directory / "claude-fixture-consumed-wake"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        # Short graces keep the case fast; which silence settles the turn and
+        # which one waits for Claude does not depend on their lengths.
+        env = {
+            "PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable),
+            "PLAYHOUSE_E2E_CLAUDE_WAKE_GRACE_SECONDS": "4",
+            "PLAYHOUSE_E2E_CLAUDE_WOKEN_SILENCE_GRACE_SECONDS": "24",
+            "PLAYHOUSE_E2E_CLAUDE_SLOW_WOKEN_SILENCE_SECONDS": "8",
+        }
+        created, _ = self.call_cli(
+            "task", "create", "--title", "Claude consumed wake", "--root", self.primary, "--provider", "claude"
+        )
+        task_id = self.assert_success(created)["id"]
+        pause = Path(f"{executable}.consumed-wake-pause")
+        parked = Path(f"{executable}.consumed-wake-ready")
+        release = Path(f"{executable}.consumed-wake-release")
+        woken = Path(f"{executable}.consumed-wake-woken")
+        pause.write_text("Playhouse test owns this Claude fixture marker.\n", encoding="utf-8")
+        command = ("conversation", "send", task_id, "--message", "Park a shell and then consumed wake notification.")
+        process = self.start_cli(*command, extra_environment=env)
+        try:
+            deadline = time.monotonic() + 20
+            while not parked.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(parked.exists(), "The fixture should park the turn after its result while the shell runs.")
+            # The turn is still the active turn here, so this follow-up queues
+            # rather than sending, and only a settled turn can ever deliver it.
+            stranded = self.assert_success(self.call_cli(
+                "conversation", "queue", task_id, "--message", "Then tell the story of the VM run.",
+            )[0])
+            self.assertIn(
+                stranded["id"],
+                [item["id"] for item in self.assert_success(self.call_cli("conversation", "queue-list", task_id)[0])],
+                "A follow-up sent while the parked turn is active must wait in the queue.",
+            )
+            release.write_text("Playhouse test owns this Claude fixture marker.\n", encoding="utf-8")
+            deadline = time.monotonic() + 20
+            while not woken.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(woken.exists(), "The fixture should start the woken turn and then stay silent.")
+            self.assertIsNone(
+                process.poll(),
+                "The silent wake must not end the send before Playhouse's own grace period settles the turn.",
+            )
+            response, _ = self.finish_cli(process, command, timeout=120)
+        finally:
+            if process.poll() is None:
+                process.communicate(timeout=30)
+        self.assert_success(response)
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        self.assertIn(
+            "WAKE SHELL STARTED",
+            [message["text"] for message in history["messages"] if message["role"] == "assistant"],
+            "Settling a stranded turn must keep the answer it already gave.",
+        )
+        deadline = time.monotonic() + 60
+        remaining = None
+        while time.monotonic() < deadline:
+            remaining = [
+                item["id"] for item
+                in self.assert_success(self.call_cli("conversation", "queue-list", task_id)[0])
+            ]
+            if stranded["id"] not in remaining:
+                break
+            time.sleep(0.2)
+        self.assertNotIn(
+            stranded["id"], remaining or [],
+            "A follow-up queued while the turn was stranded must be delivered once Playhouse settles it.",
+        )
+        deadline = time.monotonic() + 60
+        status = None
+        while time.monotonic() < deadline:
+            status = self.assert_success(self.call_cli("task", "get", task_id)[0])["status"]
+            if status == "Review":
+                break
+            time.sleep(0.2)
+        self.assertEqual(
+            status, "Review",
+            "A task whose turn was stranded by a silent wake must not stay In Progress once Playhouse settles it.",
+        )
+        history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=env)[0])
+        self.assertTrue(
+            any(
+                "BISCUIT-7" in (message["text"] or "")
+                for message in history["messages"] if message["role"] == "assistant"
+            ),
+            "The delivered follow-up's own answer belongs in the conversation.",
+        )
+
+        # A woken turn that is alive and merely slow to speak must not be cut
+        # off by that same backstop: it gets its own, far longer grace.
+        slow_created, _ = self.call_cli(
+            "task", "create", "--title", "Claude slow woken turn", "--root", self.primary, "--provider", "claude"
+        )
+        slow_id = self.assert_success(slow_created)["id"]
+        announced = Path(f"{executable}.slow-woken-announced")
+        slow_command = ("conversation", "send", slow_id, "--message", "Park a shell and then a slow woken turn.")
+        slow_process = self.start_cli(*slow_command, extra_environment=env)
+        try:
+            deadline = time.monotonic() + 30
+            while not announced.exists() and slow_process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(announced.exists(), "The fixture should announce the woken turn before going quiet.")
+            slow_response, _ = self.finish_cli(slow_process, slow_command, timeout=120)
+        finally:
+            if slow_process.poll() is None:
+                slow_process.communicate(timeout=30)
+        self.assert_success(slow_response)
+        slow_history = self.assert_success(self.call_cli("conversation", "history", slow_id, extra_environment=env)[0])
+        self.assertEqual(
+            [message["text"] for message in slow_history["messages"] if message["role"] == "assistant"][-1],
+            "SLOW WOKEN HANDLED",
+            "A woken turn that stays quiet past the consumed-notification grace must still end on its own answer.",
+        )
+
     # case-contract: test_claude_private_recovery_failure_fails_closed | If Claude fails while applying an answer after restart and echoes the answer or recovery instructions, Playhouse returns a generic error, preserves the pending question for retry while the task stays in Waiting Response, and keeps the prompt out of history, saved task state, and diagnostics.
     def test_claude_private_recovery_failure_fails_closed(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
