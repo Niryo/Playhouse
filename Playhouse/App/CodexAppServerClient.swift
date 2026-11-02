@@ -2040,6 +2040,10 @@ enum TaskProgressReportInstructions {
     static let executableName = "playhouse-cli"
     static let progressSubcommand = "task progress"
     static let outcomeSubcommand = "task outcome"
+    /// Standalone chat's end-of-turn page signal. A chat has no board status, so
+    /// it reports this instead of an outcome, and it runs in the same place: after
+    /// the answer, often with a closing line still to come.
+    static let chatPageCloseTurnSubcommand = "chat page close-turn"
 
     enum ReportCommand { case progress, outcome }
 
@@ -2047,6 +2051,7 @@ enum TaskProgressReportInstructions {
     static func reportCommand(in shellCommand: String) -> ReportCommand? {
         guard shellCommand.contains(executableName) else { return nil }
         if shellCommand.contains(" \(outcomeSubcommand) ") { return .outcome }
+        if shellCommand.contains(" \(chatPageCloseTurnSubcommand) ") { return .outcome }
         if shellCommand.contains(" \(progressSubcommand) ") { return .progress }
         return nil
     }
