@@ -356,6 +356,9 @@ struct TaskConversationView: View {
     @State private var currentTextSelection: AnnotationSelection?
     @State private var annotationComment = ""
     @State private var activities: [ConversationActivity] = []
+    /// A live turn shows its work: the disclosure opens as the turn starts and
+    /// folds back into Worked for once the turn settles. A collapse the reader
+    /// performs mid-turn stays collapsed until the next turn starts.
     @State private var isActivityExpanded = false
     @State private var responseStartedAt: Date?
     @State private var completedResponseDuration: Int?
@@ -1210,6 +1213,27 @@ struct TaskConversationView: View {
                 if hasCompletedResponse {
                     isActivityExpanded = false
                 }
+            }
+            // A turn in flight shows its progress instead of burying it behind
+            // "Working for". Settling folds the section away again whether the
+            // turn answered, was stopped, or was interrupted, so the result
+            // reads cleanly. A collapse the reader performs mid-turn stays
+            // collapsed, because this fires on the active/settled transition
+            // rather than on each message or activity update.
+            //
+            // `initial` is for a task opened while its turn already runs; the
+            // first evaluation still reads the default `isResponding`, so the
+            // expansion actually lands when `loadHistory` raises it.
+            //
+            // One provider difference rides on `hasCompletedAssistantResponse`
+            // rather than on this rule: Claude persists `final_answer` on its
+            // answer, while a Codex `agentMessage` read back from history does
+            // not, so between a Codex final answer and its turn completion a
+            // task reopened from persisted history keeps the section open where
+            // Claude's would have folded. The window's own stream marks the
+            // phase for both, so this only shows on a reload inside that window.
+            .onChange(of: isDisplayingActiveResponse, initial: true) { _, isActive in
+                isActivityExpanded = isActive
             }
 
             if isDiffPresented {
@@ -4301,9 +4325,6 @@ struct TaskConversationView: View {
                             let completedTurnID: String? = finalAnswer?.turnID ?? history.messages.last?.turnID
                             if let completedTurnID {
                                 collapsedProgressTurnIDs.insert(completedTurnID)
-                            }
-                            if activities.isEmpty {
-                                isActivityExpanded = false
                             }
                             Task { await refreshWorkspaceChanges() }
                         }

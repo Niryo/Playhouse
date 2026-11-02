@@ -806,6 +806,19 @@ def main():
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
             elif mode.endswith("-hold-interrupt") or mode.endswith("-hold-reject-interrupt"):
+                # Report one activity before holding, so a user-initiated Stop with
+                # no final answer still keeps the window's activity section mounted
+                # and the fold it performs on settle is distinguishable from the
+                # section simply never having rendered.
+                write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                    "threadId": THREAD_ID, "turnId": TURN_ID,
+                    "item": {
+                        "id": "item_fixture_stop_command",
+                        "type": "commandExecution",
+                        "command": "git status --short",
+                        "cwd": os.environ.get("PLAYHOUSE_FIXTURE_WORKSPACE", os.getcwd()),
+                    },
+                }})
                 active = Path(str(sys.argv[0]) + ".interrupt-ready")
                 active.write_text("The fixture turn is active and waiting for an interrupt.\n", encoding="utf-8")
                 deadline = time.monotonic() + 30
@@ -1237,6 +1250,8 @@ def main():
                     release = Path(str(sys.argv[0]) + ".tool-release")
                     ready.unlink(missing_ok=True)
                     release.unlink(missing_ok=True)
+                    Path(str(sys.argv[0]) + ".tool-active-command-completed").unlink(missing_ok=True)
+                    Path(str(sys.argv[0]) + ".tool-others-completed").unlink(missing_ok=True)
                     ready.write_text("Tool lifecycle starts are visible.\n", encoding="utf-8")
                     release_latest = Path(str(sys.argv[0]) + ".tool-release-latest")
                     release_latest.unlink(missing_ok=True)
@@ -1250,6 +1265,12 @@ def main():
                     write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
                         **active_command_item, "status": "completed", "durationMs": 37,
                     }}})
+                    # A concurrent `thread/items/list` read (a second CLI call, or a
+                    # reopened window resubscribing to this same thread) rebuilds its
+                    # snapshot from scratch rather than sharing this process's live
+                    # state; mark what has actually completed so that snapshot can
+                    # tell genuinely in-progress items from settled ones.
+                    Path(str(sys.argv[0]) + ".tool-active-command-completed").write_text("done\n", encoding="utf-8")
                     while not release.exists() and time.monotonic() < deadline:
                         drain_pending_stdin()
                         time.sleep(0.02)
@@ -1267,6 +1288,7 @@ def main():
                     write({"jsonrpc": "2.0", "method": "item/completed", "params": {"threadId": THREAD_ID, "item": {
                         **dynamic_item, "status": "failed", "success": False, "durationMs": 37,
                     }}})
+                    Path(str(sys.argv[0]) + ".tool-others-completed").write_text("done\n", encoding="utf-8")
                 for action_item in diagnostic_action_items(os.environ.get("PLAYHOUSE_FIXTURE_WORKSPACE", os.getcwd())):
                     write({"jsonrpc": "2.0", "method": "item/started", "params": {
                         "threadId": THREAD_ID, "item": {**action_item, "status": "inProgress"},
@@ -1504,6 +1526,19 @@ def main():
                     "turn": {"id": TURN_ID, "status": turn_status, **turn_error},
                 }})
             else:
+                if mode.endswith("-interrupted"):
+                    # An interrupted turn keeps the activity it already reported, so
+                    # the window still renders its activity section after the turn
+                    # settles and can be checked for folding rather than vanishing.
+                    write({"jsonrpc": "2.0", "method": "item/started", "params": {
+                        "threadId": THREAD_ID, "turnId": TURN_ID,
+                        "item": {
+                            "id": "item_fixture_interrupted_command",
+                            "type": "commandExecution",
+                            "command": "git status --short",
+                            "cwd": os.environ.get("PLAYHOUSE_FIXTURE_WORKSPACE", os.getcwd()),
+                        },
+                    }})
                 question_request(901)
         elif message.get("id") in {901, 902} or message.get("id") in question_contexts:
             if "-question-isolation-" in mode:
@@ -1783,13 +1818,51 @@ def main():
                         {"id": f"item_long_history_assistant_{index}", "type": "agentMessage", "phase": "final_answer", "text": f"Long history assistant {index:02d}."},
                     ])
             if mode.endswith("-tool-activity"):
-                contents.extend([
-                    {"id": "item_fixture_mcp_call", "type": "mcpToolCall", "server": "fixture-server", "tool": "lookup", "status": "completed", "arguments": {"token": "RAW_ARGUMENT_SECRET"}, "result": {"content": [{"type": "text", "text": "RAW_RESULT_SECRET"}]}},
-                    {"id": "item_fixture_dynamic_call", "type": "dynamicToolCall", "tool": "summarize", "status": "failed", "arguments": {"prompt": "RAW_ARGUMENT_SECRET"}, "success": False, "durationMs": 37},
-                    {"id": "item_fixture_dynamic_legacy", "type": "dynamicToolCall", "tool": "legacySummary", "status": "completed", "arguments": {"input": "RAW_ARGUMENT_SECRET"}, "success": True, "contentItems": [{"type": "inputText", "text": "RAW_RESULT_SECRET"}]},
-                    {"id": "item_user_fixture_later", "type": "userMessage", "content": [{"type": "text", "text": "A later turn starts."}]},
-                    {"id": "item_assistant_fixture_later", "type": "agentMessage", "text": "Later turn response."},
-                ])
+                # A concurrent `thread/items/list` read — a second CLI call, or a
+                # window reopening the same thread mid-turn — rebuilds its snapshot
+                # from scratch rather than sharing the held turn's live state.
+                # `turn/create`'s own generic handling already saved this turn to
+                # `saved_history["turns"]` before this mode's branch ever runs, so
+                # the `elif saved_history.get("turns")` reconstruction above has
+                # already populated `contents` with a fabricated final answer for
+                # it ("Answers received: ..."). That would make a still-open turn
+                # read as already answered, so start this mode's own reconstruction
+                # fresh instead of extending that bogus content.
+                contents = [{"id": "item_user_fixture", "type": "userMessage", "content": [{"type": "text", "text": "Show tool activity."}]}]
+                # Read the completion markers the held turn writes so this snapshot
+                # reports the calls still in progress accurately, instead of
+                # always answering with their eventual terminal state.
+                others_completed = Path(str(sys.argv[0]) + ".tool-others-completed").is_file()
+                latest_completed = Path(str(sys.argv[0]) + ".tool-active-command-completed").is_file()
+                if others_completed:
+                    contents.extend([
+                        {"id": "item_fixture_mcp_call", "type": "mcpToolCall", "server": "fixture-server", "tool": "lookup", "status": "completed", "arguments": {"token": "RAW_ARGUMENT_SECRET"}, "result": {"content": [{"type": "text", "text": "RAW_RESULT_SECRET"}]}},
+                        {"id": "item_fixture_dynamic_call", "type": "dynamicToolCall", "tool": "summarize", "status": "failed", "arguments": {"prompt": "RAW_ARGUMENT_SECRET"}, "success": False, "durationMs": 37},
+                        {"id": "item_fixture_dynamic_legacy", "type": "dynamicToolCall", "tool": "legacySummary", "status": "completed", "arguments": {"input": "RAW_ARGUMENT_SECRET"}, "success": True, "contentItems": [{"type": "inputText", "text": "RAW_RESULT_SECRET"}]},
+                    ])
+                else:
+                    contents.extend([
+                        {"id": "item_fixture_mcp_call", "type": "mcpToolCall", "server": "fixture-server", "tool": "lookup", "status": "inProgress", "arguments": {"token": "RAW_ARGUMENT_SECRET"}},
+                        {"id": "item_fixture_dynamic_call", "type": "dynamicToolCall", "tool": "summarize", "status": "inProgress", "arguments": {"prompt": "RAW_ARGUMENT_SECRET"}},
+                        {"id": "item_fixture_dynamic_legacy", "type": "dynamicToolCall", "tool": "legacySummary", "status": "inProgress", "arguments": {"input": "RAW_ARGUMENT_SECRET"}},
+                    ])
+                contents.append({
+                    "id": "item_fixture_active_long_command", "type": "commandExecution",
+                    "command": "long-command-name " + "argument-" * 40, "cwd": "/tmp/playhouse-fixture",
+                    **({"status": "completed", "durationMs": 37} if latest_completed else {"status": "inProgress"}),
+                })
+                if others_completed and latest_completed:
+                    # A `userMessage` item resets the client's in-progress activity
+                    # tracking, so reporting "a later turn starts" while the held
+                    # turn's own commandExecution is still open would make that
+                    # live activity unreadable from this same reconstruction. Only
+                    # include it once the turn has genuinely settled, matching the
+                    # real sequencing this item exists to exercise (later-turn
+                    # items following the calls in history).
+                    contents.extend([
+                        {"id": "item_user_fixture_later", "type": "userMessage", "content": [{"type": "text", "text": "A later turn starts."}]},
+                        {"id": "item_assistant_fixture_later", "type": "agentMessage", "text": "Later turn response."},
+                    ])
             if mode.endswith("-markdown"):
                 saved_history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.is_file() else {}
                 contents = [

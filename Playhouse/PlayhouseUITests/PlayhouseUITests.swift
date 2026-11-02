@@ -5480,6 +5480,8 @@ final class PlayhouseUITests: XCTestCase {
             let visibleThinking = NSPredicate(format: "label CONTAINS %@ OR label CONTAINS %@", "Thinking", "Running")
             let thinkingExpectation = XCTNSPredicateExpectation(predicate: visibleThinking, object: reopenedActivity)
             XCTAssertEqual(XCTWaiter.wait(for: [thinkingExpectation], timeout: 30), .completed, "An active turn should remain visibly active after leaving and reopening the task.")
+            XCTAssertTrue(waitUntil({ reopenedActivity.value as? String == "Expanded, down chevron" }, timeout: 15),
+                          "Reopening a task mid-turn should land on the same open section instead of hiding the work behind Working for.")
 
             let activityDisclosure = element("codex-activity-disclosure")
             guard activityDisclosure.waitForExistence(timeout: 60) else {
@@ -5499,16 +5501,22 @@ final class PlayhouseUITests: XCTestCase {
             XCTAssertEqual(
                 XCTWaiter.wait(for: [runningActivityExpectation], timeout: 60),
                 .completed,
-                "The collapsed activity title should report the current running-task count."
+                "The activity title should report the current running-task count."
             )
-            attachScreenshot(named: "Running response with collapsed Codex activity")
             let activityRow = app.descendants(matching: .any)
                 .matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "codex-activity-row-", "sleep 90; printf PAUSE_TEST_FINISHED"))
                 .firstMatch
-            XCTAssertFalse(activityRow.exists, "Activity details should stay collapsed until opened.")
+            XCTAssertTrue(activityRow.waitForExistence(timeout: 30), "A live turn should show its running command row without the reader opening anything.")
+            attachScreenshot(named: "Running chat composer and open Codex activity")
+            // The open section is a default, not a lock. The running row keeps the
+            // live slot outside the section, so the chevron is what folds here.
             activityDisclosure.click()
-            XCTAssertTrue(activityRow.waitForExistence(timeout: 30), "Opening activity details should show the running command row.")
-            attachScreenshot(named: "Running chat composer and expanded Codex activity")
+            XCTAssertTrue(waitUntil({ activityDisclosure.value as? String == "Collapsed, right chevron" }, timeout: 10),
+                          "A reader's mid-turn collapse should be honored.")
+            activityDisclosure.click()
+            XCTAssertTrue(waitUntil({ activityDisclosure.value as? String == "Expanded, down chevron" }, timeout: 10),
+                          "Reopening the section mid-turn should restore the open chevron.")
+            XCTAssertTrue(activityRow.waitForExistence(timeout: 30), "The running command row should remain available.")
 
             pauseButton.click()
             let continueButton = element("continue-response-button")
@@ -5563,6 +5571,10 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue((thinking["activeThreadIDs"] as? [String] ?? []).contains(threadID), "The daemon should report the window's thinking turn as active.")
         XCTAssertTrue((thinking["interruptibleThreadIDs"] as? [String] ?? []).contains(threadID), "The daemon should report the window's thinking turn as interruptible.")
 
+        let stopActivity = element("codex-activity-disclosure")
+        XCTAssertTrue(stopActivity.waitForExistence(timeout: 10), "A thinking turn should surface its activity section.")
+        XCTAssertTrue(waitUntil({ stopActivity.value as? String == "Expanded, down chevron" }, timeout: 10),
+                      "A thinking turn should show its work instead of hiding it behind Working for.")
         let stop = element("pause-response-button")
         XCTAssertTrue(waitUntil({ stop.isEnabled }, timeout: 10), "Stop should be enabled while the provider turn is active, before any text is written.")
         stop.click()
@@ -5579,17 +5591,26 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(element("continue-response-button").waitForExistence(timeout: 15), "The stopped turn should reset the composer to its resumable state.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         XCTAssertNil(try taskRecord(id: taskID)?["statusMessage"] as? String, "A user-requested stop should not leave a failure reason.")
+        // A user-initiated Stop settles with no final answer and no Blocked reason,
+        // distinct from both the answered and the interrupted-with-reason folds
+        // covered elsewhere. The fixture's reported activity keeps the section
+        // mounted, so the fold here is distinguishable from the section never
+        // having rendered.
+        let reopenedActivity = element("codex-activity-disclosure")
+        XCTAssertTrue(waitUntil({ reopenedActivity.value as? String == "Collapsed, right chevron" }, timeout: 10),
+                      "A user-initiated Stop should fold its activity section away once the daemon reports the turn no longer active.")
+        XCTAssertTrue(reopenedActivity.exists, "The stopped turn's activity section should stay available, just folded.")
         let settled = try XCTUnwrap(try runCLI(["conversation", "runtime"])["result"] as? [String: Any])
         XCTAssertFalse((settled["activeThreadIDs"] as? [String] ?? []).contains(threadID), "A stopped turn is no longer active in the daemon.")
         XCTAssertTrue((settled["interruptedThreadIDs"] as? [String] ?? []).contains(threadID), "The daemon should remember that the window paused the turn.")
     }
 
-    // case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles.
+    // case-contract: test_codex_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Codex reasoning immediately moves the task to Waiting Response and sends Codex's turn-scoped turn/interrupt request. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles. The turn's activity section renders open for as long as the daemon reports the turn active, and folds once the stop settles with no final answer.
     func test_codex_stop_interrupts_thinking_turn_and_waits_for_response() throws {
         try exerciseStopDuringThinking(provider: "codex", title: "Codex stop while thinking")
     }
 
-    // case-contract: test_claude_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Claude reasoning immediately moves the task to Waiting Response and sends Claude's session-scoped control interrupt. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles.
+    // case-contract: test_claude_stop_interrupts_thinking_turn_and_waits_for_response | Clicking Stop during Claude reasoning immediately moves the task to Waiting Response and sends Claude's session-scoped control interrupt. The accepted interruption settles the send without changing the task to Blocked, and a fresh CLI/XPC read confirms the status persisted. A fresh `conversation runtime` read from the daemon reports the turn active and interruptible while it thinks, and interrupted but no longer active once the stop settles. The turn's activity section renders open for as long as the daemon reports the turn active, and folds once the stop settles with no final answer.
     func test_claude_stop_interrupts_thinking_turn_and_waits_for_response() throws {
         try exerciseStopDuringThinking(provider: "claude", title: "Claude stop while thinking")
     }
@@ -7901,7 +7922,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual((history?["messages"] as? [Any])?.count, 0)
     }
 
-    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the submitted user message remains visible in the transcript. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
+    // case-contract: test_conversation_shows_mcp_and_dynamic_tool_activity | MCP and dynamic tool lifecycle updates coalesce by stable item ID into distinct visible conversation rows; each call reports its start and measured duration, and completed durations persist through history reload. While a tool call holds the sent turn active, the submitted user message remains visible in the transcript. The latest active process, including a long command, appears outside Working for on one truncated line; older active processes remain inside, and completion moves it inside. The conversation header has no live activity line while responding. Working for renders open while the turn runs, so its progress is visible without a click, and it is still open after leaving and reopening the task mid-turn; every in-flight call is readable from mid-turn history. A collapse the reader performs mid-turn is honored and survives the activity updates that follow, and the final answer closes the section back into a clean collapsed Worked for. The expanded Working for list shows each call's live or completed duration. In-progress, completed, and failed statuses, server/tool identity, and safe result summaries render without duplicate rows, including when later-turn items follow the calls in history. Arguments and raw result text are never exposed.
     func test_conversation_shows_mcp_and_dynamic_tool_activity() throws {
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-tool-activity").path
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: try XCTUnwrap(codexFixtureExecutable)))
@@ -7929,11 +7950,12 @@ final class PlayhouseUITests: XCTestCase {
         let latestActiveRow = element("codex-activity-row-item_fixture_active_long_command")
         XCTAssertTrue(latestActiveRow.waitForExistence(timeout: 10), "The latest active process should appear outside Working for.")
         XCTAssertLessThan(latestActiveRow.frame.height, 45, "The long active command should remain a single truncated line.")
-        XCTAssertFalse(element("codex-activity-row-item_fixture_mcp_call").exists)
-        XCTAssertFalse(element("codex-activity-row-item_fixture_dynamic_call").exists)
-        element("codex-activity-disclosure").click()
+        let activityDisclosure = element("codex-activity-disclosure")
+        XCTAssertTrue(waitUntil({ activityDisclosure.value as? String == "Expanded, down chevron" }, timeout: 10),
+                      "A turn in flight should show its work instead of hiding it behind Working for.")
         let activityDetails = element("codex-activity-details")
-        XCTAssertTrue(activityDetails.waitForExistence(timeout: 5), "Expanded Working for should contain tool activity rows.")
+        XCTAssertTrue(activityDetails.waitForExistence(timeout: 5), "Working for should already list this turn's tool activity.")
+        attachScreenshot(named: "Working for stays open while the turn runs")
         // Activity rows are groups; their details and durations are child texts.
         func rowText(_ id: String) -> String {
             [element("codex-activity-row-\(id)").label,
@@ -7962,9 +7984,43 @@ final class PlayhouseUITests: XCTestCase {
         }
         XCTAssertTrue(mcpRow.label.contains("In progress"))
         XCTAssertTrue(dynamicRow.label.contains("In progress"))
+        // Leaving and reopening the task mid-turn lands on the same open section,
+        // with this turn's calls still readable; a cold reopen cannot reconstruct
+        // the live elapsed-time display the continuously-open window shows above,
+        // so this checks status and content, not the running duration.
+        element("back-to-board-button").click()
+        XCTAssertTrue(element("board-title").waitForExistence(timeout: 10))
+        openTask(named: "Tool activity")
+        XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 20))
+        XCTAssertTrue(waitUntil({ activityDisclosure.value as? String == "Expanded, down chevron" }, timeout: 15),
+                      "Reopening a task mid-turn should land on the same open section instead of hiding the work behind Working for.")
+        XCTAssertTrue(activityDetails.waitForExistence(timeout: 10), "The reopened live turn should render its progress without a click.")
+        XCTAssertTrue(mcpRow.waitForExistence(timeout: 10), "Reopening mid-turn should still show in-flight calls inside Working for.")
+        XCTAssertTrue(dynamicRow.waitForExistence(timeout: 5))
+        XCTAssertTrue(legacyDynamicRow.waitForExistence(timeout: 5))
+        XCTAssertTrue(mcpRow.label.contains("In progress"), "A reopened in-flight call should still read as in progress.")
+        XCTAssertTrue(latestActiveRow.waitForExistence(timeout: 10), "The reopened window should still show the latest active process outside Working for.")
+        XCTAssertFalse(commandRow.exists, "The active command should stay outside expanded Working for after reopening.")
+        // The open section is a default, not a lock: a reader can fold it mid-turn,
+        // and it must stay folded across the activity updates that follow.
+        activityDisclosure.click()
+        XCTAssertTrue(waitUntil({ !activityDetails.exists }, timeout: 5), "Collapsing mid-turn should hide this turn's activity rows.")
+        XCTAssertFalse(element("codex-activity-row-item_fixture_mcp_call").exists)
+        XCTAssertFalse(element("codex-activity-row-item_fixture_dynamic_call").exists)
+        attachScreenshot(named: "A reader can fold the section while the turn runs")
         try "Finish the newest call first.\n".write(to: toolReleaseLatest, atomically: true, encoding: .utf8)
-        XCTAssertTrue(waitUntil({ latestActiveRow.label.contains("Completed") }, timeout: 10))
+        // The finished command leaves the live slot outside the section; while the
+        // section is folded it is rendered nowhere, which is the observable signal
+        // that the update landed.
+        XCTAssertTrue(waitUntil({ !latestActiveRow.exists }, timeout: 10),
+                      "The completed command should leave the live activity slot to the still-running calls.")
+        XCTAssertEqual(activityDisclosure.value as? String, "Collapsed, right chevron",
+                       "An activity update arriving mid-turn must not reopen a section the reader folded.")
+        XCTAssertFalse(activityDetails.exists, "The reader's mid-turn collapse should survive the completing command.")
+        activityDisclosure.click()
+        XCTAssertTrue(activityDetails.waitForExistence(timeout: 5), "Expanded Working for should contain tool activity rows.")
         XCTAssertTrue(waitUntil({ commandRow.waitForExistence(timeout: 0.1) }, timeout: 10), "A completed command should move inside Working for.")
+        XCTAssertTrue(commandRow.label.contains("Completed"), "The command should read Completed once the section is reopened.")
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_mcp_call").count, 1)
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_call").count, 1)
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-activity-row-item_fixture_dynamic_legacy").count, 1)
@@ -7981,6 +8037,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ activityRowShows("item_fixture_active_long_command", "Completed") }, timeout: 15), "The long command should complete inside Working for.")
         // The final answer folds the turn's activity into Worked for; reopen it once settled.
         XCTAssertTrue(waitUntil({ self.element("codex-activity-disclosure").exists && self.element("codex-activity-disclosure").label.hasPrefix("Worked for") }, timeout: 30), "The turn should settle into Worked for.")
+        XCTAssertEqual(element("codex-activity-disclosure").value as? String, "Collapsed, right chevron",
+                       "The final answer should fold the open section back into a clean Worked for.")
+        attachScreenshot(named: "Worked for closes when the final answer arrives")
         var activityDetailsReopenCount = 0
         XCTAssertTrue(waitUntil({
             if !self.element("codex-activity-details").exists, activityDetailsReopenCount < 3 {
@@ -8219,7 +8278,7 @@ final class PlayhouseUITests: XCTestCase {
         }, timeout: 10), "Upward scrolling must still reveal earlier messages after an in-place reload.")
     }
 
-    // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, active agents appear as individual named rows outside the collapsed Worked for disclosure, with available path/model/reasoning metadata and started-working wording. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs. A fresh `conversation subagent-history` read returns the completed child's stored conversation content.
+    // case-contract: test_conversation_shows_subagent_delegation | During a parent turn, Working for renders open and active agents appear as individual named rows outside it, with available path/model/reasoning metadata and started-working wording; a mid-turn collapse the reader performs is honored. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs. A fresh `conversation subagent-history` read returns the completed child's stored conversation content.
     func test_conversation_shows_subagent_delegation() throws {
         let fixtureRoot = WorkspaceFixture.root
         let fixtureOwnerMarker = fixtureRoot.appendingPathComponent(".playhouse-bridge-fixture")
@@ -8258,10 +8317,12 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: subagentReady.path) }, timeout: 20), "The fixture should expose the active child interval before completion.")
         let activityDisclosure = element("codex-activity-disclosure")
         XCTAssertTrue(activityDisclosure.waitForExistence(timeout: 10), "Active child work should appear in conversation activity.")
-        XCTAssertEqual(activityDisclosure.value as? String, "Collapsed, right chevron",
-                       "Active agent rows should be presented while Working for is collapsed.")
+        // Every activity in flight here renders outside the section, so the open
+        // section has nothing inside it yet; its state is the chevron, not content.
+        XCTAssertTrue(waitUntil({ activityDisclosure.value as? String == "Expanded, down chevron" }, timeout: 10),
+                      "A turn in flight should show its work instead of hiding it behind Working for.")
         let activeChildButton = element("codex-subagent-row-00000000-0000-0000-0000-000000000002")
-        XCTAssertTrue(activeChildButton.waitForExistence(timeout: 10), "The running child should appear as a clickable timeline row while Codex activity is collapsed.")
+        XCTAssertTrue(activeChildButton.waitForExistence(timeout: 10), "The running child should appear as a clickable timeline row beside the open Codex activity.")
         XCTAssertEqual(activityDisclosure.descendants(matching: .any).matching(identifier: "codex-subagent-row-00000000-0000-0000-0000-000000000002").count, 0,
                        "Active agents should not be nested inside Working for.")
         XCTAssertTrue(activeChildButton.label.contains("Sandbox review"))
@@ -8271,8 +8332,17 @@ final class PlayhouseUITests: XCTestCase {
         assertSubagentIconArtwork(agentIcon)
         let secondActiveChildButton = element("codex-subagent-row-00000000-0000-0000-0000-000000000003")
         XCTAssertTrue(secondActiveChildButton.waitForExistence(timeout: 5),
-                      "Every active agent should remain visible outside the collapsed Codex activity section.")
+                      "Every active agent should remain visible outside the Codex activity section.")
+        // The open section is a default, not a lock: folding it mid-turn sticks.
         activityDisclosure.click()
+        XCTAssertTrue(waitUntil({ activityDisclosure.value as? String == "Collapsed, right chevron" }, timeout: 5),
+                      "A reader should still be able to fold the open section while the turn runs.")
+        // Folding the section is what proves the active agents render outside it.
+        XCTAssertTrue(activeChildButton.exists && secondActiveChildButton.exists,
+                      "Active agents render outside the section, so folding it must not hide them.")
+        activityDisclosure.click()
+        XCTAssertTrue(waitUntil({ activityDisclosure.value as? String == "Expanded, down chevron" }, timeout: 5),
+                      "Reopening the section mid-turn should restore the open chevron.")
         XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "codex-subagent-row-00000000-0000-0000-0000-000000000002").count, 1,
                        "The interacted update should update the single timeline row instead of creating a duplicate.")
         let childMetadata = subagentRowMetadata(activeChildButton)
@@ -9584,10 +9654,13 @@ final class PlayhouseUITests: XCTestCase {
         var expandedWorkedFor = false
         XCTAssertTrue(
             waitUntil({
-                // The final answer folds agent rows into a collapsed Worked for.
-                if !subagentRow.exists, !expandedWorkedFor, self.element("codex-activity-disclosure").exists,
-                   self.element("codex-activity-disclosure").label.hasPrefix("Worked for") {
-                    self.element("codex-activity-disclosure").click()
+                // The final answer folds agent rows into a collapsed Worked for;
+                // expand only when it is actually collapsed.
+                let disclosure = self.element("codex-activity-disclosure")
+                if !subagentRow.exists, !expandedWorkedFor, disclosure.exists,
+                   disclosure.label.hasPrefix("Worked for"),
+                   (disclosure.value as? String ?? "").hasPrefix("Collapsed") {
+                    disclosure.click()
                     expandedWorkedFor = true
                 }
                 return self.app.descendants(matching: .any).matching(NSPredicate(
@@ -9648,9 +9721,19 @@ final class PlayhouseUITests: XCTestCase {
             waitUntil({ self.transcriptContains("The background check failed.") }, timeout: 15),
             "The parent's answer should remain visible for a failed agent turn."
         )
-        element("codex-activity-disclosure").click()
+        // The section is open while the turn runs and folds into Worked for once the
+        // answer lands, so expand only when it is actually collapsed.
         let failedAgentRow = element("codex-subagent-row-toolu_background_agent")
-        XCTAssertTrue(waitUntil({ failedAgentRow.label.contains("failed") }, timeout: 15), failedAgentRow.label)
+        var failedExpandAttempts = 0
+        XCTAssertTrue(waitUntil({
+            if !failedAgentRow.exists, failedExpandAttempts < 3,
+               (self.element("codex-activity-disclosure").value as? String ?? "").hasPrefix("Collapsed") {
+                self.element("codex-activity-disclosure").click()
+                failedExpandAttempts += 1
+                return false
+            }
+            return failedAgentRow.label.contains("failed")
+        }, timeout: 15), failedAgentRow.label)
         XCTAssertFalse(element(reportIdentifier).exists, "A failed agent summary must not appear as a successful assistant result.")
         XCTAssertTrue(waitUntil({ !self.element("pause-response-button").exists }, timeout: 20))
         XCTAssertLessThan(
@@ -9931,9 +10014,14 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(providerHistory.contains("Green"))
         XCTAssertTrue(providerHistory.contains("fixture-secret"))
         let immediateActivityDisclosure = element("codex-activity-disclosure")
-        if immediateActivityDisclosure.exists { immediateActivityDisclosure.click() }
+        // The section is open during a turn and collapsed once it settles; expand only
+        // when collapsed, so the redaction check always inspects expanded details.
+        XCTAssertTrue(expandActivityDetails(immediateActivityDisclosure),
+            "The redaction check must inspect expanded activity details, not a collapsed section.")
         XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "fixture-secret")).firstMatch.exists,
             "Playhouse conversation content and expanded activity details must redact the re-entered secret.")
+        XCTAssertEqual(immediateActivityDisclosure.value as? String, "Expanded, down chevron",
+            "The section must still be open, so the redaction check above was not vacuous.")
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Waiting Response")
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 12))
@@ -9944,9 +10032,12 @@ final class PlayhouseUITests: XCTestCase {
             "After restart, history should hide the assistant response from a secret recovery turn.")
         XCTAssertTrue(transcriptMessage("[Private answer sent after restart]").exists)
         let persistedActivityDisclosure = element("codex-activity-disclosure")
-        if persistedActivityDisclosure.exists { persistedActivityDisclosure.click() }
+        XCTAssertTrue(expandActivityDetails(persistedActivityDisclosure),
+            "The reloaded redaction check must inspect expanded activity details.")
         XCTAssertFalse(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "fixture-secret")).firstMatch.exists,
             "The secret must remain redacted from messages, activities, and diffs after Playhouse reloads provider history.")
+        XCTAssertEqual(persistedActivityDisclosure.value as? String, "Expanded, down chevron",
+            "The reloaded section must still be open, so the redaction check above was not vacuous.")
 
         let followUpComposer = element("message-composer")
         followUpComposer.click()
@@ -10650,7 +10741,7 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(deliveredAnswered["itemIDs"] as? [String], ["item_playhouse_async_question"], "The delivered async answer should be recorded as answered.")
     }
 
-    // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; a turn running when the window quits cleanly or is killed keeps running in the bridge daemon, stays In Progress with its prompt visible after relaunch, finishes, and allows a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
+    // case-contract: test_codex_interrupted_turn_blocks_with_reason_and_can_retry | Turn start persists In Progress; a genuine interrupted outcome remains Blocked with its reason, while restart recovery returns stale In Progress work to Waiting Response with its prompt and conversation available. A saved prompt whose turn never started returns to Waiting Response with its draft intact and can be continued; a turn running when the window quits cleanly or is killed keeps running in the bridge daemon, stays In Progress with its prompt visible after relaunch, finishes, and allows a follow-up. Interrupted outcomes and diagnostics persist across connections; a new prompt can finish in Review. The live turn's activity section renders open and folds away when the interrupted turn settles without an answer, on the conversation that stayed open; the interrupted turn adds no final answer and keeps the activity it reported. A queued follow-up remains visible as needing action after interruption, survives reopening, and is dispatched only after an explicit retry; the completed retry becomes the task's latest saved prompt.
     func test_codex_interrupted_turn_blocks_with_reason_and_can_retry() throws {
         _ = try runCLI(["task", "create", "--title", "Interrupted turn", "--root", fixture.primary.path])
         codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-interrupted").path
@@ -10660,6 +10751,14 @@ final class PlayhouseUITests: XCTestCase {
         element("message-composer").typeText("Start work that will be interrupted.")
         element("send-message-button").click()
         XCTAssertTrue(element("ai-question-form-title").waitForExistence(timeout: 10))
+        let interruptedActivity = element("codex-activity-disclosure")
+        XCTAssertTrue(interruptedActivity.waitForExistence(timeout: 10), "A live turn should surface its activity section.")
+        XCTAssertTrue(waitUntil({ interruptedActivity.value as? String == "Expanded, down chevron" }, timeout: 10),
+                      "A turn in flight should show its work instead of hiding it behind Working for.")
+        // The lone reported activity is still running, so it occupies the live slot
+        // outside the section; the open section itself has nothing inside it yet.
+        XCTAssertTrue(element("codex-activity-row-item_fixture_interrupted_command").waitForExistence(timeout: 10),
+                      "The live turn should render its reported activity without a click.")
         let interruptedID = try taskID(named: "Interrupted turn")
         let queuedText = "Follow up after I review the interrupted turn."
         let queued = try runCLI(["conversation", "queue", interruptedID, "--message", queuedText])["result"] as? [String: Any]
@@ -10669,6 +10768,15 @@ final class PlayhouseUITests: XCTestCase {
         element("submit-ai-answers-button").click()
 
         XCTAssertTrue(element("codex-chat-error").waitForExistence(timeout: 10))
+        // The turn settles with no answer. Its reported activity keeps the section
+        // mounted on the same conversation, so it must be folded rather than gone:
+        // asserting the section still exists is what makes the collapse meaningful.
+        XCTAssertTrue(waitUntil({ interruptedActivity.value as? String == "Collapsed, right chevron" }, timeout: 10),
+                      "An interrupted turn should fold its activity section away instead of resting open.")
+        XCTAssertTrue(interruptedActivity.exists, "The interrupted turn's activity section should stay available, just folded.")
+        XCTAssertFalse(element("codex-activity-details").exists, "A settled interrupted turn should not rest on expanded activity details.")
+        XCTAssertFalse(element("pause-response-button").exists, "The interrupted turn should no longer be responding.")
+        attachScreenshot(named: "Activity folds away when an interrupted turn settles")
         XCTAssertTrue(app.staticTexts["Follow-up needs your action"].waitForExistence(timeout: 10), "An interrupted turn must retain its queued message for an explicit retry.")
         let blocked = try XCTUnwrap(taskRecord(named: "Interrupted turn"))
         XCTAssertEqual(blocked["status"] as? String, "Blocked")
@@ -11685,6 +11793,25 @@ final class PlayhouseUITests: XCTestCase {
         assertPixel(logoImage, normalizedX: 0.50, normalizedY: 0.35, rgb: (245, 179, 124), accuracy: 35, file: file, line: line)
         assertPixel(logoImage, normalizedX: 0.20, normalizedY: 0.80, rgb: (177, 54, 171), accuracy: 35, file: file, line: line)
         assertPixel(logoImage, normalizedX: 0.80, normalizedY: 0.80, rgb: (240, 82, 121), accuracy: 30, file: file, line: line)
+    }
+
+    /// The activity section renders open while a turn runs and collapses once it
+    /// settles, so a test that needs the details open must expand only when the
+    /// disclosure is actually collapsed; clicking blindly can close it instead.
+    /// Reports whether the section ended up open, so a caller can assert that its
+    /// own check really inspected an open section. The chevron is the anchor, not
+    /// the details container: when every activity in flight renders outside the
+    /// section, an open section has no children and does not resolve.
+    @discardableResult
+    private func expandActivityDetails(_ disclosure: XCUIElement? = nil, timeout: TimeInterval = 10) -> Bool {
+        let control = disclosure ?? element("codex-activity-disclosure")
+        guard control.exists else { return false }
+        return waitUntil({
+            let value = control.value as? String ?? ""
+            if value.hasPrefix("Expanded") { return true }
+            if value.hasPrefix("Collapsed") { control.click() }
+            return (control.value as? String ?? "").hasPrefix("Expanded")
+        }, timeout: timeout)
     }
 
     /// An agent row's metadata line, read from the row's button beside its icon.

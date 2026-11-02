@@ -211,6 +211,11 @@ def respond(user_text, instructions, preserve_no_outcome=False):
             "subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": question_input,
         }})
     elif "hold until stopped" in user_text.lower() or "hold-until-stopped" in user_text.lower():
+        # Report one in-progress tool use before holding, so a user-initiated Stop
+        # with no final answer still keeps the window's activity section mounted,
+        # and the fold it performs on settle is distinguishable from the section
+        # simply never having rendered.
+        assistant("msg_stop_command", [{"type": "tool_use", "id": "toolu_stop_command", "name": "Bash", "input": {"command": "git status --short"}}])
         ready = Path(str(sys.argv[0]) + ".interrupt-ready")
         ready.write_text("The Claude fixture turn is active and waiting for an interrupt.\n", encoding="utf-8")
         deadline = time.monotonic() + 30
