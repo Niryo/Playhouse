@@ -3587,24 +3587,34 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Concurrent repository removal rejects a stale settings save")
     }
 
-    // case-contract: test_task_repository_removal_preserves_state_on_dirty_worktree | Removing the only pending repository leaves the task with no workspace and preserves the source repository; removing a pending repository preserves other context folders; removing a clean managed worktree through the GUI waits for an active turn, while the task repository API removes it from context immediately and defers clean worktree deletion until the turn releases; a bridge service restart preserves the cleanup intent and a fresh request completes removal; if the active turn writes files before release, deferred cleanup preserves that worktree and its changes; a dirty worktree rejects removal and preserves its task record and files.
+    // case-contract: test_task_repository_removal_preserves_state_on_dirty_worktree | Removing one of two pending repositories leaves the remaining repository in task context and remembered settings, while preserving the removed source repository; the next task restores only the remaining remembered repository. Removing a pending repository preserves other context folders; removing a clean managed worktree through the GUI waits for an active turn, while the task repository API removes it from context immediately and defers clean worktree deletion until the turn releases; a bridge service restart preserves the cleanup intent and a fresh request completes removal; if the active turn writes files before release, deferred cleanup preserves that worktree and its changes; a dirty worktree rejects removal and preserves its task record and files.
     func test_task_repository_removal_preserves_state_on_dirty_worktree() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
 
-        let soleTitle = "Sole repository removal through UI"
-        let sole = try runCLI(["task", "create", "--title", soleTitle, "--repo", fixture.primary.path])["result"] as? [String: Any]
+        let soleTitle = "Two repository removal through UI"
+        let sole = try runCLI(["task", "create", "--title", soleTitle, "--repo", fixture.primary.path, "--repo", fixture.secondary.path])["result"] as? [String: Any]
         let soleID = try XCTUnwrap(sole?["id"] as? String)
         openTask(named: soleTitle)
         element("conversation-repository-badge-primary").click()
         element("remove-conversation-repository-button").click()
         XCTAssertTrue(waitUntil({
             guard let result = try? self.taskRecord(id: soleID),
-                  let records = result["repositoryWorktrees"] as? [Any] else { return false }
-            return records.isEmpty
-        }, timeout: 10), "Removing the only pending repository should leave the task without a workspace.")
-        XCTAssertEqual(try taskRecord(id: soleID)?["workspaceRoots"] as? [String], [])
+                  let records = result["repositoryWorktrees"] as? [[String: Any]] else { return false }
+            return records.count == 1 && records[0]["repositoryPath"] as? String == self.fixture.secondary.path
+        }, timeout: 10), "Removing one pending repository should preserve the other attachment.")
+        XCTAssertEqual(try taskRecord(id: soleID)?["workspaceRoots"] as? [String], [fixture.secondary.path])
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.primary.path))
+        XCTAssertEqual((try runCLI(["settings", "get"])["result"] as? [String: Any])?["lastSelectedRepositories"] as? [String], [fixture.secondary.path])
+
+        element("back-to-board-button").click()
+        element("new-task-button").click()
+        let restoredTitle = element("empty-conversation-repository-title")
+        XCTAssertTrue(restoredTitle.waitForExistence(timeout: 5), "A new task should restore the remaining remembered repository.")
+        XCTAssertEqual(accessibleLabelOrValue(of: restoredTitle), "secondary")
+        XCTAssertTrue(element("conversation-repository-badge-secondary").exists)
+        XCTAssertFalse(element("conversation-repository-badge-primary").exists)
+        attachScreenshot(named: "New task restores only the repository that remains selected")
 
         element("back-to-board-button").click()
         let pendingTitle = "Pending repository removal through UI"
