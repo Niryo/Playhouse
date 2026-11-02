@@ -245,6 +245,10 @@ struct RemoteConversationManager {
         try await daemon.call("task.pr.create", ["taskID": id(taskID)]).decoded(BoardTaskRecord.self)
     }
 
+    func setAutoCreatePullRequest(taskID: UUID, enabled: Bool) async throws -> BoardTaskRecord {
+        try await daemon.call("task.pr.auto", ["taskID": id(taskID), "enabled": .boolean(enabled)]).decoded(BoardTaskRecord.self)
+    }
+
     func syncPullRequestChanges(taskID: UUID) async throws -> PullRequestSyncOutcome {
         try await daemon.call("task.pr.sync", ["taskID": id(taskID)]).decoded(PullRequestSyncOutcome.self)
     }

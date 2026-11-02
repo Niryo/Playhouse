@@ -61,6 +61,7 @@ enum WorkspaceSettings {
     static let lastSelectedRepositoriesKey = "lastSelectedRepositories"
     static let appearanceKey = "appearance"
     static let defaultConversationProviderKey = "defaultConversationProvider"
+    static let autoCreatePullRequestDefaultKey = "autoCreatePullRequestDefault"
     static let tokenUsageColorMaxKey = "tokenUsageColorMax"
     static let defaultTokenUsageColorMax = TokenUsageHeatmap.defaultColorMax
     static let cpuUsageColorMaxKey = "cpuUsageColorMax"

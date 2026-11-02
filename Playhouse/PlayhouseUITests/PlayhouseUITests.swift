@@ -2074,6 +2074,97 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(current["status"] as? String, "Done")
     }
 
+    // case-contract: test_task_auto_pr_toggle_creates_pull_request_on_review | A working-state task card (In Progress, Blocked, or Waiting Response) with no linked pull request shows a small Auto PR switch in place of the manual PR button, defaulting to off; the switch disappears once a pull request is linked or the task leaves the working states. Selecting Auto PR persists and is reflected across a fresh read. When a turn completes while Auto PR is on, Playhouse creates the task's pull request itself on the way to Review with no user click, exactly once. When Auto PR stays off, the task still reaches Review with no pull request, and the existing manual PR button still creates it afterward unchanged. The last switch choice is remembered: tasks created after turning it on start on, and tasks created after turning it off start off. Toggling Auto PR for an unknown task is rejected.
+    func test_task_auto_pr_toggle_creates_pull_request_on_review() throws {
+        codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        let ghEnvironment = try makeGitHubStateFixture(expectedNumbers: [])
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: ghEnvironment)
+        let created = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Auto PR toggle UI", "--repo", fixture.primary.path,
+            "--merge-target", "\(fixture.primary.path)=main",
+        ])["result"] as? [String: Any])
+        let taskID = try XCTUnwrap(created["id"] as? String)
+        XCTAssertTrue(element("task-card-\(taskID)").waitForExistence(timeout: 5))
+        XCTAssertFalse(element("task-auto-pr-toggle-\(taskID)").exists, "A Backlog task has no working-state PR controls yet.")
+
+        openTask(named: "Auto PR toggle UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Auto PR toggle UI", whileTurnHeld: {
+            self.element("back-to-board-button").click()
+            let toggle = self.element("task-auto-pr-toggle-\(taskID)")
+            XCTAssertTrue(toggle.waitForExistence(timeout: 5), "An in-progress task with no linked PR should show the Auto PR switch.")
+            XCTAssertFalse(self.element("task-create-pr-\(taskID)").exists, "The switch replaces the manual PR button while the task is in progress.")
+            XCTAssertGreaterThanOrEqual(toggle.frame.height, 30, "The Auto PR switch should keep a comfortable hit target.")
+            XCTAssertEqual(toggle.value as? String, "off")
+            XCTAssertFalse(try XCTUnwrap(self.taskRecord(id: taskID)?["autoCreatePullRequestOnReview"] as? Bool), "Auto PR must default to off.")
+            self.attachScreenshot(named: "Working task shows the Auto PR switch defaulting to off", fullScreen: true)
+
+            toggle.click()
+            XCTAssertTrue(self.waitUntil({
+                (try? self.taskRecord(id: taskID)?["autoCreatePullRequestOnReview"] as? Bool) == true
+            }, timeout: 5), "Turning Auto PR on should persist immediately.")
+            XCTAssertTrue(self.waitUntil({ (toggle.value as? String) == "on" }, timeout: 5), "The switch should show its on state.")
+            self.attachScreenshot(named: "Turning the Auto PR switch on persists", fullScreen: true)
+
+            let record = try XCTUnwrap((self.taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+            let worktree = URL(fileURLWithPath: try XCTUnwrap(record["worktreePath"] as? String), isDirectory: true)
+            let remoteRoot = self.dataDirectory.appendingPathComponent("auto-pr-remotes", isDirectory: true)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: remoteRoot.path), "Each UI case should start with an isolated bare remote fixture.")
+            try FileManager.default.createDirectory(at: remoteRoot, withIntermediateDirectories: true)
+            try WorkspaceFixture.ownerContents.write(to: remoteRoot.appendingPathComponent(WorkspaceFixture.ownerMarker), atomically: true, encoding: .utf8)
+            let remote = remoteRoot.appendingPathComponent("repository-0.git", isDirectory: true)
+            try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
+            try self.runGit(remote, "init", "--bare")
+            try self.runGit(worktree, "remote", "add", "origin", remote.path)
+            try self.runGit(worktree, "push", "origin", "main")
+
+            self.openTask(named: "Auto PR toggle UI")
+        })
+        XCTAssertTrue(waitUntil({
+            (try? self.taskRecord(id: taskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"] != nil
+        }, timeout: 15), "Auto PR should create the pull request itself once the task reaches Review.")
+        element("back-to-board-button").click()
+        let prLink = app.links["task-pr-link-\(taskID)-501"]
+        XCTAssertTrue(prLink.waitForExistence(timeout: 10), "The auto-created PR number should appear on the card without the user clicking the PR button.")
+        XCTAssertFalse(element("task-auto-pr-toggle-\(taskID)").exists, "The toggle gives way to the linked PR once one exists.")
+        attachScreenshot(named: "Auto PR created the pull request automatically once the task reached Review", fullScreen: true)
+
+        let stickyOn = try XCTUnwrap(try runCLI(["task", "create", "--title", "Sticky Auto PR on UI", "--root", fixture.primary.path])["result"] as? [String: Any])
+        XCTAssertEqual(stickyOn["autoCreatePullRequestOnReview"] as? Bool, true, "A task created after turning the switch on in the UI should start on.")
+        let stickyOnID = try XCTUnwrap(stickyOn["id"] as? String)
+        _ = try runCLI(["task", "pr", "auto", stickyOnID, "off"])
+        let stickyOff = try XCTUnwrap(try runCLI(["task", "create", "--title", "Sticky Auto PR off UI", "--root", fixture.primary.path])["result"] as? [String: Any])
+        XCTAssertEqual(stickyOff["autoCreatePullRequestOnReview"] as? Bool, false, "A task created after turning the switch off should start off.")
+
+        let manualCreated = try XCTUnwrap(try runCLI([
+            "task", "create", "--title", "Manual PR toggle default UI", "--repo", fixture.secondary.path,
+            "--merge-target", "\(fixture.secondary.path)=main",
+        ])["result"] as? [String: Any])
+        let manualTaskID = try XCTUnwrap(manualCreated["id"] as? String)
+        XCTAssertFalse(manualCreated["autoCreatePullRequestOnReview"] as? Bool ?? true, "Auto PR must default to off so existing manual tasks are unaffected.")
+        let missing = try runCLI(["task", "pr", "auto", "00000000-0000-0000-0000-000000000000", "on"], expectedStatus: 3)
+        XCTAssertEqual((missing["error"] as? [String: Any])?["code"] as? String, "not_found")
+        openTask(named: "Manual PR toggle default UI")
+        try completeCurrentTaskWithFixtureAnswers(taskTitle: "Manual PR toggle default UI")
+        element("back-to-board-button").click()
+        XCTAssertEqual(try taskRecord(id: manualTaskID)?["status"] as? String, "Review")
+        XCTAssertNil((try taskRecord(id: manualTaskID)?["repositoryWorktrees"] as? [[String: Any]])?.first?["pullRequestNumber"], "With Auto PR off, reaching Review must not create a pull request by itself.")
+        let manualButton = element("task-create-pr-\(manualTaskID)")
+        XCTAssertTrue(manualButton.waitForExistence(timeout: 5), "Auto PR off must leave the existing manual PR button in place.")
+        let manualRecord = try XCTUnwrap((try taskRecord(id: manualTaskID)?["repositoryWorktrees"] as? [[String: Any]])?.first)
+        let manualWorktree = URL(fileURLWithPath: try XCTUnwrap(manualRecord["worktreePath"] as? String), isDirectory: true)
+        let manualRemoteRoot = dataDirectory.appendingPathComponent("manual-pr-remotes", isDirectory: true)
+        try FileManager.default.createDirectory(at: manualRemoteRoot, withIntermediateDirectories: true)
+        try WorkspaceFixture.ownerContents.write(to: manualRemoteRoot.appendingPathComponent(WorkspaceFixture.ownerMarker), atomically: true, encoding: .utf8)
+        let manualRemote = manualRemoteRoot.appendingPathComponent("repository-0.git", isDirectory: true)
+        try FileManager.default.createDirectory(at: manualRemote, withIntermediateDirectories: true)
+        try runGit(manualRemote, "init", "--bare")
+        try runGit(manualWorktree, "remote", "add", "origin", manualRemote.path)
+        try runGit(manualWorktree, "push", "origin", "main")
+        manualButton.click()
+        let manualPRLink = app.links["task-pr-link-\(manualTaskID)-502"]
+        XCTAssertTrue(manualPRLink.waitForExistence(timeout: 10), "The manual PR flow must still work unchanged when Auto PR stays off.")
+    }
+
     // case-contract: test_task_pr_conflicts_detect_without_mutation | The real Git CLI detects merge conflicts without mutation, and PR creation still publishes the task branch and reaches the normal GitHub CLI path; conflicts do not block PR creation. CLI/XPC resolves staged conflicts locally without pushing and commits and pushes a staged resolution without changing the target. The paired UI confirms PR creation proceeds for a conflicted branch and the existing Fix Conflicts action still appears once the PR is linked.
     func test_task_pr_conflicts_detect_without_mutation() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path

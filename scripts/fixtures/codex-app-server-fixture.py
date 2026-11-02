@@ -718,6 +718,25 @@ def main():
                     "turn": {"id": TURN_ID, "status": "completed"},
                 }})
                 return
+            is_pull_request_summary_request = (turn_message or "").startswith("Write a very concise GitHub pull request description.")
+            if is_pull_request_summary_request:
+                # A one-shot helper turn (Auto PR's pull-request description), not an
+                # interactive conversation: answer directly instead of asking a question.
+                write({"jsonrpc": "2.0", "id": message["id"], "result": {"turn": {"id": TURN_ID, "status": "inProgress"}}})
+                write({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                    "threadId": THREAD_ID,
+                    "item": {
+                        "id": "item_playhouse_pr_summary",
+                        "type": "agentMessage",
+                        "phase": "final_answer",
+                        "text": "Fixture pull request summary.",
+                    },
+                }})
+                write({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+                    "threadId": THREAD_ID,
+                    "turn": {"id": TURN_ID, "status": "completed"},
+                }})
+                return
             image_inputs = [item for item in turn_input if item.get("type") == "image"]
             turn_history = {
                 "userMessage": turn_message,

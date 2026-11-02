@@ -377,6 +377,7 @@ struct KanbanBoardView: View {
             },
             onMoveTask: { id, status in moveTask(id: id, to: status) },
             onCreatePullRequests: { createPullRequests(for: $0) },
+            onToggleAutoPR: { task, enabled in setAutoCreatePullRequest(for: task, enabled: enabled) },
             onResolveConflicts: {
                 conflictResolutionTaskID = $0.id
                 selectedTask = $0
@@ -776,11 +777,13 @@ struct KanbanBoardView: View {
             defer { isCreatingNewTask = false }
             do {
                 let manager = BoardTaskManager(modelContext: modelContext)
+                let settings = WorkspaceSettingsManager()
                 let created = try await manager.create(
                     title: "Untitled task",
                     repositories: [],
                     contextFolders: [],
-                    provider: WorkspaceSettingsManager().defaultConversationProvider
+                    provider: settings.defaultConversationProvider,
+                    autoCreatePullRequestOnReview: settings.autoCreatePullRequestDefault
                 )
                 let newTask = try manager.taskModel(created.id)
                 selectedTask = newTask
@@ -965,6 +968,16 @@ struct KanbanBoardView: View {
         }
     }
 
+    private func setAutoCreatePullRequest(for task: BoardTask, enabled: Bool) {
+        Task { @MainActor in
+            do {
+                _ = try await remoteConversations.setAutoCreatePullRequest(taskID: task.id, enabled: enabled)
+            } catch {
+                pullRequestError = error.localizedDescription
+            }
+        }
+    }
+
 }
 
 private struct DragEndEventMonitor: NSViewRepresentable {
@@ -1050,6 +1063,7 @@ private struct KanbanColumnView: View {
     let tasks: [BoardTask]
     let onMoveTask: (UUID, TaskStatus) -> Void
     let onCreatePullRequests: (BoardTask) -> Void
+    let onToggleAutoPR: (BoardTask, Bool) -> Void
     let onResolveConflicts: (BoardTask) -> Void
     let creatingPullRequestTaskIDs: Set<UUID>
     let mergedReviewTaskIDs: Set<UUID>
@@ -1159,6 +1173,7 @@ private struct KanbanColumnView: View {
             onDelete: { onDeleteTask(task) },
             onShowTokenStats: { onShowTaskTokenStats(task) },
             onCreatePullRequests: { onCreatePullRequests(task) },
+            onToggleAutoPR: { onToggleAutoPR(task, $0) },
             onResolveConflicts: { onResolveConflicts(task) },
             isCreatingPullRequests: creatingPullRequestTaskIDs.contains(task.id),
             isPullRequestMerged: mergedReviewTaskIDs.contains(task.id),
@@ -1330,6 +1345,7 @@ private struct TaskCardView: View {
     let onDelete: () -> Void
     let onShowTokenStats: () -> Void
     let onCreatePullRequests: () -> Void
+    let onToggleAutoPR: (Bool) -> Void
     let onResolveConflicts: () -> Void
     let isCreatingPullRequests: Bool
     let isPullRequestMerged: Bool
@@ -1500,6 +1516,17 @@ private struct TaskCardView: View {
         task.status != .backlog && !task.repositoryWorktrees.isEmpty
     }
 
+    /// While the task is still being worked on (before it reaches Review), the Auto
+    /// PR/Manual toggle replaces the manual create button: once the task moves to
+    /// Review, auto mode creates the pull request itself, so there is nothing left for
+    /// the toggle to decide.
+    private var isAutoPRWorkingState: Bool {
+        switch task.status {
+        case .inProgress, .blocked, .waitingResponse: true
+        case .backlog, .review, .done: false
+        }
+    }
+
     private var timeRow: some View {
         HStack(spacing: 6) {
             Image(systemName: "clock")
@@ -1533,7 +1560,9 @@ private struct TaskCardView: View {
     private var pullRequestControls: some View {
         HStack(spacing: 5) {
             let linked = linkedPullRequests
-            if linked.isEmpty {
+            if linked.isEmpty && isAutoPRWorkingState {
+                autoPRSwitch
+            } else if linked.isEmpty {
                 let hasMultipleRepositories = task.repositoryWorktrees.filter { !$0.isPending }.count > 1
                 Button(action: onCreatePullRequests) {
                     if isCreatingPullRequests {
@@ -1619,6 +1648,41 @@ private struct TaskCardView: View {
             }
         }
         .buttonStyle(.borderless)
+    }
+
+    /// Small "PR" switch shown in place of the manual "PR" button while the task is still
+    /// being worked on: on means reaching Review creates the pull request(s) automatically.
+    private var autoPRSwitch: some View {
+        let isOn = task.autoCreatePullRequestOnReview
+        return Button {
+            onToggleAutoPR(!isOn)
+        } label: {
+            HStack(spacing: 5) {
+                Text("PR")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Capsule()
+                    .fill(isOn ? Color.accentColor : Color.primary.opacity(0.18))
+                    .frame(width: 22, height: 13)
+                    .overlay(alignment: isOn ? .trailing : .leading) {
+                        Circle()
+                            .fill(.white)
+                            .frame(width: 11, height: 11)
+                            .shadow(color: .black.opacity(0.25), radius: 0.5, y: 0.5)
+                            .padding(1)
+                    }
+                    .animation(.easeInOut(duration: 0.15), value: isOn)
+            }
+            .frame(minWidth: 30, minHeight: 30)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .buttonHoverPointer()
+        .help(isOn ? "Auto PR is on: a pull request is created automatically when this task moves to Review" : "Auto PR is off: create the pull request yourself once this task moves to Review")
+        .accessibilityLabel("Auto PR")
+        .accessibilityValue(isOn ? "on" : "off")
+        .accessibilityAddTraits(.isToggle)
+        .accessibilityIdentifier("task-auto-pr-toggle-\(task.id.uuidString)")
     }
 
     private func workingDuration(at date: Date) -> String {
