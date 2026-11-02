@@ -55,7 +55,7 @@ Principles that made the previous rounds work:
    `/private/tmp/playhouse-bridge/501/<hash>.sock.log` (every `listening` line is
    a daemon start; one without an `idle, exiting` before it is a death), and the
    artifacts directory on the host under
-   `$TMPDIR/playhouse-ui-tart-artifacts/<run>/playhouse-ui.*/` (`bridge-watcher.log`
+   `/tmp/playhouse-ui-tart-artifacts/<run>/playhouse-ui.*/` (`bridge-watcher.log`
    lists daemon deaths as `watcher exited rc=69`, plus the single `.xcresult`).
 
 3. **Triage every failure to a root cause.** For each failed case gather, in this
