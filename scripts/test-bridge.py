@@ -7104,7 +7104,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIn("question", failed.get("error", {}).get("message", "").lower())
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Blocked")
 
-    # case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from Playhouse history, clears pending state, and returns to Waiting Response.
+    # case-contract: test_claude_pending_question_recovers_after_provider_process_restarts | Claude's pending AskUserQuestion is persisted and restored from fresh CLI/XPC history after the provider turn ends; the task remains Waiting Response while unanswered, and answering resumes the saved Claude session in In Progress, delivers the answer, hides the private recovery prompt and redacts secret answers from Playhouse history, clears pending state, and returns to Waiting Response. While the recovery turn applying the answer runs, the answered question is no longer pending in history or shown in the reopened conversation, and the task is In Progress; if that recovery dies mid-turn, the question returns for retry with the task in Waiting Response, and answering again succeeds.
     def test_claude_pending_question_recovers_after_provider_process_restarts(self):
         fixture = Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py"
         executable = self.data_directory / "claude-fixture-restart-question"
@@ -7136,6 +7136,57 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertFalse(rejected.get("ok", True), rejected)
         still_pending, _ = self.call_cli("conversation", "history", task_id)
         self.assertEqual(self.assert_success(still_pending).get("pendingUserInputRequest"), pending)
+        recovery_pause = Path(str(executable) + ".recovery-pause")
+        recovery_ready = Path(str(executable) + ".recovery-ready")
+        recovery_release = Path(str(executable) + ".recovery-release")
+        recovery_pause.write_text("Hold the recovery turn open.\n", encoding="utf-8")
+        answer_process = self.start_cli(
+            "conversation", "answer-user-input", task_id, pending["id"], "--answer", "question-1=Green",
+            extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)},
+        )
+        try:
+            deadline = time.monotonic() + 20
+            while not recovery_ready.exists() and answer_process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(recovery_ready.exists(), "The fixture should hold the recovery turn open.")
+            applying = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+            self.assertIsNone(
+                applying.get("pendingUserInputRequest"),
+                "An answered question must not stay pending while its recovery turn runs.",
+            )
+            self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "In Progress")
+            # Kill the bridge daemon that owns the recovery turn before it can clean up.
+            send_started = [
+                event for event in self.diagnostic_events()
+                if event.get("event") == "conversation.send.started" and event.get("taskID") == task_id
+            ][-1]
+            bridge_pid = int(send_started["clientPID"])
+            try:
+                os.kill(bridge_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            exit_deadline = time.monotonic() + 5
+            while time.monotonic() < exit_deadline:
+                try:
+                    os.kill(bridge_pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("The bridge daemon owning the recovery turn should exit.")
+            answer_process.communicate(timeout=30)
+        finally:
+            recovery_release.write_text("Release the orphaned recovery turn.\n", encoding="utf-8")
+            if answer_process.poll() is None:
+                answer_process.communicate(timeout=30)
+        crashed = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+        self.assertEqual(
+            crashed.get("pendingUserInputRequest"), pending,
+            "A recovery that dies mid-turn must show its question again for retry.",
+        )
+        self.assertEqual(self.assert_success(self.call_cli("task", "get", task_id)[0])["status"], "Waiting Response")
+        for marker in (recovery_pause, recovery_ready, recovery_release):
+            marker.unlink(missing_ok=True)
         accepted, _ = self.call_cli(
             "conversation", "answer-user-input", task_id, pending["id"], "--answer", "question-1=Green",
             extra_environment={"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)},

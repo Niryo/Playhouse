@@ -236,6 +236,16 @@ def respond(user_text, instructions, preserve_no_outcome=False):
             commands.append({"command": command, "output": run_tool("toolu_outcome_reminder", "Bash", {"command": command}, command)})
     elif "answer to the pending question from the prior playhouse session" in user_text.lower():
         answer = user_text.split("Answer: ", 1)[-1].splitlines()[0].strip()
+        recovery_pause = Path(str(sys.argv[0]) + ".recovery-pause")
+        if recovery_pause.exists():
+            # Hold the recovery turn open so tests can inspect it mid-turn.
+            recovery_release = Path(str(sys.argv[0]) + ".recovery-release")
+            Path(str(sys.argv[0]) + ".recovery-ready").write_text("The recovery turn is running.\n", encoding="utf-8")
+            recovery_deadline = time.monotonic() + 30
+            while not recovery_release.exists() and time.monotonic() < recovery_deadline:
+                time.sleep(0.02)
+            if not recovery_release.exists():
+                raise TimeoutError("The test did not release the recovery turn.")
         text("msg_recovered_question_answer", f"Recovered answer: {answer}.")
     elif "ask a restart-safe structured question" in user_text.lower():
         question_input = {
