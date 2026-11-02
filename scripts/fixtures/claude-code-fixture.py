@@ -531,7 +531,9 @@ def respond(user_text, instructions, preserve_no_outcome=False):
             "The parent result is out while the shell runs.\n", encoding="utf-8"
         )
         steered, steered_uuid = read_steered_input("the parked background shell turn")
+        parent_request_started("msg_parked_steered_answer")
         text("msg_parked_steered", f"STEERED: {steered}")
+        write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
         write({"type": "system", "subtype": "task_updated", "task_id": task_id, "run_id": "fixture-run-1",
                "patch": {"status": "completed", "end_time": 0}})
         write({"type": "system", "subtype": "task_notification", "task_id": task_id, "run_id": "fixture-run-1",
@@ -540,6 +542,7 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         write({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
         parent_request_started("msg_parked_final", woken=True)
         text("msg_parked_final", "PARKED HANDLED")
+        wait_for_release("steered-answer", "The steered answer is visible while the woken parent result is pending.")
         write({"type": "result", "subtype": "success", "is_error": False, "result": ""})
         complete_command(steered_uuid)
     elif "background shell" in user_text.lower():
