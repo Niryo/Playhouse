@@ -584,34 +584,34 @@ struct KanbanBoardView: View {
                 ScrollView {
                     LazyVStack(spacing: 5) {
                         ForEach(results) { task in
-                            Button {
-                                selectedTask = task
-                                isSelectedTaskNew = false
-                                closeDoneArchive()
-                            } label: {
-                                HStack(spacing: 10) {
-                                    Image(systemName: "checkmark.circle.fill").foregroundStyle(TaskStatus.done.accent)
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        Text(task.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                                        Text(task.createdAt, style: .date).font(.system(size: 10)).foregroundStyle(.secondary)
+                            HStack(spacing: 0) {
+                                Button {
+                                    selectedTask = task
+                                    isSelectedTaskNew = false
+                                    closeDoneArchive()
+                                } label: {
+                                    HStack(spacing: 10) {
+                                        Image(systemName: "checkmark.circle.fill").foregroundStyle(TaskStatus.done.accent)
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(task.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                                            Text(task.createdAt, style: .date).font(.system(size: 10)).foregroundStyle(.secondary)
+                                        }
+                                        Spacer(minLength: 0)
                                     }
-                                    Spacer(minLength: 0)
+                                    .padding(10).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                                 }
-                                .padding(10).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                            }
-                            .buttonHoverPointer()
-                            .help("Open task: \(task.title)")
-                            .buttonStyle(.plain)
-                            .accessibilityIdentifier("done-archive-task-\(task.id.uuidString)")
-                            .onAppear {
-                                if query.isEmpty && task.id == archiveTasks.last?.id { loadNextArchivePage() }
-                            }
-                            .overlay(alignment: .trailing) {
+                                .buttonHoverPointer()
+                                .help("Open task: \(task.title)")
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("done-archive-task-\(task.id.uuidString)")
                                 if !task.repositoryWorktrees.isEmpty {
                                     archivedTaskPullRequestControl(task)
                                         .buttonStyle(.borderless)
                                         .padding(.trailing, 10)
                                 }
+                            }
+                            .onAppear {
+                                if query.isEmpty && task.id == archiveTasks.last?.id { loadNextArchivePage() }
                             }
                         }
                     }

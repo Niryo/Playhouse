@@ -2003,7 +2003,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Done preserves the task worktree without merging")
     }
 
-    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target. The Done archive control retains its help and waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
+    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
     func test_task_pr_create_reports_real_gh_failure() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -2031,7 +2031,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.height, 30, "The PR action should have a comfortable vertical hit target.")
         assertHoverEmphasis(for: activeCreateButton)
         XCTAssertEqual(activeCreateButton.label, "PR. Create a pull request for each repository linked to this task")
-        assertNativeHelpPresentation(for: activeCreateButton)
+        assertNativeHelpText(for: activeCreateButton, equals: "Create a pull request for each repository linked to this task")
+        attachScreenshot(named: "Active task PR control shows its help text", fullScreen: true)
+        dismissNativeHelpText(named: "Create a pull request for each repository linked to this task")
         moveTaskToDone(taskID: taskID)
         XCTAssertEqual(try taskRecord(id: taskID)?["status"] as? String, "Done")
         element("done-archive-button").click()
@@ -2041,7 +2043,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(createButton.waitForExistence(timeout: 5))
         assertHoverEmphasis(for: createButton)
         XCTAssertEqual(createButton.label, "PR. Create a pull request for each repository linked to this completed task")
-        assertNativeHelpPresentation(for: createButton)
+        assertNativeHelpText(for: createButton, equals: "Create a pull request for each repository linked to this completed task")
+        attachScreenshot(named: "Completed task PR action shows its help text in the archive", fullScreen: true)
+        dismissNativeHelpText(named: "Create a pull request for each repository linked to this completed task")
         let operationLock = try TaskOperationLockBarrier(dataDirectory: dataDirectory, taskID: taskID)
         var operationLockReleased = false
         defer { if !operationLockReleased { try? operationLock.release() } }
@@ -2086,6 +2090,11 @@ final class PlayhouseUITests: XCTestCase {
         let worktree = URL(fileURLWithPath: try XCTUnwrap(completedRecord["worktreePath"] as? String), isDirectory: true)
 
         let conflictPath = "playhouse-pr-conflict-fixture.txt"
+        let originalTargetHead = try runGitOutput(fixture.primary, "rev-parse", "main")
+        defer {
+            try? runGit(fixture.primary, "remote", "remove", "origin")
+            try? runGit(fixture.primary, "reset", "--hard", originalTargetHead)
+        }
         try "target branch version\n".write(to: fixture.primary.appendingPathComponent(conflictPath), atomically: true, encoding: .utf8)
         try runGit(fixture.primary, "add", conflictPath)
         try runGit(fixture.primary, "commit", "-m", "Update PR target fixture")
@@ -2094,7 +2103,7 @@ final class PlayhouseUITests: XCTestCase {
         try runGit(worktree, "commit", "-m", "Update task branch fixture")
         let branchHead = try runGitOutput(worktree, "rev-parse", "HEAD")
         let targetHead = try runGitOutput(fixture.primary, "rev-parse", "main")
-        let remote = WorkspaceFixture.root.appendingPathComponent("pr-conflict-origin.git", isDirectory: true)
+        let remote = runDirectory.appendingPathComponent("pr-conflict-origin.git", isDirectory: true)
         XCTAssertFalse(FileManager.default.fileExists(atPath: remote.path), "Each UI case should start with an isolated bare remote fixture.")
         try FileManager.default.createDirectory(at: remote, withIntermediateDirectories: true)
         _ = try runGitOutput(remote, "init", "--bare")
@@ -4625,10 +4634,7 @@ final class PlayhouseUITests: XCTestCase {
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: classifierActive.path) }, timeout: 15))
         let explicitPage = try XCTUnwrap((try runCLI(["chat", "page", "new", "--title", "Explicit topic"])["result"] as? [String: Any])?["page"] as? [String: Any])
-        element("chat-sidebar-button").click()
-        XCTAssertTrue(waitUntil({ !element("chat-sidebar").exists }, timeout: 5))
-        element("chat-sidebar-button").click()
-        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        refreshStandaloneChatSidebar()
         // A page's title separator is drawn before its first message, so the new page shows
         // once a turn lands on it (asserted after the Mars send below).
         XCTAssertFalse(element("chat-missed-page-signal-notice").exists)
@@ -4669,10 +4675,7 @@ final class PlayhouseUITests: XCTestCase {
         let retryStatus = try XCTUnwrap(try runCLI(["chat", "status"])["result"] as? [String: Any])
         XCTAssertFalse(retryStatus["missedPreviousPageSignal"] as? Bool ?? true)
         XCTAssertEqual((retryStatus["activePage"] as? [String: Any])?["title"] as? String, "Mars")
-        element("chat-sidebar-button").click()
-        XCTAssertTrue(waitUntil({ !element("chat-sidebar").exists }, timeout: 5))
-        element("chat-sidebar-button").click()
-        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        refreshStandaloneChatSidebar()
         XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Mars") }, timeout: 10))
         XCTAssertFalse(element("chat-active-page-title").exists, "The resolved title should remain in the transcript, not the header.")
         XCTAssertFalse(element("chat-missed-page-signal-notice").exists)
@@ -4708,8 +4711,8 @@ final class PlayhouseUITests: XCTestCase {
             code: "invalid_argument"
         )
 
-        element("chat-sidebar-button").click()
-        XCTAssertTrue(waitUntil({ !element("chat-sidebar").exists }, timeout: 5), "Clicking Chat again should slide the sidebar back out.")
+        element("back-to-board-button").click()
+        XCTAssertTrue(waitUntil({ !element("chat-sidebar").exists }, timeout: 5), "Returning to the board should slide the chat sidebar away.")
     }
 
     // case-contract: test_standalone_chat_page_sessions_isolate_context | Each standalone chat page is its own provider session: the first turn of a page starts a fresh session carrying the system prompt plus only that page's own turns, later turns on that page resume it without repeating the page context, and a different page never shares it, so an earlier page's turns never reach a later page. An annotation that quotes an earlier page carries just that page into the current turn, and rotating sessions still leaves every page's messages visible in the transcript.
@@ -5062,10 +5065,7 @@ final class PlayhouseUITests: XCTestCase {
         element("send-message-button").click()
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: active.path) }, timeout: 15))
         let explicitPage = try XCTUnwrap((try runCLI(["chat", "page", "new", "--title", "Explicit topic"])["result"] as? [String: Any])?["page"] as? [String: Any])
-        element("chat-sidebar-button").click()
-        XCTAssertTrue(waitUntil({ !element("chat-sidebar").exists }, timeout: 5))
-        element("chat-sidebar-button").click()
-        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        refreshStandaloneChatSidebar()
         // A page's title separator is drawn before its first message, so the new page shows
         // once a turn lands on it (asserted after the Mars send below).
         XCTAssertFalse(element("chat-missed-page-signal-notice").exists)
@@ -5103,10 +5103,7 @@ final class PlayhouseUITests: XCTestCase {
         let retryStatus = try XCTUnwrap(try runCLI(["chat", "status"])["result"] as? [String: Any])
         XCTAssertFalse(retryStatus["missedPreviousPageSignal"] as? Bool ?? true)
         XCTAssertEqual((retryStatus["activePage"] as? [String: Any])?["title"] as? String, "Mars")
-        element("chat-sidebar-button").click()
-        XCTAssertTrue(waitUntil({ !element("chat-sidebar").exists }, timeout: 5))
-        element("chat-sidebar-button").click()
-        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10))
+        refreshStandaloneChatSidebar()
         XCTAssertTrue(waitUntil({ self.chatPageSeparatorIsVisible("Mars") }, timeout: 10))
         XCTAssertFalse(element("chat-missed-page-signal-notice").exists)
         composer.click()
@@ -5972,6 +5969,18 @@ final class PlayhouseUITests: XCTestCase {
     // case-contract: test_conversation_provider_selection_persists_and_validates | New tasks use the default provider from settings, which starts as Codex and rejects unknown providers, and task create can choose a provider explicitly. A task without a conversation switches providers immediately; provider choice persists across fresh CLI/XPC reads and an app relaunch. Each provider's selected model is global across conversations and persists across provider switches and fresh CLI/XPC reads without reusing the other provider's model. Unknown providers and Done-task switches are rejected, and history has no provider boundary. A Claude task names Claude in the empty conversation, hides Goal mode, and rejects Goal changes through CLI/XPC. Switching a task's provider also updates the sticky default provider for new tasks and chats.
     func test_conversation_provider_selection_persists_and_validates() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
+        let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-provider-selection")
+        try FileManager.default.copyItem(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
+            to: claudeExecutable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claudeExecutable.path)
+        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"),
+            atomically: true,
+            encoding: .utf8
+        )
+        claudeFixtureExecutable = claudeExecutable.path
         launchApp(defaultParent: fixture.parent.path)
         let settings = try XCTUnwrap(try runCLI(["settings", "get"])["result"] as? [String: Any])
         XCTAssertEqual(settings["defaultProvider"] as? String, "codex", "Existing installs keep Codex as the default provider.")
@@ -5989,11 +5998,11 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Send a message to Codex · Luna."].waitForExistence(timeout: 10))
         _ = try runCLI(["conversation", "model", taskID, "set", "codex-choice"])
 
-        providerMenu.click()
+        element("conversation-provider-menu").click()
         let claudeChoice = app.menuItems["conversation-provider-claude"]
         XCTAssertTrue(claudeChoice.waitForExistence(timeout: 5))
         claudeChoice.click()
-        XCTAssertTrue(waitUntil({ providerMenu.label.contains("Claude") }, timeout: 10), "A task without a conversation switches immediately.")
+        XCTAssertTrue(waitUntil({ self.element("conversation-provider-menu").label.contains("Claude") }, timeout: 10), "A task without a conversation switches immediately.")
         XCTAssertTrue(waitUntil({ (try? self.taskRecord(id: taskID)?["conversationProvider"] as? String) == "claude" }, timeout: 10))
         XCTAssertTrue(waitUntil({
             guard let settings = try? self.runCLI(["settings", "get"]) else { return false }
@@ -6005,19 +6014,24 @@ final class PlayhouseUITests: XCTestCase {
         let claudeModelBeforeSelection = try runCLI(["conversation", "model", taskID])
         XCTAssertEqual((claudeModelBeforeSelection["result"] as? [String: Any])?["modelID"] as? String, nil, "Claude must not inherit the Codex model selection.")
         _ = try runCLI(["conversation", "model", taskID, "set", "claude-choice"])
-        XCTAssertTrue(app.staticTexts["Send a message to Claude."].waitForExistence(timeout: 10), "The empty conversation names Claude.")
+        XCTAssertTrue(waitUntil({
+            let prompt = self.element("model-prompt")
+            return prompt.exists && self.accessibleLabelOrValue(of: prompt).contains("Send a message to Claude")
+        }, timeout: 10), "The empty conversation names Claude.")
         XCTAssertFalse(element("provider-boundary-claude").exists, "Switching before any conversation records no boundary.")
-        providerMenu.click()
+        XCTAssertTrue(waitUntil({ self.element("conversation-provider-menu").isEnabled }, timeout: 10))
+        element("conversation-provider-menu").click()
         XCTAssertTrue(app.menuItems["conversation-provider-codex"].waitForExistence(timeout: 5))
         app.menuItems["conversation-provider-codex"].click()
-        XCTAssertTrue(waitUntil({ providerMenu.label.contains("Codex") }, timeout: 10))
+        XCTAssertTrue(waitUntil({ self.element("conversation-provider-menu").label.contains("Codex") }, timeout: 10))
         let switchedCodexModelPicker = element("model-picker-menu")
         XCTAssertTrue(waitUntil({ switchedCodexModelPicker.label.contains("codex-choice") }, timeout: 10), "Switching back to Codex should restore its visible model selection.")
         XCTAssertEqual((try runCLI(["conversation", "model", taskID])["result"] as? [String: Any])?["modelID"] as? String, "codex-choice")
-        providerMenu.click()
+        XCTAssertTrue(waitUntil({ self.element("conversation-provider-menu").isEnabled }, timeout: 10))
+        element("conversation-provider-menu").click()
         XCTAssertTrue(app.menuItems["conversation-provider-claude"].waitForExistence(timeout: 5))
         app.menuItems["conversation-provider-claude"].click()
-        XCTAssertTrue(waitUntil({ providerMenu.label.contains("Claude") }, timeout: 10))
+        XCTAssertTrue(waitUntil({ self.element("conversation-provider-menu").label.contains("Claude") }, timeout: 10))
         let switchedClaudeModelPicker = element("model-picker-menu")
         XCTAssertTrue(waitUntil({ switchedClaudeModelPicker.label.contains("claude-choice") }, timeout: 10), "Switching back to Claude should restore its visible model selection.")
         XCTAssertEqual((try runCLI(["conversation", "model", taskID])["result"] as? [String: Any])?["modelID"] as? String, "claude-choice")
@@ -6070,6 +6084,18 @@ final class PlayhouseUITests: XCTestCase {
     func test_conversation_provider_switch_waits_for_settled_turn_and_records_boundary() throws {
         let executablePath = try makeCodexFixture(emptyQuestions: false).path
         codexFixtureExecutable = executablePath
+        let claudeExecutable = dataDirectory.appendingPathComponent("claude-fixture-provider-switch")
+        try FileManager.default.copyItem(
+            at: WorkspaceFixture.root.appendingPathComponent("claude-fixture-ui"),
+            to: claudeExecutable
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claudeExecutable.path)
+        try "Playhouse test owns this Claude Code protocol fixture (v1).\n".write(
+            to: dataDirectory.appendingPathComponent(".playhouse-claude-fixture-owner"),
+            atomically: true,
+            encoding: .utf8
+        )
+        claudeFixtureExecutable = claudeExecutable.path
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Provider switch UI", roots: [fixture.primary.path])
         let taskID = try taskID(named: "Provider switch UI")
@@ -8447,10 +8473,13 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ isVisible(firstAssistant) }, timeout: 5))
         XCTAssertLessThan(oldest.frame.minY, firstAssistant.frame.minY, "Older messages should retain chronological order after batches are inserted.")
         let lastOlderAssistant = element("assistant-message-item_long_history_assistant_59")
-        scrollTranscript(by: -1500, until: { isVisible(lastOlderAssistant) && isVisible(latestQuestion) }, limit: 40)
+        // Step by less than the overlap between adjacent rows so a large scroll cannot
+        // jump past the position where the last older answer and latest turn are both visible.
+        scrollTranscript(by: -200, until: { isVisible(lastOlderAssistant) && isVisible(latestQuestion) }, limit: 60, settle: 0.2)
         XCTAssertTrue(waitUntil({ isVisible(lastOlderAssistant) }, timeout: 5), "The last earlier answer should remain reachable after all pages load.")
         XCTAssertTrue(waitUntil({ isVisible(latestQuestion) }, timeout: 5), "The start of the initially rendered latest turn should be reachable.")
         XCTAssertLessThan(lastOlderAssistant.frame.minY, latestQuestion.frame.minY, "Earlier history should remain in chronological order across the boundary into the latest turn.")
+        attachScreenshot(named: "Older answer remains ordered above the latest question")
         scrollTranscript(by: -1500, until: { isVisible(latest) }, limit: 40)
         XCTAssertTrue(waitUntil({ isVisible(latest) }, timeout: 5), "Loading earlier messages should preserve and return to the newest content.")
 
@@ -8952,7 +8981,11 @@ final class PlayhouseUITests: XCTestCase {
 
     // case-contract: test_thread_goal_lifecycle_persists_through_cli_xpc | CLI/XPC Goal set/get/pause/resume/clear persist the objective and lifecycle state across fresh connections and enable the Goals app-server feature; setting the same active Goal preserves its timer generation, clearing then setting another Goal creates a new generation with a fresh baseline, setting a Goal moves the task to In Progress, and invalid blank objectives preserve the current Goal. The UI restores saved Goals; the opt-in live Codex integration confirms native startup, verifies the first Goal retains its elapsed duration, restores a legacy completion without timing metadata, and confirms a second Goal timer begins near zero; renders each achieved summary as a conversation item that visibly moves with scrolling and is anchored to its completing turn, verifies a later user follow-up appears after the prior achievement through turn completion, and preserves both items and their ordering in the read-only Done archive. Native turn activation is owned by the retained GUI runtime.
     func test_thread_goal_lifecycle_persists_through_cli_xpc() throws {
-        if isLiveCodexIntegration { codexFixtureExecutable = nil }
+        if isLiveCodexIntegration {
+            codexFixtureExecutable = nil
+        } else {
+            codexFixtureExecutable = WorkspaceFixture.root.appendingPathComponent("codex-fixture-goal-success").path
+        }
         try FileManager.default.createDirectory(at: dataDirectory.appendingPathComponent("codex-home"), withIntermediateDirectories: true)
         let usesLiveCodex = isLiveCodexIntegration
         if usesLiveCodex {
@@ -10135,6 +10168,16 @@ final class PlayhouseUITests: XCTestCase {
         )
         claudeFixtureExecutable = executable.path
         let parkedReady = URL(fileURLWithPath: executable.path + ".parked-shell-ready")
+        let steeredAnswerPause = URL(fileURLWithPath: executable.path + ".steered-answer-pause")
+        let steeredAnswerReady = URL(fileURLWithPath: executable.path + ".steered-answer-ready")
+        let steeredAnswerRelease = URL(fileURLWithPath: executable.path + ".steered-answer-release")
+        try Data().write(to: steeredAnswerPause, options: .atomic)
+        defer {
+            try? Data("Release the steered-answer fixture pause.\n".utf8).write(to: steeredAnswerRelease, options: .atomic)
+            try? FileManager.default.removeItem(at: steeredAnswerPause)
+            try? FileManager.default.removeItem(at: steeredAnswerReady)
+            try? FileManager.default.removeItem(at: steeredAnswerRelease)
+        }
         let created = try XCTUnwrap(try runCLI([
             "task", "create", "--title", "Claude parked steer", "--root", fixture.primary.path, "--provider", "claude"
         ]) ["result"] as? [String: Any])
@@ -10147,7 +10190,8 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: parkedReady.path) }, timeout: 15),
                       "The fixture should park the turn after its result while the shell runs.")
         XCTAssertTrue(waitUntil({ self.transcriptContains("PARKED STARTED") }, timeout: 10))
-        XCTAssertTrue(element("pause-response-button").exists, "The parked turn must still read as the active turn.")
+        XCTAssertTrue(waitUntil({ self.element("pause-response-button").exists }, timeout: 10),
+                      "The parked turn must still read as the active turn after its provider result settles.")
 
         let followUp = "Check the other blocked tasks too."
         let composer = element("message-composer")
@@ -10166,10 +10210,14 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(waitUntil({ (try? self.runCLI(["conversation", "queue-list", taskID])["result"] as? [[String: Any]])??.isEmpty == true }, timeout: 10),
                       "An accepted steer must leave the queue.")
         XCTAssertFalse(element("queued-message-text-\(queuedID)").exists, "The steered row should no longer be queued.")
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: steeredAnswerReady.path) }, timeout: 10),
+                      "Claude should answer the steered follow-up before completing the parked turn.")
         XCTAssertTrue(waitUntil({ self.transcriptContains("STEERED: \(followUp)") }, timeout: 15),
                       "Claude's answer to the steered follow-up belongs in the same turn.")
+        XCTAssertTrue(element("pause-response-button").exists, "The parked turn remains active until its woken parent answer arrives.")
         attachScreenshot(named: "Steered follow-up answered inside the parked turn")
 
+        try Data("Release after the same-turn answer is visible.\n".utf8).write(to: steeredAnswerRelease, options: .atomic)
         XCTAssertTrue(waitUntil({ self.transcriptContains("PARKED HANDLED") }, timeout: 20),
                       "The woken parent turn's answer still ends the turn.")
         let history = try XCTUnwrap(try runCLI(
@@ -12412,6 +12460,23 @@ final class PlayhouseUITests: XCTestCase {
             || app.otherElements.matching(NSPredicate(format: "label CONTAINS %@", text)).firstMatch.exists
     }
 
+    /// Refreshes a standalone chat through its visible navigation controls. The board's
+    /// Chat button moves off-screen while the 460-point sidebar and 980-point board coexist.
+    private func refreshStandaloneChatSidebar() {
+        let backButton = element("back-to-board-button")
+        XCTAssertTrue(waitUntil({ backButton.exists && backButton.isHittable }, timeout: 5), "The sidebar should offer a visible way back to the board.")
+        backButton.click()
+        XCTAssertTrue(waitUntil({ !self.element("chat-sidebar").exists }, timeout: 5), "Returning to the board should slide the chat sidebar away.")
+        let parent = launchDefaultParent
+        XCTAssertTrue(terminateAppAndWait(app), "Playhouse must stop before restoring the test window frame.")
+        clearSavedWindowFrames()
+        launchApp(defaultParent: parent)
+        let chatButton = element("chat-sidebar-button")
+        XCTAssertTrue(waitUntil({ chatButton.exists && chatButton.isHittable }, timeout: 5), "The board's Chat button should be available again after leaving the sidebar.")
+        chatButton.click()
+        XCTAssertTrue(element("chat-sidebar").waitForExistence(timeout: 10), "The standalone chat should reopen from the board.")
+    }
+
     /// Waits for transcript text, scrolling down on each miss: the lazy transcript
     /// only exposes rows near the viewport.
     private func transcriptShows(_ text: String, timeout: TimeInterval) -> Bool {
@@ -12936,11 +13001,78 @@ final class PlayhouseUITests: XCTestCase {
         return value
     }
 
-    private func assertHelpTag(for element: XCUIElement, equals expected: String) {
+    private func assertNativeHelpText(for element: XCUIElement, equals expected: String) {
+        movePointerToHelpRunway(below: element)
+        Thread.sleep(forTimeInterval: 1.5)
+        let baseline = XCUIScreen.main.screenshot().image
         element.hover()
-        let helpTag = app.descendants(matching: .helpTag)
-            .matching(NSPredicate(format: "label == %@", expected)).firstMatch
-        XCTAssertTrue(helpTag.waitForExistence(timeout: 8), "Expected the hovered control to show the help tag ‘\(expected)’." )
+        XCTAssertTrue(waitForNativeHelpChange(from: baseline, near: element, timeout: 8), "Hovering should present the native help text ‘\(expected)’ outside the PR control.")
+    }
+
+    private func dismissNativeHelpText(named expected: String) {
+        let element = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", expected)).firstMatch
+        let baseline = XCUIScreen.main.screenshot().image
+        movePointerToHelpRunway(below: element)
+        XCTAssertTrue(waitForNativeHelpChange(from: baseline, near: element, timeout: 8), "Moving away should dismiss the native help text ‘\(expected)’ outside the PR control.")
+    }
+
+    private func movePointerToHelpRunway(below control: XCUIElement) {
+        let window = app.windows.firstMatch
+        let windowFrame = window.frame
+        let controlFrame = control.frame
+        let target = CGPoint(x: controlFrame.midX, y: min(windowFrame.maxY - 10, controlFrame.maxY + 100))
+        let offset = CGVector(
+            dx: (target.x - windowFrame.minX) / windowFrame.width,
+            dy: (target.y - windowFrame.minY) / windowFrame.height
+        )
+        window.coordinate(withNormalizedOffset: offset).hover()
+    }
+
+    private func waitForNativeHelpChange(from baseline: NSImage, near control: XCUIElement, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            let current = XCUIScreen.main.screenshot().image
+            guard let changedPixels = changedPixelCount(near: control, before: baseline, after: current, step: 2, threshold: 0.12) else {
+                XCTFail("Could not compare the screenshot region outside the PR control.")
+                return false
+            }
+            if changedPixels > 100 { return true }
+            Thread.sleep(forTimeInterval: 0.25)
+        } while Date() < deadline
+        return false
+    }
+
+    private func changedPixelCount(near control: XCUIElement, before: NSImage, after: NSImage, step: Int, threshold: CGFloat) -> Int? {
+        guard let beforeCG = before.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let afterCG = after.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              beforeCG.width == afterCG.width, beforeCG.height == afterCG.height else { return nil }
+        let window = app.windows.firstMatch
+        let windowFrame = window.frame
+        guard windowFrame.width > 0, windowFrame.height > 0,
+              let windowCG = window.screenshot().image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let scaleX = CGFloat(windowCG.width) / windowFrame.width
+        let scaleY = CGFloat(windowCG.height) / windowFrame.height
+        guard scaleX > 0, scaleY > 0 else { return nil }
+        let screenBounds = CGRect(origin: .zero, size: CGSize(width: CGFloat(beforeCG.width) / scaleX, height: CGFloat(beforeCG.height) / scaleY))
+        let frame = control.frame
+        let hoverExclusion = CGRect(x: frame.minX - 45, y: screenBounds.minY, width: frame.width + 90, height: screenBounds.height)
+        let beforeBitmap = NSBitmapImageRep(cgImage: beforeCG)
+        let afterBitmap = NSBitmapImageRep(cgImage: afterCG)
+        var changed = 0
+        for x in stride(from: 0, to: beforeCG.width, by: step) {
+            for y in stride(from: 0, to: beforeCG.height, by: step) {
+                let point = CGPoint(x: CGFloat(x) / scaleX, y: CGFloat(y) / scaleY)
+                guard screenBounds.contains(point), !hoverExclusion.contains(point),
+                      let beforeColor = beforeBitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                      let afterColor = afterBitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                let delta = abs(beforeColor.redComponent - afterColor.redComponent)
+                    + abs(beforeColor.greenComponent - afterColor.greenComponent)
+                    + abs(beforeColor.blueComponent - afterColor.blueComponent)
+                if delta > threshold { changed += 1 }
+            }
+        }
+        return changed
     }
 
     private static func isOrangePixel(_ color: NSColor) -> Bool {
@@ -13034,24 +13166,6 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertGreaterThan(changedPixels, 5, "Hovering a PR control should visibly change its appearance.", file: file, line: line)
     }
 
-    private func assertNativeHelpPresentation(for control: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
-        // An earlier step may have left the pointer on this control long enough for the
-        // help to be showing already; park it elsewhere so the before/after pair brackets
-        // the help appearing.
-        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.97)).hover()
-        Thread.sleep(forTimeInterval: 0.3)
-        control.hover()
-        Thread.sleep(forTimeInterval: 0.25)
-        let before = XCUIScreen.main.screenshot().image
-        Thread.sleep(forTimeInterval: 1.5)
-        let after = XCUIScreen.main.screenshot().image
-        guard let changedPixels = changedPixelCount(before: before, after: after, step: 2, threshold: 0.12) else {
-            XCTFail("Could not compare app screenshots for native help presentation.", file: file, line: line)
-            return
-        }
-        XCTAssertGreaterThan(changedPixels, 100, "Hovering should visibly present the control's native help.", file: file, line: line)
-    }
-
     private func element(containingAccessibilityText text: String) -> XCUIElement {
         app.descendants(matching: .any)
             .matching(NSPredicate(format: "label CONTAINS[c] %@ OR value CONTAINS[c] %@", text, text))
@@ -13072,8 +13186,9 @@ final class PlayhouseUITests: XCTestCase {
         return !element.exists
     }
 
-    private func attachScreenshot(named name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
+    private func attachScreenshot(named name: String, fullScreen: Bool = false) {
+        let screenshot = fullScreen ? XCUIScreen.main.screenshot() : app.screenshot()
+        let attachment = XCTAttachment(screenshot: screenshot)
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)

@@ -290,7 +290,7 @@ if ! rsync -a --delete --exclude='.git' --exclude='DerivedData/' --exclude='buil
 	exit 74
 fi
 set +e
-tart exec -i "$vm_name" /bin/bash -s -- "$run_id" "${live_provider:-none}" "$reset_vm_state" "${ui_cases[@]}" <<'GUEST_SCRIPT'
+tart exec -i "$vm_name" /bin/bash -s -- "$run_id" "${live_provider:-none}" "$reset_vm_state" "${PLAYHOUSE_UI_BATCH_SIZE:-}" "${ui_cases[@]}" <<'GUEST_SCRIPT'
 set -uo pipefail
 run_id="$1"
 shift
@@ -298,6 +298,11 @@ live_provider="$1"
 shift
 reset_vm_state="$1"
 shift
+ui_batch_size="$1"
+shift
+if [[ -n "$ui_batch_size" ]]; then
+	export PLAYHOUSE_UI_BATCH_SIZE="$ui_batch_size"
+fi
 if [[ "$live_provider" == "none" ]]; then
 	live_provider=""
 fi
