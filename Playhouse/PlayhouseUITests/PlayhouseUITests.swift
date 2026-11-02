@@ -2239,14 +2239,14 @@ final class PlayhouseUITests: XCTestCase {
 
         app.terminate()
         XCTAssertTrue(waitUntil({ app.state == .notRunning }, timeout: 10), "The app must close its SwiftData container before seeding the archived store.")
-        let prURL = "https://github.com/playhouse-test/fixture/pull/123"
-        let secondPRURL = "https://github.com/playhouse-test/fixture/pull/124"
-        try seedTaskPullRequest(taskID: taskID, number: 123, url: prURL)
-        try seedTaskPullRequest(taskID: taskID, number: 124, url: secondPRURL, repositoryIndex: 1)
+        let prURL = "https://github.com/playhouse-test/fixture/pull/1234"
+        let secondPRURL = "https://github.com/playhouse-test/fixture/pull/1235"
+        try seedTaskPullRequest(taskID: taskID, number: 1234, url: prURL)
+        try seedTaskPullRequest(taskID: taskID, number: 1235, url: secondPRURL, repositoryIndex: 1)
         let persisted = try XCTUnwrap(taskRecord(id: taskID))
         XCTAssertEqual(persisted["status"] as? String, "Done")
         let record = try XCTUnwrap((persisted["repositoryWorktrees"] as? [[String: Any]])?.first)
-        XCTAssertEqual(record["pullRequestNumber"] as? Int, 123)
+        XCTAssertEqual(record["pullRequestNumber"] as? Int, 1234)
         XCTAssertEqual(record["pullRequestURL"] as? String, prURL)
         XCTAssertEqual((persisted["repositoryWorktrees"] as? [[String: Any]])?.count, 2)
 
@@ -2259,12 +2259,12 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(secondActiveLink.label, "#502")
         element("done-archive-button").click()
         XCTAssertTrue(element("done-archive-task-\(taskID)").waitForExistence(timeout: 10))
-        let prLink = app.links["done-archive-pr-link-\(taskID)-123"]
+        let prLink = app.links["done-archive-pr-link-\(taskID)-1234"]
         XCTAssertTrue(prLink.waitForExistence(timeout: 10), "The Done archive should show the saved PR number as a link.")
-        let secondPRLink = app.links["done-archive-pr-link-\(taskID)-124"]
+        let secondPRLink = app.links["done-archive-pr-link-\(taskID)-1235"]
         XCTAssertTrue(secondPRLink.waitForExistence(timeout: 10), "The Done archive should show every repository's saved PR number.")
-        XCTAssertEqual(prLink.label, "#123")
-        XCTAssertEqual(secondPRLink.label, "#124")
+        XCTAssertEqual(prLink.label, "#1,234")
+        XCTAssertEqual(secondPRLink.label, "#1,235")
         assertHoverEmphasis(for: prLink)
         attachScreenshot(named: "Done archive shows the linked pull request")
     }
