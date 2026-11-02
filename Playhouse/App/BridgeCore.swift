@@ -2716,10 +2716,10 @@ final class BoardTaskManager {
         )
     }
 
-    /// `reason` explains a `nil` percent: `"unsupported_provider"` for Codex
-    /// (its tasks share one process across every thread, so CPU can't be
-    /// attributed per task) or `"not_running"` for an idle/not-yet-sampled
-    /// Claude task.
+    /// `reason` explains a `nil` percent: `"not_running"` for an idle or
+    /// not-yet-sampled task of either provider. A turn-active Codex task
+    /// reports its working-directory share of the shared app-server's tree
+    /// (see `TaskCPUUsageSnapshot`), `0` when none of it is attributable.
     struct TaskCPUUsageResult: Codable {
         var cpuPercent: Double?
         var reason: String?
@@ -2742,10 +2742,7 @@ final class BoardTaskManager {
 
     func cpuUsage(_ id: UUID, dataDirectory: String? = nil) async throws -> TaskCPUUsageResult {
         let task = try requireSubject(id)
-        guard task.conversationProvider == .claude else {
-            return TaskCPUUsageResult(cpuPercent: nil, reason: "unsupported_provider")
-        }
-        guard let threadID = task.claudeSessionID,
+        guard let threadID = task.activeConversationID,
               let percent = await TaskCPUUsageSnapshot.current(dataDirectory: dataDirectory).percentByThreadID[threadID] else {
             return TaskCPUUsageResult(cpuPercent: nil, reason: "not_running")
         }

@@ -1527,7 +1527,7 @@ struct WorkspaceSettingsView: View {
                 }
             }
             Section("CPU usage") {
-                Text("A Claude task's left-edge bar warms from green to red as the task's process tree's CPU use approaches this percentage. Not available for Codex tasks.")
+                Text("A running task's left-edge bar warms from green to red as its CPU use approaches this percentage. For Codex tasks, which share one app-server, that's the CPU of commands running in the task's worktree.")
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 10) {
                     Text("Red at")

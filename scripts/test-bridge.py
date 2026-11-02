@@ -8525,13 +8525,75 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertIsNone(finished["cpuPercent"], "A finished turn is no longer running.")
         self.assertEqual(finished["reason"], "not_running")
 
-    # case-contract: test_task_cpu_usage_absent_for_codex | A Codex task never reports a numeric CPU percentage from `task cpu-usage`, always citing unsupported_provider, because Codex multiplexes every task's turns inside one shared app-server process with no OS-level way to attribute CPU to a single task.
-    def test_task_cpu_usage_absent_for_codex(self):
-        task_id = self.create_task(title="Codex CPU usage", roots=[self.primary], provider="codex")["id"]
-        self.complete_fixture_turn(task_id, executable_name="codex-fixture-cpu-usage")
-        result = self.assert_success(self.call_cli("task", "cpu-usage", task_id)[0])
-        self.assertIsNone(result["cpuPercent"], "Codex tasks never get a numeric CPU reading.")
-        self.assertEqual(result["reason"], "unsupported_provider")
+    def cpu_attribution_child(self, executable, kind):
+        """The {pid, parentPID, workingDirectory} a running CPU-attribution fixture child recorded for itself."""
+        record = Path(f"{executable}.cpu-child-{kind}.json")
+        return json.loads(record.read_text(encoding="utf-8")) if record.is_file() else None
+
+    # case-contract: test_task_cpu_usage_attributes_codex_load_by_worktree | Two Codex tasks rooted in different repository folders share one real fixture app-server. Before any turn each reports cpu-usage as not running. While task A's turn runs a real CPU-burning child process in A's folder and task B's concurrent turn runs an idle child in B's folder, both children belong to the same app-server process; once a baseline is sampled, `task cpu-usage` attributes a plausible non-zero percentage to A and a near-zero one to B, and the task cards show A's CPU bar reading hot against a lowered ceiling beside B's visible but empty bar. Both readings return to not-running once the turns complete.
+    def test_task_cpu_usage_attributes_codex_load_by_worktree(self):
+        fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
+        executable = self.data_directory / "codex-fixture-cpu-attribution"
+        shutil.copyfile(fixture, executable)
+        executable.chmod(0o755)
+        (self.data_directory / ".playhouse-codex-fixture-owner").write_text(
+            "Playhouse test owns this Codex protocol fixture (v1).\n", encoding="utf-8"
+        )
+        environment = {"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(executable)}
+        busy_id = self.create_task(title="Codex busy worktree", roots=[self.primary], provider="codex")["id"]
+        idle_id = self.create_task(title="Codex idle worktree", roots=[self.secondary], provider="codex")["id"]
+        for task_id in (busy_id, idle_id):
+            before = self.assert_success(self.call_cli("task", "cpu-usage", task_id)[0])
+            self.assertIsNone(before["cpuPercent"], "A Codex task with no turn yet has nothing to sample.")
+            self.assertEqual(before["reason"], "not_running")
+
+        busy = self.start_cli("conversation", "send", busy_id, "--message", "Please burn cpu for 25 seconds.", extra_environment=environment)
+        idle = self.start_cli("conversation", "send", idle_id, "--message", "Please idle cpu for 25 seconds.", extra_environment=environment)
+        try:
+            deadline = time.monotonic() + 15
+            children = {}
+            while time.monotonic() < deadline and len(children) < 2:
+                children = {kind: child for kind in ("burn", "idle") if (child := self.cpu_attribution_child(executable, kind))}
+                time.sleep(0.1)
+            self.assertEqual(set(children), {"burn", "idle"}, "Both tasks' turns should be running their command children.")
+            self.assertEqual(children["burn"]["parentPID"], children["idle"]["parentPID"], "Both tasks' commands should run under one shared app-server.")
+            self.assertEqual(os.path.realpath(children["burn"]["workingDirectory"]), os.path.realpath(self.primary), "The busy command runs in its task's folder.")
+            self.assertEqual(os.path.realpath(children["idle"]["workingDirectory"]), os.path.realpath(self.secondary), "The idle command runs in its task's folder.")
+
+            # The first read only establishes the baseline (reported as not
+            # running), so poll until both tasks have a measured value, then
+            # let the idle child's own start-up CPU fall out of the window.
+            readings = {}
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                readings = {task_id: self.assert_success(self.call_cli("task", "cpu-usage", task_id)[0]) for task_id in (busy_id, idle_id)}
+                if all(reading["cpuPercent"] is not None for reading in readings.values()):
+                    break
+                time.sleep(0.3)
+            self.assertTrue(all(reading["cpuPercent"] is not None for reading in readings.values()), f"Both running Codex tasks should be sampled: {readings}")
+            time.sleep(1)
+            busy_reading = self.assert_success(self.call_cli("task", "cpu-usage", busy_id)[0])
+            idle_reading = self.assert_success(self.call_cli("task", "cpu-usage", idle_id)[0])
+            self.assertIsNone(busy_reading["reason"])
+            self.assertIsNone(idle_reading["reason"], "A running Codex task with an idle command still reports a value, not not-running.")
+            self.assertGreater(busy_reading["cpuPercent"], 20, "The busy-looping command's CPU should be attributed to its own task.")
+            self.assertLess(busy_reading["cpuPercent"], (os.cpu_count() or 1) * 100 + 50, "One busy loop can't exceed every core.")
+            self.assertLess(idle_reading["cpuPercent"], 5, "The other task's busy command must not leak into the idle task's reading.")
+
+            self.finish_cli(busy, ["conversation", "send", busy_id], timeout=45)
+            self.finish_cli(idle, ["conversation", "send", idle_id], timeout=45)
+        finally:
+            for process in (busy, idle):
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate(timeout=10)
+            # A failed assertion must not leave the daemon-side burn running into later cases.
+            if burner := self.cpu_attribution_child(executable, "burn"):
+                subprocess.run(["/bin/kill", str(burner["pid"])], check=False, capture_output=True)
+        for task_id in (busy_id, idle_id):
+            finished = self.assert_success(self.call_cli("task", "cpu-usage", task_id)[0])
+            self.assertIsNone(finished["cpuPercent"], "A finished Codex turn is no longer running.")
+            self.assertEqual(finished["reason"], "not_running")
 
     # case-contract: test_settings_cpu_usage_color_max_round_trip | The CPU usage color maximum defaults to one fully busy core per logical CPU, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting.
     def test_settings_cpu_usage_color_max_round_trip(self):

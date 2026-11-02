@@ -663,10 +663,12 @@ struct ConversationRuntimeSnapshot: Codable, Equatable {
     }
 }
 
-/// Live CPU usage attributed to each Claude Code task's process tree, keyed
-/// by thread/session ID. Codex tasks never appear here: Codex multiplexes
-/// every task's turns inside one shared `app-server` process, so there is no
-/// OS-level way to attribute CPU to an individual Codex task.
+/// Live CPU usage of each turn-active task, keyed by thread/session ID. A
+/// Claude task owns its own Claude Code process, so its value is that
+/// process tree's load. Codex multiplexes every task's turns inside one
+/// shared `app-server` process, so a Codex task's value is the share of that
+/// app-server's tree attributed to it by working directory (see
+/// `CodexProcessAttribution`).
 struct TaskCPUUsageSnapshot: Codable, Equatable {
     var percentByThreadID: [String: Double] = [:]
 
@@ -684,6 +686,13 @@ struct TaskCPUUsageSnapshot: Codable, Equatable {
             if let percent = await TaskCPUUsageSampler.shared.sample(threadID: threadID, rootPID: pid) {
                 snapshot.percentByThreadID[threadID] = percent
             }
+        }
+        for client in CodexAppServerClient.allSharedClients where scope == nil || client.runtimeScope == scope {
+            guard let pid = client.appServerProcessIdentifier else { continue }
+            let percents = await TaskCPUUsageSampler.shared.sampleCodexAppServer(
+                rootPID: pid, rootsByThreadID: client.activeThreadWorkspaceRootsByThreadID
+            )
+            snapshot.percentByThreadID.merge(percents) { current, _ in current }
         }
         return snapshot
     }
