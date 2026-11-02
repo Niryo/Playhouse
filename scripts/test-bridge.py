@@ -2928,24 +2928,24 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(self.call_cli("task", "get", task["id"])[0])["status"], "Review")
         self.run_git(self.primary, "remote", "remove", "origin")
 
-    # case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC creates PRs for two repositories, verifies the first PR persists when the second creation fails, retries only the missing repository, confirms each gh create call targets the corresponding repository worktree, and confirms both saved numbers on fresh reads. The UI labels active-card and Done-archive multi-repository creation actions PRs, clicks the active action, verifies the partial-success retry action, confirms the gh create calls target both repository worktrees and retry only the failed one, then shows the exact created PR numbers on the active task and every linked number in the Done archive. Hovering the outer padded edge of each PR link triggers its feedback.
+    # case-contract: test_done_archive_displays_existing_pull_request_link | CLI/XPC creates PRs for two repositories, verifies the first PR persists when the second creation fails, retries only the missing repository, confirms each gh create call targets the corresponding repository worktree, and confirms both saved numbers on fresh reads. The UI labels active-card and Done-archive multi-repository creation actions PRs, clicks the active action, verifies the partial-success retry action, confirms the gh create calls target both repository worktrees and retry only the failed one, then shows exact PR numbers on the active task and Done archive, including four-digit values without grouping separators. Hovering the outer padded edge of each PR link triggers its feedback.
     def test_done_archive_displays_existing_pull_request_link(self):
         task = self.create_repo_task("Archived linked PR", [self.primary, self.secondary], materialize=True)
         completed, _ = self.call_cli("task", "move", task["id"], "Done")
         self.assertEqual(self.assert_success(completed)["status"], "Done")
-        url = self.seed_done_task_pull_request(task["id"])
-        second_url = self.seed_done_task_pull_request(task["id"], number=124, repository_index=1)
+        url = self.seed_done_task_pull_request(task["id"], number=1234)
+        second_url = self.seed_done_task_pull_request(task["id"], number=1235, repository_index=1)
 
         current = self.assert_success(self.call_cli("task", "get", task["id"])[0])
         self.assertEqual(current["status"], "Done")
         record = current["repositoryWorktrees"][0]
-        self.assertEqual(record["pullRequestNumber"], 123)
+        self.assertEqual(record["pullRequestNumber"], 1234)
         self.assertEqual(record["pullRequestURL"], url)
-        self.assertEqual(current["repositoryWorktrees"][1]["pullRequestNumber"], 124)
+        self.assertEqual(current["repositoryWorktrees"][1]["pullRequestNumber"], 1235)
         self.assertEqual(current["repositoryWorktrees"][1]["pullRequestURL"], second_url)
         archived = next(item for item in self.assert_success(self.call_cli("board", "list")[0])["tasks"] if item["id"] == task["id"])
-        self.assertEqual(archived["repositoryWorktrees"][0]["pullRequestNumber"], 123)
-        self.assertEqual(archived["repositoryWorktrees"][1]["pullRequestNumber"], 124)
+        self.assertEqual(archived["repositoryWorktrees"][0]["pullRequestNumber"], 1234)
+        self.assertEqual(archived["repositoryWorktrees"][1]["pullRequestNumber"], 1235)
 
         creating = self.create_repo_task("Create PRs for every repository", [self.primary, self.secondary], materialize=True)
         self.clear_task_provider_session(creating["id"])
