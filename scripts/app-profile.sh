@@ -51,14 +51,14 @@ playhouse_verify_build_identity() {
   return 1
 }
 
-# Return only GUI and XPC processes launched from the selected worktree's app.
+# Return only GUI and bridge daemon processes launched from the selected worktree's app.
 playhouse_profile_processes() {
   local app_bundle="${PLAYHOUSE_PROFILE_DERIVED_DATA}/Build/Products/Debug/Playhouse.app"
   local process_name process_id process_command
   if [[ "${app_bundle}" == /private/var/* ]]; then
     app_bundle="/var/${app_bundle#/private/var/}"
   fi
-  for process_name in Playhouse PlayhouseBridge; do
+  for process_name in Playhouse playhouse-daemon; do
     while IFS= read -r process_id; do
       [[ -n "${process_id}" ]] || continue
       process_command="$(ps -p "${process_id}" -o command= 2>/dev/null || true)"
