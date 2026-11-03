@@ -835,6 +835,16 @@ enum PlayhouseWorktreeManager {
         return !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// Whether the branch holds commits its merge target lacks. GitHub rejects a
+    /// pull request without any ("No commits between ..."). Without a configured
+    /// merge target there is nothing to compare, so GitHub decides.
+    static func hasCommitsAheadOfMergeTarget(_ record: RepositoryWorktreeRecord) throws -> Bool {
+        guard record.mergeTarget?.isEmpty == false else { return true }
+        let targetRef = try mergeTargetRef(record)
+        let count = try git(record.worktreePath, ["rev-list", "--count", "\(targetRef)..HEAD"]).output
+        return (Int(count.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 1) > 0
+    }
+
     static func hasMergeConflicts(_ record: RepositoryWorktreeRecord) throws -> Bool {
         guard record.mergeTarget?.isEmpty == false else { return false }
         let targetRef = try mergeTargetRef(record)
@@ -1249,6 +1259,14 @@ struct PlayhouseWorktreeService {
         try await perform("git.commit", record: record, fields: ["commitMessageBytes": String(message.utf8.count)]) {
             try await PlayhouseBackgroundOperation.run {
                 try PlayhouseWorktreeManager.commitChanges(record, message: message)
+            }
+        }
+    }
+
+    func hasCommitsAheadOfMergeTarget(_ record: RepositoryWorktreeRecord) async throws -> Bool {
+        try await perform("git.has_commits_ahead", record: record) {
+            try await PlayhouseBackgroundOperation.run {
+                try PlayhouseWorktreeManager.hasCommitsAheadOfMergeTarget(record)
             }
         }
     }

@@ -2188,6 +2188,7 @@ final class BoardTaskManager {
                 throw BridgeCommandError(code: "invalid_transition", message: "Start the task conversation before creating a pull request so its repository worktree is ready.")
             }
             var records = originalRecords
+            var unchangedPaths: Set<String> = []
             for index in records.indices where records[index].pullRequestNumber == nil || records[index].pullRequestURL == nil {
                 do {
                     // `--head` skips gh's push flow, and `gh pr list` also needs a
@@ -2200,6 +2201,9 @@ final class BoardTaskManager {
                 if let existing = try await pullRequestService.findOpen(records[index], executable: gh) {
                     records[index].pullRequestNumber = existing.number
                     records[index].pullRequestURL = existing.url
+                } else if try await !worktreeService.hasCommitsAheadOfMergeTarget(records[index]) {
+                    // A repository the task never changed has nothing to propose.
+                    unchangedPaths.insert(records[index].repositoryPath)
                 }
             }
             let taskAfterLookup = try requireTask(id)
@@ -2208,10 +2212,16 @@ final class BoardTaskManager {
             }
             taskAfterLookup.repositoryWorktrees = records
             try await saveTaskContext(taskID: id)
-            return (gh, records, BoardTaskRecord(task: taskAfterLookup))
+            return (gh, records, unchangedPaths, BoardTaskRecord(task: taskAfterLookup))
         }
-        let (gh, records, lookedUpRecords) = lookup
-        guard records.contains(where: { $0.pullRequestNumber == nil || $0.pullRequestURL == nil }) else {
+        let (gh, records, unchangedPaths, lookedUpRecords) = lookup
+        func needsPullRequest(_ record: RepositoryWorktreeRecord) -> Bool {
+            (record.pullRequestNumber == nil || record.pullRequestURL == nil) && !unchangedPaths.contains(record.repositoryPath)
+        }
+        guard records.contains(where: needsPullRequest) else {
+            if records.allSatisfy({ $0.pullRequestNumber == nil }) {
+                throw BridgeCommandError(code: "invalid_transition", message: "No repository in this task has changes to open a pull request for.")
+            }
             return lookedUpRecords
         }
 
@@ -2264,7 +2274,7 @@ final class BoardTaskManager {
             }
             var updatedRecords = records
             var expectedRecords = records
-            for index in updatedRecords.indices where updatedRecords[index].pullRequestNumber == nil || updatedRecords[index].pullRequestURL == nil {
+            for index in updatedRecords.indices where needsPullRequest(updatedRecords[index]) {
                 let record = updatedRecords[index]
                 let pullRequest: GitHubPullRequestManager.PullRequest
                 if let existing = try await pullRequestService.findOpen(record, executable: gh) {
