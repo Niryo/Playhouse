@@ -510,13 +510,16 @@ struct ConversationTurnDiff: Codable, Equatable {
 }
 
 struct ConversationHistory: Codable, Equatable {
-    let messages: [ConversationMessage]
+    var messages: [ConversationMessage]
     let activities: [ConversationActivity]
     let diff: ConversationTurnDiff?
     var answeredAsyncQuestionIDs: [String] = []
     var pendingUserInputRequest: ConversationUserInputRequest?
     /// Dividers where the task's conversation moved to another provider.
     var providerBoundaries: [ConversationProviderBoundary] = []
+    /// For a page of history, how many messages precede `messages`; nil when
+    /// `messages` is the whole conversation.
+    var earlierMessageCount: Int?
 }
 
 enum RepositoryScanner {

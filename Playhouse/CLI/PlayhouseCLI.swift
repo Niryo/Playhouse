@@ -417,7 +417,12 @@ enum PlayhouseCLI {
             }
             guard let id = tail.first else { throw CLIError.usage("A task ID is required.") }
             switch operation {
-            case "history": return BridgeRequest(command: "conversation.history", arguments: ["taskID": .string(id)])
+            case "history":
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--limit", "--before"])
+                var arguments: [String: BridgeValue] = ["taskID": .string(id)]
+                if let limit = flags["--limit"]?.first { arguments["limit"] = .string(limit) }
+                if let before = flags["--before"]?.first { arguments["before"] = .string(before) }
+                return BridgeRequest(command: "conversation.history", arguments: arguments)
             case "present-image":
                 let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: ["--image", "--caption"])
                 guard let path = flags["--image"]?.first, !path.isEmpty else {
@@ -684,7 +689,7 @@ enum PlayhouseCLI {
       playhouse settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>|set-token-usage-color-max <tokens>|set-cpu-usage-color-max <percent>
       playhouse task token-usage <task-id>
       playhouse task cpu-usage <task-id>
-      playhouse conversation history <task-id>
+      playhouse conversation history <task-id> [--limit <messages>] [--before <message-id>]
       playhouse conversation present-image <task-id> --image <path> [--caption <text>]
       playhouse conversation queue <task-id> --message <text>
       playhouse conversation queue-list <task-id>

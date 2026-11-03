@@ -54,8 +54,18 @@ struct RemoteConversationManager {
 
     // MARK: - Provider operations, owned by the daemon
 
-    func history(taskID: UUID, onActionRequest: @escaping () -> Void = {}) async throws -> ConversationHistory {
-        let result = try await daemon.call("conversation.history", ["taskID": id(taskID)]) { event in
+    /// With `messageLimit`, only the newest messages (before `beforeMessageID`,
+    /// when given) cross the bridge, with a count of the earlier ones left.
+    func history(
+        taskID: UUID,
+        messageLimit: Int? = nil,
+        beforeMessageID: String? = nil,
+        onActionRequest: @escaping () -> Void = {}
+    ) async throws -> ConversationHistory {
+        var arguments: [String: BridgeValue] = ["taskID": id(taskID)]
+        if let messageLimit { arguments["limit"] = .string(String(messageLimit)) }
+        if let beforeMessageID { arguments["before"] = .string(beforeMessageID) }
+        let result = try await daemon.call("conversation.history", arguments) { event in
             if event.type == "action_request" { onActionRequest() }
         }
         await runtime.refresh()
@@ -80,6 +90,9 @@ struct RemoteConversationManager {
             "mode": .string(mode.rawValue),
             "images": .array(imageDataURLs.map(BridgeValue.string)),
             "reportTurnStarting": .boolean(onTurnStarting != nil),
+            // The window keeps its own paged transcript, so the finished turn
+            // only needs to bring back the newest page rather than everything.
+            "historyLimit": .string(String(TaskConversationView.historyPageSize)),
         ]
         if let modelID { arguments["model"] = .string(modelID) }
         if let statusBeforeSubmission { arguments["statusBeforeSubmission"] = .string(statusBeforeSubmission.rawValue) }
@@ -184,6 +197,7 @@ struct RemoteConversationManager {
             "taskID": id(taskID),
             "itemID": .string(question.id),
             "answers": .array(answers.map(BridgeValue.string)),
+            "historyLimit": .string(String(TaskConversationView.historyPageSize)),
         ])
         let history = try result.object?["history"].map { try $0.decoded(ConversationHistory.self) }
         return (result.object?["text"]?.string ?? "", result.object?["queued"]?.bool ?? false, history)

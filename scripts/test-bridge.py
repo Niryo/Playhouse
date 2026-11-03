@@ -226,6 +226,36 @@ class PlayhouseBridgeTests(unittest.TestCase):
         else:
             self.fail(f"Refusing to remove worktree fixture without its ownership marker: {self.worktree_directory}")
 
+    def conversation_database(self):
+        return self.data_directory / "Conversations-v1.sqlite"
+
+    def conversation_state(self, task_id):
+        """The task's stored conversation state row, or None before anything is recorded."""
+        path = self.conversation_database()
+        if not path.exists():
+            return None
+        with sqlite3.connect(path, timeout=30) as connection:
+            row = connection.execute("SELECT payload FROM conversation_state WHERE task_id = ?", (task_id.upper(),)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def write_conversation_state(self, task_id, state):
+        with sqlite3.connect(self.conversation_database(), timeout=30) as connection:
+            connection.execute(
+                "INSERT INTO conversation_state (task_id, payload) VALUES (?, ?) "
+                "ON CONFLICT(task_id) DO UPDATE SET payload = excluded.payload",
+                (task_id.upper(), json.dumps(state)),
+            )
+
+    def conversation_row_counts(self, task_id):
+        path = self.conversation_database()
+        if not path.exists():
+            return {"turns": 0, "messages": 0, "activities": 0}
+        with sqlite3.connect(path, timeout=30) as connection:
+            return {
+                name: connection.execute(f"SELECT COUNT(*) FROM conversation_{name} WHERE task_id = ?", (task_id.upper(),)).fetchone()[0]
+                for name in ("turns", "messages", "activities")
+            }
+
     def call_cli(self, *command, expected_status=0, timeout=90, extra_environment=None):
         environment = os.environ.copy()
         environment["PLAYHOUSE_DATA_DIRECTORY"] = str(self.data_directory)
@@ -4881,8 +4911,9 @@ class PlayhouseBridgeTests(unittest.TestCase):
         history = self.assert_success(self.call_cli("conversation", "history", codex_task["id"])[0])
         self.assertEqual(history["messages"], [])
         self.assertEqual(history["providerBoundaries"], [], "Switching before any conversation records no boundary.")
-        transcript = self.data_directory / "conversation-transcripts" / f"{codex_task['id']}.json"
-        self.assertFalse(transcript.exists(), "No transcript is written before the first turn.")
+        self.assertIsNone(self.conversation_state(codex_task["id"]), "No transcript is written before the first turn.")
+        self.assertEqual(self.conversation_row_counts(codex_task["id"]), {"turns": 0, "messages": 0, "activities": 0},
+                         "No transcript rows are written before the first turn.")
 
         goal_set, _ = self.call_cli("conversation", "goal", claude_task["id"], "set", "--text", "Ship it", expected_status=1)
         self.assert_failure(goal_set, "invalid_transition")
@@ -6451,7 +6482,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertLess(user["timelineOrder"], reloaded_rows[0]["timelineOrder"])
         self.assertLess(reloaded_rows[0]["timelineOrder"], assistant["timelineOrder"])
 
-    # case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation immediately presents only the latest user question, pinned to the top of the viewport with its answer below. Scrolling upward loads earlier messages automatically in 40-message batches, including when the latest turn alone is shorter than the viewport, while keeping the anchored message in place and preserving chronological order. No separate control is needed on systems that report scroll position; below macOS 15 the transcript keeps an explicit Load earlier messages control inside that runway instead. A conversation that was empty when it opened establishes no window and keeps the newest 40 messages rendered as they arrive. Reloading history in place reopens on that same latest turn and keeps upward paging working. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch.
+    # case-contract: test_conversation_loads_newest_messages_before_older_history | Reopening a 120-message conversation immediately presents only the latest user question, pinned to the top of the viewport with its answer below. Scrolling upward loads earlier messages automatically in 40-message batches, including when the latest turn alone is shorter than the viewport, while keeping the anchored message in place and preserving chronological order. No separate control is needed on systems that report scroll position; below macOS 15 the transcript keeps an explicit Load earlier messages control inside that runway instead. A conversation that was empty when it opened establishes no window and keeps the newest 40 messages rendered as they arrive. Reloading history in place reopens on that same latest turn and keeps upward paging working. CLI/XPC history remains complete and ordered across fresh reads and across an in-place provider switch, and a paged read returns only the newest 80 messages with the count of the 40 before them, while paging backward returns those earlier messages in order.
     def test_conversation_loads_newest_messages_before_older_history(self):
         task_id = self.create_task(title="Long conversation history")["id"]
         fixture = Path(__file__).resolve().parent / "fixtures" / "codex-app-server-fixture.py"
@@ -6484,6 +6515,126 @@ class PlayhouseBridgeTests(unittest.TestCase):
         reloaded_response, _ = self.call_cli("conversation", "history", task_id, extra_environment=env)
         reloaded_messages = self.assert_success(reloaded_response)["messages"]
         self.assertEqual([message["text"] for message in reloaded_messages], [message["text"] for message in messages])
+        # Paging a Codex-backed history slices the composed transcript the same way.
+        newest = self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "80", extra_environment=env)[0])
+        self.assertEqual(newest["earlierMessageCount"], 40)
+        self.assertEqual([message["text"] for message in newest["messages"]], [message["text"] for message in messages[40:]])
+        older = self.assert_success(self.call_cli(
+            "conversation", "history", task_id, "--limit", "80", "--before", newest["messages"][0]["id"], extra_environment=env
+        )[0])
+        self.assertEqual(older["earlierMessageCount"], 0)
+        self.assertEqual([message["text"] for message in older["messages"]], [message["text"] for message in messages[:40]])
+        paged_reads = [event for event in self.diagnostic_events()
+                       if event.get("event") == "conversation.history.read" and event.get("taskID") == task_id.upper()
+                       and event.get("messageLimit") == "80"]
+        self.assertEqual([read["source"] for read in paged_reads], ["composed", "composed"],
+                         "A Codex thread is composed from the app-server before it is paged.")
+
+    # case-contract: test_conversation_history_pages_claude_transcript_from_store | Claude turns are stored row by row in the SQLite conversation store: a user image is kept out of the message text payload, and recording a later turn writes only that turn's own rows without rewriting earlier turns. CLI/XPC history stays complete by default; with --limit it reads only the stored turns covering the newest messages and returns those messages plus the count of earlier ones, and --before pages backward to the first message, with pages that join into the complete ordered history, carry its activities, and fill in the image only on the page that holds its message; this still holds after another turn completes. A non-positive or non-numeric limit fails with invalid_argument, an unknown --before message fails with not_found, and an empty conversation returns an empty page. Reopening the conversation in the visible UI reads only the newest page and pins the latest turn, then reads the older page from the store as the reader scrolls up until the first turn and its image are shown, and a turn sent afterwards from the composer keeps the earlier pages loaded without reading them again.
+    def test_conversation_history_pages_claude_transcript_from_store(self):
+        claude = self.data_directory / "claude-fixture-long-history"
+        shutil.copyfile(Path(__file__).resolve().parent / "fixtures" / "claude-code-fixture.py", claude)
+        claude.chmod(0o755)
+        (self.data_directory / ".playhouse-claude-fixture-owner").write_text(
+            "Playhouse test owns this Claude Code protocol fixture (v1).\n", encoding="utf-8"
+        )
+        fixtures = {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(claude)}
+        task_id = self.create_task("Claude paged history", roots=[self.primary])["id"]
+        self.assert_success(self.call_cli("conversation", "provider", task_id, "set", "claude")[0])
+        empty = self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "10")[0])
+        self.assertEqual((empty["messages"], empty["earlierMessageCount"]), ([], 0), "An empty conversation is an empty page.")
+
+        image = self.data_directory / "first-turn.png"
+        image.write_bytes(bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c636000020000050001a5f645400000000049454e44ae426082"))
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Long history turn 1.", "--image", str(image), extra_environment=fixtures
+        )[0])
+        database = self.conversation_database()
+        key = task_id.upper()
+        with sqlite3.connect(database, timeout=30) as connection:
+            stored_turns_before = {row[0] for row in connection.execute("SELECT id FROM conversation_turns WHERE task_id = ?", (key,))}
+            image_rows = connection.execute(
+                "SELECT payload, image_data_urls FROM conversation_messages WHERE task_id = ? AND image_data_urls IS NOT NULL", (key,)
+            ).fetchall()
+            # Every later row write is logged, so the next turn proves it left earlier turns alone.
+            connection.executescript("""
+                CREATE TABLE test_row_writes (kind TEXT NOT NULL, turn_id TEXT NOT NULL);
+                CREATE TRIGGER test_message_insert AFTER INSERT ON conversation_messages BEGIN INSERT INTO test_row_writes VALUES ('message', NEW.turn_id); END;
+                CREATE TRIGGER test_message_update AFTER UPDATE ON conversation_messages BEGIN INSERT INTO test_row_writes VALUES ('message', NEW.turn_id); END;
+                CREATE TRIGGER test_message_delete AFTER DELETE ON conversation_messages BEGIN INSERT INTO test_row_writes VALUES ('message', OLD.turn_id); END;
+                CREATE TRIGGER test_activity_write AFTER UPDATE ON conversation_activities BEGIN INSERT INTO test_row_writes VALUES ('activity', NEW.turn_id); END;
+                CREATE TRIGGER test_turn_write AFTER UPDATE ON conversation_turns BEGIN INSERT INTO test_row_writes VALUES ('turn', NEW.id); END;
+            """)
+        self.assertTrue(stored_turns_before, "The first Claude turn is stored as rows.")
+        self.assertEqual(len(image_rows), 1, "The user image is stored once, in its own column.")
+        image_payload, image_column = image_rows[0]
+        self.assertEqual(json.loads(image_payload)["imageDataURLs"], [], "Image data stays out of the message text payload.")
+        self.assertTrue(json.loads(image_column)[0].startswith("data:image/png;base64,"))
+
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Long history turn 2.", extra_environment=fixtures)[0])
+        with sqlite3.connect(database, timeout=30) as connection:
+            writes = connection.execute("SELECT kind, turn_id FROM test_row_writes").fetchall()
+            connection.executescript("""
+                DROP TRIGGER test_message_insert; DROP TRIGGER test_message_update; DROP TRIGGER test_message_delete;
+                DROP TRIGGER test_activity_write; DROP TRIGGER test_turn_write; DROP TABLE test_row_writes;
+            """)
+        self.assertGreaterEqual(len([write for write in writes if write[0] == "message"]), 31, "The second turn records its own messages.")
+        self.assertEqual([write for write in writes if write[1] in stored_turns_before], [],
+                         "Recording a later turn must not rewrite any row of an earlier turn.")
+        for message in ("Long history turn 3.", "Say hello."):
+            self.assert_success(self.call_cli("conversation", "send", task_id, "--message", message, extra_environment=fixtures)[0])
+
+        full = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+        messages = full["messages"]
+        self.assertIsNone(full.get("earlierMessageCount"), "Default history is complete, not a page.")
+        self.assertEqual(len(messages), 95)
+        self.assertEqual([message["text"] for message in messages[:2]], ["Long history turn 1.", "Long history turn 1, message 1."])
+        self.assertEqual(messages[31]["text"], "Long history turn 2.")
+        self.assertEqual(messages[-2]["text"], "Say hello.")
+        self.assertEqual(messages[-1]["text"], "OK.")
+        self.assertEqual(len(messages[0]["imageDataURLs"]), 1, "Complete history includes the stored image.")
+        self.assertTrue(all(not message["imageDataURLs"] for message in messages[1:]))
+
+        def history_reads():
+            return [event for event in self.diagnostic_events()
+                    if event.get("event") == "conversation.history.read" and event.get("taskID") == key]
+
+        def read_pages(full_history):
+            reads_before = len(history_reads())
+            pages = [self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "40")[0])]
+            while pages[0]["earlierMessageCount"]:
+                before = pages[0]["messages"][0]["id"]
+                pages.insert(0, self.assert_success(self.call_cli("conversation", "history", task_id, "--limit", "40", "--before", before)[0]))
+            self.assertEqual([message for page in pages for message in page["messages"]], full_history["messages"],
+                             "Pages join into the complete ordered history, images included.")
+            for page in pages:
+                self.assertEqual(page["activities"], full_history["activities"], "Every page carries the conversation's activities.")
+                self.assertEqual(page["providerBoundaries"], full_history["providerBoundaries"])
+            self.assertTrue(all(not message["imageDataURLs"] for page in pages[1:] for message in page["messages"]),
+                            "Only the page holding the image message carries image data.")
+            reads = history_reads()[reads_before:]
+            self.assertEqual({read["source"] for read in reads}, {"stored-page"},
+                             "A Claude page is read from the stored turns it covers, not by composing the whole history.")
+            self.assertEqual([read["hydratedImageMessageCount"] for read in reads], ["0"] * (len(pages) - 1) + ["1"])
+            return pages
+
+        pages = read_pages(full)
+        self.assertEqual([len(page["messages"]) for page in pages], [15, 40, 40])
+        self.assertEqual([page["earlierMessageCount"] for page in pages], [0, 15, 55])
+
+        for limit in ("0", "-3", "many"):
+            rejected, _ = self.call_cli("conversation", "history", task_id, "--limit", limit, expected_status=2)
+            self.assert_failure(rejected, "invalid_argument")
+        unknown, _ = self.call_cli("conversation", "history", task_id, "--limit", "5", "--before", "no-such-message", expected_status=3)
+        self.assert_failure(unknown, "not_found")
+
+        # Another completed turn leaves the earlier pages joinable and the first image intact.
+        self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Say hello again.", extra_environment=fixtures)[0])
+        grown = self.assert_success(self.call_cli("conversation", "history", task_id)[0])
+        self.assertEqual(len(grown["messages"]), 97)
+        self.assertEqual(grown["messages"][:95], messages, "A later turn does not change earlier messages.")
+        pages = read_pages(grown)
+        self.assertEqual([page["earlierMessageCount"] for page in pages], [0, 17, 57])
 
     # case-contract: test_conversation_shows_subagent_delegation | During a parent turn, Working for renders open and active agents appear as individual named rows outside it, with available path/model/reasoning metadata and started-working wording; a mid-turn collapse the reader performs is honored. When the final answer arrives, all agent rows collapse inside Worked for alongside other Codex activity; expanding it reveals clickable agent rows. The UI fixture pauses after the final answer to verify this before turn completion while Stop response remains available. Completed, interrupted, and unknown states survive history reload and remain inspectable after reopening. The child thread opens as read-only through thread/read, thread/turns/list, and thread/items/list without editable controls or thread/resume, and diagnostics retain safe RPC outcomes while excluding conversation text, command output, and diffs. Multiple Codex message deltas and command-output deltas are summarized per item with counts and byte totals, flushed at turn completion, and excluded from individual notification records; lifecycle notifications remain individually logged, and diagnostics exclude conversation text, command output, and diffs. A fresh `conversation subagent-history` read returns the completed child's stored conversation content.
     def test_conversation_shows_subagent_delegation(self):
@@ -6972,12 +7123,11 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.assert_success(self.call_cli("conversation", "effort", task_id)[0])["effort"], "xhigh")
         self.assertEqual(self.assert_success(self.call_cli("conversation", "model", task_id)[0])["modelID"], "gpt-6-sol",
                           "Sending a turn must not silently fall back to the default model.")
-        transcript_path = self.data_directory / "conversation-transcripts" / f"{task_id.upper()}.json"
-        transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
+        transcript = self.conversation_state(task_id)
         for segment in transcript["segments"]:
             segment["codexTurnIDs"] = []
             segment.pop("codexTurnModelIDs", None)
-        transcript_path.write_text(json.dumps(transcript), encoding="utf-8")
+        self.write_conversation_state(task_id, transcript)
         self.assert_success(self.call_cli("conversation", "model", task_id, "set", "gpt-6-luna")[0])
         self.assert_success(self.call_cli("conversation", "send", task_id, "--message", "Check the next model.", "--model", "gpt-6-luna", extra_environment=environment)[0])
         history = self.assert_success(self.call_cli("conversation", "history", task_id, extra_environment=environment)[0])
@@ -7090,7 +7240,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, f"Could not read isolated preference {key}: {completed.stderr}")
         return completed.stdout.strip(), completed.stderr
 
-    # case-contract: test_pending_question_repair_restores_thread_owner | A misplaced pending question can be repaired through CLI/XPC only into its owning conversation. Repair rejects a wrong owner and a conflicting destination without mutation, backs up both transcripts, preserves request identity and mode, clears only the misplaced source, and is retryable. Fresh history and the visible UI restore the question only on the original task; answering it clears pending state and the safe response survives reopening. Retrying an interrupted repair after the destination question was answered rejects the stale source without resurrecting the question.
+    # case-contract: test_pending_question_repair_restores_thread_owner | A misplaced pending question can be repaired through CLI/XPC only into its owning conversation. Repair rejects a wrong owner and a conflicting destination without mutation, applies both tasks' state atomically, preserves request identity and mode, clears only the misplaced source, and is retryable. Fresh history and the visible UI restore the question only on the original task; answering it clears pending state and the safe response survives reopening. Retrying an interrupted repair after the destination question was answered rejects the stale source without resurrecting the question.
     def test_pending_question_repair_restores_thread_owner(self):
         target = self.create_task("Repair original question", roots=[self.primary])["id"]
         source = self.create_task("Repair misplaced question", roots=[self.secondary])["id"]
@@ -7106,35 +7256,34 @@ class PlayhouseBridgeTests(unittest.TestCase):
         shutil.copyfile(executable, stranger_executable)
         stranger_executable.chmod(0o755)
         self.assert_success(self.call_cli("conversation", "send", stranger, "--message", "Start another real conversation.", extra_environment={"PLAYHOUSE_E2E_CODEX_EXECUTABLE": str(stranger_executable)})[0])
-        directory = self.data_directory / "conversation-transcripts"
-        destination = directory / f"{target.upper()}.json"
-        misplaced = directory / f"{source.upper()}.json"
-        original = json.loads(destination.read_text())
+        original = self.conversation_state(target)
         request = original.pop("pendingUserInputRequest")
-        destination.write_text(json.dumps(original))
-        misplaced.write_text(json.dumps({"version": 1, "segments": [], "turns": [], "pendingUserInputRequest": request}))
-        before = (destination.read_bytes(), misplaced.read_bytes())
+        self.write_conversation_state(target, original)
+        misplaced_state = {"version": 1, "segments": [], "turns": [], "pendingUserInputRequest": request}
+        self.write_conversation_state(source, misplaced_state)
+        before = (self.conversation_state(target), self.conversation_state(source))
         rejected, _ = self.call_cli("conversation", "repair-user-input", stranger, "--from-task", source, expected_status=1)
         self.assert_failure(rejected, "invalid_transition")
-        self.assertEqual(before, (destination.read_bytes(), misplaced.read_bytes()))
+        self.assertEqual(before, (self.conversation_state(target), self.conversation_state(source)))
         conflict = dict(request, id="a-different-pending-request")
         original["pendingUserInputRequest"] = conflict
-        destination.write_text(json.dumps(original))
-        conflict_bytes = destination.read_bytes()
+        self.write_conversation_state(target, original)
+        conflicting = (self.conversation_state(target), self.conversation_state(source))
         rejected, _ = self.call_cli("conversation", "repair-user-input", target, "--from-task", source, expected_status=1)
         self.assert_failure(rejected, "invalid_transition")
-        self.assertEqual(destination.read_bytes(), conflict_bytes)
+        self.assertEqual(conflicting, (self.conversation_state(target), self.conversation_state(source)),
+                         "A rejected repair leaves both tasks' state untouched.")
         original.pop("pendingUserInputRequest")
-        destination.write_text(json.dumps(original))
+        self.write_conversation_state(target, original)
         repaired, _ = self.call_cli("conversation", "repair-user-input", target, "--from-task", source)
         self.assertEqual(self.assert_success(repaired), request)
-        self.assertIsNone(json.loads(misplaced.read_text()).get("pendingUserInputRequest"))
-        self.assertEqual(json.loads(destination.read_text())["pendingUserInputRequest"], request)
-        backups = list((directory / "question-repair-backups").glob("*/*.json"))
-        self.assertEqual(len(backups), 2)
-        backup_contents = {p.name: json.loads(p.read_text()) for p in backups}
-        self.assertEqual(backup_contents[destination.name], original)
-        self.assertEqual(backup_contents[misplaced.name]["pendingUserInputRequest"], request)
+        self.assertIsNone(self.conversation_state(source).get("pendingUserInputRequest"))
+        repaired_target = self.conversation_state(target)
+        self.assertEqual(repaired_target["pendingUserInputRequest"], request)
+        self.assertEqual(repaired_target["userInputRepairs"], [{"sourceTaskID": source.upper(), "request": request}],
+                         "The destination records a receipt of the repair in the same transaction.")
+        self.assertFalse((self.data_directory / "conversation-transcripts").exists(),
+                         "Repairs no longer write JSON transcript backups; SQLite applies both tasks atomically.")
         again, _ = self.call_cli("conversation", "repair-user-input", target, "--from-task", source)
         self.assertEqual(self.assert_success(again), request)
         fresh, _ = self.call_cli("conversation", "history", target, extra_environment=env)
@@ -7148,10 +7297,10 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertNotIn("fixture-secret", json.dumps(history))
         self.assertNotIn("Continue this conversation by applying", json.dumps(history))
         # Destination published and answered before a crashed repair cleared source.
-        misplaced.write_bytes(before[1])
+        self.write_conversation_state(source, misplaced_state)
         retry, _ = self.call_cli("conversation", "repair-user-input", target, "--from-task", source, expected_status=1)
         self.assert_failure(retry, "invalid_transition")
-        self.assertIsNone(json.loads(destination.read_text()).get("pendingUserInputRequest"))
+        self.assertIsNone(self.conversation_state(target).get("pendingUserInputRequest"))
 
     # case-contract: test_codex_questions_can_be_answered_over_cli_xpc | MCP tool/requestUserInput structured questions raised in Plan mode remain in the conversation and move the task to Waiting Response while unanswered; leaving and reopening the conversation preserves the pending question, keyed answers resume the provider turn in In Progress, and the answered turn reports no outcome, so Playhouse drives a private status nudge; when that private turn cannot complete, the task settles in Blocked naming that reason instead of Waiting Response. A parallel conversation retains its own question and thread; the original conversation receives and answers a second question in its original Plan mode, and completing either conversation preserves the other pending request.
     def test_codex_questions_can_be_answered_over_cli_xpc(self):
@@ -7176,6 +7325,10 @@ class PlayhouseBridgeTests(unittest.TestCase):
         command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone"]
         for framework in ("Foundation", "AppKit", "SwiftUI", "SwiftData", "Combine"):
             command.extend(["-framework", framework])
+        grdb = subprocess.run([str(root / "scripts/build-grdb.sh")], capture_output=True, text=True, timeout=600)
+        self.assertEqual(grdb.returncode, 0, grdb.stderr)
+        grdb_module = grdb.stdout.strip().splitlines()[-1]
+        command.extend(["-I", grdb_module, "-I", str(root / "Vendor/GRDB.swift/Sources/GRDBSQLite"), "-L", grdb_module, "-lGRDB"])
         command.extend(str(root / "Playhouse" / "App" / f"{name}.swift") for name in core)
         command.extend([str(root / "Playhouse/Bridge/BridgeContract.swift"),
                         str(root / "scripts/test-codex-question-ownership.swift"), "-o", str(probe)])

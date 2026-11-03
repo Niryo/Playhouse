@@ -12,6 +12,7 @@ Every turn is recorded in `<executable>.history` for test assertions.
 """
 
 import json
+import re
 import os
 import select
 import subprocess
@@ -414,6 +415,12 @@ def respond(user_text, instructions, preserve_no_outcome=False):
             commands.append({"command": close_turn,
                              "output": run_tool("toolu_close_turn", "Bash", {"command": close_turn}, close_turn)})
         text("msg_chat_closing", CHAT_CLOSING)
+    elif match := re.search(r"long history turn (\d+)", user_text.lower()):
+        # Thirty visible assistant messages in one turn, so a few turns build a
+        # transcript long enough to page through.
+        number = match.group(1)
+        for index in range(1, 31):
+            text(f"msg_long_{number}_{index}", f"Long history turn {number}, message {index}.")
     elif "story" in user_text.lower():
         text("msg_story", STORY)
         progress_clear = report_command(instructions, " task progress clear ")

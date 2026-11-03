@@ -422,6 +422,10 @@ struct TaskConversationView: View {
     // conversation starts the window at the latest user turn.
     @State private var oldestRenderedMessageID: String?
     @State private var isRevealingOlderConversationMessages = false
+    /// Messages older than `messages` that the daemon still holds. History is
+    /// read a page at a time, and the next page loads once the reader scrolls
+    /// past the oldest message already here.
+    @State private var earlierStoredMessageCount = 0
     /// Set once the transcript has settled at or above the top of its rendered
     /// window, which is what makes the next upward scroll reveal older
     /// messages. Position has to be observed, never assumed, or a layout pass
@@ -601,6 +605,9 @@ struct TaskConversationView: View {
     }
 
     private static let olderConversationMessageBatchSize = 40
+    /// Messages read per history request: the newest page on open, then one
+    /// more page each time the rendered window reaches the oldest loaded one.
+    static let historyPageSize = 80
     /// How far the transcript must be dragged past the oldest rendered message
     /// before the next older batch is revealed.
     private static let olderConversationRevealThreshold: CGFloat = 24
@@ -639,6 +646,7 @@ struct TaskConversationView: View {
     private var hasOlderConversationMessages: Bool {
         // Answered from indices rather than by building the rendered window:
         // every scroll sample asks this question.
+        if earlierStoredMessageCount > 0 { return true }
         let allMessages = conversationMessages
         guard let oldestRenderedMessageID,
               let startIndex = allMessages.firstIndex(where: { $0.id == oldestRenderedMessageID }) else {
@@ -654,6 +662,18 @@ struct TaskConversationView: View {
         let allMessages = conversationMessages
         guard let currentTopID = renderedConversationMessages.first?.id,
               let currentStartIndex = allMessages.firstIndex(where: { $0.id == currentTopID }) else { return }
+        // The loaded messages cannot fill another batch above the window, so
+        // read the next older page from the daemon first.
+        if currentStartIndex < Self.olderConversationMessageBatchSize, earlierStoredMessageCount > 0 {
+            isRevealingOlderConversationMessages = true
+            isOlderConversationRevealArmed = false
+            Task { @MainActor in
+                let loaded = await loadEarlierConversationMessages()
+                isRevealingOlderConversationMessages = false
+                if loaded { revealOlderConversationMessages(using: proxy) }
+            }
+            return
+        }
         let newStartIndex = max(0, currentStartIndex - Self.olderConversationMessageBatchSize)
         guard newStartIndex < currentStartIndex else { return }
         isRevealingOlderConversationMessages = true
@@ -673,6 +693,67 @@ struct TaskConversationView: View {
                 withTransaction(transaction, restoreAnchor)
             }
             isRevealingOlderConversationMessages = false
+        }
+    }
+
+    /// Reads the page of history just before the oldest loaded message and
+    /// prepends it. Returns whether any earlier messages were added.
+    private func loadEarlierConversationMessages() async -> Bool {
+        guard let oldestLoadedID = messages.first?.id else { return false }
+        do {
+            let page = try await conversationManager.history(
+                taskID: task.id,
+                messageLimit: Self.historyPageSize,
+                beforeMessageID: oldestLoadedID
+            )
+            // Another reload may have replaced the transcript while this read ran.
+            guard messages.first?.id == oldestLoadedID else { return false }
+            let loadedIDs = Set(messages.map(\.id))
+            let earlier = page.messages.filter { !loadedIDs.contains($0.id) }
+            messages = earlier + messages
+            earlierStoredMessageCount = page.earlierMessageCount ?? 0
+            collapsedProgressTurnIDs.formUnion(earlier.lazy
+                .filter { $0.role == .assistant && $0.phase == "final_answer" }
+                .compactMap(\.turnID))
+            restoreAnnotations(from: messages, keepingPending: true)
+            return !earlier.isEmpty
+        } catch {
+            // The anchor message can be gone after a provider switch rewrote
+            // history; reload the newest page rather than leave paging stuck.
+            if (error as? BridgeCommandError)?.code == "not_found" {
+                earlierStoredMessageCount = 0
+                Task { await loadConversation() }
+            } else {
+                errorMessage = error.localizedDescription
+            }
+            return false
+        }
+    }
+
+    /// Applies a history read to the transcript. A page keeps the earlier
+    /// messages this window already loaded above it; a complete history is
+    /// trimmed back to the messages already loaded, so a reload never pulls
+    /// the whole conversation into memory.
+    private func applyHistoryMessages(_ history: ConversationHistory, _ incoming: [ConversationMessage]? = nil) {
+        let incoming = incoming ?? history.messages
+        if let earlierCount = history.earlierMessageCount {
+            if let first = incoming.first, let overlap = messages.firstIndex(where: { $0.id == first.id }) {
+                messages = Array(messages[..<overlap]) + incoming
+                earlierStoredMessageCount = max(0, earlierCount - overlap)
+            } else {
+                messages = incoming
+                earlierStoredMessageCount = earlierCount
+            }
+            return
+        }
+        if earlierStoredMessageCount > 0 || messages.count >= Self.historyPageSize,
+           let oldestLoadedID = messages.first?.id,
+           let start = incoming.firstIndex(where: { $0.id == oldestLoadedID }) {
+            messages = Array(incoming[start...])
+            earlierStoredMessageCount = start
+        } else {
+            messages = incoming
+            earlierStoredMessageCount = 0
         }
     }
 
@@ -929,7 +1010,7 @@ struct TaskConversationView: View {
             // question, or another window's answer); keep it only if it was saved.
             if request == nil, let previous, userInputRequest?.id == previous.id {
                 Task { @MainActor in
-                    guard let history = try? await conversationManager.history(taskID: task.id),
+                    guard let history = try? await conversationManager.history(taskID: task.id, messageLimit: 1),
                           userInputRequest?.id == previous.id else { return }
                     let saved = history.pendingUserInputRequest
                     userInputRequest = saved?.threadID == task.activeConversationID ? saved : nil
@@ -2197,7 +2278,7 @@ struct TaskConversationView: View {
             .coordinateSpace(name: Self.conversationScrollCoordinateSpace)
             .scrollIndicators(.visible)
             .accessibilityIdentifier("conversation-scroll-view")
-            .accessibilityValue("Showing latest \(renderedConversationMessages.count) of \(conversationMessages.count) messages")
+            .accessibilityValue("Showing latest \(renderedConversationMessages.count) of \(conversationMessages.count + earlierStoredMessageCount) messages")
             .onPreferenceChange(ConversationTopMarkerPositionKey.self) { markerY in
                 // Exactly one source drives the reveal: the scroll observer
                 // where it exists, this marker where it does not.
@@ -2840,7 +2921,7 @@ struct TaskConversationView: View {
                 let result = try await conversationManager.answerAsyncQuestion(taskID: task.id, question: message, answers: answers)
                 if !result.queued { answeredAsyncQuestionIDs.insert(message.id) }
                 if let history = result.history {
-                    messages = history.messages
+                    applyHistoryMessages(history)
                     activities = history.activities
                     answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
                 } else if result.queued {
@@ -2848,7 +2929,7 @@ struct TaskConversationView: View {
                 } else {
                     var settledHistory: ConversationHistory?
                     for _ in 0..<50 {
-                        if let history = try? await conversationManager.history(taskID: task.id),
+                        if let history = try? await conversationManager.history(taskID: task.id, messageLimit: Self.historyPageSize),
                            history.messages.contains(where: { candidate in
                                candidate.role == .assistant &&
                                candidate.asyncQuestions == nil &&
@@ -2861,7 +2942,7 @@ struct TaskConversationView: View {
                         try? await Task.sleep(nanoseconds: 100_000_000)
                     }
                     if let settledHistory {
-                        messages = settledHistory.messages
+                        applyHistoryMessages(settledHistory)
                         activities = settledHistory.activities
                         answeredAsyncQuestionIDs = Set(settledHistory.answeredAsyncQuestionIDs)
                     } else {
@@ -4106,11 +4187,14 @@ struct TaskConversationView: View {
         do {
             // Standalone chat rotates one session per page, so the transcript asks for the
             // earlier pages to be restored from the local archive alongside the live session.
+            // Only the newest page is read; older pages load as the reader scrolls up.
             let history = try await conversationManager.history(
                 taskID: task.id,
+                messageLimit: Self.historyPageSize,
                 onActionRequest: { actionNotice = approvalNotice }
             )
             messages = history.messages
+            earlierStoredMessageCount = history.earlierMessageCount ?? 0
             // Resolve the window as soon as the messages land. The assignment
             // at the end of the load repeats it once progress collapsing has
             // settled which rows the transcript renders.
@@ -4229,8 +4313,8 @@ struct TaskConversationView: View {
         }
     }
 
-    private func restoreAnnotations(from messages: [ConversationMessage]) {
-        var restored: [ConversationAnnotation] = []
+    private func restoreAnnotations(from messages: [ConversationMessage], keepingPending: Bool = false) {
+        var restored: [ConversationAnnotation] = keepingPending ? annotations.filter(\.pending) : []
         for message in messages where message.role == .user {
             guard let start = message.text.range(of: "<response-comments>")
                     ?? message.text.range(of: "<response-annotations>"),
@@ -4553,7 +4637,7 @@ struct TaskConversationView: View {
                                 }
                             }
                         }
-                        messages = mergedMessages
+                        applyHistoryMessages(history, mergedMessages)
                         answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
                         activities = history.activities
                         if update.type == "completed" {
@@ -4726,12 +4810,14 @@ struct TaskConversationView: View {
         do {
             let history = try await conversationManager.history(
                 taskID: task.id,
+                messageLimit: max(Self.historyPageSize, messages.count),
                 onActionRequest: { actionNotice = approvalNotice }
             )
             // A provider may not list a running turn's items yet, so mid-turn history can
             // hold less than this window already shows; applying it would blank the turn.
-            if keepingShownTurn, history.messages.count < messages.count { return }
-            messages = history.messages
+            let historyCount = history.messages.count + (history.earlierMessageCount ?? 0)
+            if keepingShownTurn, historyCount < messages.count + earlierStoredMessageCount { return }
+            applyHistoryMessages(history)
             activities = history.activities
             providerBoundaries = history.providerBoundaries
         } catch {
@@ -4855,8 +4941,8 @@ struct TaskConversationView: View {
                 let outcome = try await conversationManager.steerQueuedMessage(taskID: task.id, messageID: message.id)
                 refreshQueuedMessages()
                 guard outcome.accepted else {
-                    if let history = try? await conversationManager.history(taskID: task.id) {
-                        messages = history.messages
+                    if let history = try? await conversationManager.history(taskID: task.id, messageLimit: Self.historyPageSize) {
+                        applyHistoryMessages(history)
                         activities = history.activities
                         answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
                     }
@@ -4887,8 +4973,8 @@ struct TaskConversationView: View {
                     draft = ""
                     pendingImages.removeAll()
                     refreshQueuedMessages()
-                    if let history = try? await conversationManager.history(taskID: task.id) {
-                        messages = history.messages
+                    if let history = try? await conversationManager.history(taskID: task.id, messageLimit: Self.historyPageSize) {
+                        applyHistoryMessages(history)
                         activities = history.activities
                     }
                     errorMessage = nil
@@ -4914,8 +5000,8 @@ struct TaskConversationView: View {
                 guard retried else {
                     throw BridgeCommandError(code: "operation_failed", message: "The queued follow-up still needs your attention.")
                 }
-                let history = try await conversationManager.history(taskID: task.id)
-                messages = history.messages
+                let history = try await conversationManager.history(taskID: task.id, messageLimit: Self.historyPageSize)
+                applyHistoryMessages(history)
                 activities = history.activities
                 answeredAsyncQuestionIDs = Set(history.answeredAsyncQuestionIDs)
                 refreshQueuedMessages()
