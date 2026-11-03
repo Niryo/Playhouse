@@ -1775,17 +1775,24 @@ enum ClaudeSessionUsageReader {
         var snapshot = ConversationCallUsageSnapshot(provider: ConversationProvider.claude.rawValue, updatedAt: .now)
         // Subagent lines belong to their own files, never to the main agent.
         snapshot.main = usage(in: mainURL) { $0["isSidechain"] as? Bool != true }
-        let subagentDirectory = mainURL.deletingPathExtension().appendingPathComponent("subagents", isDirectory: true)
-        let files = (try? FileManager.default.contentsOfDirectory(at: subagentDirectory, includingPropertiesForKeys: nil)) ?? []
-        for file in files where file.pathExtension == "jsonl" && file.lastPathComponent.hasPrefix("agent-") {
-            let agentID = String(file.deletingPathExtension().lastPathComponent.dropFirst("agent-".count))
-            let result = usage(in: file) { _ in true }
-            if !result.isEmpty { snapshot.subagents[agentID] = result }
+        for subagent in subagentFiles(mainFile: mainURL) {
+            let result = usage(in: subagent.file) { _ in true }
+            if !result.isEmpty { snapshot.subagents[subagent.agentID] = result }
         }
         return snapshot.totalCalls > 0 ? snapshot : nil
     }
 
-    private static func sessionFile(sessionID: String, configDirectory: String) -> URL? {
+    /// Each subagent's own file, `<session>/subagents/agent-<id>.jsonl`, by agent ID.
+    static func subagentFiles(mainFile: URL) -> [(agentID: String, file: URL)] {
+        let subagentDirectory = mainFile.deletingPathExtension().appendingPathComponent("subagents", isDirectory: true)
+        let files = (try? FileManager.default.contentsOfDirectory(at: subagentDirectory, includingPropertiesForKeys: nil)) ?? []
+        return files
+            .filter { $0.pathExtension == "jsonl" && $0.lastPathComponent.hasPrefix("agent-") }
+            .map { (String($0.deletingPathExtension().lastPathComponent.dropFirst("agent-".count)), $0) }
+            .sorted { $0.agentID < $1.agentID }
+    }
+
+    static func sessionFile(sessionID: String, configDirectory: String) -> URL? {
         let projects = URL(fileURLWithPath: configDirectory, isDirectory: true).appendingPathComponent("projects", isDirectory: true)
         let directories = (try? FileManager.default.contentsOfDirectory(at: projects, includingPropertiesForKeys: nil)) ?? []
         return directories

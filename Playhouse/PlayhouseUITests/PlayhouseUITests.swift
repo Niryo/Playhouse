@@ -12342,6 +12342,253 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual((calls["subagents"] as? [String: Any])?["calls"] as? Int, 1)
     }
 
+    /// The fixture log's size as the app formats it; the log is built the same
+    /// way as WASTE_LOG in scripts/fixtures/claude-code-fixture.py.
+    private enum WasteFixture {
+        static var logLength: String {
+            var length = 0
+            for index in 1...1000 {
+                let time = String(format: "2026-11-03T10:%02d:%02dZ", index / 60 % 60, index % 60)
+                let marker = index == 900 ? "NEEDLE-42 " : ""
+                let line = "\(time) INFO fixture log line \(String(format: "%04d", index)) \(marker)request ok path=/api/orc/builds/\(String(format: "%04d", index))\n"
+                length += line.unicodeScalars.count
+            }
+            return length.formatted(IntegerFormatStyle<Int>().grouping(.automatic))
+        }
+    }
+
+    /// Runs one Claude fixture turn whose session file logs every request (see
+    /// write_waste_session in scripts/fixtures/claude-code-fixture.py), with the
+    /// app reading the same Claude config directory the turn wrote to.
+    private func runClaudeTokenWasteTurn(title: String) throws -> (taskID: String, environment: [String: String]) {
+        var environment = try installClaudeFixture(named: "claude-fixture-ui-token-waste")
+        // The CLI forwards CLAUDE_CONFIG_DIR with its requests; the window's own
+        // bridge requests take the same directory from PLAYHOUSE_E2E_CLAUDE_CONFIG_DIR.
+        let claudeConfig = dataDirectory.appendingPathComponent("claude-config").path
+        environment["CLAUDE_CONFIG_DIR"] = claudeConfig
+        environment["PLAYHOUSE_E2E_CLAUDE_CONFIG_DIR"] = claudeConfig
+        launchApp(defaultParent: fixture.parent.path, environmentOverrides: environment)
+        let taskID = try XCTUnwrap((try runCLI([
+            "task", "create", "--title", title, "--root", fixture.primary.path, "--provider", "claude",
+        ])["result"] as? [String: Any])?["id"] as? String)
+        XCTAssertTrue(app.buttons[title].waitForExistence(timeout: 10))
+        _ = try runCLI(["conversation", "send", taskID, "--message", "Show token waste."], extraEnvironment: environment)
+        return (taskID, environment)
+    }
+
+    private func openTokenStats(of title: String) {
+        app.buttons[title].rightClick()
+        let statsAction = element("token-stats-task-menu-item")
+        XCTAssertTrue(statsAction.waitForExistence(timeout: 5), "The task context menu should offer Token Stats.")
+        statsAction.click()
+        XCTAssertTrue(element("token-stats-section-overview").waitForExistence(timeout: 10), "Token Stats opens on its Overview section.")
+    }
+
+    /// `section` is the section's identifier suffix: wasters, tools, overhead or overview.
+    private func showTokenStatsSection(_ section: String) {
+        let tab = element("token-stats-section-\(section)")
+        XCTAssertTrue(tab.waitForExistence(timeout: 5), "Token Stats should offer its \(section) section.")
+        tab.click()
+    }
+
+    // case-contract: test_task_token_waste_ranks_claude_items_by_size | A task with no conversation reports its token map unavailable, with no wasters, tools or agents. After a Claude Code fixture turn whose session file logs every request (a shape, blobs, and transcript lines referenced by hash, including a parallel tool call sent as one message), the map reads the main agent and its subagent, and the main agent's final transcript tokens equal its last request's context exactly. The largest item is the MCP tool's 1,000-line log, ranked by the tokens it added, flagged as removed by the compaction, and sharing the tokens of the request it arrived in with its call by characters. The tools rollup ranks that MCP tool first by tokens added, the MCP server rollup counts its defined and called tools and what its definitions cost, the overhead lists the system prompt, each built-in tool definition and the server's definitions as sent with every request, the README read twice is one repeated result, the request that re-sent its context without the prompt cache is the one cache miss, and the compaction is counted. The Token Stats modal shows these in its Wasters, Tools & MCP and Overhead sections.
+    func test_task_token_waste_ranks_claude_items_by_size() throws {
+        let (taskID, environment) = try runClaudeTokenWasteTurn(title: "Claude token waste")
+        _ = try runCLI(["task", "create", "--title", "No conversation yet", "--root", fixture.primary.path, "--provider", "claude"])
+        XCTAssertTrue(app.buttons["No conversation yet"].waitForExistence(timeout: 10))
+        openTokenStats(of: "No conversation yet")
+        showTokenStatsSection("wasters")
+        XCTAssertTrue(element("token-stats-map-unavailable").waitForExistence(timeout: 10), "A task with no conversation has nothing to map.")
+        XCTAssertFalse(element("token-stats-raw-input-button").isEnabled, "There is no raw input to open yet.")
+        attachScreenshot(named: "A task with no conversation has no token map yet")
+        element("close-token-stats-button").click()
+        XCTAssertTrue(waitForDisappearance(element("token-stats-map-unavailable")))
+
+        openTokenStats(of: "Claude token waste")
+
+        showTokenStatsSection("wasters")
+        assertText("token-stats-waster-0-label", equals: "fixturelogs/query_logs")
+        XCTAssertTrue(element("token-stats-waster-0-removed").waitForExistence(timeout: 5), "The compaction removed the log.")
+        assertText("token-stats-waster-0-requests", equals: "×63")
+        let tokensPerCopy = try duplicateTokens(taskID: taskID, environment: environment)
+        assertText("token-stats-duplicate-0-copies", equals: "2 copies of \(tokensPerCopy)")
+        assertText("token-stats-cache-miss-0-request", equals: "Request 34")
+        attachScreenshot(named: "Wasters rank the MCP log first, then show the repeated read and the cache miss")
+
+        showTokenStatsSection("tools")
+        assertText("token-stats-measured-tool-fixturelogs/query_logs-total", equals: "18,000")
+        XCTAssertTrue(element("token-stats-measured-tool-Bash").exists, "Every tool that ran has its own row.")
+        assertText("token-stats-server-fixturelogs-total", equals: "18,000")
+        attachScreenshot(named: "Tools and MCP servers by the tokens they added")
+
+        showTokenStatsSection("overhead")
+        XCTAssertTrue(element(containingAccessibilityText: "MCP server fixturelogs · 2 tool definitions").waitForExistence(timeout: 5))
+        XCTAssertTrue(element(containingAccessibilityText: "System prompt (part 1)").exists)
+        XCTAssertTrue(element("token-stats-agent-claude/fxw").exists, "The subagent's file is its own agent.")
+        attachScreenshot(named: "Overhead sent with every request, and each agent")
+        element("close-token-stats-button").click()
+
+        let report = try XCTUnwrap(try runCLI(["task", "token-waste", taskID], extraEnvironment: environment)["result"] as? [String: Any])
+        let top = try XCTUnwrap((report["wasters"] as? [[String: Any]])?.first)
+        XCTAssertEqual(top["label"] as? String, "fixturelogs/query_logs")
+        XCTAssertEqual((report["tools"] as? [[String: Any]])?.first?["totalTokens"] as? Int, 18_000)
+    }
+
+    private func duplicateTokens(taskID: String, environment: [String: String]) throws -> String {
+        let report = try XCTUnwrap(try runCLI(["task", "token-waste", taskID], extraEnvironment: environment)["result"] as? [String: Any])
+        let tokens = try XCTUnwrap((report["duplicates"] as? [[String: Any]])?.first?["tokensPerCopy"] as? Int)
+        return tokens.formatted(IntegerFormatStyle<Int>().grouping(.automatic))
+    }
+
+    // case-contract: test_task_token_waste_ranks_codex_items_by_size | A Codex fixture turn whose thread and subagent have rollout files gives the same map from Codex's own format: a request was sent the instructions plus every item before its own output, the final transcript's tokens equal the last request's input exactly after a compaction replaced the history, Codex's unsaved tool definitions appear as one hidden-overhead item sent with every request, encrypted reasoning is shown by its size, the MCP tool's log is the largest item and was removed by the compaction, the repeated README read and the cache miss are reported, and the subagent's thread is its own agent. The raw input's final transcript lists the hidden overhead, the instructions and the replacement history once each without the removed log, and an item's full text, from a tool output or from the replacement history, reads back exactly as Codex saved it, in chunks, with its call named. The Token Stats modal shows the Codex wasters, the hidden overhead and the subagent, and showing the log opens its full text.
+    func test_task_token_waste_ranks_codex_items_by_size() throws {
+        launchApp(defaultParent: fixture.parent.path)
+        try createTaskFixture(title: "Codex token waste", roots: [fixture.primary.path])
+        let taskID = try taskID(named: "Codex token waste")
+        XCTAssertTrue(app.buttons["Codex token waste"].waitForExistence(timeout: 10))
+
+        // As in the Codex token usage case, the fixture holds the turn open
+        // until Playhouse reports its outcome, then completes it.
+        let executable = dataDirectory.appendingPathComponent("codex-fixture-token-waste")
+        try FileManager.default.copyItem(at: WorkspaceFixture.root.appendingPathComponent("codex-fixture-ui"), to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try Data("Playhouse test owns this Codex protocol fixture (v1).\n".utf8)
+            .write(to: dataDirectory.appendingPathComponent(".playhouse-codex-fixture-owner"))
+        let holdMarker = URL(fileURLWithPath: executable.path + ".hold-release")
+        let activeMarker = URL(fileURLWithPath: executable.path + ".turn-active")
+        let releaseMarker = URL(fileURLWithPath: executable.path + ".turn-release")
+        try Data().write(to: holdMarker)
+        try? FileManager.default.removeItem(at: activeMarker)
+        try? FileManager.default.removeItem(at: releaseMarker)
+        // The fixture writes its rollout under the Codex home the CLI forwards,
+        // which must be the one the window reads its session files from.
+        let process = try startCLIProcess(
+            ["conversation", "send", taskID, "--message", "Show token waste.", "--answer", "color=Blue", "--answer", "token=fixture-secret"],
+            extraEnvironment: [
+                "PLAYHOUSE_E2E_CODEX_EXECUTABLE": executable.path,
+                "CODEX_HOME": dataDirectory.appendingPathComponent("codex-home").path,
+            ]
+        )
+        defer {
+            if process.process.isRunning {
+                try? "Release the active turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+                process.process.waitUntilExit()
+            }
+            try? FileManager.default.removeItem(at: activeMarker)
+            try? FileManager.default.removeItem(at: releaseMarker)
+            try? FileManager.default.removeItem(at: holdMarker)
+        }
+        XCTAssertTrue(waitUntil({ FileManager.default.fileExists(atPath: activeMarker.path) }, timeout: 10), "The fixture should hold the turn open for a CLI outcome report.")
+        _ = try runCLI(["task", "outcome", taskID, "completed"])
+        try "Release the completed fixture turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
+        _ = try finishCLIProcess(process)
+        let threadID = try XCTUnwrap((try runCLI(["task", "get", taskID])["result"] as? [String: Any])?["codexThreadID"] as? String)
+
+        openTokenStats(of: "Codex token waste")
+        showTokenStatsSection("wasters")
+        assertText("token-stats-waster-0-label", equals: "fixturelogs/query_logs")
+        XCTAssertTrue(element("token-stats-waster-0-removed").waitForExistence(timeout: 5), "The compaction removed the log.")
+        assertText("token-stats-cache-miss-0-request", equals: "Request 4")
+        attachScreenshot(named: "Codex wasters rank the MCP log first")
+        element("token-stats-waster-0-show").click()
+        assertText("raw-input-text-label", equals: "fixturelogs/query_logs")
+        let firstLine = element("raw-input-text-line-1")
+        XCTAssertTrue(firstLine.waitForExistence(timeout: 10), "The Codex log's full text opens from its waster row.")
+        XCTAssertTrue(
+            accessibleLabelOrValue(of: firstLine).contains("2026-11-03T10:00:01Z INFO fixture log line 0001"),
+            "The first line is the log exactly as Codex saved it."
+        )
+        attachScreenshot(named: "Showing the Codex waster opens the log as Codex saved it")
+        element("close-raw-input-button").click()
+        showTokenStatsSection("overhead")
+        XCTAssertTrue(
+            element(containingAccessibilityText: "Tool definitions and other context Codex does not save").waitForExistence(timeout: 5),
+            "Codex's unsaved tool definitions show as one hidden-overhead line."
+        )
+        XCTAssertTrue(element("token-stats-agent-codex/\(threadID)-subagent").exists, "The subagent thread is its own agent.")
+        attachScreenshot(named: "Codex overhead includes the hidden tool definitions and the subagent")
+        element("close-token-stats-button").click()
+
+        let report = try XCTUnwrap(try runCLI(["task", "token-waste", taskID])["result"] as? [String: Any])
+        let overhead = try XCTUnwrap(report["overhead"] as? [[String: Any]])
+        XCTAssertTrue(overhead.contains { $0["kind"] as? String == "hiddenOverhead" && $0["everyRequest"] as? Bool == true })
+        XCTAssertEqual((report["agents"] as? [[String: Any]])?.first?["finalTranscriptTokens"] as? Int, 4_400)
+    }
+
+    // case-contract: test_task_raw_input_pages_final_transcript_without_duplicates | A task with no conversation has no raw input: its page is empty and reading an item's text is not_found. After a Claude Code fixture turn, the raw input lists the final transcript with each item once across pages and without the log a compaction removed; the everything-sent scope adds what was removed, ordering by size lists the largest first, a search finds the log by a word only its full text contains, and a focus item reports its position. An item's full text reads back in chunks that end on a line break and join to the exact text, with the call that produced it named. An unknown agent or item is not_found, and an unknown order or a limit of zero is invalid_argument. In the app, View raw input opens the final transcript, scrolling loads the next page of rows, showing the largest waster opens it in the everything-sent scope with its full text, and scrolling that text reaches its last line.
+    func test_task_raw_input_pages_final_transcript_without_duplicates() throws {
+        let (taskID, environment) = try runClaudeTokenWasteTurn(title: "Claude raw input")
+        let everything = try XCTUnwrap(try runCLI(
+            ["task", "raw-input", taskID, "--scope", "all", "--limit", "1000"], extraEnvironment: environment
+        )["result"] as? [String: Any])
+        let allRows = try XCTUnwrap(everything["rows"] as? [[String: Any]])
+        let lastRowID = try XCTUnwrap(allRows.last?["id"] as? Int)
+        XCTAssertGreaterThan(allRows.count, 100, "Enough items that the list needs a second page.")
+
+        openTokenStats(of: "Claude raw input")
+        let rawInputButton = element("token-stats-raw-input-button")
+        XCTAssertTrue(waitUntil({ rawInputButton.exists && rawInputButton.isEnabled }, timeout: 10), "The raw input opens once the map has loaded.")
+        rawInputButton.click()
+        assertText("raw-input-summary", equals: "10 items · 3,160 tokens")
+        XCTAssertTrue(element("raw-input-no-selection").exists)
+        attachScreenshot(named: "Raw input opens on the final transcript, each item once")
+
+        element("raw-input-scope-all").click()
+        let summary = element("raw-input-summary")
+        XCTAssertTrue(
+            waitUntil({ self.accessibleLabelOrValue(of: summary).hasPrefix("\(allRows.count) items") }, timeout: 10),
+            "Everything sent adds what the compaction removed."
+        )
+        let loadedRows = element("raw-input-loaded-rows")
+        assertText("raw-input-loaded-rows", equals: "100 of \(allRows.count) loaded")
+        XCTAssertFalse(element("raw-input-row-\(lastRowID)").exists, "Rows past the first page are not loaded yet.")
+        let list = element("raw-input-list")
+        let lastRow = element("raw-input-row-\(lastRowID)")
+        for _ in 0..<60 where !lastRow.exists {
+            list.scroll(byDeltaX: 0, deltaY: -800)
+        }
+        XCTAssertTrue(lastRow.waitForExistence(timeout: 10), "Scrolling to the end loads the next page of rows.")
+        XCTAssertTrue(
+            waitUntil({ self.accessibleLabelOrValue(of: loadedRows) == "\(allRows.count) of \(allRows.count) loaded" }, timeout: 10),
+            "The second page is fetched only once the list scrolls to its end."
+        )
+        attachScreenshot(named: "Scrolling the list loads the next page")
+        element("close-raw-input-button").click()
+
+        showTokenStatsSection("wasters")
+        let show = element("token-stats-waster-0-show")
+        XCTAssertTrue(show.waitForExistence(timeout: 5))
+        show.click()
+        assertText("raw-input-text-label", equals: "fixturelogs/query_logs")
+        let call = element("raw-input-text-call")
+        XCTAssertTrue(call.waitForExistence(timeout: 5), "A tool result names the call that produced it.")
+        let callText = accessibleLabelOrValue(of: call)
+        XCTAssertTrue(callText.contains("fixturelogs/query_logs") && callText.contains("5000"), "The call names the tool and its arguments: \(callText)")
+        XCTAssertTrue(element("raw-input-text-line-1").waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            waitUntil({ self.accessibleLabelOrValue(of: summary).hasPrefix("\(allRows.count) items") }, timeout: 10),
+            "A removed waster opens in the everything-sent scope."
+        )
+        attachScreenshot(named: "Showing the largest waster opens its full text")
+        let logLength = WasteFixture.logLength
+        let loadedText = element("raw-input-text-loaded")
+        XCTAssertTrue(waitUntil({ self.accessibleLabelOrValue(of: loadedText).hasSuffix("of \(logLength) characters loaded") }, timeout: 10))
+        XCTAssertFalse(
+            accessibleLabelOrValue(of: loadedText).hasPrefix("\(logLength) of"),
+            "Only the first chunk of the log is loaded before the text scrolls."
+        )
+        let text = element("raw-input-text")
+        let lastLine = element("raw-input-text-line-1000")
+        for _ in 0..<80 where !lastLine.exists {
+            text.scroll(byDeltaX: 0, deltaY: -1500)
+        }
+        XCTAssertTrue(lastLine.waitForExistence(timeout: 10), "Scrolling the text loads its later chunks up to the last line.")
+        assertText("raw-input-text-loaded", equals: "\(logLength) of \(logLength) characters loaded")
+        attachScreenshot(named: "Scrolling the log reaches its last line")
+        element("close-raw-input-button").click()
+        element("close-token-stats-button").click()
+    }
+
     // case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to twenty million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's token counter re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
     func test_settings_token_usage_color_max_round_trip() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-token-max")

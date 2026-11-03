@@ -2789,6 +2789,57 @@ final class BoardTaskManager {
         )
     }
 
+    /// The provider sessions whose files hold what this task's requests were
+    /// sent, the current provider's first so it is the default agent.
+    private func tokenMapSessions(_ id: UUID) throws -> [ProviderSessionReference] {
+        let subject = try requireSubject(id)
+        let snapshots = subject.callUsageSnapshots
+        let providers = [subject.conversationProvider] + ConversationProvider.allCases.filter { $0 != subject.conversationProvider }
+        return providers.compactMap { provider in
+            guard let sessionID = subject.conversationID(for: provider) else { return nil }
+            let subagents = snapshots["\(provider.rawValue):\(sessionID)"]?.subagents.keys.sorted() ?? []
+            return ProviderSessionReference(
+                provider: provider, sessionID: sessionID, subagentThreadIDs: provider == .codex ? subagents : []
+            )
+        }
+    }
+
+    /// What filled this task's context, ranked by the tokens each item, tool
+    /// and MCP server added, read from the providers' own session files.
+    func tokenWasteReport(_ id: UUID, homes: ProviderSessionHomes) async throws -> TaskTokenWasteReport {
+        let sessions = try tokenMapSessions(id)
+        return await Task.detached(priority: .userInitiated) {
+            ProviderTokenMap.wasteReport(taskID: id, agents: ProviderTokenMap.load(sessions: sessions, homes: homes))
+        }.value
+    }
+
+    /// One page of an agent's context: the final transcript, or everything ever sent.
+    func rawInputPage(
+        _ id: UUID, homes: ProviderSessionHomes, agent: String?, scope: TaskRawInputScope, order: TaskRawInputOrder,
+        query: String, offset: Int, limit: Int, focus: Int?
+    ) async throws -> TaskRawInputPage {
+        let sessions = try tokenMapSessions(id)
+        return try await Task.detached(priority: .userInitiated) {
+            try ProviderTokenMap.page(
+                taskID: id, agents: ProviderTokenMap.load(sessions: sessions, homes: homes), agent: agent,
+                scope: scope, order: order, query: query, offset: offset, limit: limit, focus: focus
+            )
+        }.value
+    }
+
+    /// One chunk of an item's full text, exactly as the model received it.
+    func rawInputText(
+        _ id: UUID, homes: ProviderSessionHomes, agent: String?, item: Int, offset: Int, length: Int
+    ) async throws -> TaskRawInputText {
+        let sessions = try tokenMapSessions(id)
+        return try await Task.detached(priority: .userInitiated) {
+            try ProviderTokenMap.text(
+                taskID: id, agents: ProviderTokenMap.load(sessions: sessions, homes: homes), agent: agent,
+                item: item, offset: offset, length: length
+            )
+        }.value
+    }
+
     /// `reason` explains a `nil` percent: `"not_running"` for an idle or
     /// not-yet-sampled task of either provider. A turn-active Codex task
     /// reports its working-directory share of the shared app-server's tree
@@ -7305,6 +7356,36 @@ final class PlayhouseBridgeRuntime {
             case "task.token-usage":
                 let taskID = try request.requiredUUID("taskID")
                 result = try Self.value(taskManager.tokenUsageSummary(taskID))
+            case "task.token-waste":
+                let taskID = try request.requiredUUID("taskID")
+                let homes = ProviderSessionHomes.resolve(claudeConfigDirectory: claudeConfigDirectory, codexHome: callerCodexHome)
+                result = try Self.value(await taskManager.tokenWasteReport(taskID, homes: homes))
+            case "task.raw-input":
+                let taskID = try request.requiredUUID("taskID")
+                let homes = ProviderSessionHomes.resolve(claudeConfigDirectory: claudeConfigDirectory, codexHome: callerCodexHome)
+                result = try Self.value(await taskManager.rawInputPage(
+                    taskID, homes: homes,
+                    agent: request.arguments["agent"]?.string,
+                    scope: request.optionalChoice("scope", default: TaskRawInputScope.finalTranscript),
+                    order: request.optionalChoice("order", default: TaskRawInputOrder.transcript),
+                    query: request.arguments["query"]?.string ?? "",
+                    offset: request.optionalInteger("offset", in: 0...Int.max) ?? 0,
+                    limit: request.optionalInteger("limit", in: 1...1_000) ?? 100,
+                    focus: request.optionalInteger("focus", in: 0...Int.max)
+                ))
+            case "task.raw-input-text":
+                let taskID = try request.requiredUUID("taskID")
+                let homes = ProviderSessionHomes.resolve(claudeConfigDirectory: claudeConfigDirectory, codexHome: callerCodexHome)
+                guard let item = try request.optionalInteger("item", in: 0...Int.max) else {
+                    throw BridgeCommandError(code: "invalid_argument", message: "Argument item must name an item of the raw input.")
+                }
+                result = try Self.value(await taskManager.rawInputText(
+                    taskID, homes: homes,
+                    agent: request.arguments["agent"]?.string,
+                    item: item,
+                    offset: request.optionalInteger("offset", in: 0...Int.max) ?? 0,
+                    length: request.optionalInteger("length", in: 1...Int.max) ?? ProviderTokenMap.defaultTextChunk
+                ))
             case "task.cpu-usage":
                 let taskID = try request.requiredUUID("taskID")
                 result = try Self.value(await taskManager.cpuUsage(taskID, dataDirectory: dataDirectory))
@@ -8050,6 +8131,32 @@ private extension BridgeRequest {
             throw BridgeCommandError(code: "invalid_argument", message: "The history limit must be a positive number of messages.")
         }
         return limit
+    }
+
+    /// A whole-number argument, sent by the CLI as text; out of `range` is a caller error.
+    func optionalInteger(_ name: String, in range: ClosedRange<Int>) throws -> Int? {
+        guard let raw = arguments[name] else { return nil }
+        let value: Int?
+        switch raw {
+        case .integer(let number): value = number
+        case .string(let text): value = Int(text)
+        default: value = nil
+        }
+        guard let value, range.contains(value) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Argument \(name) must be a whole number from \(range.lowerBound)\(range.upperBound == Int.max ? " up" : " to \(range.upperBound)").")
+        }
+        return value
+    }
+
+    /// One of a fixed set of named choices, `fallback` when the argument is absent.
+    func optionalChoice<Choice: RawRepresentable & CaseIterable>(_ name: String, default fallback: Choice) throws -> Choice
+    where Choice.RawValue == String {
+        guard let raw = arguments[name]?.string else { return fallback }
+        guard let choice = Choice(rawValue: raw) else {
+            let names = Choice.allCases.map(\.rawValue).joined(separator: ", ")
+            throw BridgeCommandError(code: "invalid_argument", message: "Argument \(name) must be one of: \(names).")
+        }
+        return choice
     }
 
     func requiredUUID(_ name: String) throws -> UUID {

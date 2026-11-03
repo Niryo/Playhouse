@@ -11,6 +11,7 @@ instructions Playhouse appended and really run, so outcomes reach the task.
 Every turn is recorded in `<executable>.history` for test assertions.
 """
 
+import hashlib
 import json
 import re
 import os
@@ -136,6 +137,141 @@ def write_session_calls(session_id, turn_number, main_calls):
     with open(project / session_id / "subagents" / f"agent-fx{turn_number}.jsonl", "a", encoding="utf-8") as handle:
         for index, usage in enumerate(STORY_SUBAGENT_CALLS):
             handle.write(line(f"msg_fx_sub{turn_number}_{index}", usage, sidechain=True))
+
+
+# The token-waste session: a Claude Code request log (`api-request-shape`,
+# `api-request-blob`, `api-request`) whose usage adds up exactly, so a test can
+# assert what each item cost. An MCP tool returns a 1,000-line log, README.md is
+# read twice, one request misses the prompt cache, and a compaction drops the
+# log from the final transcript. Ordinary messages are written as transcript
+# lines and referenced by hash, as the real CLI does; only the first prompt and
+# the compaction summary get blob lines.
+WASTE_LOG_LINES = 1000
+WASTE_LOG = "".join(
+    f"2026-11-03T10:{index // 60 % 60:02d}:{index % 60:02d}Z INFO fixture log line {index:04d} "
+    f"{'NEEDLE-42 ' if index == 900 else ''}request ok path=/api/orc/builds/{index:04d}\n"
+    for index in range(1, WASTE_LOG_LINES + 1)
+)
+WASTE_README = "Fixture README.\n" + "This project is a deterministic fixture for token accounting.\n" * 10
+WASTE_FILLER_ROUNDS = 60
+WASTE_CACHE_MISS_ROUND = 30
+WASTE_SYSTEM_PROMPT = "You are the Claude Code fixture. " * 40
+
+
+def message_hash(message):
+    return hashlib.sha256(json.dumps(message, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+
+
+def write_waste_session(session_id):
+    config = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not config or not session_id:
+        return
+    project = Path(config) / "projects" / "-fixture-project"
+    (project / session_id / "subagents").mkdir(parents=True, exist_ok=True)
+    tool = lambda name, description: {"name": name, "description": description,
+                                      "input_schema": {"type": "object", "properties": {"value": {"type": "string"}}}}
+    write_request_log(project / f"{session_id}.jsonl", "waste", {
+        "system": [{"type": "text", "text": WASTE_SYSTEM_PROMPT}],
+        "tools": [tool("Bash", "Run a shell command."), tool("Read", "Read a file."),
+                  tool("mcp__fixturelogs__query_logs", "Query the fixture's log stream."),
+                  tool("mcp__fixturelogs__list_streams", "List the fixture's log streams.")],
+    }, main_session_steps())
+    write_request_log(project / session_id / "subagents" / "agent-fxw.jsonl", "waste_sub", {
+        "system": [{"type": "text", "text": "You are a fixture subagent. " * 10}],
+        "tools": [tool("Read", "Read a file.")],
+    }, [
+        ("blob", [{"role": "user", "content": "Find the README."}], 800),
+        ("turn", [("toolu_sub_read", "Read", {"file_path": "README.md"}, WASTE_README)], 1000),
+        ("end", "Found it."),
+    ], sidechain=True)
+
+
+def main_session_steps():
+    prompt = {"role": "user", "content": [
+        {"type": "text", "text": "<system-reminder>\nFixture project instructions: keep answers short.\n</system-reminder>"},
+        {"type": "text", "text": "Show token waste."},
+    ]}
+    steps = [
+        ("blob", [prompt], 3000),
+        ("turn", [("toolu_waste_logs", "mcp__fixturelogs__query_logs", {"stream": "orc", "limit": 5000}, WASTE_LOG)], 21000),
+        ("turn", [("toolu_waste_read1", "Read", {"file_path": "README.md"}, WASTE_README)], 21200),
+        ("turn", [("toolu_waste_read2", "Read", {"file_path": "README.md"}, WASTE_README)], 21400),
+    ]
+    context = 21400
+    for index in range(WASTE_FILLER_ROUNDS):
+        # The first round runs two tools in parallel: one assistant message over
+        # two lines, and two user lines the API receives as one message.
+        calls = [(f"toolu_waste_bash{index}_{part}", "Bash", {"command": f"echo step {index}.{part}"}, f"step {index}.{part}")
+                 for part in range(2 if index == 0 else 1)]
+        context += 30 * len(calls)
+        steps.append(("turn", calls, context, index + 1 == WASTE_CACHE_MISS_ROUND))
+    steps.append(("compact", {"role": "user", "content": [
+        {"type": "text", "text": "Summary: the logs were checked and the README was read twice."}]}, 3100))
+    steps.append(("turn", [("toolu_waste_outcome", "Bash", {"command": "report outcome"}, "ok")], 3160))
+    steps.append(("end", "Token waste shown."))
+    return steps
+
+
+def write_request_log(path, prefix, shape, steps, sidechain=False):
+    """Writes each step's request, the transcript lines it added, and the
+    assistant line carrying the usage of the request before it."""
+    shape_hash = hashlib.sha256(json.dumps(shape, sort_keys=True).encode()).hexdigest()
+    lines = [{"type": "api-request-shape", "shapeHash": shape_hash, "shape": shape}]
+    chain = []
+    previous = None
+    previous_context = 0
+    pending_output = None
+
+    def request(tail, context, keep, miss=False):
+        nonlocal previous, previous_context
+        request_id = f"{prefix}_request_{len([l for l in lines if l['type'] == 'api-request']) + 1}"
+        entry = {"type": "api-request", "id": request_id, "keep": keep, "tail": tail, "shapeHash": shape_hash,
+                 "querySource": "sdk", "timestamp": "2026-11-03T10:00:00.000Z"}
+        if previous:
+            entry["base"] = previous
+        lines.append(entry)
+        if miss:
+            usage = {"input_tokens": 50, "cache_read_input_tokens": 0, "cache_creation_input_tokens": context - 50, "output_tokens": 5}
+        else:
+            read = max(0, min(previous_context, context - 2))
+            usage = {"input_tokens": 2, "cache_read_input_tokens": read, "cache_creation_input_tokens": context - read - 2, "output_tokens": 5}
+        previous, previous_context = request_id, context
+        return request_id, usage
+
+    for step in steps:
+        kind = step[0]
+        if kind in ("blob", "compact"):
+            messages = step[1] if kind == "blob" else [step[1]]
+            hashes = []
+            for message in messages:
+                digest = message_hash(message)
+                lines.append({"type": "api-request-blob", "hash": digest, "message": message})
+                hashes.append(digest)
+            keep = 0 if kind == "blob" else 1
+            chain = (chain[:keep] if kind == "compact" else []) + hashes
+            pending_output = request(hashes, step[2], keep)
+        elif kind == "turn":
+            calls, context = step[1], step[2]
+            request_id, usage = pending_output
+            message_id = f"msg_{request_id}"
+            blocks = [{"type": "tool_use", "id": call[0], "name": call[1], "input": call[2]} for call in calls]
+            for index, block in enumerate(blocks):
+                lines.append({"type": "assistant", "isSidechain": sidechain, "requestRef": request_id, "apiBlockIndex": index,
+                              "message": {"id": message_id, "role": "assistant", "content": [block], "usage": usage}})
+            results = [{"type": "tool_result", "tool_use_id": call[0], "content": call[3]} for call in calls]
+            for result in results:
+                lines.append({"type": "user", "isSidechain": sidechain, "message": {"role": "user", "content": [result]}})
+            tail = [message_hash({"role": "assistant", "content": blocks}), message_hash({"role": "user", "content": results})]
+            pending_output = request(tail, context, len(chain), miss=len(step) > 3 and step[3])
+            chain += tail
+        elif kind == "end":
+            request_id, usage = pending_output
+            lines.append({"type": "assistant", "isSidechain": sidechain, "requestRef": request_id,
+                          "message": {"id": f"msg_{request_id}", "role": "assistant",
+                                      "content": [{"type": "text", "text": step[1]}], "usage": usage}})
+    with open(path, "a", encoding="utf-8") as handle:
+        for line in lines:
+            handle.write(json.dumps(line) + "\n")
 
 
 def run_tool(tool_id, name, tool_input, command=None):
@@ -464,6 +600,15 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         number = match.group(1)
         for index in range(1, 31):
             text(f"msg_long_{number}_{index}", f"Long history turn {number}, message {index}.")
+    elif "token waste" in user_text.lower():
+        write_waste_session(argument("--session-id") or argument("--resume"))
+        text("msg_waste_answer", "Token waste shown.")
+        progress_clear = report_command(instructions, " task progress clear ")
+        outcome = report_command(instructions, " task outcome ", "completed")
+        for tool_id, command in [("toolu_progress_clear", progress_clear), ("toolu_outcome", outcome)]:
+            if command:
+                commands.append({"command": command, "output": run_tool(tool_id, "Bash", {"command": command}, command)})
+        text("msg_waste_closing", "The token waste is above.")
     elif "story" in user_text.lower():
         # Kept on disk because each send may start a fresh fixture process, and
         # a repeated message ID would make the second turn's calls look like the first's.
