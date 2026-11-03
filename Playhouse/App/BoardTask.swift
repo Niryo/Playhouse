@@ -193,6 +193,15 @@ final class BoardTask {
     /// When true, moving this task to Review automatically creates its pull request(s)
     /// instead of waiting for the user to click the manual "PR" control.
     var autoCreatePullRequestOnReview: Bool = false
+    /// When true (with `autoCreatePullRequestOnReview`), Playhouse keeps following the
+    /// task's pull requests in Review and sends fix turns until checks pass and every
+    /// review thread is resolved.
+    var pullRequestAutopilot: Bool = false
+    /// Autopilot fix turns sent since the pull requests were last green; bounds the loop.
+    var pullRequestAutopilotFixAttempts: Int = 0
+    /// The PR state the last autopilot fix turn was sent for, so an unchanged red state
+    /// is not sent again.
+    var pullRequestAutopilotLastFixSignature: String?
     /// Legacy marker from when the standalone chat was a hidden board task. Nothing reads it
     /// for behavior; it exists so `migrateLegacyStandaloneChatTasks()` can find those rows and
     /// convert them to `StandaloneChat`. The original column name is preserved so the migration
@@ -244,6 +253,36 @@ final class BoardTask {
         conversationActivityDurationsData = nil
         answeredAsyncQuestionIDsData = nil
         viewedWorkspaceChangesData = nil
+    }
+}
+
+/// What reaching Review does with a task's pull requests: nothing (the user creates
+/// them), create them, or create them and keep fixing them until they're green.
+enum PullRequestMode: String, CaseIterable, Codable, Sendable {
+    case manual
+    case pullRequest = "pr"
+    case autopilot
+
+    var label: String {
+        switch self {
+        case .manual: "Off"
+        case .pullRequest: "PR"
+        case .autopilot: "Auto"
+        }
+    }
+
+    var helpText: String {
+        switch self {
+        case .manual: "Manual: create the pull request yourself once this task moves to Review"
+        case .pullRequest: "PR: a pull request is created automatically when this task moves to Review"
+        case .autopilot: "Autopilot: create the pull request, then keep fixing failing checks and review comments until it's green"
+        }
+    }
+}
+
+extension BoardTask {
+    var pullRequestMode: PullRequestMode {
+        pullRequestAutopilot ? .autopilot : (autoCreatePullRequestOnReview ? .pullRequest : .manual)
     }
 }
 

@@ -259,8 +259,21 @@ struct RemoteConversationManager {
         try await daemon.call("task.pr.create", ["taskID": id(taskID)]).decoded(BoardTaskRecord.self)
     }
 
-    func setAutoCreatePullRequest(taskID: UUID, enabled: Bool) async throws -> BoardTaskRecord {
-        try await daemon.call("task.pr.auto", ["taskID": id(taskID), "enabled": .boolean(enabled)]).decoded(BoardTaskRecord.self)
+    func setPullRequestMode(taskID: UUID, mode: PullRequestMode) async throws -> BoardTaskRecord {
+        try await daemon.call("task.pr.mode", ["taskID": id(taskID), "mode": .string(mode.rawValue)]).decoded(BoardTaskRecord.self)
+    }
+
+    /// Runs one autopilot pass in the daemon. `onStatus` gets the probed states
+    /// before any fix turn starts; the call itself returns after that turn ends.
+    func runPullRequestAutopilot(
+        taskID: UUID,
+        onStatus: @escaping ([PullRequestReviewState]) -> Void = { _ in }
+    ) async throws -> PullRequestAutopilotOutcome {
+        try await daemon.call("task.pr.autopilot", ["taskID": id(taskID)]) { event in
+            guard event.type == "autopilot_status",
+                  let states = try? event.payload.decoded([PullRequestReviewState].self) else { return }
+            onStatus(states)
+        }.decoded(PullRequestAutopilotOutcome.self)
     }
 
     func syncPullRequestChanges(taskID: UUID) async throws -> PullRequestSyncOutcome {

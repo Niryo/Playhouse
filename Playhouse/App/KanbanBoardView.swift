@@ -36,6 +36,13 @@ struct KanbanBoardView: View {
     @State private var taskAwaitingUnmergedConfirmation: UUID?
     @State private var syncingReviewTaskIDs = Set<UUID>()
     @State private var attemptedReviewSyncSignatures: [UUID: String] = [:]
+    /// Last probed check colour of each linked PR, keyed by task then PR number.
+    @State private var pullRequestHealth: [UUID: [Int: PullRequestHealth]] = [:]
+    /// Autopilot tasks the daemon is probing or fixing right now.
+    @State private var autopilotRunningTaskIDs = Set<UUID>()
+    /// Autopilot tasks whose PRs were last seen with checks still running.
+    @State private var autopilotPendingTaskIDs = Set<UUID>()
+    @State private var autopilotPollScheduled = false
     @State private var pullRequestError: String?
     @State private var doneMoveError: String?
     @State private var isShowingBoardSearch = false
@@ -377,7 +384,7 @@ struct KanbanBoardView: View {
             },
             onMoveTask: { id, status in moveTask(id: id, to: status) },
             onCreatePullRequests: { createPullRequests(for: $0) },
-            onToggleAutoPR: { task, enabled in setAutoCreatePullRequest(for: task, enabled: enabled) },
+            onSetPullRequestMode: { task, mode in setPullRequestMode(for: task, mode: mode) },
             onResolveConflicts: {
                 conflictResolutionTaskID = $0.id
                 selectedTask = $0
@@ -385,6 +392,7 @@ struct KanbanBoardView: View {
             creatingPullRequestTaskIDs: taskCreatingPullRequests,
             mergedReviewTaskIDs: mergedReviewTaskIDs,
             conflictedReviewTaskIDs: conflictedReviewTaskIDs,
+            pullRequestHealth: pullRequestHealth,
             onAddTask: openNewTask,
             onOpenTask: { selectedTask = $0 },
             onRenameTask: { taskBeingRenamed = $0 },
@@ -783,7 +791,7 @@ struct KanbanBoardView: View {
                     repositories: [],
                     contextFolders: [],
                     provider: settings.defaultConversationProvider,
-                    autoCreatePullRequestOnReview: settings.autoCreatePullRequestDefault
+                    pullRequestMode: settings.pullRequestModeDefault
                 )
                 let newTask = try manager.taskModel(created.id)
                 selectedTask = newTask
@@ -884,6 +892,7 @@ struct KanbanBoardView: View {
                 }
                 for await (id, states, error) in group {
                     if let states {
+                        recordPullRequestHealth(id, states: states)
                         if states.isEmpty {
                             // The persisted query can briefly lag the visible
                             // SwiftData task after an external store update.
@@ -896,6 +905,7 @@ struct KanbanBoardView: View {
                         if states.contains(where: \.requiresConflictResolution) { conflictedReviewTaskIDs.insert(id) }
                         else { conflictedReviewTaskIDs.remove(id) }
                         syncReviewChangesIfNeeded(for: id, states: states)
+                        followPullRequestAutopilot(for: id, states: states)
                     } else if let error {
                         mergedReviewTaskIDs.remove(id)
                         conflictedReviewTaskIDs.remove(id)
@@ -905,6 +915,102 @@ struct KanbanBoardView: View {
             }
             mergedReviewTaskIDs.formIntersection(reviewIDs)
             conflictedReviewTaskIDs.formIntersection(reviewIDs)
+            autopilotPendingTaskIDs.formIntersection(reviewIDs)
+            scheduleAutopilotPollIfNeeded()
+        }
+    }
+
+    /// A card keeps its last colours while a fix turn runs; they refresh on the
+    /// next probe once the task is back in Review.
+    private func recordPullRequestHealth(_ id: UUID, states: [PullRequestReviewState]) {
+        guard !states.isEmpty else { return }
+        pullRequestHealth[id] = Dictionary(states.map { ($0.number, $0.health) }, uniquingKeysWith: { _, new in new })
+    }
+
+    /// Autopilot tasks act on what the probe found: red asks the daemon to run a
+    /// fix turn (it re-probes and decides through the same shared assessment),
+    /// pending keeps the slow poll alive, and green or merged lets it stop.
+    private func followPullRequestAutopilot(for id: UUID, states: [PullRequestReviewState]) {
+        guard let task = tasks.first(where: { $0.id == id }), task.pullRequestAutopilot, task.status == .review else {
+            autopilotPendingTaskIDs.remove(id)
+            return
+        }
+        switch BoardTaskManager.assessPullRequestAutopilot(states) {
+        case .pending:
+            autopilotPendingTaskIDs.insert(id)
+        case .merged:
+            autopilotPendingTaskIDs.remove(id)
+        case .green:
+            autopilotPendingTaskIDs.remove(id)
+            // The daemon owns the loop guard: let it confirm green and reset the
+            // fix streak, so a later red state gets a full set of attempts.
+            if task.pullRequestAutopilotFixAttempts > 0 || task.pullRequestAutopilotLastFixSignature != nil {
+                runPullRequestAutopilot(for: id)
+            }
+        case .needsFix:
+            autopilotPendingTaskIDs.remove(id)
+            runPullRequestAutopilot(for: id)
+        }
+    }
+
+    private func runPullRequestAutopilot(for id: UUID) {
+        guard autopilotRunningTaskIDs.insert(id).inserted else {
+            // A probe that lands while the previous pass is still finishing must
+            // not be lost: the poll looks again shortly.
+            autopilotPendingTaskIDs.insert(id)
+            scheduleAutopilotPollIfNeeded()
+            return
+        }
+        Task { @MainActor in
+            defer { autopilotRunningTaskIDs.remove(id) }
+            do {
+                let outcome = try await remoteConversations.runPullRequestAutopilot(taskID: id) { states in
+                    recordPullRequestHealth(id, states: states)
+                }
+                switch outcome.action {
+                case "fixed":
+                    // Its states predate the fix; probe the task's PRs afresh now
+                    // that the turn has settled.
+                    lastMergedPullRequestCheckAt = nil
+                    checkReviewPullRequests()
+                case "green", "merged", "stalled":
+                    recordPullRequestHealth(id, states: outcome.states)
+                default:
+                    recordPullRequestHealth(id, states: outcome.states)
+                    autopilotPendingTaskIDs.insert(id)
+                }
+                scheduleAutopilotPollIfNeeded()
+            } catch {
+                pullRequestError = error.localizedDescription
+            }
+        }
+    }
+
+    /// While an autopilot PR still has checks running, re-probe just those tasks
+    /// every few minutes. The poll stops once none are pending; a focus probe
+    /// that finds one red again restarts it.
+    private func scheduleAutopilotPollIfNeeded() {
+        guard !autopilotPendingTaskIDs.isEmpty, !autopilotPollScheduled else { return }
+        autopilotPollScheduled = true
+        let interval = ProcessInfo.processInfo.environment["PLAYHOUSE_E2E_PR_AUTOPILOT_POLL_SECONDS"]
+            .flatMap(TimeInterval.init) ?? 180
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(interval))
+            autopilotPollScheduled = false
+            let pending = tasks.filter { autopilotPendingTaskIDs.contains($0.id) && $0.status == .review && $0.pullRequestAutopilot }
+            autopilotPendingTaskIDs = Set(pending.map(\.id))
+            let manager = BoardTaskManager(modelContext: modelContext)
+            for task in pending {
+                do {
+                    let states = try await manager.reviewPullRequests(task)
+                    recordPullRequestHealth(task.id, states: states)
+                    followPullRequestAutopilot(for: task.id, states: states)
+                } catch {
+                    autopilotPendingTaskIDs.remove(task.id)
+                    pullRequestError = error.localizedDescription
+                }
+            }
+            scheduleAutopilotPollIfNeeded()
         }
     }
 
@@ -951,7 +1057,9 @@ struct KanbanBoardView: View {
                 guard task.status == .review, let number = record.pullRequestNumber else {
                     return nil
                 }
-                return "\(task.id.uuidString):\(record.repositoryPath):\(number)"
+                // The mode is part of the key so turning autopilot on re-probes
+                // once the board sees the change.
+                return "\(task.id.uuidString):\(record.repositoryPath):\(number):\(task.pullRequestMode.rawValue)"
             }
         }.sorted()
     }
@@ -968,10 +1076,12 @@ struct KanbanBoardView: View {
         }
     }
 
-    private func setAutoCreatePullRequest(for task: BoardTask, enabled: Bool) {
+    private func setPullRequestMode(for task: BoardTask, mode: PullRequestMode) {
         Task { @MainActor in
             do {
-                _ = try await remoteConversations.setAutoCreatePullRequest(taskID: task.id, enabled: enabled)
+                // Turning autopilot on in Review changes `reviewPullRequestSignature`,
+                // which re-probes the PR and starts following it.
+                _ = try await remoteConversations.setPullRequestMode(taskID: task.id, mode: mode)
             } catch {
                 pullRequestError = error.localizedDescription
             }
@@ -1063,11 +1173,12 @@ private struct KanbanColumnView: View {
     let tasks: [BoardTask]
     let onMoveTask: (UUID, TaskStatus) -> Void
     let onCreatePullRequests: (BoardTask) -> Void
-    let onToggleAutoPR: (BoardTask, Bool) -> Void
+    let onSetPullRequestMode: (BoardTask, PullRequestMode) -> Void
     let onResolveConflicts: (BoardTask) -> Void
     let creatingPullRequestTaskIDs: Set<UUID>
     let mergedReviewTaskIDs: Set<UUID>
     let conflictedReviewTaskIDs: Set<UUID>
+    let pullRequestHealth: [UUID: [Int: PullRequestHealth]]
     let onAddTask: () -> Void
     let onOpenTask: (BoardTask) -> Void
     let onRenameTask: (BoardTask) -> Void
@@ -1173,11 +1284,12 @@ private struct KanbanColumnView: View {
             onDelete: { onDeleteTask(task) },
             onShowTokenStats: { onShowTaskTokenStats(task) },
             onCreatePullRequests: { onCreatePullRequests(task) },
-            onToggleAutoPR: { onToggleAutoPR(task, $0) },
+            onSetPullRequestMode: { onSetPullRequestMode(task, $0) },
             onResolveConflicts: { onResolveConflicts(task) },
             isCreatingPullRequests: creatingPullRequestTaskIDs.contains(task.id),
             isPullRequestMerged: mergedReviewTaskIDs.contains(task.id),
             hasPullRequestConflicts: conflictedReviewTaskIDs.contains(task.id),
+            pullRequestHealth: pullRequestHealth[task.id] ?? [:],
             onMoveToDone: task.status == .review ? { onMoveTask(task.id, .done) } : nil
         )
         if task.status == .waitingResponse {
@@ -1345,11 +1457,12 @@ private struct TaskCardView: View {
     let onDelete: () -> Void
     let onShowTokenStats: () -> Void
     let onCreatePullRequests: () -> Void
-    let onToggleAutoPR: (Bool) -> Void
+    let onSetPullRequestMode: (PullRequestMode) -> Void
     let onResolveConflicts: () -> Void
     let isCreatingPullRequests: Bool
     let isPullRequestMerged: Bool
     let hasPullRequestConflicts: Bool
+    let pullRequestHealth: [Int: PullRequestHealth]
     let onMoveToDone: (() -> Void)?
 
     var body: some View {
@@ -1518,10 +1631,9 @@ private struct TaskCardView: View {
         task.status != .backlog && !task.repositoryWorktrees.isEmpty
     }
 
-    /// While the task is still being worked on (before it reaches Review), the Auto
-    /// PR/Manual toggle replaces the manual create button: once the task moves to
-    /// Review, auto mode creates the pull request itself, so there is nothing left for
-    /// the toggle to decide.
+    /// While the task is still being worked on (before it reaches Review), the
+    /// Off/PR/Auto mode control replaces the manual create button: once the task moves
+    /// to Review, the PR and Auto modes create the pull request themselves.
     private var isAutoPRWorkingState: Bool {
         switch task.status {
         case .inProgress, .blocked, .waitingResponse: true
@@ -1575,7 +1687,7 @@ private struct TaskCardView: View {
         HStack(spacing: 5) {
             let linked = linkedPullRequests
             if linked.isEmpty && isAutoPRWorkingState {
-                autoPRSwitch
+                pullRequestModeControl
             } else if linked.isEmpty {
                 let hasMultipleRepositories = task.repositoryWorktrees.filter { !$0.isPending }.count > 1
                 Button(action: onCreatePullRequests) {
@@ -1645,16 +1757,20 @@ private struct TaskCardView: View {
                         .frame(minWidth: 30, minHeight: 30)
                         .contentShape(Rectangle())
                     }
+                    autopilotToggle
                     ForEach(linked, id: \.repositoryPath) { record in
                         if let number = record.pullRequestNumber, let url = URL(string: record.pullRequestURL ?? "") {
+                            let health = pullRequestHealth[number]
                             Link(destination: url) {
                                 Text(verbatim: "#\(number)")
+                                    .foregroundStyle(health.map(Self.healthColor) ?? Color.accentColor)
                             }
                                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
                                 .actionButtonHoverEmphasis(padding: 5)
                                 .buttonHoverPointer()
-                                .help(Text(verbatim: "Open pull request #\(number) in your browser"))
+                                .help(Text(verbatim: "Open pull request #\(number) in your browser\(health.map { " (\(Self.healthDescription($0)))" } ?? "")"))
                                 .contentShape(Capsule())
+                                .accessibilityValue(health?.rawValue ?? "unknown")
                                 .accessibilityIdentifier("task-pr-link-\(task.id.uuidString)-\(number)")
                         }
                     }
@@ -1664,39 +1780,81 @@ private struct TaskCardView: View {
         .buttonStyle(.borderless)
     }
 
-    /// Small "PR" switch shown in place of the manual "PR" button while the task is still
-    /// being worked on: on means reaching Review creates the pull request(s) automatically.
-    private var autoPRSwitch: some View {
-        let isOn = task.autoCreatePullRequestOnReview
-        return Button {
-            onToggleAutoPR(!isOn)
-        } label: {
-            HStack(spacing: 5) {
-                Text("PR")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Capsule()
-                    .fill(isOn ? Color.accentColor : Color.primary.opacity(0.18))
-                    .frame(width: 22, height: 13)
-                    .overlay(alignment: isOn ? .trailing : .leading) {
-                        Circle()
-                            .fill(.white)
-                            .frame(width: 11, height: 11)
-                            .shadow(color: .black.opacity(0.25), radius: 0.5, y: 0.5)
-                            .padding(1)
-                    }
-                    .animation(.easeInOut(duration: 0.15), value: isOn)
+    static func healthColor(_ health: PullRequestHealth) -> Color {
+        switch health {
+        case .green: .green
+        case .red: .red
+        case .pending: .orange
+        }
+    }
+
+    static func healthDescription(_ health: PullRequestHealth) -> String {
+        switch health {
+        case .green: "checks passing"
+        case .red: "checks failing or conflicted"
+        case .pending: "checks running"
+        }
+    }
+
+    /// Compact three-way control shown in place of the manual "PR" button while the
+    /// task is still being worked on: Off leaves the PR to the user, PR creates it on
+    /// Review, and Auto also keeps fixing it until it's green. macOS has no native
+    /// three-state switch (a mixed-state checkbox means "partially on"), so this is a
+    /// small segmented picker drawn to fit the card.
+    private var pullRequestModeControl: some View {
+        let current = task.pullRequestMode
+        return HStack(spacing: 0) {
+            ForEach(PullRequestMode.allCases, id: \.self) { mode in
+                let isSelected = mode == current
+                Button {
+                    if !isSelected { onSetPullRequestMode(mode) }
+                } label: {
+                    Text(mode.label)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(isSelected ? Color.white : Color.secondary)
+                        .padding(.horizontal, 5)
+                        .frame(minHeight: 15)
+                        .background(Capsule().fill(isSelected ? Color.accentColor : Color.clear))
+                        .frame(minHeight: 30)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .buttonHoverPointer()
+                .help(mode.helpText)
+                .accessibilityLabel(mode.label)
+                .accessibilityValue(isSelected ? "selected" : "")
+                .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+                .accessibilityIdentifier("task-pr-mode-\(mode.rawValue)-\(task.id.uuidString)")
             }
-            .frame(minWidth: 30, minHeight: 30)
-            .contentShape(Rectangle())
+        }
+        .padding(.horizontal, 1)
+        .background(Capsule().fill(Color.primary.opacity(0.08)).frame(height: 17))
+        .animation(.easeInOut(duration: 0.15), value: current)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Pull request mode")
+        .accessibilityIdentifier("task-pr-mode-\(task.id.uuidString)")
+    }
+
+    /// Once a PR is linked, the mode control is gone; this keeps autopilot
+    /// switchable (on, or back to plain PR) so the user can stop or start the loop.
+    private var autopilotToggle: some View {
+        let isOn = task.pullRequestAutopilot
+        return Button {
+            onSetPullRequestMode(isOn ? .pullRequest : .autopilot)
+        } label: {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(isOn ? Color.accentColor : Color.secondary.opacity(0.6))
+                .frame(minWidth: 30, minHeight: 30)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .buttonHoverPointer()
-        .help(isOn ? "Auto PR is on: a pull request is created automatically when this task moves to Review" : "Auto PR is off: create the pull request yourself once this task moves to Review")
-        .accessibilityLabel("Auto PR")
+        .help(isOn ? "Autopilot is on: Playhouse keeps fixing failing checks and review comments until the pull request is green. Click to turn it off." : "Autopilot is off. Click to keep fixing failing checks and review comments automatically.")
+        .accessibilityLabel("Autopilot")
         .accessibilityValue(isOn ? "on" : "off")
         .accessibilityAddTraits(.isToggle)
-        .accessibilityIdentifier("task-auto-pr-toggle-\(task.id.uuidString)")
+        .accessibilityIdentifier("task-pr-autopilot-toggle-\(task.id.uuidString)")
     }
 
     private func workingDuration(at date: Date) -> String {

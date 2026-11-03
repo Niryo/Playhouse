@@ -860,6 +860,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
     let contextFolders: [String]
     let draftImageDataURLs: [String]?
     let autoCreatePullRequestOnReview: Bool
+    let pullRequestMode: String
 
     /// Accepts any conversation owner: a board task, or the standalone chat, which reports
     /// empty workspace roots and worktrees because it has none.
@@ -883,6 +884,7 @@ struct BoardTaskRecord: Codable, Equatable, Identifiable {
         contextFolders = task.contextFolderPaths
         draftImageDataURLs = includeDraftImages ? task.draftImageDataURLs : nil
         autoCreatePullRequestOnReview = task.autoCreatePullRequestOnReview
+        pullRequestMode = task.pullRequestMode.rawValue
     }
 }
 
@@ -914,29 +916,109 @@ enum GitHubPullRequestManager {
         let mergedAt: String?
         let mergeable: String?
         let headRefOid: String?
+        let statusCheckRollup: [CheckRollupItem]?
     }
 
-    static func reviewState(_ record: RepositoryWorktreeRecord, executable: String) throws -> PullRequestReviewState {
+    /// One entry of `statusCheckRollup`: a check run (`status`/`conclusion`) or a
+    /// commit status context (`state`).
+    private struct CheckRollupItem: Decodable {
+        let name: String?
+        let context: String?
+        let status: String?
+        let conclusion: String?
+        let state: String?
+    }
+
+    private struct ReviewThreadsResponse: Decodable {
+        struct DataPayload: Decodable { let repository: Repository? }
+        struct Repository: Decodable { let pullRequest: PullRequest? }
+        struct PullRequest: Decodable { let reviewThreads: Threads }
+        struct Threads: Decodable { let nodes: [Thread] }
+        struct Thread: Decodable { let isResolved: Bool }
+        let data: DataPayload?
+    }
+
+    /// How long a pushed head may show no checks at all before that counts as a
+    /// repository without CI rather than checks GitHub hasn't registered yet.
+    static let checksRegistrationGrace: TimeInterval = 180
+
+    static func reviewState(_ record: RepositoryWorktreeRecord, executable: String, includeReviewThreads: Bool = false) throws -> PullRequestReviewState {
         guard let number = record.pullRequestNumber else {
             throw BridgeCommandError(code: "invalid_transition", message: "This repository has no linked pull request.")
         }
-        let result = try run(executable, ["pr", "view", String(number), "--json", "mergedAt,mergeable,headRefOid"], directory: record.worktreePath)
+        let result = try run(executable, ["pr", "view", String(number), "--json", "mergedAt,mergeable,headRefOid,statusCheckRollup"], directory: record.worktreePath)
         let response = try JSONDecoder().decode(PullRequestReviewResponse.self, from: Data(result.utf8))
         let localHead: String?
+        var localHeadCommittedAt: Date?
         if response.headRefOid != nil {
-            let git = try PlayhouseProcessRunner.run(executable: "/usr/bin/git", arguments: ["rev-parse", "HEAD"], directory: record.worktreePath)
+            let git = try PlayhouseProcessRunner.run(executable: "/usr/bin/git", arguments: ["log", "-1", "--format=%H%n%ct", "HEAD"], directory: record.worktreePath)
             guard git.status == 0 else {
                 throw BridgeCommandError(code: "operation_failed", message: "Couldn't inspect the local head for pull request #\(number).")
             }
-            localHead = String(data: git.stdout, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let lines = (String(data: git.stdout, encoding: .utf8) ?? "").split(whereSeparator: \.isNewline).map(String.init)
+            localHead = lines.first?.trimmingCharacters(in: .whitespacesAndNewlines)
+            localHeadCommittedAt = lines.dropFirst().first.flatMap(TimeInterval.init).map(Date.init(timeIntervalSince1970:))
         } else {
             localHead = nil
         }
+        let checks = summarizeChecks(
+            response.statusCheckRollup ?? [],
+            headRecentlyCommitted: localHeadCommittedAt.map { Date().timeIntervalSince($0) < checksRegistrationGrace } ?? false
+        )
+        let unresolvedThreads = includeReviewThreads && response.mergedAt == nil
+            ? try unresolvedReviewThreadCount(record, number: number, executable: executable)
+            : nil
         return PullRequestReviewState(
             repositoryPath: record.repositoryPath, number: number,
             merged: response.mergedAt != nil, mergeable: response.mergeable ?? "UNKNOWN",
-            headRefOid: response.headRefOid, localHeadOid: localHead
+            headRefOid: response.headRefOid, localHeadOid: localHead,
+            checks: checks.state, failingChecks: checks.failing,
+            unresolvedReviewThreads: unresolvedThreads
         )
+    }
+
+    /// Failure outranks pending, which outranks success, as on GitHub's own badge.
+    /// A head with no checks yet is pending while GitHub may still register them.
+    private static func summarizeChecks(_ items: [CheckRollupItem], headRecentlyCommitted: Bool) -> (state: PullRequestChecksState, failing: [String]) {
+        guard !items.isEmpty else { return (headRecentlyCommitted ? .pending : .none, []) }
+        let failingConclusions: Set<String> = ["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"]
+        var failing: [String] = []
+        var pending = false
+        for item in items {
+            let label = item.name ?? item.context ?? "check"
+            if let state = item.state?.uppercased() {
+                if ["FAILURE", "ERROR"].contains(state) { failing.append(label) }
+                else if ["PENDING", "EXPECTED"].contains(state) { pending = true }
+            } else if item.status?.uppercased() != "COMPLETED" {
+                pending = true
+            } else if failingConclusions.contains(item.conclusion?.uppercased() ?? "") {
+                failing.append(label)
+            }
+        }
+        if !failing.isEmpty { return (.failure, failing.sorted()) }
+        return (pending ? .pending : .success, [])
+    }
+
+    /// Unresolved review threads are the PR comments that can be replied to and
+    /// resolved; GitHub exposes them only through GraphQL.
+    private static func unresolvedReviewThreadCount(_ record: RepositoryWorktreeRecord, number: Int, executable: String) throws -> Int {
+        guard let url = record.pullRequestURL.flatMap(URL.init(string:)) else {
+            throw BridgeCommandError(code: "operation_failed", message: "Pull request #\(number) has no URL to read its review threads from.")
+        }
+        let components = url.pathComponents.filter { $0 != "/" }
+        guard components.count >= 2 else {
+            throw BridgeCommandError(code: "operation_failed", message: "Couldn't read the repository of pull request #\(number) from \(url.absoluteString).")
+        }
+        let query = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { isResolved } } } } }"
+        let result = try run(executable, [
+            "api", "graphql", "-f", "query=\(query)",
+            "-f", "owner=\(components[0])", "-f", "name=\(components[1])", "-F", "number=\(number)"
+        ], directory: record.worktreePath)
+        let response = try JSONDecoder().decode(ReviewThreadsResponse.self, from: Data(result.utf8))
+        guard let threads = response.data?.repository?.pullRequest?.reviewThreads.nodes else {
+            throw BridgeCommandError(code: "operation_failed", message: "GitHub didn't return the review threads of pull request #\(number).")
+        }
+        return threads.filter { !$0.isResolved }.count
     }
 
     static func resolveExecutable() throws -> String {
@@ -1024,6 +1106,17 @@ enum GitHubPullRequestManager {
     }
 }
 
+/// The combined CI state of a pull request's head commit. `none` is a head with
+/// no checks at all (past the registration grace), which reads as green.
+enum PullRequestChecksState: String, Codable, Sendable {
+    case success, failure, pending, none
+}
+
+/// The colour a linked PR number shows on its task card.
+enum PullRequestHealth: String, Codable, Sendable {
+    case green, red, pending
+}
+
 struct PullRequestReviewState: Codable, Sendable {
     let repositoryPath: String
     let number: Int
@@ -1033,18 +1126,33 @@ struct PullRequestReviewState: Codable, Sendable {
     let localHeadOid: String?
     let hasConflicts: Bool
     let isConfirmedResolved: Bool
+    let checks: PullRequestChecksState
+    let failingChecks: [String]
+    /// Nil unless the probe asked for review threads (autopilot tasks only).
+    let unresolvedReviewThreads: Int?
+    let health: PullRequestHealth
 
     var requiresConflictResolution: Bool {
         hasConflicts || (!merged && mergeable == "MERGEABLE" && headRefOid != nil && headRefOid != localHeadOid)
     }
 
-    init(repositoryPath: String, number: Int, merged: Bool, mergeable: String, headRefOid: String?, localHeadOid: String?) {
+    init(
+        repositoryPath: String, number: Int, merged: Bool, mergeable: String, headRefOid: String?, localHeadOid: String?,
+        checks: PullRequestChecksState = .none, failingChecks: [String] = [], unresolvedReviewThreads: Int? = nil
+    ) {
         self.repositoryPath = repositoryPath
         self.number = number
         self.merged = merged
         self.mergeable = mergeable
         self.headRefOid = headRefOid
         self.localHeadOid = localHeadOid
+        self.checks = checks
+        self.failingChecks = failingChecks
+        self.unresolvedReviewThreads = unresolvedReviewThreads
+        if merged { health = .green }
+        else if checks == .failure || mergeable == "CONFLICTING" { health = .red }
+        else if checks == .pending { health = .pending }
+        else { health = .green }
         hasConflicts = !merged && mergeable == "CONFLICTING"
         isConfirmedResolved = merged || (mergeable == "MERGEABLE" && headRefOid != nil && headRefOid == localHeadOid)
     }
@@ -1054,6 +1162,24 @@ enum PullRequestResolutionCheck: String, Codable, Sendable {
     case resolved
     case stillConflicted
     case inconclusive
+}
+
+extension PullRequestMode {
+    static func parse(_ value: String) throws -> PullRequestMode {
+        guard let mode = PullRequestMode(rawValue: value.lowercased()) else {
+            throw BridgeCommandError(code: "invalid_argument", message: "Unknown pull request mode '\(value)'. Valid modes: manual, pr, autopilot.")
+        }
+        return mode
+    }
+}
+
+/// The `task.pr.autopilot` command's result. `action` is inactive, merged,
+/// green, pending, stalled (moved to Waiting Response), or fixed (a fix turn ran).
+struct PullRequestAutopilotOutcome: Codable, Sendable {
+    let action: String
+    let states: [PullRequestReviewState]
+    let taskStatus: String
+    let reason: String?
 }
 
 /// What the review sync did to one PR-linked repository: no-remote,
@@ -1099,9 +1225,9 @@ struct PlayhousePullRequestService {
         }
     }
 
-    func reviewState(_ record: RepositoryWorktreeRecord, executable: String) async throws -> PullRequestReviewState {
+    func reviewState(_ record: RepositoryWorktreeRecord, executable: String, includeReviewThreads: Bool = false) async throws -> PullRequestReviewState {
         try await PlayhouseBackgroundOperation.run {
-            try GitHubPullRequestManager.reviewState(record, executable: executable)
+            try GitHubPullRequestManager.reviewState(record, executable: executable, includeReviewThreads: includeReviewThreads)
         }
     }
 }
@@ -1640,7 +1766,7 @@ final class BoardTaskManager {
     }
 
     @discardableResult
-    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex, autoCreatePullRequestOnReview: Bool = false) async throws -> BoardTaskRecord {
+    func create(title: String, repositories: [RepositoryWorktreeSpec], contextFolders: [String], provider: ConversationProvider = .codex, pullRequestMode: PullRequestMode = .manual) async throws -> BoardTaskRecord {
         let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedTitle.isEmpty else { throw PlayhouseManagerError.invalidTitle }
         let folders = try Self.normalizeOptionalRoots(contextFolders)
@@ -1658,7 +1784,8 @@ final class BoardTaskManager {
         let task = BoardTask(title: normalizedTitle, status: .backlog, workspaceRootPaths: roots, conversationProvider: provider)
         task.repositoryWorktrees = worktrees
         task.contextFolderPaths = folders
-        task.autoCreatePullRequestOnReview = autoCreatePullRequestOnReview
+        task.autoCreatePullRequestOnReview = pullRequestMode != .manual
+        task.pullRequestAutopilot = pullRequestMode == .autopilot
         return try await withRepositoryAllocationLocks(worktrees.map(\.repositoryPath)) {
             try validateRepositoryAssignments(worktrees, excludingTaskID: nil)
             modelContext.insert(task)
@@ -2168,11 +2295,119 @@ final class BoardTaskManager {
     }
 
     func setAutoCreatePullRequestOnReview(_ id: UUID, enabled: Bool) async throws -> BoardTaskRecord {
+        try await setPullRequestMode(id, mode: enabled ? .pullRequest : .manual)
+    }
+
+    /// Choosing a mode restarts the autopilot loop guard, so re-enabling autopilot
+    /// on a PR it gave up on gets a fresh set of fix attempts.
+    func setPullRequestMode(_ id: UUID, mode: PullRequestMode) async throws -> BoardTaskRecord {
         try await withTaskOperationLock(id) {
             let task = try requireTask(id)
-            task.autoCreatePullRequestOnReview = enabled
+            task.autoCreatePullRequestOnReview = mode != .manual
+            task.pullRequestAutopilot = mode == .autopilot
+            task.pullRequestAutopilotFixAttempts = 0
+            task.pullRequestAutopilotLastFixSignature = nil
             try await saveTaskContext(taskID: id)
+            PlayhouseDiagnostics.record("task.pr.mode.succeeded", fields: ["taskID": id.uuidString, "mode": mode.rawValue])
             return BoardTaskRecord(task: task)
+        }
+    }
+
+    /// Autopilot gives up after this many fix turns that never got the PRs green,
+    /// even when each one changed something.
+    static let maxPullRequestAutopilotFixAttempts = 5
+
+    /// What autopilot should do about a task's probed pull requests. Shared by the
+    /// board's probe (to decide whether to ask the daemon at all) and the daemon's
+    /// `task.pr.autopilot` command (which acts on it).
+    enum PullRequestAutopilotAssessment: String, Codable, Sendable {
+        case merged, green, pending, needsFix = "needs-fix"
+    }
+
+    static func assessPullRequestAutopilot(_ states: [PullRequestReviewState]) -> PullRequestAutopilotAssessment {
+        let open = states.filter { !$0.merged }
+        guard !open.isEmpty else { return .merged }
+        // A local head GitHub hasn't received yet is the review sync's to push
+        // first; a fix turn now would race it for the worktree.
+        if open.contains(where: { !$0.hasConflicts && $0.headRefOid != nil && $0.headRefOid != $0.localHeadOid }) { return .pending }
+        if open.contains(where: { $0.health == .red || ($0.unresolvedReviewThreads ?? 0) > 0 }) { return .needsFix }
+        if open.contains(where: { $0.health == .pending }) { return .pending }
+        return .green
+    }
+
+    /// Identifies a red state so the same unchanged failure is never sent twice.
+    static func pullRequestAutopilotSignature(_ states: [PullRequestReviewState]) -> String {
+        states.filter { !$0.merged }.map { state in
+            [
+                String(state.number), state.headRefOid ?? "-", state.checks.rawValue,
+                state.failingChecks.joined(separator: ","), state.mergeable,
+                String(state.unresolvedReviewThreads ?? 0)
+            ].joined(separator: ":")
+        }.sorted().joined(separator: "|")
+    }
+
+    enum PullRequestAutopilotClaim {
+        /// Send a fix turn for this red state.
+        case fix
+        /// Stop the loop: the task moved to Waiting Response with this reason.
+        case stalled(String)
+    }
+
+    /// Records a fix attempt for a red state, or stops the loop when the same
+    /// state was already sent or the attempt budget is spent.
+    func claimPullRequestAutopilotFix(_ id: UUID, signature: String) async throws -> PullRequestAutopilotClaim {
+        let reason: String? = try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            if task.pullRequestAutopilotLastFixSignature == signature {
+                return "Autopilot already asked \(task.conversationProvider.displayName) to fix this pull request state, and nothing changed. Review the pull request, then send a message to continue."
+            }
+            if task.pullRequestAutopilotFixAttempts >= Self.maxPullRequestAutopilotFixAttempts {
+                return "Autopilot sent \(Self.maxPullRequestAutopilotFixAttempts) fix turns without getting the pull request green. Review it, then send a message to continue."
+            }
+            task.pullRequestAutopilotFixAttempts += 1
+            task.pullRequestAutopilotLastFixSignature = signature
+            try await saveTaskContext(taskID: id)
+            return nil
+        }
+        if let reason {
+            _ = try await setLifecycleStatus(id, to: .waitingResponse, message: reason)
+            PlayhouseDiagnostics.record("task.pr.autopilot.stalled", fields: ["taskID": id.uuidString])
+            return .stalled(reason)
+        }
+        return .fix
+    }
+
+    /// Gives back a claimed attempt whose fix turn never ran, so the next probe
+    /// retries it instead of reporting that nothing changed.
+    func releasePullRequestAutopilotFix(_ id: UUID, signature: String) async throws {
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.pullRequestAutopilotLastFixSignature == signature else { return }
+            task.pullRequestAutopilotFixAttempts = max(0, task.pullRequestAutopilotFixAttempts - 1)
+            task.pullRequestAutopilotLastFixSignature = nil
+            try await saveTaskContext(taskID: id)
+        }
+    }
+
+    /// A message from the user is a fresh request, so the PR state autopilot last
+    /// sent may be sent again; the attempt count still bounds the streak.
+    func clearPullRequestAutopilotSignature(_ id: UUID) async throws {
+        guard let task = try? requireTask(id), task.pullRequestAutopilotLastFixSignature != nil else { return }
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            task.pullRequestAutopilotLastFixSignature = nil
+            try await saveTaskContext(taskID: id)
+        }
+    }
+
+    /// A green state ends the current fix streak.
+    func resetPullRequestAutopilotAttempts(_ id: UUID) async throws {
+        try await withTaskOperationLock(id) {
+            let task = try requireTask(id)
+            guard task.pullRequestAutopilotFixAttempts != 0 || task.pullRequestAutopilotLastFixSignature != nil else { return }
+            task.pullRequestAutopilotFixAttempts = 0
+            task.pullRequestAutopilotLastFixSignature = nil
+            try await saveTaskContext(taskID: id)
         }
     }
 
@@ -2313,18 +2548,20 @@ final class BoardTaskManager {
         return try await reviewPullRequests(task)
     }
 
+    /// Autopilot tasks also read unresolved review threads; other modes skip
+    /// that GitHub request because nothing acts on it.
     func reviewPullRequests(_ task: BoardTask) async throws -> [PullRequestReviewState] {
         let records = task.repositoryWorktrees.filter { $0.pullRequestNumber != nil }
-        return try await reviewPullRequests(records)
+        return try await reviewPullRequests(records, includeReviewThreads: task.pullRequestAutopilot)
     }
 
-    func reviewPullRequests(_ records: [RepositoryWorktreeRecord]) async throws -> [PullRequestReviewState] {
+    func reviewPullRequests(_ records: [RepositoryWorktreeRecord], includeReviewThreads: Bool = false) async throws -> [PullRequestReviewState] {
         guard !records.isEmpty else { return [] }
         let executable = try pullRequestService.resolveExecutable()
         return try await withThrowingTaskGroup(of: PullRequestReviewState.self) { group in
             for record in records {
                 group.addTask {
-                    try await PlayhousePullRequestService().reviewState(record, executable: executable)
+                    try await PlayhousePullRequestService().reviewState(record, executable: executable, includeReviewThreads: includeReviewThreads)
                 }
             }
             var states: [PullRequestReviewState] = []
@@ -3715,14 +3952,19 @@ final class WorkspaceSettingsManager {
         PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "defaultConversationProvider", "value": provider.rawValue])
     }
 
-    /// The Auto PR switch position new tasks start with: whatever the user last chose on any task.
-    var autoCreatePullRequestDefault: Bool {
-        defaults.bool(forKey: WorkspaceSettings.autoCreatePullRequestDefaultKey)
+    /// The PR mode new tasks start with: whatever the user last chose on any task.
+    /// Before the mode existed, the on/off Auto PR choice was stored as a Bool.
+    var pullRequestModeDefault: PullRequestMode {
+        if let stored = defaults.string(forKey: WorkspaceSettings.pullRequestModeDefaultKey),
+           let mode = PullRequestMode(rawValue: stored) {
+            return mode
+        }
+        return defaults.bool(forKey: WorkspaceSettings.autoCreatePullRequestDefaultKey) ? .pullRequest : .manual
     }
 
-    func setAutoCreatePullRequestDefault(_ enabled: Bool) {
-        defaults.set(enabled, forKey: WorkspaceSettings.autoCreatePullRequestDefaultKey)
-        PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "autoCreatePullRequestDefault", "value": String(enabled)])
+    func setPullRequestModeDefault(_ mode: PullRequestMode) {
+        defaults.set(mode.rawValue, forKey: WorkspaceSettings.pullRequestModeDefaultKey)
+        PlayhouseDiagnostics.record("settings.write.succeeded", fields: ["setting": "pullRequestModeDefault", "value": mode.rawValue])
     }
 
     var defaultParentFolderURL: URL? {
@@ -5494,6 +5736,9 @@ final class ConversationManager {
         }
         defer { Self.bumpVisibleRevision(taskID) }
         let task = try tasks.conversationSubject(taskID)
+        if !task.isStandaloneChat, !hideInternalOutcomeReminder, !text.hasPrefix(Self.pullRequestAutopilotPromptMarker) {
+            try await tasks.clearPullRequestAutopilotSignature(taskID)
+        }
         guard contextPageIDs.isEmpty || task.isStandaloneChat else {
             throw BridgeCommandError(
                 code: "invalid_argument",
@@ -7052,6 +7297,100 @@ final class ConversationManager {
         """
     }
 
+    /// Probes an autopilot task's pull requests in Review and, when they're red
+    /// (failing checks, conflicts, or unresolved review threads), sends the task's
+    /// provider a visible fix turn through the normal send path. The loop stops on
+    /// green, on merge, when the model reports `waiting-response`, or when
+    /// `claimPullRequestAutopilotFix` finds nothing changed since the last attempt.
+    func runPullRequestAutopilot(
+        taskID: UUID,
+        onStatus: @escaping ([PullRequestReviewState]) -> Void = { _ in }
+    ) async throws -> PullRequestAutopilotOutcome {
+        let task = try tasks.taskModel(taskID)
+        func outcome(_ action: String, _ states: [PullRequestReviewState] = [], reason: String? = nil) throws -> PullRequestAutopilotOutcome {
+            PullRequestAutopilotOutcome(action: action, states: states, taskStatus: try tasks.taskModel(taskID).status.rawValue, reason: reason)
+        }
+        guard task.pullRequestAutopilot else { return try outcome("inactive", reason: "Autopilot is off for this task.") }
+        guard task.status == .review else { return try outcome("inactive", reason: "Autopilot acts only on tasks in Review.") }
+        guard task.repositoryWorktrees.contains(where: { !$0.isPending && $0.pullRequestNumber != nil }) else {
+            return try outcome("inactive", reason: "This task has no linked pull request yet.")
+        }
+        guard Self.autopilotRunningTaskIDs.insert(taskID).inserted else {
+            return try outcome("inactive", reason: "Autopilot is already handling this task.")
+        }
+        defer { Self.autopilotRunningTaskIDs.remove(taskID) }
+        guard try !tasks.hasConversationTurnReservation(taskID) else {
+            return try outcome("inactive", reason: "A conversation turn is running for this task.")
+        }
+        let states = try await tasks.reviewPullRequests(task)
+        onStatus(states)
+        switch BoardTaskManager.assessPullRequestAutopilot(states) {
+        case .merged:
+            return try outcome("merged", states)
+        case .green:
+            try await tasks.resetPullRequestAutopilotAttempts(taskID)
+            return try outcome("green", states)
+        case .pending:
+            return try outcome("pending", states)
+        case .needsFix:
+            let current = try tasks.taskModel(taskID)
+            guard current.status == .review, current.pullRequestAutopilot else {
+                return try outcome("inactive", states, reason: "The task left Review or autopilot was turned off.")
+            }
+            let signature = BoardTaskManager.pullRequestAutopilotSignature(states)
+            switch try await tasks.claimPullRequestAutopilotFix(taskID, signature: signature) {
+            case .stalled(let reason):
+                return try outcome("stalled", states, reason: reason)
+            case .fix:
+                PlayhouseDiagnostics.record("task.pr.autopilot.fix.started", fields: [
+                    "taskID": taskID.uuidString, "provider": current.conversationProvider.rawValue
+                ])
+                var turnStarted = false
+                do {
+                    _ = try await send(
+                        taskID: taskID,
+                        text: Self.pullRequestAutopilotPrompt(states),
+                        onTurnStarting: { turnStarted = true },
+                        historyMessageLimit: 1
+                    )
+                } catch {
+                    if !turnStarted { try? await tasks.releasePullRequestAutopilotFix(taskID, signature: signature) }
+                    throw error
+                }
+                return try outcome("fixed", states)
+            }
+        }
+    }
+
+    private static var autopilotRunningTaskIDs = Set<UUID>()
+
+    static let pullRequestAutopilotPromptMarker = "Playhouse autopilot:"
+
+    static func pullRequestAutopilotPrompt(_ states: [PullRequestReviewState]) -> String {
+        let problems = states.filter { !$0.merged }.compactMap { state -> String? in
+            var issues: [String] = []
+            if state.checks == .failure {
+                issues.append(state.failingChecks.isEmpty ? "failing checks" : "failing checks: \(state.failingChecks.joined(separator: ", "))")
+            }
+            if state.hasConflicts { issues.append("merge conflicts with its base branch") }
+            if let threads = state.unresolvedReviewThreads, threads > 0 {
+                issues.append("\(threads) unresolved review \(threads == 1 ? "thread" : "threads")")
+            }
+            guard !issues.isEmpty else { return nil }
+            return "- Pull request #\(state.number) (\(state.repositoryPath)): \(issues.joined(separator: "; "))."
+        }
+        return """
+        \(pullRequestAutopilotPromptMarker) this task's pull request isn't green yet. Please get it there.
+
+        \(problems.joined(separator: "\n"))
+
+        1. Read the details with the GitHub CLI from the task worktree: `gh pr checks <number>`, `gh run view <run-id> --log-failed` for failing runs, and the review threads through `gh api graphql` (`reviewThreads` with their comments).
+        2. Fix genuine failures in the task worktree. For merge conflicts, merge the base branch and resolve them. Commit your work; Playhouse pushes the task branch when you report `completed`.
+        3. Treat every unresolved review comment critically: reviewers and bots can be wrong, noisy, or out of scope. Change the code only for comments that really deserve it. For every thread, fixed or not, reply with what you changed or why you left the code as it is, then resolve the thread (GraphQL `addPullRequestReviewThreadReply` and `resolveReviewThread`).
+        4. If something can't be fixed from here — for example GitHub or CI is down, a check needs credentials or permissions you don't have, or the user must act (such as adding a Jira ticket to the pull request title) — don't retry in a loop. Report `waiting-response` and tell the user exactly what is blocking the pull request and what they need to do. Otherwise report `completed` when you're done; Playhouse keeps watching the pull request and sends another turn if it is still red.
+        """
+    }
+
     /// Sent after an explicit `in-progress`: the model asked to keep going.
     static func outcomeContinuationPrompt(attempt: Int) -> String {
         """
@@ -7348,7 +7687,7 @@ final class PlayhouseBridgeRuntime {
                 let provider = try request.arguments["provider"]?.string.map(ConversationProvider.parse) ?? settings.defaultConversationProvider
                 result = try Self.value(await taskManager.create(
                     title: title, repositories: repositories, contextFolders: roots, provider: provider,
-                    autoCreatePullRequestOnReview: settings.autoCreatePullRequestDefault
+                    pullRequestMode: settings.pullRequestModeDefault
                 ))
             case "task.get", "task.show":
                 let taskID = try request.requiredUUID("taskID")
@@ -7398,9 +7737,23 @@ final class PlayhouseBridgeRuntime {
                     allowUnmergedPullRequests: request.arguments["allowUnmergedPullRequests"]?.bool ?? false
                 ))
             case "task.pr.auto":
-                let enabled = request.arguments["enabled"]?.bool ?? false
-                result = try Self.value(await taskManager.setAutoCreatePullRequestOnReview(request.requiredUUID("taskID"), enabled: enabled))
-                settings.setAutoCreatePullRequestDefault(enabled)
+                let mode: PullRequestMode = request.arguments["enabled"]?.bool == true ? .pullRequest : .manual
+                result = try Self.value(await taskManager.setPullRequestMode(request.requiredUUID("taskID"), mode: mode))
+                settings.setPullRequestModeDefault(mode)
+            case "task.pr.mode":
+                let mode = try PullRequestMode.parse(request.requiredString("mode"))
+                result = try Self.value(await taskManager.setPullRequestMode(request.requiredUUID("taskID"), mode: mode))
+                settings.setPullRequestModeDefault(mode)
+            case "task.pr.autopilot":
+                let conversations = ConversationManager(tasks: taskManager, clients: conversationClients(), settingsManager: settings)
+                result = try Self.value(await conversations.runPullRequestAutopilot(
+                    taskID: request.requiredUUID("taskID"),
+                    onStatus: { states in
+                        if let payload = try? Self.value(states) {
+                            eventHandler(BridgeEvent(requestID: request.id, type: "autopilot_status", payload: payload))
+                        }
+                    }
+                ))
             case "task.pr.create":
                 result = try Self.value(await taskManager.createPullRequests(
                     request.requiredUUID("taskID"),

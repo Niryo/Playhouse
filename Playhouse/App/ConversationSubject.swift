@@ -162,6 +162,8 @@ protocol ConversationSubject: AnyObject, Observable {
     /// Whether moving this subject to Review should create its pull request(s)
     /// automatically. Always false for a standalone chat, which has no repositories.
     var autoCreatePullRequestOnReview: Bool { get }
+    /// Manual, PR, or autopilot. Always manual for a standalone chat.
+    var pullRequestMode: PullRequestMode { get }
 
     /// Which creature this is, derived from the model's type rather than stored on a row.
     ///
@@ -338,6 +340,7 @@ extension StandaloneChat: ConversationSubject {
     var repositoryWorktrees: [RepositoryWorktreeRecord] { [] }
     var contextFolderPaths: [String] { [] }
     var autoCreatePullRequestOnReview: Bool { false }
+    var pullRequestMode: PullRequestMode { .manual }
     var isStandaloneChat: Bool { true }
 }
 
