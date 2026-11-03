@@ -689,6 +689,8 @@ final class ClaudeSessionRunner {
         }
     }
 
+    func debugImportReplay(_ message: [String: Any]) async { await handle(message) } // DEBUG-IMPORT: replays a recorded session line through the live handler.
+
     private func handle(_ message: [String: Any]) async {
         switch message["type"] as? String {
         case "control_response":

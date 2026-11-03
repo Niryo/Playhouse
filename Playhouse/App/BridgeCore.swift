@@ -6022,6 +6022,10 @@ final class ConversationManager {
         }
     }
 
+    func debugImportRecordClaudeMessage(taskID: UUID, turnID: String, modelID: String?, _ message: ConversationMessage) { recordClaudeMessage(taskID: taskID, turnID: turnID, modelID: modelID, message) } // DEBUG-IMPORT:
+    func debugImportRecordClaudeActivity(taskID: UUID, turnID: String, _ activity: ConversationActivity) { recordClaudeActivity(taskID: taskID, turnID: turnID, activity) } // DEBUG-IMPORT:
+    func debugImportPrepareSegmentID(taskID: UUID) async throws -> String? { try await prepareSegment(task: tasks.conversationSubject(taskID))?.segmentID } // DEBUG-IMPORT:
+
     /// Claude reports a background agent's result on its task notification,
     /// outside the parent assistant response. Persist that report as a normal
     /// assistant message so it is visible in the conversation and available to
