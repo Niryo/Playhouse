@@ -262,6 +262,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = self.defaults_suite
         environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = arguments.service_name
         environment["CODEX_HOME"] = str(self.data_directory / "codex-home")
+        # The CLI forwards CLAUDE_CONFIG_DIR; a test sets its own rather than inherit the host's.
+        environment.pop("CLAUDE_CONFIG_DIR", None)
         environment.update(extra_environment or {})
         completed = subprocess.run(
             [str(self.cli), *map(str, command)],
@@ -292,6 +294,8 @@ class PlayhouseBridgeTests(unittest.TestCase):
         environment["PLAYHOUSE_E2E_DEFAULTS_SUITE"] = self.defaults_suite
         environment["PLAYHOUSE_BRIDGE_SERVICE_NAME"] = arguments.service_name
         environment["CODEX_HOME"] = str(self.data_directory / "codex-home")
+        # The CLI forwards CLAUDE_CONFIG_DIR; a test sets its own rather than inherit the host's.
+        environment.pop("CLAUDE_CONFIG_DIR", None)
         environment.update(extra_environment or {})
         return subprocess.Popen(
             [str(self.cli), *map(str, command)],
@@ -7330,7 +7334,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         probe = self.data_directory / "codex-question-ownership-probe"
         core = ["BoardTask", "ConversationSubject", "WorkspaceSupport", "WorkspaceChanges", "CodexAppServerClient",
-                "ConversationModel", "ClaudeCodeClient", "ProcessCPUSampler", "ConversationTranscriptStore",
+                "ConversationModel", "ClaudeCodeClient", "ProviderRequestLog", "ProcessCPUSampler", "ConversationTranscriptStore",
                 "StandaloneChatStore", "BridgeCore"]
         command = ["xcrun", "--sdk", "macosx", "swiftc", "-parse-as-library", "-swift-version", "5", "-D", "DEBUG", "-Onone"]
         for framework in ("Foundation", "AppKit", "SwiftUI", "SwiftData", "Combine"):
@@ -8821,7 +8825,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         environment = self.install_claude_fixture("claude-fixture-token-usage")
         # The session files the fixture writes live under Claude Code's config directory.
         session_files = self.data_directory / "claude-config"
-        file_environment = {**environment, "PLAYHOUSE_E2E_CLAUDE_CONFIG_DIR": str(session_files)}
+        file_environment = {**environment, "CLAUDE_CONFIG_DIR": str(session_files)}
         task_id = self.assert_success(self.call_cli(
             "task", "create", "--title", "Claude token usage", "--root", self.primary, "--provider", "claude"
         )[0])["id"]
@@ -8924,6 +8928,243 @@ class PlayhouseBridgeTests(unittest.TestCase):
             {"totalCalls": 3, "totalSentTokens": 1900, "totalOutputTokens": 80, "finalTranscriptTokens": 900},
         )
         self.assertEqual(calls["subagents"], {"count": 1, "calls": 1, "sentTokens": 300, "outputTokens": 10})
+
+    def run_claude_token_waste_turn(self, title):
+        """One Claude fixture turn whose session file logs every request; see
+        write_waste_session in scripts/fixtures/claude-code-fixture.py."""
+        environment = self.install_claude_fixture("claude-fixture-token-waste")
+        environment["CLAUDE_CONFIG_DIR"] = str(self.data_directory / "claude-config")
+        task_id = self.create_task(title=title, provider="claude")["id"]
+        self.assert_success(self.call_cli(
+            "conversation", "send", task_id, "--message", "Show token waste.", extra_environment=environment,
+        )[0])
+        return task_id, environment
+
+    # case-contract: test_task_token_waste_ranks_claude_items_by_size | A task with no conversation reports its token map unavailable, with no wasters, tools or agents. After a Claude Code fixture turn whose session file logs every request (a shape, blobs, and transcript lines referenced by hash, including a parallel tool call sent as one message), the map reads the main agent and its subagent, and the main agent's final transcript tokens equal its last request's context exactly. The largest item is the MCP tool's 1,000-line log, ranked by the tokens it added, flagged as removed by the compaction, and sharing the tokens of the request it arrived in with its call by characters. The tools rollup ranks that MCP tool first by tokens added, the MCP server rollup counts its defined and called tools and what its definitions cost, the overhead lists the system prompt, each built-in tool definition and the server's definitions as sent with every request, the README read twice is one repeated result, the request that re-sent its context without the prompt cache is the one cache miss, and the compaction is counted. The Token Stats modal shows these in its Wasters, Tools & MCP and Overhead sections.
+    def test_task_token_waste_ranks_claude_items_by_size(self):
+        empty_id = self.create_task(title="No conversation yet", provider="claude")["id"]
+        empty = self.assert_success(self.call_cli("task", "token-waste", empty_id)[0])
+        self.assertFalse(empty["available"], "A task with no conversation has nothing to map.")
+        self.assertEqual((empty["wasters"], empty["tools"], empty["agents"]), ([], [], []))
+
+        task_id, environment = self.run_claude_token_waste_turn("Claude token waste")
+        report = self.assert_success(self.call_cli("task", "token-waste", task_id, extra_environment=environment)[0])
+        self.assertTrue(report["available"])
+        agents = {agent["id"]: agent for agent in report["agents"]}
+        self.assertEqual(list(agents), ["claude", "claude/fxw"], "The main agent comes first, then each subagent file.")
+        # The fixture's main agent makes 66 requests and ends on a 3,160-token context.
+        self.assertEqual(
+            {key: agents["claude"][key] for key in ("requests", "finalTranscriptTokens", "compactions")},
+            {"requests": 66, "finalTranscriptTokens": 3160, "compactions": 1},
+        )
+        self.assertEqual(agents["claude/fxw"]["finalTranscriptTokens"], 1000)
+        # The usage summary sums the same session files by message ID; the two readers must agree.
+        call_usage = self.assert_success(self.call_cli("task", "token-usage", task_id, extra_environment=environment)[0])["callUsage"]
+        self.assertEqual(call_usage["mainAgent"]["sentTokens"], agents["claude"]["sentTokens"])
+        self.assertEqual(call_usage["mainAgent"]["finalTranscriptTokens"], agents["claude"]["finalTranscriptTokens"])
+
+        wasters = report["wasters"]
+        top = wasters[0]
+        self.assertEqual(
+            (top["label"], top["kind"], top["agent"], top["inFinalTranscript"]),
+            ("fixturelogs/query_logs", "toolResult", "claude", False),
+            "The MCP tool's log is the largest item, and the compaction removed it.",
+        )
+        self.assertEqual(top["requests"], 63, "Three requests before the 60 filler rounds carried the log.")
+        self.assertEqual(top["rentTokens"], top["tokens"] * 63)
+        self.assertEqual([item["tokens"] for item in wasters], sorted((item["tokens"] for item in wasters), reverse=True))
+        # The log and its call arrived together, adding 18,000 tokens split by characters.
+        rows = self.assert_success(self.call_cli(
+            "task", "raw-input", task_id, "--scope", "all", "--limit", "1000", extra_environment=environment,
+        )[0])["rows"]
+        log = next(row for row in rows if row["id"] == top["item"])
+        call = next(row for row in rows if row["kind"] == "toolCall" and row["label"] == "fixturelogs/query_logs")
+        self.assertEqual(top["tokens"], 18000 - 18000 * call["textLength"] // (call["textLength"] + log["textLength"]))
+        self.assertEqual(call["tokens"] + top["tokens"], 18000)
+
+        tools = report["tools"]
+        self.assertEqual([tool["id"] for tool in tools][:3], ["fixturelogs/query_logs", "Bash", "Read"])
+        self.assertEqual(
+            {key: tools[0][key] for key in ("server", "calls", "totalTokens", "resultTokens", "largestResultTokens")},
+            {"server": "fixturelogs", "calls": 1, "totalTokens": 18000, "resultTokens": top["tokens"], "largestResultTokens": top["tokens"]},
+        )
+        self.assertEqual(tools[1]["calls"], 62, "Sixty filler rounds (the first runs two tools) and the outcome report.")
+        self.assertEqual(tools[2]["calls"], 3, "README.md is read twice by the main agent and once by the subagent.")
+        server = report["servers"][0]
+        self.assertEqual((server["id"], server["tools"], server["calls"], server["totalTokens"]), ("fixturelogs", 2, 1, 18000))
+        self.assertGreater(server["definitionTokens"], 0, "Both tool definitions cost tokens on every request.")
+
+        overhead = {entry["label"]: entry for entry in report["overhead"]}
+        for label in ("System prompt (part 1)", "Tool definition: Bash", "Tool definition: Read", "MCP server fixturelogs · 2 tool definitions"):
+            self.assertIn(label, overhead)
+            self.assertTrue(overhead[label]["everyRequest"], f"{label} is sent with every request.")
+            self.assertEqual(overhead[label]["requests"], 66)
+        repeats = [entry for entry in report["duplicates"] if entry["agent"] == "claude"]
+        self.assertEqual([(entry["label"], entry["copies"]) for entry in repeats], [("Read", 2)])
+        self.assertEqual(repeats[0]["wastedTokens"], repeats[0]["tokensPerCopy"])
+        self.assertEqual(
+            [(miss["agent"], miss["request"]) for miss in report["cacheMisses"]], [("claude", 34)],
+            "Only the request that skipped the cache re-sent its context; adding the log is new content, not a miss.",
+        )
+
+    # case-contract: test_task_token_waste_ranks_codex_items_by_size | A Codex fixture turn whose thread and subagent have rollout files gives the same map from Codex's own format: a request was sent the instructions plus every item before its own output, the final transcript's tokens equal the last request's input exactly after a compaction replaced the history, Codex's unsaved tool definitions appear as one hidden-overhead item sent with every request, encrypted reasoning is shown by its size, the MCP tool's log is the largest item and was removed by the compaction, the repeated README read and the cache miss are reported, and the subagent's thread is its own agent. The raw input's final transcript lists the hidden overhead, the instructions and the replacement history once each without the removed log, and an item's full text, from a tool output or from the replacement history, reads back exactly as Codex saved it, in chunks, with its call named. The Token Stats modal shows the Codex wasters, the hidden overhead and the subagent, and showing the log opens its full text.
+    def test_task_token_waste_ranks_codex_items_by_size(self):
+        task_id = self.create_task(title="Codex token waste", roots=[self.primary])["id"]
+        self.complete_fixture_turn(task_id, executable_name="codex-fixture-token-waste", message="Show token waste.")
+        thread_id = self.assert_success(self.call_cli("task", "get", task_id)[0])["codexThreadID"]
+        report = self.assert_success(self.call_cli("task", "token-waste", task_id)[0])
+        self.assertTrue(report["available"])
+        agents = {agent["id"]: agent for agent in report["agents"]}
+        self.assertEqual(list(agents), ["codex", f"codex/{thread_id}-subagent"])
+        self.assertEqual(
+            {key: agents["codex"][key] for key in ("requests", "finalTranscriptTokens", "compactions")},
+            {"requests": 5, "finalTranscriptTokens": 4400, "compactions": 1},
+            "The final transcript is what the last request was sent, after the compaction.",
+        )
+        self.assertEqual(agents[f"codex/{thread_id}-subagent"]["finalTranscriptTokens"], 300)
+
+        top = report["wasters"][0]
+        self.assertEqual(
+            (top["label"], top["kind"], top["inFinalTranscript"], top["requests"]),
+            ("fixturelogs/query_logs", "toolResult", False, 3),
+        )
+        overhead = {entry["kind"]: entry for entry in report["overhead"]}
+        hidden = overhead["hiddenOverhead"]
+        self.assertEqual(hidden["label"], "Tool definitions and other context Codex does not save")
+        self.assertTrue(hidden["everyRequest"])
+        self.assertEqual(hidden["requests"], 5)
+        self.assertTrue(0 < hidden["tokens"] < 4000, "The first request's cost beyond its visible items.")
+        self.assertEqual(overhead["systemPrompt"]["label"], "Codex base instructions")
+        tools = {tool["id"]: tool for tool in report["tools"]}
+        self.assertEqual(report["tools"][0]["id"], "fixturelogs/query_logs")
+        self.assertEqual((tools["fixturelogs/query_logs"]["server"], tools["exec"]["calls"]), ("fixturelogs", 2))
+        self.assertEqual([(entry["label"], entry["copies"]) for entry in report["duplicates"]], [("exec", 2)])
+        self.assertEqual([(miss["agent"], miss["request"]) for miss in report["cacheMisses"]], [("codex", 4)])
+
+        rows = self.assert_success(self.call_cli("task", "raw-input", task_id, "--scope", "all", "--limit", "1000")[0])["rows"]
+        reasoning = next(row for row in rows if row["kind"] == "thinking")
+        self.assertEqual(reasoning["preview"], "[encrypted reasoning: 305 characters]")
+        self.assertEqual(rows[0]["kind"], "hiddenOverhead", "The hidden overhead leads everything sent.")
+
+        # The final transcript: hidden overhead, base instructions, then the
+        # compaction's replacement history and the message after it, each once.
+        final = self.assert_success(self.call_cli("task", "raw-input", task_id, "--limit", "1000")[0])
+        self.assertEqual(final["totalTokens"], 4400)
+        self.assertEqual(
+            [(row["kind"], row["label"]) for row in final["rows"]],
+            [("hiddenOverhead", "Tool definitions and other context Codex does not save"),
+             ("systemPrompt", "Codex base instructions"), ("userText", "User message"),
+             ("other", "Compaction summary"), ("userText", "User message")],
+        )
+        self.assertNotIn(top["item"], [row["id"] for row in final["rows"]], "The compaction removed the log.")
+
+        def full_text(item):
+            chunks, offset = [], 0
+            while True:
+                chunk = self.assert_success(self.call_cli(
+                    "task", "raw-input-text", task_id, "--item", str(item), "--offset", str(offset),
+                )[0])
+                chunks.append(chunk["text"])
+                if chunk.get("nextOffset") is None:
+                    return "".join(chunks), len(chunks), chunk
+                offset = chunk["nextOffset"]
+
+        log_text, log_chunks, log_chunk = full_text(top["item"])
+        expected_log = "".join(
+            f"2026-11-03T10:{index // 60 % 60:02d}:{index % 60:02d}Z INFO fixture log line {index:04d} "
+            f"{'NEEDLE-42 ' if index == 900 else ''}request ok path=/api/orc/builds/{index:04d}\n"
+            for index in range(1, 1001)
+        )
+        self.assertEqual(log_text, expected_log, "A Codex tool output reads back exactly as Codex saved it.")
+        self.assertGreater(log_chunks, 1)
+        self.assertTrue(log_chunk["call"].startswith("fixturelogs/query_logs"))
+        self.assertIn("5000", log_chunk["call"])
+        replaced_prompt = final["rows"][2]["id"]
+        self.assertEqual(full_text(replaced_prompt)[0], "Show token waste.", "An item of the replacement history reads back exactly.")
+        self.assertEqual(full_text(final["rows"][1]["id"])[0], "You are the Codex fixture. " * 80)
+
+    # case-contract: test_task_raw_input_pages_final_transcript_without_duplicates | A task with no conversation has no raw input: its page is empty and reading an item's text is not_found. After a Claude Code fixture turn, the raw input lists the final transcript with each item once across pages and without the log a compaction removed; the everything-sent scope adds what was removed, ordering by size lists the largest first, a search finds the log by a word only its full text contains, and a focus item reports its position. An item's full text reads back in chunks that end on a line break and join to the exact text, with the call that produced it named. An unknown agent or item is not_found, and an unknown order or a limit of zero is invalid_argument. In the app, View raw input opens the final transcript, scrolling loads the next page of rows, showing the largest waster opens it in the everything-sent scope with its full text, and scrolling that text reaches its last line.
+    def test_task_raw_input_pages_final_transcript_without_duplicates(self):
+        empty_id = self.create_task(title="No raw input yet", provider="claude")["id"]
+        empty = self.assert_success(self.call_cli("task", "raw-input", empty_id)[0])
+        self.assertEqual((empty["total"], empty["rows"], empty["agents"], empty.get("agent")), (0, [], [], None))
+        response, _ = self.call_cli("task", "raw-input-text", empty_id, "--item", "0", expected_status=3)
+        self.assert_failure(response, "not_found")
+
+        task_id, environment = self.run_claude_token_waste_turn("Claude raw input")
+
+        def raw_input(*options, expected_status=0):
+            response, _ = self.call_cli("task", "raw-input", task_id, *options, extra_environment=environment, expected_status=expected_status)
+            return response
+
+        first = self.assert_success(raw_input("--limit", "4"))
+        self.assertEqual((first["agent"], first["scope"], first["order"]), ("claude", "final", "transcript"))
+        # Shape (system prompt and four tools), the prompt's two blocks, the
+        # compaction summary, and the last call and result.
+        self.assertEqual((first["total"], first["totalTokens"]), (10, 3160))
+        final_ids = []
+        for offset in range(0, first["total"], 4):
+            page = self.assert_success(raw_input("--offset", str(offset), "--limit", "4"))
+            self.assertEqual(page["offset"], offset)
+            final_ids += [row["id"] for row in page["rows"]]
+            self.assertTrue(all(row["inFinalTranscript"] for row in page["rows"]))
+        self.assertEqual(len(final_ids), 10)
+        self.assertEqual(len(set(final_ids)), 10, "Each item appears once across pages.")
+        self.assertEqual(
+            [row["kind"] for row in first["rows"]], ["systemPrompt", "toolDefinition", "toolDefinition", "toolDefinition"],
+        )
+
+        everything = self.assert_success(raw_input("--scope", "all", "--limit", "1000"))
+        all_ids = [row["id"] for row in everything["rows"]]
+        self.assertEqual(len(all_ids), everything["total"])
+        self.assertEqual(len(set(all_ids)), len(all_ids), "Everything sent still lists each item once.")
+        self.assertGreater(everything["total"], 100, "Enough items to need a second page in the app.")
+        log = next(row for row in everything["rows"] if row["label"] == "fixturelogs/query_logs" and row["kind"] == "toolResult")
+        self.assertNotIn(log["id"], final_ids, "The compaction removed the log from the final transcript.")
+        self.assertEqual(
+            sorted(row["id"] for row in everything["rows"] if row["inFinalTranscript"]), sorted(final_ids),
+        )
+
+        largest = self.assert_success(raw_input("--scope", "all", "--order", "size", "--limit", "5"))
+        self.assertEqual(largest["rows"][0]["id"], log["id"])
+        self.assertEqual([row["tokens"] for row in largest["rows"]], sorted((row["tokens"] for row in largest["rows"]), reverse=True))
+        self.assertNotIn("NEEDLE-42", log["preview"], "The search word sits deep in the log, past its preview.")
+        found = self.assert_success(raw_input("--scope", "all", "--query", "NEEDLE-42"))
+        self.assertEqual([row["id"] for row in found["rows"]], [log["id"]])
+        focused = self.assert_success(raw_input("--scope", "all", "--limit", "1", "--focus", str(log["id"])))
+        self.assertEqual(focused["focusPosition"], all_ids.index(log["id"]))
+
+        chunks = []
+        offset = 0
+        while True:
+            chunk = self.assert_success(self.call_cli(
+                "task", "raw-input-text", task_id, "--item", str(log["id"]), "--offset", str(offset),
+                extra_environment=environment,
+            )[0])
+            self.assertEqual(chunk["offset"], offset)
+            chunks.append(chunk["text"])
+            # The last chunk has no next offset, so the key is absent.
+            if chunk.get("nextOffset") is None:
+                break
+            self.assertTrue(chunk["text"].endswith("\n"), "A chunk that is not the last ends on a line break.")
+            offset = chunk["nextOffset"]
+        self.assertGreater(len(chunks), 1, "A 1,000-line log reads back in more than one chunk.")
+        text = "".join(chunks)
+        self.assertEqual(len(text), chunk["totalLength"])
+        lines = text.splitlines()
+        self.assertEqual(len(lines), 1000)
+        self.assertIn("NEEDLE-42", lines[899])
+        self.assertTrue(lines[-1].endswith("/api/orc/builds/1000"))
+        self.assertTrue(chunk["call"].startswith("fixturelogs/query_logs"), "A tool result names the call that produced it.")
+        self.assertIn("5000", chunk["call"])
+
+        self.assert_failure(raw_input("--agent", "nope", expected_status=3), "not_found")
+        self.assert_failure(raw_input("--order", "bogus", expected_status=2), "invalid_argument")
+        self.assert_failure(raw_input("--limit", "0", expected_status=2), "invalid_argument")
+        response, _ = self.call_cli(
+            "task", "raw-input-text", task_id, "--item", "99999", extra_environment=environment, expected_status=3,
+        )
+        self.assert_failure(response, "not_found")
 
     # case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to twenty million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's token counter re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
     def test_settings_token_usage_color_max_round_trip(self):

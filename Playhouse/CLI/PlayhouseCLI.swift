@@ -45,6 +45,12 @@ enum PlayhouseCLI {
         if let fixtureExecutable = ProcessInfo.processInfo.environment["PLAYHOUSE_E2E_CLAUDE_EXECUTABLE"] {
             configuredRequest.arguments["__claudeExecutable"] = .string(fixtureExecutable)
         }
+        // The daemon is started by launchd and never sees the caller's environment,
+        // so a caller's own Claude config directory travels with the request, as
+        // CODEX_HOME does: its turns and its session-file reads then use it.
+        if let claudeConfig = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"], !claudeConfig.isEmpty {
+            configuredRequest.arguments["__claudeConfigDirectory"] = .string(claudeConfig)
+        }
 
         do {
             let response = try BridgeClient().send(configuredRequest) { event in
@@ -111,6 +117,23 @@ enum PlayhouseCLI {
             case "token-usage":
                 let id = try firstPositional(tail)
                 return BridgeRequest(command: "task.token-usage", arguments: ["taskID": .string(id)])
+            case "token-waste":
+                let id = try firstPositional(tail)
+                return BridgeRequest(command: "task.token-waste", arguments: ["taskID": .string(id)])
+            case "raw-input", "raw-input-text":
+                let id = try firstPositional(Array(tail.prefix(1)))
+                let names: Set<String> = operation == "raw-input"
+                    ? ["--agent", "--scope", "--order", "--query", "--offset", "--limit", "--focus"]
+                    : ["--agent", "--item", "--offset", "--length"]
+                let flags = try parseFlags(Array(tail.dropFirst()), valueFlags: names)
+                var arguments: [String: BridgeValue] = ["taskID": .string(id)]
+                for name in names {
+                    if let value = flags[name]?.first { arguments[String(name.dropFirst(2))] = .string(value) }
+                }
+                if operation == "raw-input-text", arguments["item"] == nil {
+                    throw CLIError.usage("Use: playhouse task raw-input-text <task-id> --item <n> [--agent <id>] [--offset <n>] [--length <n>]")
+                }
+                return BridgeRequest(command: operation == "raw-input" ? "task.raw-input" : "task.raw-input-text", arguments: arguments)
             case "cpu-usage":
                 let id = try firstPositional(tail)
                 return BridgeRequest(command: "task.cpu-usage", arguments: ["taskID": .string(id)])
@@ -688,6 +711,9 @@ enum PlayhouseCLI {
       playhouse workspace repos list
       playhouse settings get|clear-parent|set-parent <path>|set-last-repositories --repo <path>...|set-appearance <dark|light>|set-default-provider <codex|claude>|set-token-usage-color-max <tokens>|set-cpu-usage-color-max <percent>
       playhouse task token-usage <task-id>
+      playhouse task token-waste <task-id>
+      playhouse task raw-input <task-id> [--agent <id>] [--scope final|all] [--order transcript|size|rent] [--query <text>] [--offset <n>] [--limit <n>] [--focus <item>]
+      playhouse task raw-input-text <task-id> --item <n> [--agent <id>] [--offset <n>] [--length <n>]
       playhouse task cpu-usage <task-id>
       playhouse conversation history <task-id> [--limit <messages>] [--before <message-id>]
       playhouse conversation present-image <task-id> --image <path> [--caption <text>]
