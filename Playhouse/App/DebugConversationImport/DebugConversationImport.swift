@@ -168,6 +168,15 @@ enum ClaudeSessionFileAdapter {
         var outstandingTasks: [String: String] = [:]  // task ID → tool use ID
         var awaitingParentWake = false
         var skipped: [String: Int] = [:]
+        // Background work the file later reports finished. Work it never
+        // reports (a shell the user killed, a session closed early) must not
+        // hold every later prompt inside one turn.
+        let notifiedTaskIDs = Set(objects.compactMap { object -> String? in
+            guard object["type"] as? String == "user", let body = object["message"] as? [String: Any] else { return nil }
+            let text = (body["content"] as? String)
+                ?? (body["content"] as? [[String: Any]] ?? []).compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }.joined()
+            return taskNotification(text)?.taskID
+        })
         let timestamps = ISO8601DateFormatter()
         timestamps.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
@@ -221,7 +230,7 @@ enum ClaudeSessionFileAdapter {
                    let toolUseID = blocks.first(where: { $0["type"] as? String == "tool_result" })?["tool_use_id"] as? String {
                     let taskID = (result["backgroundTaskId"] as? String)
                         ?? (result["isAsync"] as? Bool == true ? result["agentId"] as? String : nil)
-                    if let taskID {
+                    if let taskID, notifiedTaskIDs.contains(taskID) {
                         let taskType = toolNames[toolUseID] == "Bash" ? "local_bash" : "local_agent"
                         steps.append(.message([
                             "type": "system", "subtype": "task_started", "task_id": taskID,
