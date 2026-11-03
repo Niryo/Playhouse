@@ -8739,7 +8739,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertTrue(any(event.get("event") == "workspace.file.read.failed" and event.get("path") == "stale.txt" for event in diagnostics))
         self.assertNotIn("Shared working version.", json.dumps(diagnostics))
 
-    # case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch.
+    # case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch. A local base branch that is ahead of its remote-tracking branch stays the base, so unpushed base commits merged into the task branch are not listed as task changes.
     def test_external_git_edits_and_commit_refresh_workspace_changes(self):
         repository = self.data_directory / "external-git"
         repository.mkdir()
@@ -8806,13 +8806,26 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.run_git(repository, "push", "origin", "main")
         self.run_git(repository, "reset", "--hard", "HEAD~1")
         self.run_git(worktree, "merge", "--no-edit", "origin/main")
+        (worktree / "post-merge.txt").write_text("Written after the merge.\n", encoding="utf-8")
         response, _ = self.call_cli("task", "changes", "list", task_id)
         entries = {entry["path"]: entry for entry in self.assert_success(response)["unviewed"]}
-        self.assertEqual(set(entries), {"tracked.txt", "untracked.txt"})
+        self.assertEqual(set(entries), {"post-merge.txt", "tracked.txt", "untracked.txt"})
         self.assertNotIn("upstream-only.txt", entries)
         self.assertNotIn("base-only.txt", entries)
         stale_base_diff = self.assert_success(self.changes_diff(task_id, "tracked.txt", "unviewed", repository=worktree))
         self.assertEqual(stale_base_diff["original"], "Baseline.\n")
+
+        # A local base branch that is ahead of origin holds work the task was started from, so it stays the base.
+        self.run_git(repository, "merge", "--ff-only", "origin/main")
+        (repository / "local-ahead.txt").write_text("Local only.\n", encoding="utf-8")
+        self.run_git(repository, "add", "local-ahead.txt")
+        self.run_git(repository, "commit", "-m", "Unpushed local base commit")
+        self.run_git(worktree, "merge", "--no-edit", "main")
+        (worktree / "post-ahead.txt").write_text("Written after the local merge.\n", encoding="utf-8")
+        response, _ = self.call_cli("task", "changes", "list", task_id)
+        entries = {entry["path"]: entry for entry in self.assert_success(response)["unviewed"]}
+        self.assertEqual(set(entries), {"post-ahead.txt", "post-merge.txt", "tracked.txt", "untracked.txt"})
+        self.assertNotIn("local-ahead.txt", entries)
 
     def install_claude_fixture(self, name):
         """Installs the Claude Code protocol fixture and returns its turn environment."""

@@ -11978,7 +11978,7 @@ final class PlayhouseUITests: XCTestCase {
         )
     }
 
-    // case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch.
+    // case-contract: test_external_git_edits_and_commit_refresh_workspace_changes | A newly created task branch with no branch or worktree changes starts with empty Viewed and Changes sections. External Git commits unique to the task branch and staged, unstaged, or untracked edits update the open task's Changes sidebar automatically; commits unique to the base branch are excluded. Fresh CLI connections report the same per-file inventory. When the base branch's local copy is stale behind its origin remote-tracking branch and the task branch has merged the newer upstream commits, those commits are excluded as well, so the inventory matches the pull request instead of the stale local branch. A local base branch that is ahead of its remote-tracking branch stays the base, so unpushed base commits merged into the task branch are not listed as task changes.
     func test_external_git_edits_and_commit_refresh_workspace_changes() throws {
         let repository = runDirectory.appendingPathComponent("external-git", isDirectory: true)
         try FileManager.default.createDirectory(at: repository, withIntermediateDirectories: true)
@@ -12052,10 +12052,27 @@ final class PlayhouseUITests: XCTestCase {
         try runGit(repository, "push", "origin", "main")
         try runGit(repository, "reset", "--hard", "HEAD~1")
         try runGit(worktree, "merge", "--no-edit", "origin/main")
+        // A file written after the merge only appears once the sidebar has rescanned the merged
+        // branch, so waiting for its row proves the absence check below runs against fresh state.
+        try "Written after the merge.\n".write(to: worktree.appendingPathComponent("post-merge.txt"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(element("workspace-change-unviewed-post-merge.txt").waitForExistence(timeout: 10))
         let staleBase = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
         let staleBaseEntries = staleBase?["unviewed"] as? [[String: Any]] ?? []
-        XCTAssertEqual(staleBaseEntries.map { $0["path"] as? String }, ["tracked.txt", "untracked.txt"])
-        XCTAssertTrue(waitUntil({ !self.element("workspace-change-unviewed-upstream-only.txt").exists }, timeout: 10))
+        XCTAssertEqual(staleBaseEntries.map { $0["path"] as? String }, ["post-merge.txt", "tracked.txt", "untracked.txt"])
+        XCTAssertFalse(element("workspace-change-unviewed-upstream-only.txt").exists)
+
+        // A local base branch that is ahead of origin holds work the task was started from, so it stays the base.
+        try runGit(repository, "merge", "--ff-only", "origin/main")
+        try "Local only.\n".write(to: repository.appendingPathComponent("local-ahead.txt"), atomically: true, encoding: .utf8)
+        try runGit(repository, "add", "local-ahead.txt")
+        try runGit(repository, "commit", "-m", "Unpushed local base commit")
+        try runGit(worktree, "merge", "--no-edit", "main")
+        try "Written after the local merge.\n".write(to: worktree.appendingPathComponent("post-ahead.txt"), atomically: true, encoding: .utf8)
+        XCTAssertTrue(element("workspace-change-unviewed-post-ahead.txt").waitForExistence(timeout: 10))
+        let aheadBase = try runCLI(["task", "changes", "list", taskID])["result"] as? [String: Any]
+        let aheadBaseEntries = aheadBase?["unviewed"] as? [[String: Any]] ?? []
+        XCTAssertEqual(aheadBaseEntries.map { $0["path"] as? String }, ["post-ahead.txt", "post-merge.txt", "tracked.txt", "untracked.txt"])
+        XCTAssertFalse(element("workspace-change-unviewed-local-ahead.txt").exists)
         XCTAssertTrue(element("workspace-change-unviewed-tracked.txt").exists)
         attachScreenshot(named: "Merged upstream commits are excluded when the local base branch is stale")
     }
