@@ -716,9 +716,9 @@ struct TaskConversationView: View {
     @State private var hasPausedResponse = false
     @State private var isPausingResponse = false
     @State private var queuedMessages: [QueuedConversationMessage] = []
-    /// A `.dispatching` follow-up is already being sent (its message is in the
-    /// conversation) and stays in the store until that whole turn ends, so only
-    /// the others are still waiting for the user.
+    /// A `.dispatching` follow-up is claimed for delivery: either reserved for a
+    /// steer, or sent as its own turn and kept in the store until that whole turn
+    /// ends. Only the others are still waiting for the user.
     private var waitingFollowUps: [QueuedConversationMessage] { queuedMessages.filter { $0.state != .dispatching } }
     @State private var isSubmittingLiveMessage = false
     @State private var userInputRequest: ConversationUserInputRequest?
