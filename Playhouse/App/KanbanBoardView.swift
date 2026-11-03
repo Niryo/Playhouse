@@ -1353,9 +1353,18 @@ private struct TaskCardView: View {
     let onMoveToDone: (() -> Void)?
 
     var body: some View {
-        // Card rows, top to bottom: the title, the live updates, then the time
-        // on the left with the pull-request controls on the right.
+        // Card rows, top to bottom: the pull-request controls on the right
+        // (absent until the task has started and has a repository), the title,
+        // the live updates, then the time with the live token counter.
         VStack(alignment: .leading, spacing: 10) {
+            if showPullRequestControls {
+                HStack(spacing: 8) {
+                    Spacer(minLength: 8)
+                    pullRequestControls
+                }
+                .frame(minHeight: 30)
+            }
+
             HStack(spacing: 6) {
                 if task.title == "Generating title…" { ProgressView().controlSize(.small) }
                 Text(task.title)
@@ -1408,14 +1417,7 @@ private struct TaskCardView: View {
                     .allowsHitTesting(false)
             }
 
-            HStack(alignment: .center, spacing: 8) {
-                timeRow
-                Spacer(minLength: 8)
-                if showPullRequestControls {
-                    pullRequestControls
-                }
-            }
-            .frame(minHeight: showPullRequestControls ? 30 : nil)
+            timeRow
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1541,19 +1543,31 @@ private struct TaskCardView: View {
                 Text(task.createdAt.formatted(date: .abbreviated, time: .omitted))
                     .font(.system(size: 10))
             }
-            tokenUsageDot
+            tokenCounter
         }
         .foregroundStyle(.tertiary)
         .allowsHitTesting(false)
     }
 
-    private var tokenUsageDot: some View {
-        Circle()
-            .fill(TokenUsageHeatmap.color(totalTokens: task.totalTokens, max: tokenUsageColorMax))
-            .frame(width: 8, height: 8)
-            .help(TokenUsageHeatmap.label(totalTokens: task.totalTokens))
-            .accessibilityIdentifier("task-token-usage-dot-\(task.id.uuidString)")
-            .accessibilityLabel(TokenUsageHeatmap.label(totalTokens: task.totalTokens))
+    /// Everything the task has sent to the model so far, subagents included.
+    /// It climbs while a turn runs and keeps the heatmap colour, so the
+    /// configured ceiling still reads as "this task is getting expensive".
+    private var tokenCounter: some View {
+        let tokens = task.counterTokens
+        return Text(TokenUsageHeatmap.compact(tokens))
+            .font(.system(size: 10, weight: .medium, design: .monospaced))
+            .foregroundStyle(TokenUsageHeatmap.color(totalTokens: tokens, max: tokenUsageColorMax))
+            .contentTransition(.numericText())
+            .animation(.default, value: tokens)
+            .help(counterDescription)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(counterDescription)
+            .accessibilityIdentifier("task-token-usage-counter-\(task.id.uuidString)")
+    }
+
+    private var counterDescription: String {
+        guard task.hasCallUsage else { return TokenUsageHeatmap.label(totalTokens: task.totalTokens) }
+        return "\(TokenUsageHeatmap.compact(task.totalSentTokens)) tokens sent · \(task.totalCalls) \(task.totalCalls == 1 ? "call" : "calls") · \(TokenUsageHeatmap.compact(task.finalTranscriptTokens)) final transcript"
     }
 
     @ViewBuilder
@@ -1725,7 +1739,7 @@ private struct TokenStatsSheet: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
-            if let summary, summary.totalTokens > 0 {
+            if let summary, summary.totalTokens > 0 || summary.callUsage.available {
                 totals(summary)
                 Divider()
                 ScrollView {
@@ -1756,14 +1770,20 @@ private struct TokenStatsSheet: View {
         .frame(width: 520)
         // Reads the transcript once per sheet presentation rather than on every
         // SwiftUI re-render of this view.
+        // and keeps reading while the sheet is open, so a running turn's
+        // calls show up live.
         .task {
-            summary = try? BoardTaskManager(modelContext: modelContext).tokenUsageSummary(taskID)
-            didLoad = true
+            while !Task.isCancelled {
+                summary = try? BoardTaskManager(modelContext: modelContext).tokenUsageSummary(taskID)
+                didLoad = true
+                try? await Task.sleep(for: .seconds(2))
+            }
         }
     }
 
     private func totals(_ summary: TaskTokenUsageSummary) -> some View {
         VStack(alignment: .leading, spacing: 8) {
+            callTotals(summary.callUsage)
             Text(summary.totalTokens.formatted(Self.number))
                 .font(.system(size: 30, weight: .semibold, design: .rounded))
                 .accessibilityIdentifier("token-stats-total")
@@ -1786,6 +1806,49 @@ private struct TokenStatsSheet: View {
                 bucket("Cache read", summary.usage.cacheReadTokens)
                 bucket("Cache write", summary.usage.cacheCreationTokens)
             }
+        }
+    }
+
+    /// The two numbers a task is judged by: how large its transcript grew, and
+    /// how much it re-sent over all of its model calls, subagents included.
+    @ViewBuilder
+    private func callTotals(_ usage: TaskTokenUsageSummary.CallUsage) -> some View {
+        if usage.available {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .top, spacing: 28) {
+                    headline("Final transcript size", usage.finalTranscriptTokens, id: "token-stats-final-transcript")
+                    headline("Total sent (incl. subagents)", usage.totalSentTokens, id: "token-stats-total-sent")
+                }
+                let subagents = usage.subagents
+                Text("\(usage.totalCalls) model \(usage.totalCalls == 1 ? "call" : "calls") · \(usage.mainAgent.calls) main, \(subagents.calls) across \(subagents.count) \(subagents.count == 1 ? "subagent" : "subagents")")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("token-stats-total-calls")
+                Text("Output \(usage.totalOutputTokens.formatted(Self.number))")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("token-stats-output")
+                Divider()
+                Text("Main agent turns")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+        } else {
+            Text("Call-level stats are not recorded for this task yet.")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .accessibilityIdentifier("token-stats-calls-unavailable")
+        }
+    }
+
+    private func headline(_ name: String, _ value: Int, id: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(name)
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+            Text(value.formatted(Self.number))
+                .font(.system(size: 22, weight: .semibold, design: .rounded))
+                .accessibilityIdentifier(id)
         }
     }
 

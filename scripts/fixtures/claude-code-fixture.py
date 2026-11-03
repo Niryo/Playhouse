@@ -84,15 +84,58 @@ def report_command(instructions, marker, replacement=None):
     return None
 
 
-def assistant(message_id, blocks):
-    write({"type": "assistant", "parent_tool_use_id": None,
-           "message": {"id": message_id, "role": "assistant", "content": blocks}})
+def assistant(message_id, blocks, usage=None, parent=None):
+    message = {"id": message_id, "role": "assistant", "content": blocks}
+    if usage:
+        message["usage"] = dict(usage)
+    write({"type": "assistant", "parent_tool_use_id": parent, "message": message})
 
 
-def text(message_id, value):
+def text(message_id, value, usage=None):
     write({"type": "stream_event", "parent_tool_use_id": None,
            "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": value}}})
-    assistant(message_id, [{"type": "text", "text": value}])
+    assistant(message_id, [{"type": "text", "text": value}], usage)
+
+
+# Per-model-call usage of the story turn, deterministic so a test can assert
+# exact call counts and sent/output totals. "Sent" is input + cache read + cache
+# creation: the two main-agent calls send 550 and 650 (so the final transcript
+# is 650), the two subagent calls send 300 and 340.
+def call_usage(input_tokens, cache_read, cache_creation, output_tokens):
+    return {"input_tokens": input_tokens, "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_creation, "output_tokens": output_tokens}
+
+
+STORY_MAIN_CALLS = [call_usage(100, 400, 50, 20), call_usage(120, 500, 30, 40)]
+STORY_SUBAGENT_CALLS = [call_usage(200, 80, 20, 10), call_usage(240, 90, 10, 15)]
+
+
+def write_session_calls(session_id, turn_number, main_calls):
+    """Appends this turn's calls to Claude Code's own session files, as the real CLI does.
+
+    A call is written once per content block (so twice here for the first main
+    call), plus a zero-usage synthetic entry; a reader must count each message
+    ID once and ignore the synthetic one.
+    """
+    config = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not config or not session_id:
+        return
+    project = Path(config) / "projects" / "-fixture-project"
+    (project / session_id / "subagents").mkdir(parents=True, exist_ok=True)
+
+    def line(message_id, usage, sidechain=False):
+        return json.dumps({"type": "assistant", "isSidechain": sidechain,
+                           "message": {"id": message_id, "role": "assistant", "usage": usage}}) + "\n"
+
+    with open(project / f"{session_id}.jsonl", "a", encoding="utf-8") as handle:
+        for index, (message_id, usage) in enumerate(main_calls):
+            handle.write(line(message_id, usage))
+            if index == 0:
+                handle.write(line(message_id, usage))
+        handle.write(line(f"synthetic_{turn_number}", call_usage(0, 0, 0, 0)))
+    with open(project / session_id / "subagents" / f"agent-fx{turn_number}.jsonl", "a", encoding="utf-8") as handle:
+        for index, usage in enumerate(STORY_SUBAGENT_CALLS):
+            handle.write(line(f"msg_fx_sub{turn_number}_{index}", usage, sidechain=True))
 
 
 def run_tool(tool_id, name, tool_input, command=None):
@@ -422,13 +465,26 @@ def respond(user_text, instructions, preserve_no_outcome=False):
         for index in range(1, 31):
             text(f"msg_long_{number}_{index}", f"Long history turn {number}, message {index}.")
     elif "story" in user_text.lower():
-        text("msg_story", STORY)
+        # Kept on disk because each send may start a fresh fixture process, and
+        # a repeated message ID would make the second turn's calls look like the first's.
+        counter = Path(str(sys.argv[0]) + ".story-turns")
+        story_turns = (int(counter.read_text()) if counter.is_file() else 0) + 1
+        counter.write_text(str(story_turns))
+        main_ids = [f"msg_story_{story_turns}", f"msg_story_closing_{story_turns}"]
+        for index, usage in enumerate(STORY_SUBAGENT_CALLS):
+            assistant(f"msg_fx_sub{story_turns}_{index}", [{"type": "text", "text": "subagent step"}], usage,
+                      parent=f"toolu_fx_agent_{story_turns}")
+        write_session_calls(argument("--session-id") or argument("--resume"), story_turns,
+                            list(zip(main_ids, STORY_MAIN_CALLS)))
+        text(main_ids[0], STORY, STORY_MAIN_CALLS[0])
+        # Claude Code writes one line per content block of a call; the repeat shares the call's ID.
+        assistant(main_ids[0], [{"type": "thinking", "thinking": ""}], STORY_MAIN_CALLS[0])
         progress_clear = report_command(instructions, " task progress clear ")
         outcome = report_command(instructions, " task outcome ", "completed")
         for tool_id, command in [("toolu_progress_clear", progress_clear), ("toolu_outcome", outcome)]:
             if command:
                 commands.append({"command": command, "output": run_tool(tool_id, "Bash", {"command": command}, command)})
-        text("msg_story_closing", STORY_CLOSING)
+        text(main_ids[1], STORY_CLOSING, STORY_MAIN_CALLS[1])
     elif "inspect" in user_text.lower():
         text("msg_inspect_intent", INSPECTION_INTENT)
         run_tool("toolu_read", "Read", {"file_path": os.path.join(os.getcwd(), "README.md")})

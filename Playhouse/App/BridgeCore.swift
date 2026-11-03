@@ -2668,7 +2668,13 @@ final class BoardTaskManager {
     /// breakdown rather than ahead of it: the modal (which reads the rows) and
     /// the diagnostics log both see the gap, instead of the dot silently
     /// counting a turn that never appears in the breakdown.
-    func recordTokenUsage(taskID: UUID, provider: ConversationProvider, report: ConversationTurnUsageReport) async throws {
+    func recordTokenUsage(
+        taskID: UUID, provider: ConversationProvider, sourceID: String, report: ConversationTurnUsageReport
+    ) async throws {
+        if let call = report.liveCall {
+            try await recordLiveCall(taskID: taskID, provider: provider, sourceID: sourceID, call: call)
+            return
+        }
         guard !report.usage.isEmpty else { return }
         if let turnID = report.turnID {
             try conversationTranscriptStore().mutate(taskID, turns: .none) { transcript in
@@ -2701,6 +2707,50 @@ final class BoardTaskManager {
         ])
     }
 
+    /// Adds one streamed model call to the session's snapshot, so the card's
+    /// counter climbs while the turn runs rather than jumping at its end.
+    private func recordLiveCall(taskID: UUID, provider: ConversationProvider, sourceID: String, call: ConversationLiveCall) async throws {
+        try await withTaskOperationLock(taskID) {
+            let task = try self.requireSubject(taskID)
+            var snapshots = task.callUsageSnapshots
+            let key = "\(provider.rawValue):\(sourceID)"
+            var snapshot = snapshots[key] ?? ConversationCallUsageSnapshot(provider: provider.rawValue, updatedAt: .now)
+            var agent = call.agentID.map { snapshot.subagents[$0] ?? ConversationCallUsage() } ?? snapshot.main
+            agent.calls += call.calls
+            agent.sentTokens += call.sentTokens
+            agent.outputTokens += call.outputTokens
+            if call.calls > 0 { agent.lastContextTokens = call.contextTokens }
+            if let agentID = call.agentID { snapshot.subagents[agentID] = agent } else { snapshot.main = agent }
+            snapshot.updatedAt = .now
+            snapshots[key] = snapshot
+            task.callUsageSnapshots = snapshots
+            try await self.saveTaskContext(taskID: taskID)
+        }
+    }
+
+    /// Replaces a Claude session's live-accumulated snapshot with what its
+    /// session files hold, which also covers every subagent's final calls and
+    /// the output counts that were still growing while streaming.
+    func refreshClaudeCallUsage(taskID: UUID, sessionID: String, configDirectory: String) async throws {
+        let snapshot = await Task.detached(priority: .utility) {
+            ClaudeSessionUsageReader.read(sessionID: sessionID, configDirectory: configDirectory)
+        }.value
+        guard var snapshot else { return }
+        try await withTaskOperationLock(taskID) {
+            let task = try self.requireSubject(taskID)
+            var snapshots = task.callUsageSnapshots
+            snapshot.updatedAt = .now
+            snapshots["\(ConversationProvider.claude.rawValue):\(sessionID)"] = snapshot
+            task.callUsageSnapshots = snapshots
+            try await self.saveTaskContext(taskID: taskID)
+        }
+        PlayhouseDiagnostics.record("task.call_usage.refreshed", fields: [
+            "taskID": taskID.uuidString,
+            "calls": String(snapshot.totalCalls),
+            "sentTokens": String(snapshot.totalSentTokens),
+        ])
+    }
+
     func tokenUsageSummary(_ id: UUID) throws -> TaskTokenUsageSummary {
         let task = try requireSubject(id)
         let rows = (try? conversationTranscriptStore().readState(id).tokenUsage) ?? []
@@ -2724,7 +2774,8 @@ final class BoardTaskManager {
                 .map { TaskTokenUsageSummary.Tool(id: $0.key, turnCount: $0.value.turnCount, totalTokens: $0.value.totalTokens) }
                 .sorted { lhs, rhs in
                     lhs.totalTokens != rhs.totalTokens ? lhs.totalTokens > rhs.totalTokens : lhs.id < rhs.id
-                }
+                },
+            callUsage: TaskTokenUsageSummary.CallUsage(snapshots: Array(task.callUsageSnapshots.values))
         )
     }
 
@@ -6621,11 +6672,17 @@ final class ConversationManager {
                     let attributed = ConversationTurnUsageReport(
                         turnID: isHidden ? nil : (provider == .claude ? claudeTurnID : report.turnID),
                         usage: report.usage,
-                        toolLabels: isHidden ? [] : report.toolLabels
+                        toolLabels: isHidden ? [] : report.toolLabels,
+                        liveCall: report.liveCall
                     )
+                    let claudeConfigDirectory = (client as? ClaudeCodeClient)?.configDirectory
                     Task { @MainActor in
                         do {
-                            try await self.tasks.recordTokenUsage(taskID: taskID, provider: provider, report: attributed)
+                            try await self.tasks.recordTokenUsage(taskID: taskID, provider: provider, sourceID: threadID, report: attributed)
+                            // A Claude result closes a turn: settle the live counts against the session files.
+                            if provider == .claude, attributed.liveCall == nil, let claudeConfigDirectory {
+                                try await self.tasks.refreshClaudeCallUsage(taskID: taskID, sessionID: threadID, configDirectory: claudeConfigDirectory)
+                            }
                         } catch {
                             var fields = PlayhouseDiagnostics.errorFields(error)
                             fields["taskID"] = taskID.uuidString
@@ -7186,6 +7243,7 @@ final class PlayhouseBridgeRuntime {
 
             let codexExecutable = request.arguments["__codexExecutable"]?.string
             let claudeExecutable = request.arguments["__claudeExecutable"]?.string
+            let claudeConfigDirectory = request.arguments["__claudeConfigDirectory"]?.string
             // A window's requests run goals against one long-lived Codex client
             // that observes goal turns, as the window's own client used to.
             let guiRuntime = request.arguments["__guiRuntime"]?.bool == true
@@ -7194,7 +7252,7 @@ final class PlayhouseBridgeRuntime {
             func conversationClients(codexHome: String? = nil, goalFeatureEnabled: Bool = false) -> ConversationClients {
                 ConversationClients(
                     codex: CodexAppServerClient.sharedClient(executableOverride: codexExecutable, codexHomeOverride: codexHome ?? callerCodexHome, goalFeatureEnabled: goalFeatureEnabled, goalRuntimeEnabled: guiRuntime, dataDirectory: dataDirectory),
-                    claude: ClaudeCodeClient.sharedPrimaryClient(executableOverride: claudeExecutable, dataDirectory: dataDirectory)
+                    claude: ClaudeCodeClient.sharedPrimaryClient(executableOverride: claudeExecutable, configDirectoryOverride: claudeConfigDirectory, dataDirectory: dataDirectory)
                 )
             }
 

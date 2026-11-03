@@ -313,6 +313,28 @@ struct ConversationTurnUsageReport: Sendable {
     let turnID: String?
     let usage: ConversationTokenUsage
     let toolLabels: [String]
+    /// Set for a live per-model-call update, which carries no turn usage of its own.
+    var liveCall: ConversationLiveCall?
+
+    init(turnID: String?, usage: ConversationTokenUsage, toolLabels: [String], liveCall: ConversationLiveCall? = nil) {
+        self.turnID = turnID
+        self.usage = usage
+        self.toolLabels = toolLabels
+        self.liveCall = liveCall
+    }
+}
+
+/// A change in one agent's call usage, reported as the provider streams it.
+///
+/// A delta rather than a running total so the recorder can add it to whatever a
+/// resumed session already holds. `agentID` is nil for the main agent.
+struct ConversationLiveCall: Sendable, Equatable {
+    var agentID: String?
+    var calls: Int
+    var sentTokens: Int
+    var outputTokens: Int
+    /// The context size of this call, for the main agent's final transcript size.
+    var contextTokens: Int
 }
 
 /// A task's token accounting: the running totals, the per-turn detail behind
@@ -348,20 +370,65 @@ struct TaskTokenUsageSummary: Codable, Equatable {
         let totalTokens: Int
     }
 
+    /// Model-call accounting across the main agent and every subagent. The
+    /// CLI payload carries it as-is, so `available` tells a task with no
+    /// recorded calls apart from one that really sent zero tokens.
+    struct CallUsage: Codable, Equatable {
+        struct Agent: Codable, Equatable {
+            let calls: Int
+            let sentTokens: Int
+            let outputTokens: Int
+            let finalTranscriptTokens: Int
+        }
+        struct Subagents: Codable, Equatable {
+            let count: Int
+            let calls: Int
+            let sentTokens: Int
+            let outputTokens: Int
+        }
+        let available: Bool
+        let finalTranscriptTokens: Int
+        let totalSentTokens: Int
+        let totalCalls: Int
+        let totalOutputTokens: Int
+        let mainAgent: Agent
+        let subagents: Subagents
+
+        init(snapshots: [ConversationCallUsageSnapshot]) {
+            let active = snapshots.filter { $0.totalCalls > 0 }
+            let main = active.reduce(ConversationCallUsage()) { $0 + $1.main }
+            let subs = active.flatMap { $0.subagents.values }
+            available = !active.isEmpty
+            finalTranscriptTokens = active.filter { !$0.main.isEmpty }.max { $0.updatedAt < $1.updatedAt }?.main.lastContextTokens ?? 0
+            totalSentTokens = active.reduce(0) { $0 + $1.totalSentTokens }
+            totalCalls = active.reduce(0) { $0 + $1.totalCalls }
+            totalOutputTokens = active.reduce(0) { $0 + $1.totalOutputTokens }
+            mainAgent = Agent(calls: main.calls, sentTokens: main.sentTokens, outputTokens: main.outputTokens, finalTranscriptTokens: finalTranscriptTokens)
+            subagents = Subagents(
+                count: subs.count,
+                calls: subs.reduce(0) { $0 + $1.calls },
+                sentTokens: subs.reduce(0) { $0 + $1.sentTokens },
+                outputTokens: subs.reduce(0) { $0 + $1.outputTokens }
+            )
+        }
+    }
+
     let taskID: UUID
     let usage: ConversationTokenUsage
     let turns: [Turn]
     let tools: [Tool]
+    let callUsage: CallUsage
     /// Stored rather than computed so the CLI payload carries it too.
     let totalTokens: Int
 
     var turnCount: Int { turns.count }
 
-    init(taskID: UUID, usage: ConversationTokenUsage, turns: [Turn], tools: [Tool]) {
+    init(taskID: UUID, usage: ConversationTokenUsage, turns: [Turn], tools: [Tool], callUsage: CallUsage) {
         self.taskID = taskID
         self.usage = usage
         self.turns = turns
         self.tools = tools
+        self.callUsage = callUsage
         totalTokens = usage.totalTokens
     }
 }
