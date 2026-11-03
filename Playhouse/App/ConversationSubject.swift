@@ -44,12 +44,67 @@ struct ConversationTokenUsage: Codable, Equatable, Sendable {
         cacheCreationTokens = count(["cache_creation_input_tokens", "cacheCreationInputTokens"])
     }
 
+    /// Reads a Codex usage object. Codex's input count already includes its
+    /// cached and cache-written tokens, so those are moved out of `inputTokens`
+    /// into their own buckets rather than being counted twice.
+    init(codexPayload: [String: Any]) {
+        self.init(providerPayload: codexPayload)
+        if let cacheWrite = codexPayload["cache_write_input_tokens"] as? Int ?? codexPayload["cacheWriteInputTokens"] as? Int {
+            cacheCreationTokens = max(0, cacheWrite)
+        }
+        inputTokens = max(0, inputTokens - cacheReadTokens - cacheCreationTokens)
+    }
+
     init(inputTokens: Int = 0, outputTokens: Int = 0, cacheReadTokens: Int = 0, cacheCreationTokens: Int = 0) {
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
         self.cacheReadTokens = cacheReadTokens
         self.cacheCreationTokens = cacheCreationTokens
     }
+}
+
+/// Model-call counts for one agent (the main agent or one subagent).
+///
+/// `sentTokens` is everything a call re-sends (input + cache read + cache
+/// write), summed over calls; `lastContextTokens` is that same figure for the
+/// most recent call, i.e. how large the transcript had grown by then.
+struct ConversationCallUsage: Codable, Equatable, Sendable {
+    var calls = 0
+    var sentTokens = 0
+    var outputTokens = 0
+    var lastContextTokens = 0
+
+    var isEmpty: Bool { calls == 0 }
+
+    static func + (lhs: Self, rhs: Self) -> Self {
+        Self(
+            calls: lhs.calls + rhs.calls,
+            sentTokens: lhs.sentTokens + rhs.sentTokens,
+            outputTokens: lhs.outputTokens + rhs.outputTokens,
+            lastContextTokens: rhs.isEmpty ? lhs.lastContextTokens : rhs.lastContextTokens
+        )
+    }
+
+    /// Adds one model call.
+    mutating func addCall(sentTokens: Int, outputTokens: Int) {
+        calls += 1
+        self.sentTokens += sentTokens
+        self.outputTokens += outputTokens
+        lastContextTokens = sentTokens
+    }
+}
+
+/// One provider session's (Claude) or root thread's (Codex) call usage: the
+/// main agent plus every subagent, keyed by agent ID.
+struct ConversationCallUsageSnapshot: Codable, Equatable, Sendable {
+    var provider: String
+    var updatedAt: Date
+    var main = ConversationCallUsage()
+    var subagents: [String: ConversationCallUsage] = [:]
+
+    var totalCalls: Int { main.calls + subagents.values.reduce(0) { $0 + $1.calls } }
+    var totalSentTokens: Int { main.sentTokens + subagents.values.reduce(0) { $0 + $1.sentTokens } }
+    var totalOutputTokens: Int { main.outputTokens + subagents.values.reduce(0) { $0 + $1.outputTokens } }
 }
 
 /// The state a conversation turn needs, independent of what owns the conversation.
@@ -96,6 +151,8 @@ protocol ConversationSubject: AnyObject, Observable {
     var totalOutputTokens: Int { get set }
     var totalCacheReadTokens: Int { get set }
     var totalCacheCreationTokens: Int { get set }
+    /// Per-call usage snapshots keyed `"<provider>:<session or thread id>"`.
+    var callUsageSnapshotsData: Data? { get set }
 
     /// Workspace roots the turn may read. Empty for a standalone chat, which runs with no
     /// repository or worktree context.
@@ -203,6 +260,28 @@ extension ConversationSubject {
 
     var totalTokens: Int { tokenUsage.totalTokens }
 
+    var callUsageSnapshots: [String: ConversationCallUsageSnapshot] {
+        get {
+            guard let callUsageSnapshotsData else { return [:] }
+            return (try? JSONDecoder().decode([String: ConversationCallUsageSnapshot].self, from: callUsageSnapshotsData)) ?? [:]
+        }
+        set { callUsageSnapshotsData = newValue.isEmpty ? nil : try? JSONEncoder().encode(newValue) }
+    }
+
+    var hasCallUsage: Bool { callUsageSnapshots.values.contains { $0.totalCalls > 0 } }
+    var totalCalls: Int { callUsageSnapshots.values.reduce(0) { $0 + $1.totalCalls } }
+    /// Everything re-sent across the task, subagents included; falls back to the
+    /// turn totals for tasks recorded before call-level usage existed.
+    var totalSentTokens: Int {
+        hasCallUsage ? callUsageSnapshots.values.reduce(0) { $0 + $1.totalSentTokens } : tokenUsage.totalTokens - totalOutputTokens
+    }
+    /// The size of the transcript at the most recent main-agent call.
+    var finalTranscriptTokens: Int {
+        callUsageSnapshots.values.filter { !$0.main.isEmpty }.max { $0.updatedAt < $1.updatedAt }?.main.lastContextTokens ?? 0
+    }
+    /// What the card's counter shows: total sent, or the legacy total.
+    var counterTokens: Int { hasCallUsage ? totalSentTokens : totalTokens }
+
     var currentInProgressSeconds: Double {
         totalInProgressSeconds + (status == .inProgress ? max(0, Date.now.timeIntervalSince(inProgressStartedAt ?? .now)) : 0)
     }
@@ -241,6 +320,7 @@ final class StandaloneChat {
     var totalOutputTokens: Int = 0
     var totalCacheReadTokens: Int = 0
     var totalCacheCreationTokens: Int = 0
+    var callUsageSnapshotsData: Data?
 
     init(provider: ConversationProvider = .codex) {
         id = UUID()

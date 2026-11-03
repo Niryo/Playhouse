@@ -2602,7 +2602,7 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(self.run_git(worktree, "rev-parse", "HEAD"), branch_head)
         self.assertTrue(self.branch_exists(self.primary, branch))
 
-    # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
+    # case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own row above the card title and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
     def test_task_pr_create_reports_real_gh_failure(self):
         task = self.create_repo_task(
             "PR failure", [self.primary], merge_targets={self.primary: "main"}
@@ -8795,19 +8795,30 @@ class PlayhouseBridgeTests(unittest.TestCase):
         )
         return {"PLAYHOUSE_E2E_CLAUDE_EXECUTABLE": str(executable)}
 
-    # case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. The task card shows a token usage dot whose tooltip reports the total, and the Token Stats context-menu item opens a modal showing the totals, the per-tool rollup and the per-turn breakdown.
+    # case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent whose tooltip names the sent total, call count and final transcript size, and the Token Stats context-menu item opens a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown.
     def test_task_token_usage_records_claude_turn_breakdown(self):
         # Matches TURN_USAGE in scripts/fixtures/claude-code-fixture.py.
         expected_turn_usage = {
             "inputTokens": 1000, "outputTokens": 200, "cacheReadTokens": 300, "cacheCreationTokens": 100,
         }
         turn_total = sum(expected_turn_usage.values())
+        # Matches STORY_MAIN_CALLS / STORY_SUBAGENT_CALLS in the fixture: per turn, two main
+        # calls sending 550 and 650 (output 20 + 40) and two subagent calls sending 300 and
+        # 340 (output 10 + 15), with a repeated line and a zero-usage line to be ignored.
+        call_usage_per_turn = {
+            "totalCalls": 4, "totalSentTokens": 1840, "totalOutputTokens": 85, "finalTranscriptTokens": 650,
+        }
         environment = self.install_claude_fixture("claude-fixture-token-usage")
+        # The session files the fixture writes live under Claude Code's config directory.
+        session_files = self.data_directory / "claude-config"
+        file_environment = {**environment, "PLAYHOUSE_E2E_CLAUDE_CONFIG_DIR": str(session_files)}
         task_id = self.assert_success(self.call_cli(
             "task", "create", "--title", "Claude token usage", "--root", self.primary, "--provider", "claude"
         )[0])["id"]
 
         empty = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])
+        self.assertFalse(empty["callUsage"]["available"], "A task with no turns has no call-level usage yet.")
+        self.assertEqual(empty["callUsage"]["totalCalls"], 0)
         self.assertEqual(empty["totalTokens"], 0, "A task with no turns has recorded no tokens.")
         self.assertEqual(empty["turns"], [])
         self.assertEqual(empty["tools"], [])
@@ -8820,9 +8831,15 @@ class PlayhouseBridgeTests(unittest.TestCase):
         # flat per-result usage well past one turn's worth.
         self.assert_success(self.call_cli(
             "conversation", "send", task_id, "--message", "Tell me a story.",
-            extra_environment=environment,
+            extra_environment=file_environment,
         )[0])
         first = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])
+        calls = first["callUsage"]
+        self.assertTrue(calls["available"])
+        for key, value in call_usage_per_turn.items():
+            self.assertEqual(calls[key], value, f"callUsage.{key} should count each call once, subagent included.")
+        self.assertEqual(calls["mainAgent"], {"calls": 2, "sentTokens": 1200, "outputTokens": 60, "finalTranscriptTokens": 650})
+        self.assertEqual(calls["subagents"], {"count": 1, "calls": 2, "sentTokens": 640, "outputTokens": 25})
         self.assertEqual(first["usage"], expected_turn_usage, "Claude's usage buckets should reach the task totals.")
         self.assertEqual(first["totalTokens"], turn_total)
         self.assertEqual(len(first["turns"]), 1, "The completed turn should be recorded once.")
@@ -8839,9 +8856,13 @@ class PlayhouseBridgeTests(unittest.TestCase):
 
         self.assert_success(self.call_cli(
             "conversation", "send", task_id, "--message", "Tell me a story.",
-            extra_environment=environment,
+            extra_environment=file_environment,
         )[0])
         second = self.assert_success(self.call_cli("task", "token-usage", task_id)[0])
+        for key in ("totalCalls", "totalSentTokens", "totalOutputTokens"):
+            self.assertEqual(second["callUsage"][key], call_usage_per_turn[key] * 2, f"A second turn adds to callUsage.{key}.")
+        self.assertEqual(second["callUsage"]["finalTranscriptTokens"], 650)
+        self.assertEqual(second["callUsage"]["subagents"]["count"], 2, "Each turn's subagent has its own file.")
         self.assertEqual(second["totalTokens"], turn_total * 2, "A second turn adds to the running total.")
         self.assertEqual(second["usage"]["inputTokens"], expected_turn_usage["inputTokens"] * 2)
         self.assertEqual(len(second["turns"]), 2, "Each turn keeps its own row.")
@@ -8851,11 +8872,25 @@ class PlayhouseBridgeTests(unittest.TestCase):
             "Each turn row should carry only its own cost.",
         )
 
-    # case-contract: test_task_token_usage_records_codex_turn_breakdown | A Codex app-server fixture turn's usage reaches the same per-task totals and per-turn breakdown through Codex's own wire shape, mapping its cached-input bucket onto Playhouse's cache-read bucket and leaving cache-write at zero. The recorded turn row names Codex as its provider, and the Token Stats modal shows those Codex totals in the app.
+        # With no readable session files the counts come from the stream alone,
+        # which is also what the card's counter follows while a turn is running.
+        live_id = self.assert_success(self.call_cli(
+            "task", "create", "--title", "Claude live token usage", "--root", self.primary, "--provider", "claude"
+        )[0])["id"]
+        self.assert_success(self.call_cli(
+            "conversation", "send", live_id, "--message", "Tell me a story.", extra_environment=environment,
+        )[0])
+        live = self.assert_success(self.call_cli("task", "token-usage", live_id)[0])["callUsage"]
+        for key, value in call_usage_per_turn.items():
+            self.assertEqual(live[key], value, f"The live stream should reach callUsage.{key}.")
+
+    # case-contract: test_task_token_usage_records_codex_turn_breakdown | A Codex app-server fixture turn's usage reaches the same per-task totals and per-turn breakdown through Codex's own wire shape, mapping its cached-input bucket onto Playhouse's cache-read bucket and leaving cache-write at zero. The recorded turn row names Codex as its provider, Codex's input count includes its cached tokens, so the input bucket excludes them rather than counting them twice. Per-call usage notifications streamed before the turn ends, including those of a subagent thread that names its parent, reach the same call-level accounting once each (a repeated notification is ignored), and the Token Stats modal shows those Codex totals, call counts and final transcript size in the app.
     def test_task_token_usage_records_codex_turn_breakdown(self):
         # Matches TURN_USAGE in scripts/fixtures/codex-app-server-fixture.py.
+        # The fixture reports 900 input tokens of which 250 were cached; Codex's input
+        # count includes the cached part, so the input bucket keeps only the other 650.
         expected_turn_usage = {
-            "inputTokens": 900, "outputTokens": 150, "cacheReadTokens": 250, "cacheCreationTokens": 0,
+            "inputTokens": 650, "outputTokens": 150, "cacheReadTokens": 250, "cacheCreationTokens": 0,
         }
         turn_total = sum(expected_turn_usage.values())
         task_id = self.create_task(title="Codex token usage", roots=[self.primary])["id"]
@@ -8870,11 +8905,20 @@ class PlayhouseBridgeTests(unittest.TestCase):
         self.assertEqual(len(summary["turns"]), 1)
         self.assertEqual(summary["turns"][0]["provider"], "codex")
         self.assertEqual(summary["turns"][0]["totalTokens"], turn_total)
+        # The fixture streams two main-thread calls sending 700 and 900 (the second notification
+        # repeated) and one subagent call sending 300, so a repeat must not add a call.
+        calls = summary["callUsage"]
+        self.assertTrue(calls["available"])
+        self.assertEqual(
+            {key: calls[key] for key in ("totalCalls", "totalSentTokens", "totalOutputTokens", "finalTranscriptTokens")},
+            {"totalCalls": 3, "totalSentTokens": 1900, "totalOutputTokens": 80, "finalTranscriptTokens": 900},
+        )
+        self.assertEqual(calls["subagents"], {"count": 1, "calls": 1, "sentTokens": 300, "outputTokens": 10})
 
-    # case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to one million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's usage dot re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
+    # case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to twenty million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's token counter re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
     def test_settings_token_usage_color_max_round_trip(self):
         settings = self.assert_success(self.call_cli("settings", "get")[0])
-        self.assertEqual(settings["tokenUsageColorMax"], 1_000_000, "The dot's scale tops out at a million tokens by default.")
+        self.assertEqual(settings["tokenUsageColorMax"], 20_000_000, "The counter's scale tops out at twenty million tokens by default.")
 
         updated = self.assert_success(self.call_cli("settings", "set-token-usage-color-max", "2400")[0])
         self.assertEqual(updated["tokenUsageColorMax"], 2400)

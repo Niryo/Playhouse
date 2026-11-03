@@ -127,6 +127,9 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         var startedAtUptime: [String: UInt64] = [:]
         var startedAtDate: [String: Date] = [:]
         var durations: [String: Int] = [:]
+        /// The main thread's per-call usage so far this turn, reported at
+        /// completion when the terminal notification carries no usage itself.
+        var callUsage = ConversationTokenUsage()
 
         init(onDelta: @escaping (String) -> Void, onFinal: @escaping (String) -> Void,
              onProgress: @escaping (ConversationMessage) -> Void, onSteer: @escaping (String, [String]) -> Void,
@@ -139,6 +142,11 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         }
     }
     private var turnContexts: [String: TurnContext] = [:]
+    /// Subagent thread -> the thread that spawned it, from `thread/started`.
+    private var threadParents: [String: String] = [:]
+    /// The cumulative total last seen per thread, so a repeated usage
+    /// notification isn't counted as another call.
+    private var lastReportedTotals: [String: Int] = [:]
     private var completedActivityDurations: [String: [String: Int]] = [:]
     private var interruptedThreadIDs = Set<String>()
     private var goalObservationThreadID: String?
@@ -1479,6 +1487,36 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
         }
     }
 
+    /// Reports one model call from `thread/tokenUsage/updated` as it happens.
+    /// A subagent's call lands on the thread that spawned it, so it joins that
+    /// task's counter; its own `agentID` keeps it apart from the main agent.
+    private func reportCallUsage(_ params: [String: Any]) {
+        guard let threadID = params["threadId"] as? String,
+              let usage = params["tokenUsage"] as? [String: Any],
+              let total = usage["total"] as? [String: Any],
+              let last = usage["last"] as? [String: Any] else { return }
+        let totalTokens = total["totalTokens"] as? Int ?? 0
+        guard totalTokens > 0, lastReportedTotals[threadID] != totalTokens else { return }
+        lastReportedTotals[threadID] = totalTokens
+        var rootID = threadID
+        var hops = 0
+        while turnContexts[rootID] == nil, let parent = threadParents[rootID], hops < 8 {
+            rootID = parent
+            hops += 1
+        }
+        guard let context = turnContexts[rootID] else { return }
+        let call = ConversationTokenUsage(codexPayload: last)
+        let sent = call.inputTokens + call.cacheReadTokens + call.cacheCreationTokens
+        if rootID == threadID { context.callUsage = context.callUsage + call }
+        context.onTokenUsage(ConversationTurnUsageReport(
+            turnID: nil, usage: ConversationTokenUsage(), toolLabels: [],
+            liveCall: ConversationLiveCall(
+                agentID: rootID == threadID ? nil : threadID,
+                calls: 1, sentTokens: sent, outputTokens: call.outputTokens, contextTokens: sent
+            )
+        ))
+    }
+
     private func flushDeltaLogSummary(for key: String, reason: String) {
         guard let entry = deltaLogSummaries.removeValue(forKey: key) else { return }
         PlayhouseDiagnostics.record("codex.notification.summary", fields: [
@@ -1592,6 +1630,15 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             activity.detail = output
             context.activities[itemID] = activity
             context.onActivity(activity)
+        case "thread/started":
+            if let thread = params["thread"] as? [String: Any],
+               let id = thread["id"] as? String,
+               let parent = thread["parentThreadId"] as? String
+                ?? (((thread["source"] as? [String: Any])?["subAgent"] as? [String: Any])?["thread_spawn"] as? [String: Any])?["parent_thread_id"] as? String {
+                threadParents[id] = parent
+            }
+        case "thread/tokenUsage/updated":
+            reportCallUsage(params)
         case "turn/diff/updated":
             guard let context, let diff = params["diff"] as? String, !diff.isEmpty else { return }
             context.onDiff(ConversationTurnDiff(unifiedDiff: diff))
@@ -1607,7 +1654,7 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
             // either beside the turn envelope or inside it.
             if let context,
                let payload = (params["usage"] as? [String: Any]) ?? (turn["usage"] as? [String: Any]) {
-                let usage = ConversationTokenUsage(providerPayload: payload)
+                let usage = ConversationTokenUsage(codexPayload: payload)
                 if usage.isEmpty {
                     // A non-empty payload that parses to all zeros means the
                     // app-server changed its usage field names; silently
@@ -1624,6 +1671,17 @@ final class CodexAppServerClient: ObservableObject, ConversationProviderClient {
                         toolLabels: Array(Set(context.activities.values.map(\.tokenUsageLabel))).sorted()
                     ))
                 }
+            }
+
+            // Real app-servers report cost per model call instead, so the turn's
+            // row is the sum of the calls seen during it.
+            if let context, params["usage"] == nil, turn["usage"] == nil, !context.callUsage.isEmpty {
+                context.onTokenUsage(ConversationTurnUsageReport(
+                    turnID: turnID,
+                    usage: context.callUsage,
+                    toolLabels: Array(Set(context.activities.values.map(\.tokenUsageLabel))).sorted()
+                ))
+                context.callUsage = ConversationTokenUsage()
             }
 
             PlayhouseDiagnostics.record("codex.turn.ended", fields: diagnosticFields([

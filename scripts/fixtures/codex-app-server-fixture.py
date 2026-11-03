@@ -75,9 +75,46 @@ TURN_USAGE = {
 TURN_USAGE_TOTAL = sum(TURN_USAGE.values())
 
 
+def breakdown(input_tokens, cached, output_tokens):
+    return {"inputTokens": input_tokens, "cachedInputTokens": cached, "cacheWriteInputTokens": 0,
+            "outputTokens": output_tokens, "reasoningOutputTokens": 0,
+            "totalTokens": input_tokens + output_tokens}
+
+
+def token_usage_notification(thread_id, turn_id, last, total):
+    return {"method": "thread/tokenUsage/updated", "params": {
+        "threadId": thread_id, "turnId": turn_id,
+        "tokenUsage": {"last": last, "total": total, "modelContextWindow": 258400}}}
+
+
+def call_usage_notifications(thread_id, turn_id):
+    """What a real app-server streams per model call, ahead of the turn's end.
+
+    The main thread makes two calls (sending 700 then 900 tokens, so the final
+    transcript is 900) and repeats the second notification; a subagent thread
+    announces itself with its parent and makes one call sending 300. Codex's
+    input count includes its cached tokens, so "sent" is the input count itself.
+    """
+    subagent = f"{thread_id}-subagent"
+    first, second = breakdown(700, 500, 30), breakdown(900, 600, 40)
+    cumulative = breakdown(1600, 1100, 70)
+    sub = breakdown(300, 100, 10)
+    return [
+        token_usage_notification(thread_id, turn_id, first, first),
+        token_usage_notification(thread_id, turn_id, second, cumulative),
+        token_usage_notification(thread_id, turn_id, second, cumulative),
+        {"method": "thread/started", "params": {"thread": {"id": subagent, "parentThreadId": thread_id}}},
+        token_usage_notification(subagent, f"{turn_id}-subagent", sub, sub),
+    ]
+
+
 def write(value):
     if (isinstance(value, dict) and value.get("method") == "turn/completed"
             and "usage" not in value.get("params", {})):
+        params = value["params"]
+        for notification in call_usage_notifications(params.get("threadId"), (params.get("turn") or {}).get("id")):
+            sys.stdout.write(json.dumps(notification, separators=(",", ":")) + "\n")
+        sys.stdout.flush()
         value = {**value, "params": {**value["params"], "usage": dict(TURN_USAGE)}}
     sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
     sys.stdout.flush()

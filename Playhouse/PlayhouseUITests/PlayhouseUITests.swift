@@ -2003,7 +2003,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Done preserves the task worktree without merging")
     }
 
-    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
+    // case-contract: test_task_pr_create_reports_real_gh_failure | The CLI confirms a new repository-backed task persists in Backlog; the UI shows no PR control there, then shows the active-card PR action after the conversation completes with a minimum 30-point hit target, on its own row above the card title and on the right, with that row absent while the task sits in Backlog. The active-card PR control visibly presents its native help on hover; the Done archive PR action remains available with its completed-task label and visibly presents its native help on hover, then waits for the task lock before a real GitHub CLI or branch publication failure without saving a PR link or changing Done status.
     func test_task_pr_create_reports_real_gh_failure() throws {
         codexFixtureExecutable = try makeCodexFixture(emptyQuestions: false).path
         launchApp(defaultParent: fixture.parent.path)
@@ -2029,6 +2029,9 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertTrue(activeCreateButton.waitForExistence(timeout: 5), "An active repository task should expose its PR action on the card.")
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.width, 30, "The PR action should have a comfortable horizontal hit target.")
         XCTAssertGreaterThanOrEqual(activeCreateButton.frame.height, 30, "The PR action should have a comfortable vertical hit target.")
+        // The control sits on its own row above the title, on the right; Backlog had no such row.
+        XCTAssertLessThanOrEqual(activeCreateButton.frame.maxY, element("task-title-\(taskID)").frame.minY, "The pull-request row should sit above the title.")
+        XCTAssertGreaterThan(activeCreateButton.frame.midX, element("task-card-\(taskID)").frame.midX, "The pull-request control should sit on the right.")
         assertHoverEmphasis(for: activeCreateButton)
         XCTAssertEqual(activeCreateButton.label, "PR. Create a pull request for each repository linked to this task")
         assertNativeHelpText(for: activeCreateButton, equals: "Create a pull request for each repository linked to this task")
@@ -11971,7 +11974,7 @@ final class PlayhouseUITests: XCTestCase {
         attachScreenshot(named: "Branch changes exclude base-only commits and retain task commits")
     }
 
-    // case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. The task card shows a token usage dot whose tooltip reports the total, and the Token Stats context-menu item opens a modal showing the totals, the per-tool rollup and the per-turn breakdown.
+    // case-contract: test_task_token_usage_records_claude_turn_breakdown | A task starts with no recorded tokens, and its Token Stats modal says so plainly with no totals shown. Running a real Claude Code fixture turn parses that turn's reported usage into Playhouse's four buckets, adds them to the task's running totals, and records a per-turn row naming the provider and the tools, skills and MCP servers that ran in it. A second turn adds to the totals and appends its own row rather than replacing the first, and the per-tool rollup counts the turns each tool took part in. Call-level accounting spans the main agent and its subagents: an empty task's `callUsage` reports itself unavailable, and after a turn it reports exact model-call, total-sent, output and final-transcript figures read from the session files (counting each message ID once, ignoring repeated and zero-usage lines, and including the subagent's own file), which a second turn adds to rather than replaces. A Claude turn whose session files cannot be read still counts its calls live from the stream. The task card replaces its old dot with a compact live counter of total sent whose tooltip names the sent total, call count and final transcript size, and the Token Stats context-menu item opens a modal labelling 'Final transcript size' and 'Total sent (incl. subagents)' beside the call and output counts, the per-tool rollup and the per-turn breakdown.
     func test_task_token_usage_records_claude_turn_breakdown() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-token-usage")
         launchApp(defaultParent: fixture.parent.path)
@@ -11980,9 +11983,9 @@ final class PlayhouseUITests: XCTestCase {
         ])["result"] as? [String: Any])?["id"] as? String)
         let card = app.buttons["Token usage task"]
         XCTAssertTrue(card.waitForExistence(timeout: 10))
-        let dot = element("task-token-usage-dot-\(taskID)")
-        XCTAssertTrue(dot.waitForExistence(timeout: 5), "A task card should carry its token usage dot.")
-        XCTAssertEqual(dot.label, "No tokens used yet", "A task with no turns reports no usage.")
+        let counter = element("task-token-usage-counter-\(taskID)")
+        XCTAssertTrue(counter.waitForExistence(timeout: 5), "A task card should carry its live token counter.")
+        XCTAssertEqual(counter.label, "No tokens used yet", "A task with no turns reports no usage.")
 
         card.rightClick()
         element("token-stats-task-menu-item").click()
@@ -12006,9 +12009,14 @@ final class PlayhouseUITests: XCTestCase {
             ["conversation", "send", taskID, "--message", "Tell me a story."],
             extraEnvironment: environment
         )
-        // Two fixture turns of 1,600 tokens each.
-        XCTAssertTrue(waitUntil({ dot.label == "3K tokens used" }, timeout: 15), "The dot should report the accumulated total, not one turn's.")
-        attachScreenshot(named: "Task card shows its token usage dot beside the time counter")
+        // Two fixture turns, each with two main-agent calls (sending 550 and 650)
+        // and two subagent calls (300 and 340): 8 calls, 3,680 sent, final context 650.
+        XCTAssertTrue(
+            waitUntil({ counter.label == "3.7K tokens sent · 8 calls · 650 final transcript" }, timeout: 15),
+            "The counter should report everything sent, subagents included, across both turns."
+        )
+        attachScreenshot(named: "Task card shows its live token counter beside the time")
+
 
         card.rightClick()
         let statsAction = element("token-stats-task-menu-item")
@@ -12020,6 +12028,10 @@ final class PlayhouseUITests: XCTestCase {
         // A SwiftUI Text reports its string as the accessibility value, not label.
         let total = element("token-stats-total")
         assertText("token-stats-total", equals: "3,200")
+        assertText("token-stats-final-transcript", equals: "650")
+        assertText("token-stats-total-sent", equals: "3,680")
+        assertText("token-stats-total-calls", equals: "8 model calls · 4 main, 4 across 2 subagents")
+        assertText("token-stats-output", equals: "Output 170")
         XCTAssertTrue(element("token-stats-tool-Bash").exists, "The rollup should name the tool the turns ran.")
         let turnRows = app.descendants(matching: .any).matching(NSPredicate(
             format: "identifier BEGINSWITH %@", "token-stats-turn-"
@@ -12032,9 +12044,14 @@ final class PlayhouseUITests: XCTestCase {
         let summary = try XCTUnwrap(try runCLI(["task", "token-usage", taskID])["result"] as? [String: Any])
         XCTAssertEqual(summary["totalTokens"] as? Int, 3_200)
         XCTAssertEqual((summary["turns"] as? [[String: Any]])?.count, 2)
+        let calls = try XCTUnwrap(summary["callUsage"] as? [String: Any])
+        XCTAssertEqual(calls["totalCalls"] as? Int, 8)
+        XCTAssertEqual(calls["totalSentTokens"] as? Int, 3_680)
+        XCTAssertEqual(calls["finalTranscriptTokens"] as? Int, 650)
+        XCTAssertEqual((calls["subagents"] as? [String: Any])?["count"] as? Int, 2)
     }
 
-    // case-contract: test_task_token_usage_records_codex_turn_breakdown | A Codex app-server fixture turn's usage reaches the same per-task totals and per-turn breakdown through Codex's own wire shape, mapping its cached-input bucket onto Playhouse's cache-read bucket and leaving cache-write at zero. The recorded turn row names Codex as its provider, and the Token Stats modal shows those Codex totals in the app.
+    // case-contract: test_task_token_usage_records_codex_turn_breakdown | A Codex app-server fixture turn's usage reaches the same per-task totals and per-turn breakdown through Codex's own wire shape, mapping its cached-input bucket onto Playhouse's cache-read bucket and leaving cache-write at zero. The recorded turn row names Codex as its provider, Codex's input count includes its cached tokens, so the input bucket excludes them rather than counting them twice. Per-call usage notifications streamed before the turn ends, including those of a subagent thread that names its parent, reach the same call-level accounting once each (a repeated notification is ignored), and the Token Stats modal shows those Codex totals, call counts and final transcript size in the app.
     func test_task_token_usage_records_codex_turn_breakdown() throws {
         launchApp(defaultParent: fixture.parent.path)
         try createTaskFixture(title: "Codex token usage", roots: [fixture.primary.path])
@@ -12079,13 +12096,20 @@ final class PlayhouseUITests: XCTestCase {
         try "Release the completed fixture turn.\n".write(to: releaseMarker, atomically: true, encoding: .utf8)
         _ = try finishCLIProcess(process)
 
-        // One Codex fixture turn of 1,300 tokens.
-        let dot = element("task-token-usage-dot-\(taskID)")
-        XCTAssertTrue(waitUntil({ dot.exists && dot.label == "1K tokens used" }, timeout: 15), "A Codex turn's usage should reach the card's dot.")
+        // One Codex fixture turn: 3 calls (two main sending 700 and 900, one subagent
+        // sending 300), 1,900 sent, and a final transcript of 900.
+        let counter = element("task-token-usage-counter-\(taskID)")
+        XCTAssertTrue(
+            waitUntil({ counter.exists && counter.label == "1.9K tokens sent · 3 calls · 900 final transcript" }, timeout: 15),
+            "A Codex turn's per-call usage, subagent included, should reach the card's counter."
+        )
 
         card.rightClick()
         element("token-stats-task-menu-item").click()
-        assertText("token-stats-total", equals: "1,300")
+        assertText("token-stats-total", equals: "1,050")
+        assertText("token-stats-final-transcript", equals: "900")
+        assertText("token-stats-total-sent", equals: "1,900")
+        assertText("token-stats-total-calls", equals: "3 model calls · 2 main, 1 across 1 subagent")
         attachScreenshot(named: "Token Stats modal shows a Codex turn's usage")
         element("close-token-stats-button").click()
 
@@ -12094,16 +12118,23 @@ final class PlayhouseUITests: XCTestCase {
         XCTAssertEqual(usage["cacheReadTokens"] as? Int, 250, "Codex's cached input maps onto the cache-read bucket.")
         XCTAssertEqual(usage["cacheCreationTokens"] as? Int, 0, "Codex reports no cache-write bucket.")
         XCTAssertEqual((summary["turns"] as? [[String: Any]])?.first?["provider"] as? String, "codex")
+        XCTAssertEqual(usage["inputTokens"] as? Int, 650, "Codex's input count includes its cached tokens, which are not counted twice.")
+        let calls = try XCTUnwrap(summary["callUsage"] as? [String: Any])
+        XCTAssertEqual(calls["totalCalls"] as? Int, 3)
+        XCTAssertEqual(calls["totalSentTokens"] as? Int, 1_900)
+        XCTAssertEqual(calls["totalOutputTokens"] as? Int, 80)
+        XCTAssertEqual(calls["finalTranscriptTokens"] as? Int, 900)
+        XCTAssertEqual((calls["subagents"] as? [String: Any])?["calls"] as? Int, 1)
     }
 
-    // case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to one million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's usage dot re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
+    // case-contract: test_settings_token_usage_color_max_round_trip | The token usage color maximum defaults to twenty million, round-trips through the CLI/XPC settings commands, and rejects a non-positive value as invalid_argument without changing the stored setting. The settings window shows the stored maximum and saves an edited one, and a task card's token counter re-colors when the maximum changes so the same usage reads hotter against a smaller ceiling.
     func test_settings_token_usage_color_max_round_trip() throws {
         let environment = try installClaudeFixture(named: "claude-fixture-ui-token-max")
         launchApp(defaultParent: fixture.parent.path)
         let taskID = try XCTUnwrap((try runCLI([
-            "task", "create", "--title", "Dot heat task", "--root", fixture.primary.path, "--provider", "claude",
+            "task", "create", "--title", "Counter heat task", "--root", fixture.primary.path, "--provider", "claude",
         ])["result"] as? [String: Any])?["id"] as? String)
-        XCTAssertTrue(app.buttons["Dot heat task"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Counter heat task"].waitForExistence(timeout: 10))
         // "Tell me a story." reports a task outcome, so it ends in exactly one
         // Claude result message instead of the several internal nudge turns an
         // outcome-less prompt would trigger in the same session.
@@ -12111,15 +12142,16 @@ final class PlayhouseUITests: XCTestCase {
             ["conversation", "send", taskID, "--message", "Tell me a story."],
             extraEnvironment: environment
         )
-        let dot = element("task-token-usage-dot-\(taskID)")
-        XCTAssertTrue(waitUntil({ dot.exists && dot.label == "1K tokens used" }, timeout: 15))
+        let counter = element("task-token-usage-counter-\(taskID)")
+        // One fixture turn sends 1,840 tokens over four calls (two of them a subagent's).
+        XCTAssertTrue(waitUntil({ counter.exists && counter.label == "1.8K tokens sent · 4 calls · 650 final transcript" }, timeout: 15))
 
         XCTAssertEqual(
-            (try runCLI(["settings", "get"])["result"] as? [String: Any])?["tokenUsageColorMax"] as? Int, 1_000_000,
-            "The dot's scale tops out at a million tokens by default."
+            (try runCLI(["settings", "get"])["result"] as? [String: Any])?["tokenUsageColorMax"] as? Int, 20_000_000,
+            "The counter's scale tops out at twenty million tokens by default."
         )
-        XCTAssertTrue(waitUntil({ self.isGreenDominant(dot) }, timeout: 10), "1,600 tokens of a million should still read as cool green.")
-        attachScreenshot(named: "Usage dot reads green against the default million-token ceiling")
+        XCTAssertTrue(waitUntil({ self.isGreenDominant(counter) }, timeout: 10), "1,840 tokens of twenty million should still read as cool green.")
+        attachScreenshot(named: "Token counter reads green against the default twenty-million ceiling")
 
         app.typeKey(",", modifierFlags: .command)
         let preferences = settingsWindow
@@ -12127,7 +12159,7 @@ final class PlayhouseUITests: XCTestCase {
         let maxField = preferences.descendants(matching: .any)
             .matching(identifier: "token-usage-color-max-field").firstMatch
         XCTAssertTrue(maxField.waitForExistence(timeout: 5), "Settings should expose the token usage maximum.")
-        XCTAssertEqual(maxField.value as? String, "1,000,000", "The field should show the stored maximum.")
+        XCTAssertEqual(maxField.value as? String, "20,000,000", "The field should show the stored maximum.")
         attachScreenshot(named: "Workspace Settings exposes the token usage color maximum")
         maxField.click()
         maxField.typeKey("a", modifierFlags: .command)
@@ -12138,8 +12170,8 @@ final class PlayhouseUITests: XCTestCase {
         app.typeKey("w", modifierFlags: .command)
         XCTAssertTrue(waitUntil({ !preferences.exists }, timeout: 5))
 
-        XCTAssertTrue(waitUntil({ self.isRedDominant(dot) }, timeout: 10), "The same usage should read hot once it reaches the ceiling.")
-        attachScreenshot(named: "Usage dot turns red once the ceiling drops to the task's own usage")
+        XCTAssertTrue(waitUntil({ self.isRedDominant(counter) }, timeout: 10), "The same usage should read hot once it reaches the ceiling.")
+        attachScreenshot(named: "Token counter turns red once the ceiling drops to the task's own usage")
 
         assertCLIError(
             try runCLI(["settings", "set-token-usage-color-max", "0"], expectedStatus: 2),
